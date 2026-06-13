@@ -47,24 +47,26 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.listen(PORT, () => {
-  console.log(`\n  POS System running at http://localhost:${PORT}\n`);
-});
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`\n  POS System running at http://localhost:${PORT}\n`);
+  });
 
-// WooCommerce auto-sync — check every 60 s, fire when interval has elapsed
-setInterval(async () => {
-  try {
-    await ensureReady();
-    const { rows: [iRow] } = await db.execute({ sql: "SELECT value FROM settings WHERE key='woo_sync_interval'", args: [] });
-    const mins = parseInt(iRow?.value || '0');
-    if (!mins) return;
-    const { rows: [lRow] } = await db.execute({ sql: "SELECT value FROM settings WHERE key='woo_last_auto_sync'", args: [] });
-    const last = lRow?.value ? new Date(lRow.value) : new Date(0);
-    if ((Date.now() - last.getTime()) / 60000 >= mins) {
-      wooSyncAll().catch(() => {});
-    }
-  } catch (e) {}
-}, 60000);
+  // WooCommerce auto-sync — check every 60 s, fire when interval has elapsed
+  setInterval(async () => {
+    try {
+      await ensureReady();
+      const { rows: [iRow] } = await db.execute({ sql: "SELECT value FROM settings WHERE key='woo_sync_interval'", args: [] });
+      const mins = parseInt(iRow?.value || '0');
+      if (!mins) return;
+      const { rows: [lRow] } = await db.execute({ sql: "SELECT value FROM settings WHERE key='woo_last_auto_sync'", args: [] });
+      const last = lRow?.value ? new Date(lRow.value) : new Date(0);
+      if ((Date.now() - last.getTime()) / 60000 >= mins) {
+        wooSyncAll().catch(() => {});
+      }
+    } catch (e) {}
+  }, 60000);
+}
 
 // Vercel serverless export
 module.exports = app;
