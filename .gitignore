@@ -1,0 +1,9 @@
+node_modules/
+pos.db
+pos.db-shm
+pos.db-wal
+uploads/products/*
+uploads/po-attachments/*
+!uploads/products/.gitkeep
+!uploads/po-attachments/.gitkeep
+.env

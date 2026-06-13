@@ -1,0 +1,115 @@
+const express = require('express');
+const router = express.Router();
+const { db } = require('../database');
+
+// Check if a credit customer has exceeded their payment terms and block/unblock accordingly
+async function runCreditCheck(customerId) {
+  try {
+    const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [customerId] });
+    if (!customer || customer.customer_type !== 'credit') return;
+
+    if (customer.account_balance <= 0) {
+      await db.execute({ sql: 'UPDATE customers SET account_blocked = 0 WHERE id = ?', args: [customerId] });
+      return;
+    }
+
+    const { rows: [oldest] } = await db.execute({ sql: `SELECT MIN(created_at) as oldest_date FROM transactions WHERE customer_id = ? AND payment_method = 'credit' AND status = 'completed'`, args: [customerId] });
+
+    if (!oldest || !oldest.oldest_date) return;
+
+    const daysSince = Math.floor((Date.now() - new Date(oldest.oldest_date).getTime()) / 86400000);
+    const exceeded = daysSince > (customer.credit_terms_days || 30);
+    await db.execute({ sql: 'UPDATE customers SET account_blocked = ? WHERE id = ?', args: [exceeded ? 1 : 0, customerId] });
+  } catch(e) {}
+}
+
+router.get('/', async (req, res) => {
+  try {
+    // Auto-block any overdue credit customers before returning list
+    const { rows: overdue } = await db.execute({ sql: "SELECT id FROM customers WHERE customer_type = 'credit' AND active = 1 AND account_balance > 0", args: [] });
+    for (const c of overdue) await runCreditCheck(c.id);
+
+    const { search, active } = req.query;
+    let sql = 'SELECT * FROM customers WHERE 1=1';
+    const params = [];
+    if (search) {
+      sql += ` AND (first_name LIKE ? OR last_name LIKE ? OR email LIKE ? OR phone LIKE ? OR customer_number LIKE ?)`;
+      const s = `%${search}%`;
+      params.push(s, s, s, s, s);
+    }
+    if (active !== undefined) { sql += ' AND active = ?'; params.push(active); }
+    sql += ' ORDER BY last_name, first_name';
+    const { rows } = await db.execute({ sql, args: params });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/:id', async (req, res) => {
+  try {
+    const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.id] });
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    await runCreditCheck(req.params.id);
+    const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.id] });
+    const { rows: transactions } = await db.execute({ sql: 'SELECT * FROM transactions WHERE customer_id = ? ORDER BY created_at DESC LIMIT 10', args: [req.params.id] });
+    res.json({ ...updated, recent_transactions: transactions });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/:id/transactions', async (req, res) => {
+  try {
+    const { start, end } = req.query;
+    let sql = 'SELECT * FROM transactions WHERE customer_id = ?';
+    const args = [req.params.id];
+    if (start) { sql += ' AND date(created_at) >= ?'; args.push(start); }
+    if (end) { sql += ' AND date(created_at) <= ?'; args.push(end); }
+    sql += ' ORDER BY created_at DESC';
+    const { rows: transactions } = await db.execute({ sql, args });
+    res.json(transactions);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/', async (req, res) => {
+  const { first_name, last_name, email, phone, address, city, state, zip, notes, customer_type, credit_terms_days, credit_limit } = req.body;
+  if (!first_name || !last_name) return res.status(400).json({ error: 'First and last name required' });
+  try {
+    const { rows: [num] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM customers', args: [] });
+    const customer_number = `CUST-${String(Number(num.c) + 1).padStart(4, '0')}`;
+    const type = customer_type || 'cash';
+    const creditEnabled = type === 'credit' ? 1 : 0;
+    const terms = parseInt(credit_terms_days) || 30;
+    const limit = parseFloat(credit_limit) || 0;
+    const result = await db.execute({ sql: `INSERT INTO customers (customer_number,first_name,last_name,email,phone,address,city,state,zip,notes,customer_type,credit_terms_days,credit_limit,credit_enabled) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [customer_number, first_name, last_name, email||null, phone||null, address||null, city||null, state||null, zip||null, notes||null, type, terms, limit, creditEnabled] });
+    const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [Number(result.lastInsertRowid)] });
+    res.status(201).json(row);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+router.put('/:id', async (req, res) => {
+  const { first_name, last_name, email, phone, address, city, state, zip, notes, active, customer_type, credit_terms_days, credit_limit } = req.body;
+  try {
+    const type = customer_type || 'cash';
+    const creditEnabled = type === 'credit' ? 1 : 0;
+    const terms = parseInt(credit_terms_days) || 30;
+    const limit = parseFloat(credit_limit) || 0;
+    await db.execute({ sql: `UPDATE customers SET first_name=?,last_name=?,email=?,phone=?,address=?,city=?,state=?,zip=?,notes=?,active=?,customer_type=?,credit_terms_days=?,credit_limit=?,credit_enabled=? WHERE id=?`, args: [first_name, last_name, email||null, phone||null, address||null, city||null, state||null, zip||null, notes||null, active??1, type, terms, limit, creditEnabled, req.params.id] });
+    if (type === 'cash') {
+      await db.execute({ sql: 'UPDATE customers SET account_blocked = 0 WHERE id = ?', args: [req.params.id] });
+    } else {
+      await runCreditCheck(req.params.id);
+    }
+    const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.id] });
+    res.json(row);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/:id', async (req, res) => {
+  try {
+    await db.execute({ sql: 'UPDATE customers SET active = 0 WHERE id = ?', args: [req.params.id] });
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+module.exports = router;
+module.exports.runCreditCheck = runCreditCheck;

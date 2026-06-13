@@ -1,0 +1,253 @@
+const express = require('express');
+const router = express.Router();
+const { db } = require('../database');
+const { calcCommission } = require('./commissions');
+
+router.get('/', async (req, res) => {
+  try {
+    const { start, end, customer_id, status, branch_id, payment_method, transaction_number, limit = 100 } = req.query;
+    let sql = `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN branches b ON t.branch_id = b.id WHERE 1=1`;
+    const params = [];
+    if (transaction_number) { sql += ' AND t.transaction_number LIKE ?'; params.push(`%${transaction_number}%`); }
+    if (start) { sql += ' AND date(t.created_at) >= date(?)'; params.push(start); }
+    if (end) { sql += ' AND date(t.created_at) <= date(?)'; params.push(end); }
+    if (customer_id) { sql += ' AND t.customer_id = ?'; params.push(customer_id); }
+    if (status) { sql += ' AND t.status = ?'; params.push(status); }
+    if (branch_id) { sql += ' AND t.branch_id = ?'; params.push(branch_id); }
+    if (payment_method) { sql += ' AND t.payment_method = ?'; params.push(payment_method); }
+    sql += ' ORDER BY t.created_at DESC LIMIT ?';
+    params.push(parseInt(limit));
+    const { rows } = await db.execute({ sql, args: params });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/:id', async (req, res) => {
+  try {
+    const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone, q.id as source_quote_id, q.quote_number as source_quote_number, qe.first_name || ' ' || qe.last_name as quote_created_by FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN branches b ON t.branch_id = b.id LEFT JOIN quotations q ON q.converted_to_tx = t.id LEFT JOIN employees qe ON q.employee_id = qe.id WHERE t.id = ?`, args: [req.params.id] });
+    if (!tx) return res.status(404).json({ error: 'Transaction not found' });
+    const { rows: items } = await db.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [req.params.id] });
+    tx.items = items;
+    res.json(tx);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/', async (req, res) => {
+  try {
+    const { customer_id, employee_id, branch_id, drawer_session_id, items, discount_amount, promotion_code, promotion_name, payment_method, amount_tendered, notes } = req.body;
+    if (!items || items.length === 0) return res.status(400).json({ error: 'No items in transaction' });
+
+    const { rows: [txCount] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM transactions', args: [] });
+    const transaction_number = `TXN-${String(Number(txCount.c) + 1).padStart(6, '0')}`;
+
+    let subtotal = 0, tax_amount = 0;
+    const processedItems = [];
+    for (const item of items) {
+      const { rows: [product] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] });
+      if (!product) throw new Error(`Product ${item.product_id} not found`);
+      let variation = null, unit_price = product.price;
+      if (item.variation_id) {
+        const { rows: [v] } = await db.execute({ sql: 'SELECT * FROM product_variations WHERE id = ? AND product_id = ?', args: [item.variation_id, item.product_id] });
+        if (!v) throw new Error(`Variation ${item.variation_id} not found`);
+        variation = v;
+        unit_price = v.price != null ? v.price : parseFloat((product.price + (v.price_modifier || 0)).toFixed(2));
+      }
+      const lineTotal = parseFloat((unit_price * item.quantity).toFixed(2));
+      const lineTax = parseFloat((lineTotal * product.tax_rate / 100).toFixed(2));
+      subtotal += lineTotal;
+      tax_amount += lineTax;
+      processedItems.push({ product, variation, quantity: item.quantity, unit_price, lineTotal, lineTax, discount: item.discount || 0 });
+    }
+
+    subtotal = parseFloat(subtotal.toFixed(2));
+    tax_amount = parseFloat(tax_amount.toFixed(2));
+    const disc = parseFloat(discount_amount || 0);
+    const total = parseFloat((subtotal + tax_amount - disc).toFixed(2));
+    const method = payment_method || 'cash';
+    const isCredit = method === 'credit';
+
+    if (isCredit && customer_id) {
+      const { rows: [cust] } = await db.execute({ sql: 'SELECT customer_type, account_blocked FROM customers WHERE id = ?', args: [customer_id] });
+      if (!cust) return res.status(400).json({ error: 'Customer not found' });
+      if (cust.customer_type !== 'credit') return res.status(400).json({ error: 'Customer does not have a credit account' });
+      if (cust.account_blocked) return res.status(400).json({ error: 'Customer account is blocked due to overdue payment. Please settle the outstanding balance first.' });
+    }
+
+    const tendered = parseFloat(amount_tendered || (isCredit ? 0 : total));
+    const change = isCredit ? 0 : parseFloat((tendered - total).toFixed(2));
+
+    const tx = await db.transaction('write');
+    try {
+      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,promotion_code,promotion_name,total,payment_method,amount_tendered,change_amount,is_credit,notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id || null, employee_id || 1, branch_id || null, drawer_session_id || null, subtotal, tax_amount, disc, promotion_code || null, promotion_name || null, total, method, tendered, change > 0 ? change : 0, isCredit ? 1 : 0, notes || null] });
+      const txId = Number(txResult.lastInsertRowid);
+
+      for (const { product, variation, quantity, unit_price, lineTotal, lineTax, discount } of processedItems) {
+        const itemName = variation ? `${product.name} — ${variation.name}` : product.name;
+        const itemSku = variation ? variation.sku : product.sku;
+        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, args: [txId, product.id, itemName, itemSku, quantity, unit_price, discount, lineTax, lineTotal, variation?.id||null, variation?.name||null] });
+        if (variation) {
+          await tx.execute({ sql: 'UPDATE product_variations SET stock_qty = stock_qty - ? WHERE id = ?', args: [quantity, variation.id] });
+        } else {
+          await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty - ? WHERE id = ?', args: [quantity, product.id] });
+        }
+        if (branch_id) {
+          await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = MAX(0, stock_qty - ?), updated_at = CURRENT_TIMESTAMP`, args: [product.id, branch_id, Math.max(0, product.stock_qty - quantity), product.min_stock, quantity] });
+        }
+      }
+
+      if (customer_id) {
+        const loyaltyPts = Math.floor(total * 0.5);
+        await tx.execute({ sql: 'UPDATE customers SET loyalty_points = loyalty_points + ?, total_spent = total_spent + ? WHERE id = ?', args: [loyaltyPts, total, customer_id] });
+        if (isCredit) {
+          await tx.execute({ sql: 'UPDATE customers SET account_balance = account_balance + ? WHERE id = ?', args: [total, customer_id] });
+        }
+      }
+
+      await tx.commit();
+
+      const { rows: [savedTx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id LEFT JOIN branches b ON t.branch_id = b.id WHERE t.id = ?`, args: [txId] });
+      const { rows: txItems } = await db.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [txId] });
+      savedTx.items = txItems;
+      // Auto-calculate commission (non-blocking, best-effort)
+      try { await calcCommission(savedTx.employee_id, savedTx.total, 'transaction', txId, savedTx.transaction_number); } catch(e) {}
+      res.status(201).json(savedTx);
+    } catch(e) {
+      await tx.rollback();
+      res.status(400).json({ error: e.message });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Get returns for a transaction
+router.get('/:id/returns', async (req, res) => {
+  try {
+    const { rows: returns } = await db.execute({ sql: 'SELECT * FROM returns WHERE original_transaction_id = ?', args: [req.params.id] });
+    for (const r of returns) {
+      const { rows: items } = await db.execute({ sql: 'SELECT * FROM return_items WHERE return_id = ?', args: [r.id] });
+      r.items = items;
+    }
+    res.json(returns);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Process a return
+router.post('/:id/return', async (req, res) => {
+  try {
+    const { items, resolution, notes, employee_id } = req.body;
+    if (!items || items.length === 0) return res.status(400).json({ error: 'No items selected for return' });
+    if (!['refund', 'replacement', 'credit_note'].includes(resolution)) return res.status(400).json({ error: 'Invalid resolution type' });
+
+    const { rows: [tx] } = await db.execute({ sql: 'SELECT * FROM transactions WHERE id = ?', args: [req.params.id] });
+    if (!tx) return res.status(404).json({ error: 'Transaction not found' });
+    if (tx.status !== 'completed') return res.status(400).json({ error: 'Only completed transactions can be returned' });
+    if (resolution === 'credit_note' && !tx.customer_id) return res.status(400).json({ error: 'Credit note requires a customer on the original transaction' });
+
+    const { rows: txItems } = await db.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [req.params.id] });
+
+    const { rows: alreadyReturned } = await db.execute({ sql: `SELECT ri.transaction_item_id, SUM(ri.quantity) as returned_qty FROM return_items ri JOIN returns r ON ri.return_id = r.id WHERE r.original_transaction_id = ? AND r.status != 'cancelled' GROUP BY ri.transaction_item_id`, args: [req.params.id] });
+    const returnedMap = {};
+    alreadyReturned.forEach(r => { returnedMap[r.transaction_item_id] = r.returned_qty; });
+
+    let returnSubtotal = 0, returnTax = 0;
+    const processedItems = [];
+
+    for (const item of items) {
+      const txItem = txItems.find(i => i.id === item.transaction_item_id);
+      if (!txItem) return res.status(400).json({ error: `Item ${item.transaction_item_id} not found in transaction` });
+      const alreadyRet = returnedMap[item.transaction_item_id] || 0;
+      const maxQty = txItem.quantity - alreadyRet;
+      if (item.quantity <= 0 || item.quantity > maxQty) return res.status(400).json({ error: `Invalid quantity for "${txItem.product_name}". Max returnable: ${maxQty}` });
+      const proportion = item.quantity / txItem.quantity;
+      const lineTotal = parseFloat((txItem.total * proportion).toFixed(2));
+      const lineTax = parseFloat((txItem.tax_amount * proportion).toFixed(2));
+      returnSubtotal += lineTotal;
+      returnTax += lineTax;
+      processedItems.push({ txItem, quantity: item.quantity, lineTotal, lineTax });
+    }
+
+    returnSubtotal = parseFloat(returnSubtotal.toFixed(2));
+    returnTax = parseFloat(returnTax.toFixed(2));
+    const returnTotal = parseFloat((returnSubtotal + returnTax).toFixed(2));
+
+    const { rows: [retCount] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM returns', args: [] });
+    const return_number = `RET-${String(Number(retCount.c) + 1).padStart(6, '0')}`;
+
+    const retTx = await db.transaction('write');
+    try {
+      const retResult = await retTx.execute({ sql: `INSERT INTO returns (return_number,original_transaction_id,customer_id,employee_id,branch_id,resolution,subtotal,tax_amount,total,notes) VALUES (?,?,?,?,?,?,?,?,?,?)`, args: [return_number, tx.id, tx.customer_id, employee_id || tx.employee_id, tx.branch_id, resolution, returnSubtotal, returnTax, returnTotal, notes || null] });
+      const retId = Number(retResult.lastInsertRowid);
+
+      for (const { txItem, quantity, lineTotal, lineTax } of processedItems) {
+        await retTx.execute({ sql: `INSERT INTO return_items (return_id,transaction_item_id,product_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?,?,?)`, args: [retId, txItem.id, txItem.product_id, txItem.product_name, txItem.sku, quantity, txItem.unit_price, lineTax, lineTotal] });
+        await retTx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [quantity, txItem.product_id] });
+        if (tx.branch_id) {
+          await retTx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [txItem.product_id, tx.branch_id, quantity, txItem.product_id, quantity] });
+        }
+      }
+
+      if (tx.customer_id) {
+        const loyaltyPts = Math.floor(returnTotal * 0.5);
+        await retTx.execute({ sql: 'UPDATE customers SET loyalty_points = MAX(0, loyalty_points - ?), total_spent = MAX(0, total_spent - ?) WHERE id = ?', args: [loyaltyPts, returnTotal, tx.customer_id] });
+        if (resolution === 'credit_note') {
+          await retTx.execute({ sql: 'UPDATE customers SET account_balance = account_balance + ? WHERE id = ?', args: [returnTotal, tx.customer_id] });
+        }
+      }
+
+      await retTx.commit();
+      const { rows: [ret] } = await db.execute({ sql: 'SELECT * FROM returns WHERE id = ?', args: [retId] });
+      const { rows: retItems } = await db.execute({ sql: 'SELECT * FROM return_items WHERE return_id = ?', args: [retId] });
+      ret.items = retItems;
+      res.status(201).json(ret);
+    } catch(e) {
+      await retTx.rollback();
+      res.status(400).json({ error: e.message });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Void transaction
+router.patch('/:id/void', async (req, res) => {
+  try {
+    const { pin } = req.body;
+    if (!pin) return res.status(400).json({ error: 'Override PIN required' });
+
+    const { rows: employees } = await db.execute({ sql: 'SELECT e.id, e.first_name, e.last_name, e.pin, sg.permissions FROM employees e LEFT JOIN security_groups sg ON e.security_group_id = sg.id WHERE e.active = 1', args: [] });
+    const authorizer = employees.find(e => {
+      if (e.pin !== String(pin)) return false;
+      try { const p = JSON.parse(e.permissions || '{}'); return p.void_transactions === true; } catch { return false; }
+    });
+    if (!authorizer) return res.status(403).json({ error: 'Invalid PIN or insufficient privilege' });
+
+    const { rows: [tx] } = await db.execute({ sql: 'SELECT * FROM transactions WHERE id = ?', args: [req.params.id] });
+    if (!tx) return res.status(404).json({ error: 'Not found' });
+    if (tx.status === 'voided') return res.status(400).json({ error: 'Already voided' });
+
+    const voidTxn = await db.transaction('write');
+    try {
+      await voidTxn.execute({ sql: "UPDATE transactions SET status='voided', voided_by=?, voided_at=CURRENT_TIMESTAMP WHERE id=?", args: [authorizer.id, req.params.id] });
+      const { rows: items } = await voidTxn.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [req.params.id] });
+      for (const item of items) {
+        await voidTxn.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [item.quantity, item.product_id] });
+        if (tx.branch_id) {
+          await voidTxn.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, tx.branch_id, item.quantity, item.product_id, item.quantity] });
+        }
+      }
+      if (tx.customer_id) {
+        const loyaltyPts = Math.floor(tx.total * 0.5);
+        await voidTxn.execute({ sql: 'UPDATE customers SET loyalty_points = loyalty_points - ?, total_spent = total_spent - ? WHERE id = ?', args: [loyaltyPts, tx.total, tx.customer_id] });
+        if (tx.is_credit) {
+          await voidTxn.execute({ sql: 'UPDATE customers SET account_balance = MAX(0, account_balance - ?) WHERE id = ?', args: [tx.total, tx.customer_id] });
+        }
+      }
+      await voidTxn.commit();
+    } catch(e) {
+      await voidTxn.rollback();
+      throw e;
+    }
+
+    try { await db.execute({ sql: "DELETE FROM commission_records WHERE source_type='transaction' AND source_id=? AND status!='paid'", args: [req.params.id] }); } catch(e) {}
+    res.json({ success: true, voided_by: `${authorizer.first_name} ${authorizer.last_name}` });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+module.exports = router;
