@@ -1,5 +1,9 @@
 const { createClient } = require('@libsql/client');
 
+if (process.env.VERCEL && !process.env.TURSO_DATABASE_URL) {
+  throw new Error('TURSO_DATABASE_URL is not set. Add it in Vercel project → Settings → Environment Variables.');
+}
+
 const db = createClient({
   url: process.env.TURSO_DATABASE_URL || 'file:pos.db',
   authToken: process.env.TURSO_AUTH_TOKEN,
