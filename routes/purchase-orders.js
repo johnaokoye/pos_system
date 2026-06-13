@@ -4,20 +4,13 @@ const { db } = require('../database');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 
-const uploadDir = process.env.VERCEL ? '/tmp/po-attachments' : path.join(__dirname, '../uploads/po-attachments');
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+const localUploadDir = path.join(__dirname, '../uploads/po-attachments');
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => {
-    const unique = `${Date.now()}-${Math.round(Math.random() * 1e6)}`;
-    cb(null, `${unique}${path.extname(file.originalname)}`);
-  },
-});
 const upload = multer({
-  storage,
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20 MB
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const allowed = ['application/pdf','image/jpeg','image/png','image/gif','image/webp',
       'application/msword','application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -174,7 +167,24 @@ router.post('/:id/attachments', upload.single('file'), async (req, res) => {
     const { document_type = 'other' } = req.body;
     const allowed_types = ['purchase_request', 'supplier_quotation', 'other'];
     const docType = allowed_types.includes(document_type) ? document_type : 'other';
-    const result = await db.execute({ sql: 'INSERT INTO po_attachments (po_id, document_type, original_name, stored_name, mime_type, file_size) VALUES (?,?,?,?,?,?)', args: [po.id, docType, req.file.originalname, req.file.filename, req.file.mimetype, req.file.size] });
+
+    const cloudResult = await cloudUpload(req.file.buffer, {
+      folder: 'pos-system/po-attachments',
+      public_id: `${Date.now()}-${Math.round(Math.random() * 1e6)}`,
+      resource_type: 'auto',
+    });
+
+    let storedName;
+    if (cloudResult) {
+      storedName = cloudResult.secure_url;
+    } else {
+      fs.mkdirSync(localUploadDir, { recursive: true });
+      const unique = `${Date.now()}-${Math.round(Math.random() * 1e6)}`;
+      storedName = `${unique}${path.extname(req.file.originalname)}`;
+      fs.writeFileSync(path.join(localUploadDir, storedName), req.file.buffer);
+    }
+
+    const result = await db.execute({ sql: 'INSERT INTO po_attachments (po_id, document_type, original_name, stored_name, mime_type, file_size) VALUES (?,?,?,?,?,?)', args: [po.id, docType, req.file.originalname, storedName, req.file.mimetype, req.file.size] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM po_attachments WHERE id = ?', args: [Number(result.lastInsertRowid)] });
     res.status(201).json(row);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -184,7 +194,12 @@ router.get('/:id/attachments/:aid/download', async (req, res) => {
   try {
     const { rows: [att] } = await db.execute({ sql: 'SELECT * FROM po_attachments WHERE id = ? AND po_id = ?', args: [req.params.aid, req.params.id] });
     if (!att) return res.status(404).json({ error: 'Not found' });
-    const filePath = path.join(uploadDir, att.stored_name);
+    if (att.stored_name.startsWith('https://')) {
+      // Cloud file — redirect with fl_attachment to force browser download
+      const downloadUrl = att.stored_name.replace('/upload/', '/upload/fl_attachment/');
+      return res.redirect(downloadUrl);
+    }
+    const filePath = path.join(localUploadDir, att.stored_name);
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File missing on server' });
     res.setHeader('Content-Disposition', `attachment; filename="${att.original_name}"`);
     res.setHeader('Content-Type', att.mime_type || 'application/octet-stream');
@@ -196,8 +211,11 @@ router.delete('/:id/attachments/:aid', async (req, res) => {
   try {
     const { rows: [att] } = await db.execute({ sql: 'SELECT * FROM po_attachments WHERE id = ? AND po_id = ?', args: [req.params.aid, req.params.id] });
     if (!att) return res.status(404).json({ error: 'Not found' });
-    const filePath = path.join(uploadDir, att.stored_name);
-    try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch(e) {}
+    if (att.stored_name.startsWith('https://')) {
+      await cloudDestroy(att.stored_name, 'raw');
+    } else {
+      try { if (fs.existsSync(path.join(localUploadDir, att.stored_name))) fs.unlinkSync(path.join(localUploadDir, att.stored_name)); } catch(e) {}
+    }
     await db.execute({ sql: 'DELETE FROM po_attachments WHERE id = ?', args: [att.id] });
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }

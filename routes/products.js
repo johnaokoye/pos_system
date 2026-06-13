@@ -4,19 +4,13 @@ const { db } = require('../database');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 
-const imgStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const dir = path.join(__dirname, '../uploads/products');
-    fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    cb(null, `product-${req.params.id}-${Date.now()}${ext}`);
-  },
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => cb(null, /^image\//.test(file.mimetype)),
 });
-const upload = multer({ storage: imgStorage, limits: { fileSize: 5 * 1024 * 1024 }, fileFilter: (req, file, cb) => cb(null, /^image\//.test(file.mimetype)) });
 
 // GET all products
 router.get('/', async (req, res) => {
@@ -328,10 +322,34 @@ router.post('/:id/image', upload.single('image'), async (req, res) => {
   try {
     const { rows: [existing] } = await db.execute({ sql: 'SELECT image_path FROM products WHERE id = ?', args: [req.params.id] });
     if (existing?.image_path) {
-      const old = path.join(__dirname, '..', existing.image_path);
-      if (fs.existsSync(old)) fs.unlinkSync(old);
+      if (existing.image_path.startsWith('https://')) {
+        await cloudDestroy(existing.image_path);
+      } else {
+        const old = path.join(__dirname, '..', existing.image_path);
+        if (fs.existsSync(old)) fs.unlinkSync(old);
+      }
     }
-    const imagePath = `/uploads/products/${req.file.filename}`;
+
+    const result = await cloudUpload(req.file.buffer, {
+      folder: 'pos-system/products',
+      public_id: `product-${req.params.id}`,
+      overwrite: true,
+      resource_type: 'image',
+    });
+
+    let imagePath;
+    if (result) {
+      imagePath = result.secure_url;
+    } else {
+      // Cloudinary not configured — save locally
+      const dir = path.join(__dirname, '../uploads/products');
+      fs.mkdirSync(dir, { recursive: true });
+      const ext = path.extname(req.file.originalname).toLowerCase();
+      const filename = `product-${req.params.id}-${Date.now()}${ext}`;
+      fs.writeFileSync(path.join(dir, filename), req.file.buffer);
+      imagePath = `/uploads/products/${filename}`;
+    }
+
     await db.execute({ sql: 'UPDATE products SET image_path = ? WHERE id = ?', args: [imagePath, req.params.id] });
     res.json({ image_path: imagePath });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -342,8 +360,12 @@ router.delete('/:id/image', async (req, res) => {
   try {
     const { rows: [product] } = await db.execute({ sql: 'SELECT image_path FROM products WHERE id = ?', args: [req.params.id] });
     if (product?.image_path) {
-      const filePath = path.join(__dirname, '..', product.image_path);
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      if (product.image_path.startsWith('https://')) {
+        await cloudDestroy(product.image_path);
+      } else {
+        const filePath = path.join(__dirname, '..', product.image_path);
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      }
       await db.execute({ sql: 'UPDATE products SET image_path = NULL WHERE id = ?', args: [req.params.id] });
     }
     res.json({ success: true });
