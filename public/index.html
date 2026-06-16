@@ -379,10 +379,6 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 8h-3V4H3c-1.1 0-2 .9-2 2v11h2c0 1.66 1.34 3 3 3s3-1.34 3-3h6c0 1.66 1.34 3 3 3s3-1.34 3-3h2v-5l-3-4zM6 18.5c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm13.5-9l1.96 2.5H17V9.5h2.5zm-1.5 9c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/></svg>
       Suppliers
     </div>
-    <div class="nav-item" data-section="purchase-requests">
-      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-1 11h-4v4h-4v-4H6v-4h4V6h4v4h4v4z"/></svg>
-      Purchase Requests
-    </div>
     <div class="nav-item" data-section="purchasing">
       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 3c1.93 0 3.5 1.57 3.5 3.5S13.93 13 12 13s-3.5-1.57-3.5-3.5S10.07 6 12 6zm7 13H5v-.23c0-.62.28-1.2.76-1.58C7.47 15.82 9.64 15 12 15s4.53.82 6.24 2.19c.48.38.76.97.76 1.58V19z"/></svg>
       Purchase Orders
@@ -634,7 +630,7 @@ const App = {
     this.bindNav();
     this.applyNavPermissions();
     const perms = this.currentUser.permissions;
-    const allSections = ['dashboard','pos','inventory','customers','transactions','reports','employees','suppliers','purchase-requests','purchasing','transfers','quotations','accounts','branches','security','settings'];
+    const allSections = ['dashboard','pos','inventory','customers','transactions','reports','employees','suppliers','purchasing','transfers','quotations','accounts','branches','security','settings'];
     const firstSection = perms ? (allSections.find(s => this.can(s)) || 'dashboard') : 'dashboard';
     this.showSection(firstSection);
     this.checkLowStock();
@@ -833,13 +829,13 @@ const App = {
     this.section = name;
     this.closeModal();
     document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.section === name));
-    const titles = { dashboard: 'Dashboard', pos: 'Point of Sale', inventory: 'Inventory Management', customers: 'Customers', transactions: 'Transactions', reports: 'Reports & Analytics', employees: 'Employees', settings: 'Settings', suppliers: 'Suppliers', 'purchase-requests': 'Purchase Requests', purchasing: 'Purchase Orders', quotations: 'Quotations', accounts: 'Accounts Receivable', branches: 'Branch Management', security: 'Security Groups', transfers: 'Branch Transfers', crm: 'CRM & Sales', commissions: 'Commission Tracking', warehouse: 'Warehouse Management', shipping: 'Shipping', 'cycle-counts': 'Cycle Counts', drawers: 'Cash Drawers', promotions: 'Promotions' };
+    const titles = { dashboard: 'Dashboard', pos: 'Point of Sale', inventory: 'Inventory Management', customers: 'Customers', transactions: 'Transactions', reports: 'Reports & Analytics', employees: 'Employees', settings: 'Settings', suppliers: 'Suppliers', purchasing: 'Purchasing', quotations: 'Quotations', accounts: 'Accounts Receivable', branches: 'Branch Management', security: 'Security Groups', transfers: 'Branch Transfers', crm: 'CRM & Sales', commissions: 'Commission Tracking', warehouse: 'Warehouse Management', shipping: 'Shipping', 'cycle-counts': 'Cycle Counts', drawers: 'Cash Drawers', promotions: 'Promotions' };
     document.getElementById('topbar-title').textContent = titles[name] || name;
     const content = document.getElementById('content');
     content.style.padding = name === 'pos' ? '0' : '20px';
     content.style.overflow = name === 'pos' ? 'hidden' : 'auto';
     content.style.height = name === 'pos' ? '100%' : 'auto';
-    const renders = { dashboard: () => this.renderDashboard(), pos: () => this.renderPOS(), inventory: () => this.renderInventory(), customers: () => this.renderCustomers(), transactions: () => this.renderTransactions(), reports: () => this.renderReports(), employees: () => this.renderEmployees(), settings: () => this.renderSettings(), suppliers: () => this.renderSuppliers(), 'purchase-requests': () => this.renderPurchaseRequests(), purchasing: () => this.renderPurchasing(), quotations: () => this.renderQuotations(), accounts: () => this.renderAccounts(), branches: () => this.renderBranches(), security: () => this.renderSecurity(), transfers: () => this.renderTransfers(), crm: () => this.renderCRM(), commissions: () => this.renderCommissions(), warehouse: () => this.renderWarehouse(), shipping: () => this.renderShipping(), 'cycle-counts': () => this.renderCycleCounts(), drawers: () => this.renderDrawers(), promotions: () => this.renderPromotions() };
+    const renders = { dashboard: () => this.renderDashboard(), pos: () => this.renderPOS(), inventory: () => this.renderInventory(), customers: () => this.renderCustomers(), transactions: () => this.renderTransactions(), reports: () => this.renderReports(), employees: () => this.renderEmployees(), settings: () => this.renderSettings(), suppliers: () => this.renderSuppliers(), purchasing: () => this.renderPurchasing(), quotations: () => this.renderQuotations(), accounts: () => this.renderAccounts(), branches: () => this.renderBranches(), security: () => this.renderSecurity(), transfers: () => this.renderTransfers(), crm: () => this.renderCRM(), commissions: () => this.renderCommissions(), warehouse: () => this.renderWarehouse(), shipping: () => this.renderShipping(), 'cycle-counts': () => this.renderCycleCounts(), drawers: () => this.renderDrawers(), promotions: () => this.renderPromotions() };
     if (renders[name]) await renders[name]();
   },
 
@@ -4134,106 +4130,125 @@ const App = {
 
   // ─── Purchase Requests (dedicated section) ────────────────
   async renderPurchaseRequests() {
-    const c = document.getElementById('content');
-    c.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
-    const filter = this._prFilter || 'all';
-    const typeFilter = this._prTypeFilter || 'all';
-    const params = new URLSearchParams({ limit: 200 });
-    if (filter !== 'all') params.set('status', filter);
-    if (typeFilter !== 'all') params.set('request_type', typeFilter);
-    const requests = await this.api('GET', `/purchase-requests?${params}`);
-    const prStatusColor = { draft:'badge-warning', submitted:'badge-info', approved:'badge-teal', rejected:'badge-danger', converted:'badge-success' };
-    const typeLabel = { sale_items:'Sale Items', internal_use:'Internal Use' };
-    const typeBadge = { sale_items:'badge-info', internal_use:'badge-purple' };
-    const tabs = ['all','draft','submitted','approved','rejected','converted'];
-    const typeFilters = ['all','sale_items','internal_use'];
-    c.innerHTML = `
-      <div class="section-header">
-        <h2>Purchase Requests</h2>
-        <button class="btn btn-primary" onclick="App.showPRForm()">+ New Request</button>
-      </div>
-      <div class="card" style="margin-bottom:0;border-bottom:none;border-radius:8px 8px 0 0;padding:10px 16px 0">
-        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-          <div style="display:flex;gap:4px">
-            ${tabs.map(t => `<button class="btn btn-sm ${filter===t?'btn-primary':'btn-outline'}" onclick="App._prFilter='${t}';App.renderPurchaseRequests()">${t.charAt(0).toUpperCase()+t.slice(1)}</button>`).join('')}
-          </div>
-          <div style="display:flex;gap:4px;margin-left:auto">
-            ${typeFilters.map(t => `<button class="btn btn-sm ${typeFilter===t?'btn-primary':'btn-outline'}" onclick="App._prTypeFilter='${t}';App.renderPurchaseRequests()">${t==='all'?'All Types':typeLabel[t]||t}</button>`).join('')}
-          </div>
-        </div>
-      </div>
-      <div class="card" style="border-radius:0 0 8px 8px">
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>PR #</th><th>Type</th><th>Branch</th><th>Department</th><th>Required By</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
-            <tbody>
-              ${requests.length ? requests.map(pr => `
-                <tr>
-                  <td class="fw-600">${pr.pr_number}</td>
-                  <td><span class="badge-pill ${typeBadge[pr.request_type]||'badge-info'}" style="font-size:11px">${typeLabel[pr.request_type]||pr.request_type||'Sale Items'}</span></td>
-                  <td>${pr.branch_name || '-'}</td>
-                  <td>${pr.department || '-'}</td>
-                  <td>${pr.required_date ? this.fmtDate(pr.required_date) : '-'}</td>
-                  <td><span class="badge-pill ${prStatusColor[pr.status]||'badge-info'}">${pr.status}</span></td>
-                  <td style="color:var(--text-muted)">${this.fmtDate(pr.created_at)}</td>
-                  <td>
-                    <button class="btn btn-sm btn-secondary" onclick="App.viewPR(${pr.id})">View</button>
-                    ${pr.status==='draft' ? `<button class="btn btn-sm btn-primary" onclick="App.updatePRStatus(${pr.id},'submitted')">Submit</button>` : ''}
-                    ${pr.status==='submitted' ? `<button class="btn btn-sm btn-success" onclick="App.approvePR(${pr.id})">Approve</button><button class="btn btn-sm btn-danger" onclick="App.rejectPR(${pr.id})">Reject</button>` : ''}
-                    ${pr.status==='approved' ? `<button class="btn btn-sm btn-teal" onclick="App.showConvertPRtoPO(${pr.id})">Convert to PO</button>` : ''}
-                    ${pr.converted_po_number ? `<span style="font-size:12px;color:var(--text-muted)">→ ${pr.converted_po_number}</span>` : ''}
-                  </td>
-                </tr>`).join('') : `<tr><td colspan="8" class="empty-state">No purchase requests${filter!=='all'?' with status "'+filter+'"':''}</td></tr>`}
-            </tbody>
-          </table>
-        </div>
-      </div>`;
+    return this.renderPurchasing('requests');
   },
 
-  // ─── Purchase Orders ──────────────────────────────────────
-  async renderPurchasing() {
+  // ─── Purchasing (tabbed: Purchase Orders + Purchase Requests) ─
+  async renderPurchasing(activeTab) {
+    const tab = activeTab || this._purchasingTab || 'orders';
+    this._purchasingTab = tab;
     const c = document.getElementById('content');
     c.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
-    const [orders, suppliers] = await Promise.all([
-      this.api('GET', '/purchase-orders?limit=100'),
-      this.api('GET', '/suppliers'),
-    ]);
-    const branches = this.currentUser.branches || [];
-    const statusColor = { draft:'badge-warning', sent:'badge-info', approved:'badge-teal', partial:'badge-purple', received:'badge-success', cancelled:'badge-danger' };
-    c.innerHTML = `
-      <div class="section-header">
-        <h2>Purchase Orders</h2>
-        <div style="display:flex;gap:8px">
-          <button class="btn btn-outline" onclick="App.showPRForm()">+ New Purchase Request</button>
-          <button class="btn btn-primary" onclick="App.showPOForm()">+ New PO</button>
+
+    const tabBtn = (key, label) => `
+      <button class="btn btn-sm ${tab===key?'btn-primary':'btn-outline'}"
+        onclick="App.renderPurchasing('${key}')">${label}</button>`;
+
+    if (tab === 'orders') {
+      const [orders, suppliers] = await Promise.all([
+        this.api('GET', '/purchase-orders?limit=100'),
+        this.api('GET', '/suppliers'),
+      ]);
+      const branches = this.currentUser.branches || [];
+      const statusColor = { draft:'badge-warning', sent:'badge-info', approved:'badge-teal', partial:'badge-purple', received:'badge-success', cancelled:'badge-danger' };
+      c.innerHTML = `
+        <div class="section-header">
+          <h2>Purchasing</h2>
+          <div style="display:flex;gap:8px">
+            ${this.can('purchase_requests') ? `<button class="btn btn-outline" onclick="App.showPRForm()">+ New Purchase Request</button>` : ''}
+            <button class="btn btn-primary" onclick="App.showPOForm()">+ New PO</button>
+          </div>
         </div>
-      </div>
-      <div class="card">
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>PO #</th><th>Supplier</th><th>Branch</th><th>Expected</th><th>Total</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
-            <tbody>
-              ${orders.length ? orders.map(po => `
-                <tr>
-                  <td class="fw-600">${po.po_number}</td>
-                  <td>${po.supplier_name || '-'}</td>
-                  <td>${po.branch_name || '-'}</td>
-                  <td>${po.expected_date ? this.fmtDate(po.expected_date) : '-'}</td>
-                  <td class="fw-600">${this.fmt(po.total)}</td>
-                  <td><span class="badge-pill ${statusColor[po.status]||'badge-info'}">${po.status}</span></td>
-                  <td style="color:var(--text-muted)">${this.fmtDate(po.created_at)}</td>
-                  <td>
-                    <button class="btn btn-sm btn-secondary" onclick="App.viewPO(${po.id})">View</button>
-                    ${po.status==='draft'||po.status==='sent' ? `<button class="btn btn-sm btn-primary" onclick="App.updatePOStatus(${po.id},'approved')">Approve</button>` : ''}
-                    ${po.status==='draft'||po.status==='sent'||po.status==='approved'||po.status==='partial' ? `<button class="btn btn-sm btn-success" onclick="App.showReceivePO(${po.id})">Receive</button>` : ''}
-                  </td>
-                </tr>`).join('') : '<tr><td colspan="8" class="empty-state">No purchase orders yet</td></tr>'}
-            </tbody>
-          </table>
+        <div style="display:flex;gap:6px;margin-bottom:16px">
+          ${tabBtn('orders','Purchase Orders')}
+          ${this.can('purchase_requests') ? tabBtn('requests','Purchase Requests') : ''}
         </div>
-      </div>`;
-    this._poSuppliers = suppliers;
-    this._poBranches = branches;
+        <div class="card">
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>PO #</th><th>Supplier</th><th>Branch</th><th>Expected</th><th>Total</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+              <tbody>
+                ${orders.length ? orders.map(po => `
+                  <tr>
+                    <td class="fw-600">${po.po_number}</td>
+                    <td>${po.supplier_name || '-'}</td>
+                    <td>${po.branch_name || '-'}</td>
+                    <td>${po.expected_date ? this.fmtDate(po.expected_date) : '-'}</td>
+                    <td class="fw-600">${this.fmt(po.total)}</td>
+                    <td><span class="badge-pill ${statusColor[po.status]||'badge-info'}">${po.status}</span></td>
+                    <td style="color:var(--text-muted)">${this.fmtDate(po.created_at)}</td>
+                    <td>
+                      <button class="btn btn-sm btn-secondary" onclick="App.viewPO(${po.id})">View</button>
+                      ${po.status==='draft'||po.status==='sent' ? `<button class="btn btn-sm btn-primary" onclick="App.updatePOStatus(${po.id},'approved')">Approve</button>` : ''}
+                      ${po.status==='draft'||po.status==='sent'||po.status==='approved'||po.status==='partial' ? `<button class="btn btn-sm btn-success" onclick="App.showReceivePO(${po.id})">Receive</button>` : ''}
+                    </td>
+                  </tr>`).join('') : '<tr><td colspan="8" class="empty-state">No purchase orders yet</td></tr>'}
+              </tbody>
+            </table>
+          </div>
+        </div>`;
+      this._poSuppliers = suppliers;
+      this._poBranches = branches;
+
+    } else {
+      // Purchase Requests tab
+      const filter = this._prFilter || 'all';
+      const typeFilter = this._prTypeFilter || 'all';
+      const params = new URLSearchParams({ limit: 200 });
+      if (filter !== 'all') params.set('status', filter);
+      if (typeFilter !== 'all') params.set('request_type', typeFilter);
+      const requests = await this.api('GET', `/purchase-requests?${params}`);
+      const prStatusColor = { draft:'badge-warning', submitted:'badge-info', approved:'badge-teal', rejected:'badge-danger', converted:'badge-success' };
+      const typeLabel = { sale_items:'Sale Items', internal_use:'Internal Use' };
+      const typeBadge = { sale_items:'badge-info', internal_use:'badge-purple' };
+      const statusTabs = ['all','draft','submitted','approved','rejected','converted'];
+      const typeFilters = ['all','sale_items','internal_use'];
+      c.innerHTML = `
+        <div class="section-header">
+          <h2>Purchasing</h2>
+          <button class="btn btn-primary" onclick="App.showPRForm()">+ New Request</button>
+        </div>
+        <div style="display:flex;gap:6px;margin-bottom:16px">
+          ${tabBtn('orders','Purchase Orders')}
+          ${tabBtn('requests','Purchase Requests')}
+        </div>
+        <div class="card" style="margin-bottom:0;border-bottom:none;border-radius:8px 8px 0 0;padding:10px 16px 0">
+          <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+            <div style="display:flex;gap:4px">
+              ${statusTabs.map(t=>`<button class="btn btn-sm ${filter===t?'btn-primary':'btn-outline'}" onclick="App._prFilter='${t}';App.renderPurchasing('requests')">${t.charAt(0).toUpperCase()+t.slice(1)}</button>`).join('')}
+            </div>
+            <div style="display:flex;gap:4px;margin-left:auto">
+              ${typeFilters.map(t=>`<button class="btn btn-sm ${typeFilter===t?'btn-primary':'btn-outline'}" onclick="App._prTypeFilter='${t}';App.renderPurchasing('requests')">${t==='all'?'All Types':typeLabel[t]||t}</button>`).join('')}
+            </div>
+          </div>
+        </div>
+        <div class="card" style="border-radius:0 0 8px 8px">
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>PR #</th><th>Type</th><th>Branch</th><th>Department</th><th>Required By</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+              <tbody>
+                ${requests.length ? requests.map(pr => `
+                  <tr>
+                    <td class="fw-600">${pr.pr_number}</td>
+                    <td><span class="badge-pill ${typeBadge[pr.request_type]||'badge-info'}" style="font-size:11px">${typeLabel[pr.request_type]||pr.request_type||'Sale Items'}</span></td>
+                    <td>${pr.branch_name||'-'}</td>
+                    <td>${pr.department||'-'}</td>
+                    <td>${pr.required_date?this.fmtDate(pr.required_date):'-'}</td>
+                    <td><span class="badge-pill ${prStatusColor[pr.status]||'badge-info'}">${pr.status}</span></td>
+                    <td style="color:var(--text-muted)">${this.fmtDate(pr.created_at)}</td>
+                    <td>
+                      <button class="btn btn-sm btn-secondary" onclick="App.viewPR(${pr.id})">View</button>
+                      ${pr.status==='draft'?`<button class="btn btn-sm btn-primary" onclick="App.updatePRStatus(${pr.id},'submitted')">Submit</button>`:''}
+                      ${pr.status==='submitted'?`<button class="btn btn-sm btn-success" onclick="App.approvePR(${pr.id})">Approve</button><button class="btn btn-sm btn-danger" onclick="App.rejectPR(${pr.id})">Reject</button>`:''}
+                      ${pr.status==='approved'?`<button class="btn btn-sm btn-teal" onclick="App.showConvertPRtoPO(${pr.id})">Convert to PO</button>`:''}
+                      ${pr.converted_po_number?`<span style="font-size:12px;color:var(--text-muted)">→ ${pr.converted_po_number}</span>`:''}
+                    </td>
+                  </tr>`).join('') : `<tr><td colspan="8" class="empty-state">No purchase requests${filter!=='all'?' with status "'+filter+'"':''}</td></tr>`}
+              </tbody>
+            </table>
+          </div>
+        </div>`;
+    }
   },
 
   // ─── Purchase Requests ────────────────────────────────────
@@ -4483,7 +4498,7 @@ const App = {
       }
       this.closeModal();
       this.alert('Purchase request created');
-      this.renderPurchaseRequests();
+      this.renderPurchasing('requests');
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
@@ -4566,7 +4581,7 @@ const App = {
     try {
       await this.api('PATCH', `/purchase-requests/${id}/status`, { status });
       this.alert(`Request ${status}`);
-      this.renderPurchaseRequests();
+      this.renderPurchasing('requests');
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
@@ -4575,7 +4590,7 @@ const App = {
     try {
       await this.api('PATCH', `/purchase-requests/${id}/status`, { status: 'approved', approved_by });
       this.alert('Purchase request approved');
-      this.renderPurchaseRequests();
+      this.renderPurchasing('requests');
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
@@ -4603,7 +4618,7 @@ const App = {
       await this.api('PATCH', `/purchase-requests/${id}/status`, { status: 'rejected', rejection_reason: reason });
       this.closeModal();
       this.alert('Purchase request rejected');
-      this.renderPurchaseRequests();
+      this.renderPurchasing('requests');
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
