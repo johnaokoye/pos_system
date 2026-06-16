@@ -621,6 +621,18 @@ async function _init() {
     'ALTER TABLE transaction_items ADD COLUMN variation_id INTEGER REFERENCES product_variations(id)',
     'ALTER TABLE transaction_items ADD COLUMN variation_name TEXT',
     'ALTER TABLE products ADD COLUMN image_path TEXT',
+    "ALTER TABLE purchase_requests ADD COLUMN request_type TEXT DEFAULT 'sale_items'",
+    'ALTER TABLE purchase_requests ADD COLUMN approved_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE purchase_requests ADD COLUMN approved_at DATETIME',
+    'ALTER TABLE purchase_requests ADD COLUMN rejection_reason TEXT',
+    "ALTER TABLE purchase_request_items ADD COLUMN item_type TEXT DEFAULT 'sale'",
+    'ALTER TABLE suppliers ADD COLUMN is_local INTEGER DEFAULT 0',
+    'ALTER TABLE purchase_requests ADD COLUMN supplier_id INTEGER REFERENCES suppliers(id)',
+    'ALTER TABLE purchase_requests ADD COLUMN currency TEXT',
+    'ALTER TABLE purchase_requests ADD COLUMN is_online_purchase INTEGER DEFAULT 0',
+    'ALTER TABLE purchase_requests ADD COLUMN tax_rate REAL DEFAULT 0',
+    'ALTER TABLE purchase_requests ADD COLUMN tax_amount REAL DEFAULT 0',
+    'ALTER TABLE purchase_request_items ADD COLUMN product_url TEXT',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

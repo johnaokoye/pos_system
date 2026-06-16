@@ -4052,7 +4052,7 @@ const App = {
     tbody.innerHTML = suppliers.length ? suppliers.map(s => `
       <tr>
         <td class="fw-600">${s.supplier_number}</td>
-        <td class="fw-600">${s.name}</td>
+        <td class="fw-600">${s.name}${s.is_local ? ' <span class="badge-pill badge-teal" style="font-size:10px;vertical-align:middle">Local</span>' : ''}</td>
         <td>${s.contact_name || '-'}</td>
         <td>${s.phone || '-'}</td>
         <td>${s.email || '-'}</td>
@@ -4089,7 +4089,16 @@ const App = {
             <div class="form-group"><label>ZIP</label><input id="sf-zip" value="${s.zip||''}"></div>
           </div>
           <div class="form-group"><label>Notes</label><textarea id="sf-notes" rows="2">${s.notes||''}</textarea></div>
-          ${id ? `<div class="form-group"><label>Status</label><select id="sf-active"><option value="1" ${s.active?'selected':''}>Active</option><option value="0" ${!s.active?'selected':''}>Inactive</option></select></div>` : ''}
+          <div style="display:flex;gap:24px;align-items:center;margin-top:4px">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:500">
+              <input type="checkbox" id="sf-local" ${s.is_local?'checked':''} style="width:16px;height:16px">
+              Local Supplier <span style="font-size:12px;color:var(--text-muted);font-weight:400">(default tax applies to purchases)</span>
+            </label>
+            ${id ? `<label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+              <span>Status:</span>
+              <select id="sf-active" style="margin:0"><option value="1" ${s.active?'selected':''}>Active</option><option value="0" ${!s.active?'selected':''}>Inactive</option></select>
+            </label>` : ''}
+          </div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
@@ -4110,6 +4119,7 @@ const App = {
       state: document.getElementById('sf-state').value.trim(),
       zip: document.getElementById('sf-zip').value.trim(),
       notes: document.getElementById('sf-notes').value.trim(),
+      is_local: document.getElementById('sf-local').checked ? 1 : 0,
     };
     if (id) data.active = parseInt(document.getElementById('sf-active').value);
     if (!data.name) { this.alert('Name required', 'error'); return; }
@@ -4126,21 +4136,41 @@ const App = {
   async renderPurchaseRequests() {
     const c = document.getElementById('content');
     c.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
-    const requests = await this.api('GET', '/purchase-requests?limit=100');
+    const filter = this._prFilter || 'all';
+    const typeFilter = this._prTypeFilter || 'all';
+    const params = new URLSearchParams({ limit: 200 });
+    if (filter !== 'all') params.set('status', filter);
+    if (typeFilter !== 'all') params.set('request_type', typeFilter);
+    const requests = await this.api('GET', `/purchase-requests?${params}`);
     const prStatusColor = { draft:'badge-warning', submitted:'badge-info', approved:'badge-teal', rejected:'badge-danger', converted:'badge-success' };
+    const typeLabel = { sale_items:'Sale Items', internal_use:'Internal Use' };
+    const typeBadge = { sale_items:'badge-info', internal_use:'badge-purple' };
+    const tabs = ['all','draft','submitted','approved','rejected','converted'];
+    const typeFilters = ['all','sale_items','internal_use'];
     c.innerHTML = `
       <div class="section-header">
         <h2>Purchase Requests</h2>
         <button class="btn btn-primary" onclick="App.showPRForm()">+ New Request</button>
       </div>
-      <div class="card">
+      <div class="card" style="margin-bottom:0;border-bottom:none;border-radius:8px 8px 0 0;padding:10px 16px 0">
+        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+          <div style="display:flex;gap:4px">
+            ${tabs.map(t => `<button class="btn btn-sm ${filter===t?'btn-primary':'btn-outline'}" onclick="App._prFilter='${t}';App.renderPurchaseRequests()">${t.charAt(0).toUpperCase()+t.slice(1)}</button>`).join('')}
+          </div>
+          <div style="display:flex;gap:4px;margin-left:auto">
+            ${typeFilters.map(t => `<button class="btn btn-sm ${typeFilter===t?'btn-primary':'btn-outline'}" onclick="App._prTypeFilter='${t}';App.renderPurchaseRequests()">${t==='all'?'All Types':typeLabel[t]||t}</button>`).join('')}
+          </div>
+        </div>
+      </div>
+      <div class="card" style="border-radius:0 0 8px 8px">
         <div class="table-wrap">
           <table>
-            <thead><tr><th>PR #</th><th>Branch</th><th>Department</th><th>Required By</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+            <thead><tr><th>PR #</th><th>Type</th><th>Branch</th><th>Department</th><th>Required By</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
             <tbody>
               ${requests.length ? requests.map(pr => `
                 <tr>
                   <td class="fw-600">${pr.pr_number}</td>
+                  <td><span class="badge-pill ${typeBadge[pr.request_type]||'badge-info'}" style="font-size:11px">${typeLabel[pr.request_type]||pr.request_type||'Sale Items'}</span></td>
                   <td>${pr.branch_name || '-'}</td>
                   <td>${pr.department || '-'}</td>
                   <td>${pr.required_date ? this.fmtDate(pr.required_date) : '-'}</td>
@@ -4149,11 +4179,11 @@ const App = {
                   <td>
                     <button class="btn btn-sm btn-secondary" onclick="App.viewPR(${pr.id})">View</button>
                     ${pr.status==='draft' ? `<button class="btn btn-sm btn-primary" onclick="App.updatePRStatus(${pr.id},'submitted')">Submit</button>` : ''}
-                    ${pr.status==='submitted' ? `<button class="btn btn-sm btn-success" onclick="App.updatePRStatus(${pr.id},'approved')">Approve</button>` : ''}
+                    ${pr.status==='submitted' ? `<button class="btn btn-sm btn-success" onclick="App.approvePR(${pr.id})">Approve</button><button class="btn btn-sm btn-danger" onclick="App.rejectPR(${pr.id})">Reject</button>` : ''}
                     ${pr.status==='approved' ? `<button class="btn btn-sm btn-teal" onclick="App.showConvertPRtoPO(${pr.id})">Convert to PO</button>` : ''}
                     ${pr.converted_po_number ? `<span style="font-size:12px;color:var(--text-muted)">→ ${pr.converted_po_number}</span>` : ''}
                   </td>
-                </tr>`).join('') : '<tr><td colspan="7" class="empty-state">No purchase requests yet</td></tr>'}
+                </tr>`).join('') : `<tr><td colspan="8" class="empty-state">No purchase requests${filter!=='all'?' with status "'+filter+'"':''}</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -4173,7 +4203,10 @@ const App = {
     c.innerHTML = `
       <div class="section-header">
         <h2>Purchase Orders</h2>
-        <button class="btn btn-primary" onclick="App.showPOForm()">+ New PO</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-outline" onclick="App.showPRForm()">+ New Purchase Request</button>
+          <button class="btn btn-primary" onclick="App.showPOForm()">+ New PO</button>
+        </div>
       </div>
       <div class="card">
         <div class="table-wrap">
@@ -4205,33 +4238,76 @@ const App = {
 
   // ─── Purchase Requests ────────────────────────────────────
   async showPRForm() {
-    const products = await this.api('GET', '/products');
+    const [products, suppliers, settings] = await Promise.all([
+      this.api('GET', '/products'),
+      this.api('GET', '/suppliers'),
+      this.api('GET', '/settings').catch(() => ({})),
+    ]);
     const branches = this.currentUser.branches || [];
-    const employees = await this.api('GET', '/employees').catch(() => []);
+    const defaultCurrency = (settings.currency || 'USD').toUpperCase();
+    const currencies = ['USD','EUR','GBP','CAD','AUD','JMD','TTD','BBD','GYD','BSD','HTG','MXN','CNY','JPY','INR','NGN','GHS','KES','ZAR'];
+    if (!currencies.includes(defaultCurrency)) currencies.unshift(defaultCurrency);
+    const supOpts = `<option value="">-- No Supplier --</option>${suppliers.map(s=>`<option value="${s.id}" data-local="${s.is_local||0}">${s.name}${s.is_local?' (Local)':''}</option>`).join('')}`;
     this.showModal(`
-      <div class="modal" style="max-width:720px">
+      <div class="modal" style="max-width:800px">
         <div class="modal-header"><span class="modal-title">New Purchase Request</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
-          <div class="input-row">
+          <div class="form-group" style="margin-bottom:14px">
+            <label style="font-weight:600;margin-bottom:6px;display:block">Request Type</label>
+            <div style="display:flex;gap:0;border:1px solid var(--border);border-radius:6px;overflow:hidden;width:fit-content">
+              <button id="pr-type-sale" class="btn" style="border-radius:0;border:none;padding:8px 20px;background:var(--primary);color:#fff;font-weight:600" onclick="App._setPRType('sale_items')">Sale Items (for resale)</button>
+              <button id="pr-type-internal" class="btn" style="border-radius:0;border:none;padding:8px 20px;background:var(--card);color:var(--text)" onclick="App._setPRType('internal_use')">Internal Use</button>
+            </div>
+            <p id="pr-type-hint" style="font-size:12px;color:var(--text-muted);margin-top:5px">Products that will be stocked and sold to customers.</p>
+          </div>
+
+          <div class="input-row" style="grid-template-columns:1fr 1fr 1fr">
+            <div class="form-group"><label>Supplier</label>
+              <select id="pr-supplier" onchange="App._onPRSupplierChange()">${supOpts}</select>
+            </div>
+            <div class="form-group"><label>Currency</label>
+              <select id="pr-currency" onchange="App._onPRCurrencyChange()">
+                ${currencies.map(c=>`<option value="${c}" ${c===defaultCurrency?'selected':''}>${c}</option>`).join('')}
+              </select>
+            </div>
             <div class="form-group"><label>Branch</label>
               <select id="pr-branch">
                 <option value="">-- Select Branch --</option>
                 ${branches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
               </select>
             </div>
-            <div class="form-group"><label>Department</label><input id="pr-dept" placeholder="e.g. Warehouse, Sales"></div>
           </div>
+
           <div class="input-row">
+            <div class="form-group"><label>Department</label><input id="pr-dept" placeholder="e.g. Warehouse, Sales, Admin"></div>
             <div class="form-group"><label>Required By Date</label><input id="pr-date" type="date"></div>
-            <div class="form-group"><label>Notes</label><input id="pr-notes" placeholder="Reason for request..."></div>
+            <div class="form-group"><label>Notes / Reason</label><input id="pr-notes" placeholder="Reason for request..."></div>
           </div>
+
+          <div style="display:flex;align-items:center;gap:16px;margin-bottom:12px;padding:10px 12px;background:var(--bg);border-radius:6px">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:500;margin:0">
+              <input type="checkbox" id="pr-online" onchange="App._onPROnlineToggle()" style="width:16px;height:16px">
+              Online Purchase
+            </label>
+            <span style="font-size:12px;color:var(--text-muted)">Enable to add product URLs per item</span>
+            <div id="pr-tax-badge" style="display:none;margin-left:auto;padding:4px 12px;background:#e8f5e9;border-radius:20px;font-size:13px;color:#2e7d32"></div>
+          </div>
+
           <div style="margin-bottom:10px">
             <div class="card-header"><span class="card-title">Items</span>
               <button class="btn btn-sm btn-outline" onclick="App.addPRItem()">+ Add Item</button>
             </div>
+            <div style="display:grid;grid-template-columns:2fr 1.5fr 60px 90px 90px 28px;gap:6px;padding:4px 0 4px 8px;font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase">
+              <span>Product</span><span>Item Name</span><span>Qty</span><span>Est. Cost</span><span>Item Type</span><span></span>
+            </div>
             <div id="pr-items"></div>
           </div>
-          <div style="text-align:right;font-size:15px;font-weight:700">Est. Total: <span id="pr-total">$0.00</span></div>
+
+          <div id="pr-totals-block" style="text-align:right;font-size:13px;line-height:1.9">
+            <div>Subtotal: <span id="pr-subtotal" style="font-weight:600;min-width:80px;display:inline-block">$0.00</span></div>
+            <div id="pr-tax-row" style="display:none;color:var(--text-muted)">Tax (<span id="pr-tax-pct"></span>%): <span id="pr-tax-amt" style="font-weight:600;min-width:80px;display:inline-block">$0.00</span></div>
+            <div style="font-size:15px;font-weight:700;border-top:1px solid var(--border);margin-top:4px;padding-top:4px">Est. Total: <span id="pr-total">$0.00</span></div>
+          </div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
@@ -4240,8 +4316,61 @@ const App = {
         </div>
       </div>`);
     this._prAllProducts = products;
+    this._prAllSuppliers = suppliers;
     this._prItems = [];
+    this._prRequestType = 'sale_items';
+    this._prTaxRate = parseFloat(settings.tax_rate) || 0;
+    this._prDefaultCurrency = defaultCurrency;
+    this._prIsOnline = false;
+    this._prIsLocalSupplier = true; // default currency is pre-selected
     this.addPRItem();
+    this._onPRCurrencyChange(); // show tax badge on open
+  },
+
+  _setPRType(type) {
+    this._prRequestType = type;
+    const saleBtn = document.getElementById('pr-type-sale');
+    const internalBtn = document.getElementById('pr-type-internal');
+    const hint = document.getElementById('pr-type-hint');
+    if (type === 'sale_items') {
+      saleBtn.style.background = 'var(--primary)'; saleBtn.style.color = '#fff';
+      internalBtn.style.background = 'var(--card)'; internalBtn.style.color = 'var(--text)';
+      hint.textContent = 'Products that will be stocked and sold to customers.';
+    } else {
+      internalBtn.style.background = 'var(--primary)'; internalBtn.style.color = '#fff';
+      saleBtn.style.background = 'var(--card)'; saleBtn.style.color = 'var(--text)';
+      hint.textContent = 'Items for internal use — office supplies, equipment, consumables, etc. Will not enter product inventory.';
+    }
+    document.querySelectorAll('[id^="pri-itype-"]').forEach(sel => {
+      sel.value = type === 'internal_use' ? 'internal' : 'sale';
+    });
+  },
+
+  _onPRSupplierChange() {
+    // supplier change keeps local badge in sync but doesn't drive tax
+    this._onPRCurrencyChange();
+  },
+
+  _onPRCurrencyChange() {
+    const currency = document.getElementById('pr-currency')?.value || '';
+    this._prIsLocalSupplier = currency === this._prDefaultCurrency;
+    const badge = document.getElementById('pr-tax-badge');
+    if (badge) {
+      if (this._prIsLocalSupplier && this._prTaxRate > 0) {
+        badge.style.display = 'block';
+        badge.textContent = `${currency} is local currency — ${this._prTaxRate}% tax applies`;
+      } else {
+        badge.style.display = 'none';
+      }
+    }
+    this.calcPRTotal();
+  },
+
+  _onPROnlineToggle() {
+    this._prIsOnline = document.getElementById('pr-online')?.checked || false;
+    document.querySelectorAll('[id^="pri-url-row-"]').forEach(el => {
+      el.style.display = this._prIsOnline ? '' : 'none';
+    });
   },
 
   addPRItem() {
@@ -4249,17 +4378,30 @@ const App = {
     const idx = this._prItems.length;
     this._prItems.push({});
     const container = document.getElementById('pr-items');
-    const div = document.createElement('div');
-    div.className = 'po-receive-row';
-    div.id = `pr-item-${idx}`;
-    const opts = `<option value="">-- Select Product (optional) --</option>${(this._prAllProducts||[]).map(p=>`<option value="${p.id}" data-cost="${p.cost||0}" data-name="${p.name}" data-sku="${p.sku||''}">${p.name} (${p.sku})</option>`).join('')}`;
-    div.innerHTML = `
-      <select style="flex:2" onchange="App.updatePRItem(${idx},this.value)" id="pri-prod-${idx}">${opts}</select>
-      <input id="pri-name-${idx}" placeholder="Or type item name" style="flex:1.5" oninput="App.calcPRTotal()">
-      <input id="pri-qty-${idx}" type="number" min="1" value="1" style="width:60px" placeholder="Qty" oninput="App.calcPRTotal()">
-      <input id="pri-cost-${idx}" type="number" step="0.01" style="width:80px" placeholder="Est. Cost" oninput="App.calcPRTotal()">
-      <button class="btn btn-sm btn-danger" onclick="document.getElementById('pr-item-${idx}').remove();App.calcPRTotal()">✕</button>`;
-    container.appendChild(div);
+    const opts = `<option value="">-- Product (optional) --</option>${(this._prAllProducts||[]).map(p=>`<option value="${p.id}" data-cost="${p.cost||0}" data-name="${p.name}" data-sku="${p.sku||''}">${p.name} (${p.sku})</option>`).join('')}`;
+    const defaultType = (this._prRequestType === 'internal_use') ? 'internal' : 'sale';
+    const wrap = document.createElement('div');
+    wrap.id = `pr-item-${idx}`;
+    wrap.style.cssText = 'border-bottom:1px solid var(--border);padding:8px 0';
+    wrap.innerHTML = `
+      <div style="display:grid;grid-template-columns:2fr 1.5fr 60px 90px 90px 28px;gap:6px;align-items:center">
+        <select onchange="App.updatePRItem(${idx},this.value)" id="pri-prod-${idx}">${opts}</select>
+        <input id="pri-name-${idx}" placeholder="Or type item name" oninput="App.calcPRTotal()">
+        <input id="pri-qty-${idx}" type="number" min="1" value="1" placeholder="Qty" oninput="App.calcPRTotal()">
+        <input id="pri-cost-${idx}" type="number" step="0.01" placeholder="Est. Cost" oninput="App.calcPRTotal()">
+        <select id="pri-itype-${idx}" style="font-size:12px">
+          <option value="sale" ${defaultType==='sale'?'selected':''}>Sale</option>
+          <option value="internal" ${defaultType==='internal'?'selected':''}>Internal</option>
+        </select>
+        <button class="btn btn-sm btn-danger" onclick="document.getElementById('pr-item-${idx}').remove();App.calcPRTotal()">✕</button>
+      </div>
+      <div id="pri-url-row-${idx}" style="display:${this._prIsOnline?'':'none'};margin-top:6px;padding:0 0 2px 2px">
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="font-size:11px;color:var(--text-muted);white-space:nowrap;min-width:80px">Product URL:</span>
+          <input id="pri-url-${idx}" placeholder="https://..." style="flex:1">
+        </div>
+      </div>`;
+    container.appendChild(wrap);
   },
 
   updatePRItem(idx, productId) {
@@ -4272,13 +4414,28 @@ const App = {
   },
 
   calcPRTotal() {
-    let total = 0;
+    let subtotal = 0;
     document.querySelectorAll('[id^="pri-qty-"]').forEach(qEl => {
       const idx = qEl.id.split('-').pop();
-      total += (parseFloat(qEl.value)||0) * (parseFloat(document.getElementById(`pri-cost-${idx}`)?.value)||0);
+      subtotal += (parseFloat(qEl.value)||0) * (parseFloat(document.getElementById(`pri-cost-${idx}`)?.value)||0);
     });
-    const el = document.getElementById('pr-total');
-    if (el) el.textContent = this.fmt(total);
+    const taxRate = this._prIsLocalSupplier ? (this._prTaxRate || 0) : 0;
+    const taxAmt = parseFloat((subtotal * taxRate / 100).toFixed(2));
+    const total = parseFloat((subtotal + taxAmt).toFixed(2));
+
+    const currency = document.getElementById('pr-currency')?.value || this._prDefaultCurrency || 'USD';
+    const fmtPR = n => new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(n || 0);
+
+    const sub = document.getElementById('pr-subtotal');
+    const taxRow = document.getElementById('pr-tax-row');
+    const taxPct = document.getElementById('pr-tax-pct');
+    const taxAmtEl = document.getElementById('pr-tax-amt');
+    const totalEl = document.getElementById('pr-total');
+    if (sub) sub.textContent = fmtPR(subtotal);
+    if (taxRow) taxRow.style.display = taxRate > 0 ? '' : 'none';
+    if (taxPct) taxPct.textContent = taxRate;
+    if (taxAmtEl) taxAmtEl.textContent = fmtPR(taxAmt);
+    if (totalEl) totalEl.textContent = fmtPR(total);
   },
 
   async savePR(initialStatus) {
@@ -4286,6 +4443,12 @@ const App = {
     const department = document.getElementById('pr-dept').value;
     const required_date = document.getElementById('pr-date').value;
     const notes = document.getElementById('pr-notes').value;
+    const request_type = this._prRequestType || 'sale_items';
+    const supplier_id = document.getElementById('pr-supplier')?.value || null;
+    const currency = document.getElementById('pr-currency')?.value || null;
+    const is_online_purchase = document.getElementById('pr-online')?.checked ? 1 : 0;
+    const taxRate = this._prIsLocalSupplier ? (this._prTaxRate || 0) : 0;
+
     const items = [];
     document.querySelectorAll('[id^="pri-qty-"]').forEach(qEl => {
       if (!qEl.closest('[id^="pr-item-"]')) return;
@@ -4299,11 +4462,22 @@ const App = {
       if (!product_id && !product_name) return;
       const quantity = parseInt(qEl.value) || 1;
       const unit_cost = parseFloat(document.getElementById(`pri-cost-${idx}`)?.value) || 0;
-      items.push({ product_id: product_id || null, product_name, sku, quantity, unit_cost });
+      const item_type = document.getElementById(`pri-itype-${idx}`)?.value || (request_type === 'internal_use' ? 'internal' : 'sale');
+      const product_url = document.getElementById(`pri-url-${idx}`)?.value.trim() || null;
+      items.push({ product_id: product_id || null, product_name, sku, quantity, unit_cost, item_type, product_url });
     });
     if (!items.length) { this.alert('Add at least one item', 'error'); return; }
+
+    const subtotal = items.reduce((s, i) => s + (i.unit_cost * i.quantity), 0);
+    const tax_amount = parseFloat((subtotal * taxRate / 100).toFixed(2));
+
     try {
-      const pr = await this.api('POST', '/purchase-requests', { branch_id: branch_id||null, department: department||null, notes: notes||null, required_date: required_date||null, items });
+      const pr = await this.api('POST', '/purchase-requests', {
+        branch_id: branch_id||null, department: department||null, notes: notes||null,
+        required_date: required_date||null, request_type,
+        supplier_id: supplier_id||null, currency: currency||null,
+        is_online_purchase, tax_rate: taxRate, tax_amount, items
+      });
       if (initialStatus === 'submitted') {
         await this.api('PATCH', `/purchase-requests/${pr.id}/status`, { status: 'submitted' });
       }
@@ -4316,42 +4490,72 @@ const App = {
   async viewPR(id) {
     const pr = await this.api('GET', `/purchase-requests/${id}`);
     const prStatusColor = { draft:'badge-warning', submitted:'badge-info', approved:'badge-teal', rejected:'badge-danger', converted:'badge-success' };
+    const typeLabel = { sale_items:'Sale Items', internal_use:'Internal Use' };
+    const typeBadge = { sale_items:'badge-info', internal_use:'badge-purple' };
     const total = (pr.items || []).reduce((s, i) => s + (i.total || 0), 0);
+    const saleItems = (pr.items||[]).filter(i => i.item_type !== 'internal');
+    const internalItems = (pr.items||[]).filter(i => i.item_type === 'internal');
+    const hasUrls = (pr.items||[]).some(i => i.product_url);
+    const renderItemRows = items => items.map(i => `<tr>
+      <td>
+        ${i.product_name}${i.item_type==='internal'?'<span style="font-size:10px;margin-left:4px;color:var(--text-muted)">[internal]</span>':''}
+        ${i.product_url ? `<br><a href="${i.product_url}" target="_blank" rel="noopener" style="font-size:11px;color:var(--accent);word-break:break-all">${i.product_url}</a>` : ''}
+      </td>
+      <td>${i.sku||'-'}</td>
+      <td>${i.quantity}</td>
+      <td>${this.fmt(i.unit_cost)}</td>
+      <td class="fw-600">${this.fmt(i.total)}</td>
+      <td style="font-size:12px;color:var(--text-muted)">${i.notes||''}</td>
+    </tr>`).join('');
     this.showModal(`
-      <div class="modal" style="max-width:660px">
+      <div class="modal" style="max-width:700px">
         <div class="modal-header">
           <span class="modal-title">PR: ${pr.pr_number}</span>
           <div style="display:flex;gap:8px;align-items:center">
+            <span class="badge-pill ${typeBadge[pr.request_type]||'badge-info'}" style="font-size:11px">${typeLabel[pr.request_type]||'Sale Items'}</span>
             <span class="badge-pill ${prStatusColor[pr.status]||''}">${pr.status}</span>
             <button class="modal-close">✕</button>
           </div>
         </div>
         <div class="modal-body">
           <div class="two-col" style="margin-bottom:14px;font-size:13px">
-            <div><strong>Branch:</strong> ${pr.branch_name||'-'}<br><strong>Department:</strong> ${pr.department||'-'}<br><strong>Requested by:</strong> ${pr.employee_name||'-'}</div>
-            <div><strong>Created:</strong> ${this.fmtDate(pr.created_at)}<br><strong>Required By:</strong> ${pr.required_date ? this.fmtDate(pr.required_date) : '-'}<br>${pr.converted_po_number ? `<strong>Converted to:</strong> <span class="color-success fw-600">${pr.converted_po_number}</span>` : ''}</div>
+            <div>
+              <strong>Branch:</strong> ${pr.branch_name||'-'}<br>
+              <strong>Department:</strong> ${pr.department||'-'}<br>
+              <strong>Requested by:</strong> ${pr.employee_name||'-'}<br>
+              <strong>Supplier:</strong> ${pr.supplier_name ? `${pr.supplier_name}${pr.supplier_is_local?' <span class="badge-pill badge-teal" style="font-size:10px">Local</span>':''}` : '-'}<br>
+              <strong>Currency:</strong> ${pr.currency||'-'}
+              ${pr.is_online_purchase ? ' &nbsp;<span class="badge-pill badge-info" style="font-size:10px">Online Purchase</span>' : ''}
+            </div>
+            <div>
+              <strong>Created:</strong> ${this.fmtDate(pr.created_at)}<br>
+              <strong>Required By:</strong> ${pr.required_date ? this.fmtDate(pr.required_date) : '-'}<br>
+              ${pr.approver_name ? `<strong>Approved by:</strong> <span class="color-success">${pr.approver_name}</span>${pr.approved_at?' on '+this.fmtDate(pr.approved_at):''}` : ''}
+              ${pr.converted_po_number ? `<strong>Converted to:</strong> <span class="color-success fw-600">${pr.converted_po_number}</span>` : ''}
+            </div>
           </div>
-          ${pr.notes ? `<div style="padding:8px 12px;background:var(--bg-secondary,#f8f9fa);border-radius:6px;font-size:13px;margin-bottom:12px">${pr.notes}</div>` : ''}
+          ${pr.notes ? `<div style="padding:8px 12px;background:var(--bg-secondary,#f8f9fa);border-radius:6px;font-size:13px;margin-bottom:12px"><strong>Notes:</strong> ${pr.notes}</div>` : ''}
+          ${pr.rejection_reason ? `<div style="padding:8px 12px;background:#fff3f3;border-left:3px solid var(--danger);border-radius:0 6px 6px 0;font-size:13px;margin-bottom:12px"><strong>Rejection Reason:</strong> ${pr.rejection_reason}</div>` : ''}
           <div class="table-wrap">
             <table>
               <thead><tr><th>Item</th><th>SKU</th><th>Qty</th><th>Est. Cost</th><th>Total</th><th>Notes</th></tr></thead>
-              <tbody>
-                ${(pr.items||[]).map(i => `<tr>
-                  <td>${i.product_name}</td>
-                  <td>${i.sku||'-'}</td>
-                  <td>${i.quantity}</td>
-                  <td>${this.fmt(i.unit_cost)}</td>
-                  <td class="fw-600">${this.fmt(i.total)}</td>
-                  <td style="font-size:12px;color:var(--text-muted)">${i.notes||''}</td>
-                </tr>`).join('')}
-              </tbody>
+              <tbody>${renderItemRows(pr.items||[])}</tbody>
             </table>
           </div>
-          <div style="text-align:right;margin-top:10px;font-size:15px;font-weight:700">Est. Total: ${this.fmt(total)}</div>
+          ${saleItems.length && internalItems.length ? `
+            <div style="display:flex;gap:16px;margin-top:10px;font-size:13px;color:var(--text-muted)">
+              <span>Sale items: <strong>${saleItems.length}</strong></span>
+              <span>Internal items: <strong>${internalItems.length}</strong></span>
+            </div>` : ''}
+          <div style="text-align:right;margin-top:10px;font-size:13px;line-height:1.9">
+            <div style="color:var(--text-muted)">Subtotal: <strong>${this.fmt(total)}</strong></div>
+            ${pr.tax_amount > 0 ? `<div style="color:var(--text-muted)">Tax (${pr.tax_rate}% local): <strong>${this.fmt(pr.tax_amount)}</strong></div>` : ''}
+            <div style="font-size:15px;font-weight:700;border-top:1px solid var(--border);padding-top:4px">Est. Total: ${this.fmt(total + (pr.tax_amount||0))}</div>
+          </div>
         </div>
         <div class="modal-footer">
           ${pr.status==='draft' ? `<button class="btn btn-primary" onclick="App.updatePRStatus(${pr.id},'submitted');App.closeModal()">Submit Request</button>` : ''}
-          ${pr.status==='submitted' ? `<button class="btn btn-success" onclick="App.updatePRStatus(${pr.id},'approved');App.closeModal()">Approve</button><button class="btn btn-danger" onclick="App.updatePRStatus(${pr.id},'rejected');App.closeModal()">Reject</button>` : ''}
+          ${pr.status==='submitted' ? `<button class="btn btn-success" onclick="App.closeModal();App.approvePR(${pr.id})">Approve</button><button class="btn btn-danger" onclick="App.closeModal();App.rejectPR(${pr.id})">Reject</button>` : ''}
           ${pr.status==='approved' ? `<button class="btn btn-teal" onclick="App.closeModal();App.showConvertPRtoPO(${pr.id})">Convert to PO</button>` : ''}
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
@@ -4366,24 +4570,71 @@ const App = {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
+  async approvePR(id) {
+    const approved_by = this.currentUser?.id || null;
+    try {
+      await this.api('PATCH', `/purchase-requests/${id}/status`, { status: 'approved', approved_by });
+      this.alert('Purchase request approved');
+      this.renderPurchaseRequests();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async rejectPR(id) {
+    this.showModal(`
+      <div class="modal" style="max-width:420px">
+        <div class="modal-header"><span class="modal-title">Reject Purchase Request</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label>Reason for rejection *</label>
+            <textarea id="pr-reject-reason" rows="3" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;resize:vertical" placeholder="Explain why this request is being rejected..."></textarea>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-danger" onclick="App._confirmRejectPR(${id})">Reject Request</button>
+        </div>
+      </div>`);
+  },
+
+  async _confirmRejectPR(id) {
+    const reason = document.getElementById('pr-reject-reason').value.trim();
+    if (!reason) { this.alert('Please provide a reason for rejection', 'error'); return; }
+    try {
+      await this.api('PATCH', `/purchase-requests/${id}/status`, { status: 'rejected', rejection_reason: reason });
+      this.closeModal();
+      this.alert('Purchase request rejected');
+      this.renderPurchaseRequests();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
   async showConvertPRtoPO(id) {
     const [pr, suppliers] = await Promise.all([
       this.api('GET', `/purchase-requests/${id}`),
       this.api('GET', '/suppliers'),
     ]);
     const total = (pr.items||[]).reduce((s,i) => s+(i.total||0), 0);
+    const hasInternal = (pr.items||[]).some(i => i.item_type === 'internal');
+    const hasSale = (pr.items||[]).some(i => i.item_type !== 'internal');
     this.showModal(`
-      <div class="modal" style="max-width:560px">
+      <div class="modal" style="max-width:580px">
         <div class="modal-header"><span class="modal-title">Convert PR to Purchase Order</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
-          <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px">
-            Converting <strong>${pr.pr_number}</strong> will create a new Purchase Order with the items below.
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:10px">
+            Converting <strong>${pr.pr_number}</strong> will create a new Purchase Order with all items below.
           </p>
+          ${hasInternal ? `<div style="padding:8px 12px;background:#fff8e1;border-left:3px solid var(--warning);border-radius:0 6px 6px 0;font-size:13px;margin-bottom:12px">
+            <strong>Note:</strong> Internal-use items will be included on the PO but <em>will not update product stock levels</em> when received.
+          </div>` : ''}
           <div class="table-wrap" style="margin-bottom:14px">
             <table>
-              <thead><tr><th>Item</th><th>Qty</th><th>Est. Cost</th></tr></thead>
+              <thead><tr><th>Item</th><th>Type</th><th>Qty</th><th>Est. Cost</th></tr></thead>
               <tbody>
-                ${(pr.items||[]).map(i=>`<tr><td>${i.product_name}</td><td>${i.quantity}</td><td>${this.fmt(i.unit_cost)}</td></tr>`).join('')}
+                ${(pr.items||[]).map(i=>`<tr>
+                  <td>${i.product_name}</td>
+                  <td><span style="font-size:11px;color:${i.item_type==='internal'?'var(--text-muted)':'var(--accent)'}">${i.item_type==='internal'?'Internal':'Sale'}</span></td>
+                  <td>${i.quantity}</td>
+                  <td>${this.fmt(i.unit_cost)}</td>
+                </tr>`).join('')}
               </tbody>
             </table>
           </div>

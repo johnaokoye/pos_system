@@ -2,12 +2,28 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 
+const PR_SELECT = `
+  SELECT pr.*,
+    b.name as branch_name,
+    e.first_name || ' ' || e.last_name as employee_name,
+    a.first_name || ' ' || a.last_name as approver_name,
+    s.name as supplier_name,
+    s.is_local as supplier_is_local,
+    po.po_number as converted_po_number
+  FROM purchase_requests pr
+  LEFT JOIN branches b ON pr.branch_id = b.id
+  LEFT JOIN employees e ON pr.employee_id = e.id
+  LEFT JOIN employees a ON pr.approved_by = a.id
+  LEFT JOIN suppliers s ON pr.supplier_id = s.id
+  LEFT JOIN purchase_orders po ON pr.converted_to_po_id = po.id`;
+
 router.get('/', async (req, res) => {
   try {
-    const { status, branch_id, employee_id, start, end, limit = 100 } = req.query;
-    let sql = `SELECT pr.*, b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name, po.po_number as converted_po_number FROM purchase_requests pr LEFT JOIN branches b ON pr.branch_id = b.id LEFT JOIN employees e ON pr.employee_id = e.id LEFT JOIN purchase_orders po ON pr.converted_to_po_id = po.id WHERE 1=1`;
+    const { status, request_type, branch_id, employee_id, start, end, limit = 100 } = req.query;
+    let sql = PR_SELECT + ' WHERE 1=1';
     const params = [];
     if (status) { sql += ' AND pr.status = ?'; params.push(status); }
+    if (request_type) { sql += ' AND pr.request_type = ?'; params.push(request_type); }
     if (branch_id) { sql += ' AND pr.branch_id = ?'; params.push(branch_id); }
     if (employee_id) { sql += ' AND pr.employee_id = ?'; params.push(employee_id); }
     if (start) { sql += ' AND date(pr.created_at) >= ?'; params.push(start); }
@@ -21,9 +37,12 @@ router.get('/', async (req, res) => {
 
 router.get('/:id', async (req, res) => {
   try {
-    const { rows: [pr] } = await db.execute({ sql: `SELECT pr.*, b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name, po.po_number as converted_po_number FROM purchase_requests pr LEFT JOIN branches b ON pr.branch_id = b.id LEFT JOIN employees e ON pr.employee_id = e.id LEFT JOIN purchase_orders po ON pr.converted_to_po_id = po.id WHERE pr.id = ?`, args: [req.params.id] });
+    const { rows: [pr] } = await db.execute({ sql: PR_SELECT + ' WHERE pr.id = ?', args: [req.params.id] });
     if (!pr) return res.status(404).json({ error: 'Not found' });
-    const { rows: items } = await db.execute({ sql: 'SELECT pri.*, p.name as linked_product_name FROM purchase_request_items pri LEFT JOIN products p ON pri.product_id = p.id WHERE pri.pr_id = ?', args: [req.params.id] });
+    const { rows: items } = await db.execute({
+      sql: 'SELECT pri.*, p.name as linked_product_name FROM purchase_request_items pri LEFT JOIN products p ON pri.product_id = p.id WHERE pri.pr_id = ?',
+      args: [req.params.id]
+    });
     pr.items = items;
     res.json(pr);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -31,8 +50,10 @@ router.get('/:id', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const { branch_id, employee_id, department, notes, required_date, items } = req.body;
+    const { branch_id, employee_id, department, notes, required_date, request_type = 'sale_items',
+            supplier_id, currency, is_online_purchase, tax_rate, tax_amount, items } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in purchase request' });
+    if (!['sale_items', 'internal_use'].includes(request_type)) return res.status(400).json({ error: 'Invalid request_type' });
 
     const { rows: [count] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM purchase_requests', args: [] });
     const pr_number = `PR-${String(Number(count.c) + 1).padStart(6, '0')}`;
@@ -42,18 +63,37 @@ router.post('/', async (req, res) => {
       const product = item.product_id ? (await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] })).rows[0] : null;
       const unit_cost = parseFloat(item.unit_cost || (product ? product.cost : 0)) || 0;
       const qty = parseInt(item.quantity || 1);
-      processedItems.push({ product_id: item.product_id || null, product_name: item.product_name || (product ? product.name : 'Unknown'), sku: item.sku || (product ? product.sku : ''), quantity: qty, unit_cost, notes: item.notes || null, total: parseFloat((unit_cost * qty).toFixed(2)) });
+      const item_type = item.item_type || (request_type === 'internal_use' ? 'internal' : 'sale');
+      processedItems.push({
+        product_id: item.product_id || null,
+        product_name: item.product_name || (product ? product.name : 'Unknown'),
+        sku: item.sku || (product ? product.sku : ''),
+        quantity: qty,
+        unit_cost,
+        item_type,
+        product_url: item.product_url || null,
+        notes: item.notes || null,
+        total: parseFloat((unit_cost * qty).toFixed(2))
+      });
     }
 
     const tx = await db.transaction('write');
     try {
-      const result = await tx.execute({ sql: 'INSERT INTO purchase_requests (pr_number, branch_id, employee_id, department, notes, required_date) VALUES (?,?,?,?,?,?)', args: [pr_number, branch_id || null, employee_id || null, department || null, notes || null, required_date || null] });
+      const result = await tx.execute({
+        sql: 'INSERT INTO purchase_requests (pr_number, branch_id, employee_id, department, notes, required_date, request_type, supplier_id, currency, is_online_purchase, tax_rate, tax_amount) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+        args: [pr_number, branch_id||null, employee_id||null, department||null, notes||null, required_date||null,
+               request_type, supplier_id||null, currency||null, is_online_purchase?1:0,
+               parseFloat(tax_rate)||0, parseFloat(tax_amount)||0]
+      });
       const prId = Number(result.lastInsertRowid);
       for (const item of processedItems) {
-        await tx.execute({ sql: 'INSERT INTO purchase_request_items (pr_id, product_id, product_name, sku, quantity, unit_cost, notes, total) VALUES (?,?,?,?,?,?,?,?)', args: [prId, item.product_id, item.product_name, item.sku, item.quantity, item.unit_cost, item.notes, item.total] });
+        await tx.execute({
+          sql: 'INSERT INTO purchase_request_items (pr_id, product_id, product_name, sku, quantity, unit_cost, item_type, product_url, notes, total) VALUES (?,?,?,?,?,?,?,?,?,?)',
+          args: [prId, item.product_id, item.product_name, item.sku, item.quantity, item.unit_cost, item.item_type, item.product_url, item.notes, item.total]
+        });
       }
       await tx.commit();
-      const { rows: [pr] } = await db.execute({ sql: 'SELECT * FROM purchase_requests WHERE id = ?', args: [prId] });
+      const { rows: [pr] } = await db.execute({ sql: PR_SELECT + ' WHERE pr.id = ?', args: [prId] });
       const { rows: prItems } = await db.execute({ sql: 'SELECT * FROM purchase_request_items WHERE pr_id = ?', args: [prId] });
       pr.items = prItems;
       res.status(201).json(pr);
@@ -66,14 +106,28 @@ router.post('/', async (req, res) => {
 
 router.patch('/:id/status', async (req, res) => {
   try {
-    const { status } = req.body;
+    const { status, approved_by, rejection_reason } = req.body;
     const valid = ['draft', 'submitted', 'approved', 'rejected'];
     if (!valid.includes(status)) return res.status(400).json({ error: 'Invalid status' });
     const { rows: [pr] } = await db.execute({ sql: 'SELECT * FROM purchase_requests WHERE id = ?', args: [req.params.id] });
     if (!pr) return res.status(404).json({ error: 'Not found' });
     if (pr.status === 'converted') return res.status(400).json({ error: 'Cannot change status of a converted PR' });
-    await db.execute({ sql: 'UPDATE purchase_requests SET status = ? WHERE id = ?', args: [status, req.params.id] });
-    const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM purchase_requests WHERE id = ?', args: [req.params.id] });
+
+    if (status === 'approved') {
+      await db.execute({
+        sql: 'UPDATE purchase_requests SET status = ?, approved_by = ?, approved_at = CURRENT_TIMESTAMP WHERE id = ?',
+        args: [status, approved_by || null, req.params.id]
+      });
+    } else if (status === 'rejected') {
+      await db.execute({
+        sql: 'UPDATE purchase_requests SET status = ?, rejection_reason = ? WHERE id = ?',
+        args: [status, rejection_reason || null, req.params.id]
+      });
+    } else {
+      await db.execute({ sql: 'UPDATE purchase_requests SET status = ? WHERE id = ?', args: [status, req.params.id] });
+    }
+
+    const { rows: [row] } = await db.execute({ sql: PR_SELECT + ' WHERE pr.id = ?', args: [req.params.id] });
     res.json(row);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -98,11 +152,19 @@ router.post('/:id/convert', async (req, res) => {
       prItems.forEach(item => { subtotal += item.total || 0; });
       subtotal = parseFloat(subtotal.toFixed(2));
 
-      const poResult = await tx.execute({ sql: 'INSERT INTO purchase_orders (po_number, supplier_id, branch_id, employee_id, subtotal, total, notes, expected_date) VALUES (?,?,?,?,?,?,?,?)', args: [po_number, supplier_id || null, pr.branch_id, pr.employee_id, subtotal, subtotal, poNotes || pr.notes, expected_date || pr.required_date || null] });
+      const poResult = await tx.execute({
+        sql: 'INSERT INTO purchase_orders (po_number, supplier_id, branch_id, employee_id, subtotal, total, notes, expected_date) VALUES (?,?,?,?,?,?,?,?)',
+        args: [po_number, supplier_id || null, pr.branch_id, pr.employee_id, subtotal, subtotal, poNotes || pr.notes, expected_date || pr.required_date || null]
+      });
       const poId = Number(poResult.lastInsertRowid);
 
       for (const item of prItems) {
-        await tx.execute({ sql: 'INSERT INTO purchase_order_items (po_id, product_id, product_name, sku, quantity_ordered, unit_cost, total) VALUES (?,?,?,?,?,?,?)', args: [poId, item.product_id, item.product_name, item.sku, item.quantity, item.unit_cost, item.total] });
+        // Internal-use items are added to PO but without a product link (won't update stock on receive)
+        const productId = item.item_type === 'internal' ? null : item.product_id;
+        await tx.execute({
+          sql: 'INSERT INTO purchase_order_items (po_id, product_id, product_name, sku, quantity_ordered, unit_cost, total) VALUES (?,?,?,?,?,?,?)',
+          args: [poId, productId, item.product_name, item.sku, item.quantity, item.unit_cost, item.total]
+        });
       }
 
       await tx.execute({ sql: 'UPDATE purchase_requests SET status = ?, converted_to_po_id = ? WHERE id = ?', args: ['converted', poId, pr.id] });
