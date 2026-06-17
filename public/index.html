@@ -387,6 +387,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 4H4v2h16V4zm1 10v-2l-1-5H4l-1 5v2h1v6h10v-6h4v6h2v-6h1zm-9 4H6v-4h6v4z"/></svg>
       Inventory
     </div>
+    <div class="nav-item" data-section="services">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/><path d="M0 0h24v24H0z" fill="none"/><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+      Services
+    </div>
     <div class="nav-item" data-section="transfers">
       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.99 11L3 15l3.99 4v-3H14v-2H6.99v-3zM21 9l-3.99-4v3H10v2h7.01v3L21 9z"/></svg>
       Branch Transfers
@@ -829,13 +833,13 @@ const App = {
     this.section = name;
     this.closeModal();
     document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.section === name));
-    const titles = { dashboard: 'Dashboard', pos: 'Point of Sale', inventory: 'Inventory Management', customers: 'Customers', transactions: 'Transactions', reports: 'Reports & Analytics', employees: 'Employees', settings: 'Settings', suppliers: 'Suppliers', purchasing: 'Purchasing', quotations: 'Quotations', accounts: 'Accounts Receivable', branches: 'Branch Management', security: 'Security Groups', transfers: 'Branch Transfers', crm: 'CRM & Sales', commissions: 'Commission Tracking', warehouse: 'Warehouse Management', shipping: 'Shipping', 'cycle-counts': 'Cycle Counts', drawers: 'Cash Drawers', promotions: 'Promotions' };
+    const titles = { dashboard: 'Dashboard', pos: 'Point of Sale', inventory: 'Inventory Management', services: 'Services & Non-Inventory Items', customers: 'Customers', transactions: 'Transactions', reports: 'Reports & Analytics', employees: 'Employees', settings: 'Settings', suppliers: 'Suppliers', purchasing: 'Purchasing', quotations: 'Quotations', accounts: 'Accounts Receivable', branches: 'Branch Management', security: 'Security Groups', transfers: 'Branch Transfers', crm: 'CRM & Sales', commissions: 'Commission Tracking', warehouse: 'Warehouse Management', shipping: 'Shipping', 'cycle-counts': 'Cycle Counts', drawers: 'Cash Drawers', promotions: 'Promotions' };
     document.getElementById('topbar-title').textContent = titles[name] || name;
     const content = document.getElementById('content');
     content.style.padding = name === 'pos' ? '0' : '20px';
     content.style.overflow = name === 'pos' ? 'hidden' : 'auto';
     content.style.height = name === 'pos' ? '100%' : 'auto';
-    const renders = { dashboard: () => this.renderDashboard(), pos: () => this.renderPOS(), inventory: () => this.renderInventory(), customers: () => this.renderCustomers(), transactions: () => this.renderTransactions(), reports: () => this.renderReports(), employees: () => this.renderEmployees(), settings: () => this.renderSettings(), suppliers: () => this.renderSuppliers(), purchasing: () => this.renderPurchasing(), quotations: () => this.renderQuotations(), accounts: () => this.renderAccounts(), branches: () => this.renderBranches(), security: () => this.renderSecurity(), transfers: () => this.renderTransfers(), crm: () => this.renderCRM(), commissions: () => this.renderCommissions(), warehouse: () => this.renderWarehouse(), shipping: () => this.renderShipping(), 'cycle-counts': () => this.renderCycleCounts(), drawers: () => this.renderDrawers(), promotions: () => this.renderPromotions() };
+    const renders = { dashboard: () => this.renderDashboard(), pos: () => this.renderPOS(), inventory: () => this.renderInventory(), services: () => this.renderServices(), customers: () => this.renderCustomers(), transactions: () => this.renderTransactions(), reports: () => this.renderReports(), employees: () => this.renderEmployees(), settings: () => this.renderSettings(), suppliers: () => this.renderSuppliers(), purchasing: () => this.renderPurchasing(), quotations: () => this.renderQuotations(), accounts: () => this.renderAccounts(), branches: () => this.renderBranches(), security: () => this.renderSecurity(), transfers: () => this.renderTransfers(), crm: () => this.renderCRM(), commissions: () => this.renderCommissions(), warehouse: () => this.renderWarehouse(), shipping: () => this.renderShipping(), 'cycle-counts': () => this.renderCycleCounts(), drawers: () => this.renderDrawers(), promotions: () => this.renderPromotions() };
     if (renders[name]) await renders[name]();
   },
 
@@ -1328,8 +1332,11 @@ const App = {
 
     grid.innerHTML = products.map(p => {
       const hasVars = p.has_variations > 0;
-      const oos = !hasVars && p.stock_qty <= 0;
-      const stockLabel = hasVars ? '<span style="color:var(--accent);font-size:11px;font-weight:600">▼ Select variant</span>' : (oos ? '⚠️ Out of stock' : `Stock: ${p.stock_qty}`);
+      const oos = !hasVars && !p.is_service && p.stock_qty <= 0;
+      const stockLabel = p.is_service
+        ? `<span style="color:var(--accent);font-size:11px;font-weight:600">Service${p.unit ? ' · ' + p.unit : ''}</span>`
+        : hasVars ? '<span style="color:var(--accent);font-size:11px;font-weight:600">▼ Select variant</span>'
+        : (oos ? '⚠️ Out of stock' : `Stock: ${p.stock_qty}`);
       const thumb = p.image_path ? `<img src="${p.image_path}" style="width:44px;height:44px;object-fit:cover;border-radius:4px;margin:0 auto 4px;display:block" alt="">` : `<div class="product-emoji">${this.productEmoji(p.category_name)}</div>`;
       return `<div class="product-card ${oos ? 'out-of-stock' : ''} ${hasVars ? 'has-vars' : ''}" onclick="App.addToCart(${p.id})">
         ${thumb}
@@ -1344,14 +1351,17 @@ const App = {
     const product = this.allProducts.find(p => p.id === productId);
     if (!product) return;
     if (product.has_variations > 0) { this.showVariationPicker(product); return; }
-    if (product.stock_qty <= 0) return;
+    if (!product.is_service) {
+      if (product.stock_qty <= 0) return;
+      const existing = this.cart.find(i => i.product_id === productId && !i.variation_id);
+      const totalInCart = existing ? existing.quantity : 0;
+      if (totalInCart >= product.stock_qty) { this.alert('Not enough stock', 'warning'); return; }
+    }
     const existing = this.cart.find(i => i.product_id === productId && !i.variation_id);
-    const totalInCart = existing ? existing.quantity : 0;
-    if (totalInCart >= product.stock_qty) { this.alert('Not enough stock', 'warning'); return; }
     if (existing) {
       existing.quantity++;
     } else {
-      this.cart.push({ product_id: product.id, name: product.name, price: product.price, tax_rate: product.tax_rate, quantity: 1 });
+      this.cart.push({ product_id: product.id, name: product.name, price: product.price, tax_rate: product.tax_rate, quantity: 1, is_service: product.is_service || 0 });
     }
     this.renderCart();
   },
@@ -1651,7 +1661,7 @@ const App = {
   // ─── Inventory ────────────────────────────────────────────
   async renderInventory() {
     const [products, categories, movements] = await Promise.all([
-      this.api('GET', '/products'),
+      this.api('GET', '/products?is_service=0'),
       this.api('GET', '/categories'),
       this.api('GET', '/products/movements?limit=30'),
     ]);
@@ -1702,7 +1712,7 @@ const App = {
       const q = document.getElementById('inv-search').value;
       const cat = document.getElementById('inv-cat-filter').value;
       const branchId = document.getElementById('inv-branch-filter').value;
-      let url = '/products?';
+      let url = '/products?is_service=0&';
       if (q) url += `search=${encodeURIComponent(q)}&`;
       if (cat) url += `category=${cat}&`;
       if (branchId) url += `branch_id=${branchId}&`;
@@ -1984,6 +1994,151 @@ const App = {
     this.closeModal();
     this.alert('Product deactivated');
     this.renderInventory();
+  },
+
+  // ─── Services & Non-Inventory Items ─────────────────────────────────────
+
+  async renderServices() {
+    const [services, categories] = await Promise.all([
+      this.api('GET', '/products?is_service=1'),
+      this.api('GET', '/categories'),
+    ]);
+    const c = document.getElementById('content');
+    c.innerHTML = `
+      <div class="section-header">
+        <h2>Services &amp; Non-Inventory Items</h2>
+        <button class="btn btn-primary" onclick="App.showServiceForm()">+ Add Service</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+        <div class="search-bar" style="flex:0 0 auto">
+          <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+          <input type="text" id="svc-search" placeholder="Search services..." style="width:220px">
+        </div>
+        <select id="svc-cat-filter" style="width:auto;min-width:140px"><option value="">All Categories</option>${categories.map(c => `<option value="${c.id}">${c.name}</option>`).join('')}</select>
+        <select id="svc-status-filter" style="width:auto;min-width:120px">
+          <option value="">All Statuses</option>
+          <option value="1">Active</option>
+          <option value="0">Inactive</option>
+        </select>
+      </div>
+      <div class="card">
+        <div class="table-wrap" id="svc-table-wrap">
+          ${this._buildServiceTable(services)}
+        </div>
+      </div>`;
+
+    const refilter = async () => {
+      const q = document.getElementById('svc-search').value;
+      const cat = document.getElementById('svc-cat-filter').value;
+      const status = document.getElementById('svc-status-filter').value;
+      let url = '/products?is_service=1&';
+      if (q) url += `search=${encodeURIComponent(q)}&`;
+      if (cat) url += `category=${cat}&`;
+      if (status !== '') url += `active=${status}&`;
+      const filtered = await this.api('GET', url);
+      document.getElementById('svc-table-wrap').innerHTML = this._buildServiceTable(filtered);
+    };
+
+    document.getElementById('svc-search').addEventListener('input', refilter);
+    document.getElementById('svc-cat-filter').addEventListener('change', refilter);
+    document.getElementById('svc-status-filter').addEventListener('change', refilter);
+  },
+
+  _buildServiceTable(services) {
+    if (!services.length) return '<p style="color:var(--text-muted);padding:16px">No services found.</p>';
+    return `<table>
+      <thead><tr><th>SKU</th><th>Name</th><th>Category</th><th>Unit</th><th>Price</th><th>Cost</th><th>Tax %</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody>
+        ${services.map(s => `<tr>
+          <td class="fw-600">${s.sku}</td>
+          <td>${s.name}${s.description ? `<div style="font-size:11px;color:var(--text-muted)">${s.description}</div>` : ''}</td>
+          <td>${s.category_name || '—'}</td>
+          <td style="color:var(--text-muted)">${s.unit || '—'}</td>
+          <td class="fw-600">${this.fmt(s.price)}</td>
+          <td>${s.cost ? this.fmt(s.cost) : '—'}</td>
+          <td>${s.tax_rate}%</td>
+          <td><span class="badge-pill ${s.active ? 'badge-success' : 'badge-danger'}">${s.active ? 'Active' : 'Inactive'}</span></td>
+          <td><button class="btn btn-sm btn-secondary" onclick="App.showServiceForm(${s.id})">Edit</button></td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+  },
+
+  async showServiceForm(id) {
+    const categories = await this.api('GET', '/categories');
+    const s = id ? await this.api('GET', `/products/${id}`) : {};
+    const defaultTax = s.tax_rate ?? this.settings?.tax_rate ?? 8.5;
+    const unitOptions = ['Flat Fee','Per Hour','Per Visit','Per Day','Per Unit','Per Month','Per Year'];
+
+    this.showModal(`
+      <div class="modal">
+        <div class="modal-header">
+          <span class="modal-title">${id ? 'Edit Service' : 'Add Service'}</span>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="input-row">
+            <div class="form-group"><label>SKU *</label><input id="sf-sku" value="${s.sku||''}" placeholder="SVC-001"></div>
+            <div class="form-group"><label>Unit / Billing Type</label>
+              <select id="sf-unit">
+                <option value="">— None —</option>
+                ${unitOptions.map(u => `<option value="${u}" ${s.unit===u?'selected':''}>${u}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+          <div class="form-group"><label>Name *</label><input id="sf-name" value="${s.name||''}"></div>
+          <div class="form-group"><label>Description</label><input id="sf-desc" value="${s.description||''}"></div>
+          <div class="form-group"><label>Category</label>
+            <select id="sf-cat"><option value="">— None —</option>${categories.map(c => `<option value="${c.id}" ${s.category_id==c.id?'selected':''}>${c.name}</option>`).join('')}</select>
+          </div>
+          <div class="input-row-3">
+            <div class="form-group"><label>Price *</label><input type="number" id="sf-price" value="${s.price||0}" min="0" step="0.01"></div>
+            <div class="form-group"><label>Cost</label><input type="number" id="sf-cost" value="${s.cost||0}" min="0" step="0.01"></div>
+            <div class="form-group"><label>Tax Rate %</label><input type="number" id="sf-tax" value="${defaultTax}" min="0" step="0.1"></div>
+          </div>
+          <div class="form-group"><label>Status</label>
+            <select id="sf-active"><option value="1" ${s.active!==0?'selected':''}>Active</option><option value="0" ${s.active===0?'selected':''}>Inactive</option></select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          ${id ? `<button class="btn btn-danger" onclick="App.deleteService(${id})">Delete</button>` : ''}
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.saveService(${id||'null'})">Save</button>
+        </div>
+      </div>`);
+  },
+
+  async saveService(id) {
+    const sku = document.getElementById('sf-sku').value.trim();
+    const name = document.getElementById('sf-name').value.trim();
+    if (!sku || !name) { this.alert('SKU and name are required', 'error'); return; }
+    const data = {
+      sku,
+      name,
+      description: document.getElementById('sf-desc').value.trim() || null,
+      category_id: document.getElementById('sf-cat').value || null,
+      unit: document.getElementById('sf-unit').value || null,
+      price: parseFloat(document.getElementById('sf-price').value) || 0,
+      cost: parseFloat(document.getElementById('sf-cost').value) || 0,
+      tax_rate: parseFloat(document.getElementById('sf-tax').value) || 0,
+      active: parseInt(document.getElementById('sf-active').value),
+      is_service: 1,
+    };
+    try {
+      if (id) await this.api('PUT', `/products/${id}`, data);
+      else await this.api('POST', '/products', data);
+      this.closeModal();
+      this.alert(id ? 'Service updated' : 'Service created');
+      this.renderServices();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async deleteService(id) {
+    if (!confirm('Deactivate this service?')) return;
+    await this.api('DELETE', `/products/${id}`);
+    this.closeModal();
+    this.alert('Service deactivated');
+    this.renderServices();
   },
 
   // ─── Variation Management ────────────────────────────────────────────────
@@ -6165,6 +6320,7 @@ const App = {
       { key: 'suppliers_edit', label: 'Edit Suppliers' },
       { key: 'suppliers_delete', label: 'Delete Suppliers' },
     ]},
+    { key: 'services', label: 'Services & Non-Inventory', subs: [] },
     { key: 'purchase_requests', label: 'Purchase Requests', subs: [
       { key: 'pr_create', label: 'Create Requests' },
       { key: 'pr_approve', label: 'Approve Requests' },
