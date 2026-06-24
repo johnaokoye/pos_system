@@ -24,7 +24,7 @@ router.get('/', async (req, res) => {
 
 router.get('/:id', async (req, res) => {
   try {
-    const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone, q.id as source_quote_id, q.quote_number as source_quote_number, qe.first_name || ' ' || qe.last_name as quote_created_by FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN branches b ON t.branch_id = b.id LEFT JOIN quotations q ON q.converted_to_tx = t.id LEFT JOIN employees qe ON q.employee_id = qe.id WHERE t.id = ?`, args: [req.params.id] });
+    const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone, q.id as source_quote_id, q.quote_number as source_quote_number, qe.first_name || ' ' || qe.last_name as quote_created_by, r.return_number as source_return_number FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN branches b ON t.branch_id = b.id LEFT JOIN quotations q ON q.converted_to_tx = t.id LEFT JOIN employees qe ON q.employee_id = qe.id LEFT JOIN returns r ON t.source_return_id = r.id WHERE t.id = ?`, args: [req.params.id] });
     if (!tx) return res.status(404).json({ error: 'Transaction not found' });
     const { rows: items } = await db.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [req.params.id] });
     tx.items = items;
@@ -34,7 +34,7 @@ router.get('/:id', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const { customer_id, employee_id, branch_id, drawer_session_id, items, discount_amount, promotion_code, promotion_name, payment_method, amount_tendered, notes } = req.body;
+    const { customer_id, employee_id, branch_id, drawer_session_id, items, discount_amount, promotion_code, promotion_name, payment_method, amount_tendered, notes, source_return_id, store_credit_applied } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in transaction' });
 
     const { rows: [txCount] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM transactions', args: [] });
@@ -62,7 +62,8 @@ router.post('/', async (req, res) => {
     subtotal = parseFloat(subtotal.toFixed(2));
     tax_amount = parseFloat(tax_amount.toFixed(2));
     const disc = parseFloat(discount_amount || 0);
-    const total = parseFloat((subtotal + tax_amount - disc).toFixed(2));
+    const storeCredit = parseFloat(store_credit_applied || 0);
+    const total = parseFloat((subtotal + tax_amount - disc - storeCredit).toFixed(2));
     const method = payment_method || 'cash';
     const isCredit = method === 'credit';
 
@@ -78,7 +79,7 @@ router.post('/', async (req, res) => {
 
     const tx = await db.transaction('write');
     try {
-      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,promotion_code,promotion_name,total,payment_method,amount_tendered,change_amount,is_credit,notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id || null, employee_id || 1, branch_id || null, drawer_session_id || null, subtotal, tax_amount, disc, promotion_code || null, promotion_name || null, total, method, tendered, change > 0 ? change : 0, isCredit ? 1 : 0, notes || null] });
+      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,promotion_code,promotion_name,total,payment_method,amount_tendered,change_amount,is_credit,notes,source_return_id,store_credit_applied) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id || null, employee_id || 1, branch_id || null, drawer_session_id || null, subtotal, tax_amount, disc, promotion_code || null, promotion_name || null, total, method, tendered, change > 0 ? change : 0, isCredit ? 1 : 0, notes || null, source_return_id || null, storeCredit > 0 ? storeCredit : 0] });
       const txId = Number(txResult.lastInsertRowid);
 
       for (const { product, variation, quantity, unit_price, lineTotal, lineTax, discount } of processedItems) {
@@ -100,6 +101,9 @@ router.post('/', async (req, res) => {
         await tx.execute({ sql: 'UPDATE customers SET loyalty_points = loyalty_points + ?, total_spent = total_spent + ? WHERE id = ?', args: [loyaltyPts, total, customer_id] });
         if (isCredit) {
           await tx.execute({ sql: 'UPDATE customers SET account_balance = account_balance + ? WHERE id = ?', args: [total, customer_id] });
+        }
+        if (storeCredit > 0) {
+          await tx.execute({ sql: 'UPDATE customers SET account_balance = MAX(0, account_balance - ?) WHERE id = ?', args: [storeCredit, customer_id] });
         }
       }
 

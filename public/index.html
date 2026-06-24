@@ -480,6 +480,7 @@ const App = {
   cart: [],
   cartCustomer: null,
   cartDiscount: 0,
+  _storeCreditApplied: 0,
   allProducts: [],
   allCategories: [],
   posCategory: 'all',
@@ -1062,9 +1063,9 @@ const App = {
     return map[name.toLowerCase()] || '📦';
   },
 
-  productEmoji(cat = '') {
+  productEmoji(cat) {
     const map = { electronics: '💻', clothing: '👗', 'food & beverage': '🍫', 'home & garden': '🌿', 'sports & outdoors': '🏃', 'toys & games': '🧸' };
-    return map[cat.toLowerCase()] || '🛍️';
+    return map[(cat || '').toLowerCase()] || '🛍️';
   },
 
   // ─── Dashboard ────────────────────────────────────────────
@@ -1274,6 +1275,11 @@ const App = {
             <button class="btn btn-outline btn-sm" onclick="App.selectCustomer()">Select</button>
             <button class="btn btn-secondary btn-sm" id="remove-customer-btn" style="display:none" onclick="App.removeCustomer()">✕</button>
           </div>
+          <div id="store-credit-bar" style="display:none;background:#e8f5e9;border:1px solid #a5d6a7;border-radius:6px;padding:6px 10px;font-size:12px;display:none;align-items:center;gap:8px">
+            <span style="color:#2e7d32">💳 Store Credit: <strong id="store-credit-balance"></strong></span>
+            <button class="btn btn-sm" style="background:#2e7d32;color:#fff;padding:3px 10px;font-size:11px;margin-left:auto" onclick="App.applyStoreCredit()">Apply</button>
+            <button class="btn btn-sm btn-secondary" id="remove-store-credit-btn" style="display:none;padding:3px 8px;font-size:11px" onclick="App.removeStoreCredit()">✕</button>
+          </div>
           <div class="cart-items" id="cart-items-list"></div>
           <div class="cart-totals" id="cart-totals"></div>
           <div style="display:flex;gap:8px;align-items:center;">
@@ -1433,7 +1439,7 @@ const App = {
   },
 
   clearCart() {
-    this.cart = []; this.cartCustomer = null; this.cartDiscount = 0; this.appliedPromoCode = null; this._returnCredit = null;
+    this.cart = []; this.cartCustomer = null; this.cartDiscount = 0; this._storeCreditApplied = 0; this.appliedPromoCode = null; this._returnCredit = null;
     this.renderCart();
     document.getElementById('cart-customer-name').textContent = 'Walk-in Customer';
     document.getElementById('remove-customer-btn').style.display = 'none';
@@ -1484,6 +1490,7 @@ const App = {
       <div class="total-row"><span>Subtotal</span><span>${this.fmt(subtotal)}</span></div>
       <div class="total-row"><span>Tax</span><span>${this.fmt(tax)}</span></div>
       ${discount > 0 ? `<div class="total-row" style="color:var(--success)"><span>${this._returnCredit ? `↩ Return Credit <span style="font-size:11px;font-family:monospace;color:var(--text-muted)">${this._returnCredit.return_number}</span>` : 'Discount'}</span><span>-${this.fmt(discount)}</span></div>` : ''}
+      ${this._storeCreditApplied > 0 ? `<div class="total-row" style="color:#2e7d32"><span>💳 Store Credit</span><span>-${this.fmt(this._storeCreditApplied)}</span></div>` : ''}
       <div class="total-row grand"><span>TOTAL</span><span>${this.fmt(total)}</span></div>`;
   },
 
@@ -1491,8 +1498,9 @@ const App = {
     const subtotal = this.cart.reduce((s, i) => s + i.price * i.quantity, 0);
     const tax = this.cart.reduce((s, i) => s + (i.price * i.quantity * i.tax_rate / 100), 0);
     const discount = this.cartDiscount || 0;
-    const total = subtotal + tax - discount;
-    return { subtotal: parseFloat(subtotal.toFixed(2)), tax: parseFloat(tax.toFixed(2)), discount: parseFloat(discount.toFixed(2)), total: parseFloat(total.toFixed(2)) };
+    const storeCredit = this._storeCreditApplied || 0;
+    const total = Math.max(0, subtotal + tax - discount - storeCredit);
+    return { subtotal: parseFloat(subtotal.toFixed(2)), tax: parseFloat(tax.toFixed(2)), discount: parseFloat(discount.toFixed(2)), storeCredit: parseFloat(storeCredit.toFixed(2)), total: parseFloat(total.toFixed(2)) };
   },
 
   async processPayment(method) {
@@ -1529,6 +1537,8 @@ const App = {
         promotion_name: this.appliedPromoCode?.promo_name || null,
         payment_method: method,
         amount_tendered: amountTendered,
+        source_return_id: this._returnCredit?.id || null,
+        store_credit_applied: this._storeCreditApplied || 0,
       });
 
       // Record promo code usage
@@ -1646,16 +1656,47 @@ const App = {
   setCartCustomer(id, name) {
     this.api('GET', `/customers/${id}`).then(c => {
       this.cartCustomer = c;
+      this._storeCreditApplied = 0;
       document.getElementById('cart-customer-name').textContent = name;
       document.getElementById('remove-customer-btn').style.display = 'inline-flex';
+      const bar = document.getElementById('store-credit-bar');
+      const bal = parseFloat(c.account_balance || 0);
+      if (bal > 0 && c.customer_type !== 'credit') {
+        document.getElementById('store-credit-balance').textContent = this.fmt(bal);
+        document.getElementById('remove-store-credit-btn').style.display = 'none';
+        bar.style.display = 'flex';
+      } else {
+        bar.style.display = 'none';
+      }
       this.closeModal();
     });
   },
 
+  applyStoreCredit() {
+    const bal = parseFloat(this.cartCustomer?.account_balance || 0);
+    if (bal <= 0) return;
+    const { subtotal, tax } = this.getCartTotals();
+    const maxApplicable = Math.max(0, parseFloat((subtotal + tax - this.cartDiscount).toFixed(2)));
+    this._storeCreditApplied = Math.min(bal, maxApplicable);
+    document.getElementById('remove-store-credit-btn').style.display = 'inline-flex';
+    document.querySelector('#store-credit-bar button:not(#remove-store-credit-btn)').style.display = 'none';
+    this.renderCart();
+  },
+
+  removeStoreCredit() {
+    this._storeCreditApplied = 0;
+    document.getElementById('remove-store-credit-btn').style.display = 'none';
+    document.querySelector('#store-credit-bar button:not(#remove-store-credit-btn)').style.display = '';
+    this.renderCart();
+  },
+
   removeCustomer() {
     this.cartCustomer = null;
+    this._storeCreditApplied = 0;
     document.getElementById('cart-customer-name').textContent = 'Walk-in Customer';
     document.getElementById('remove-customer-btn').style.display = 'none';
+    document.getElementById('store-credit-bar').style.display = 'none';
+    this.renderCart();
   },
 
   // ─── Inventory ────────────────────────────────────────────
@@ -3186,6 +3227,9 @@ const App = {
           ${tx.source_quote_number ? `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--primary);border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:12px;display:flex;justify-content:space-between;align-items:center">
             <span>Converted from quotation <a href="#" style="font-weight:700;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewQuote(${tx.source_quote_id})">${tx.source_quote_number}</a>${tx.quote_created_by ? ` &nbsp;·&nbsp; <span style="color:var(--text-muted)">Created by</span> <strong>${tx.quote_created_by}</strong>` : ''}</span>
           </div>` : ''}
+          ${tx.source_return_number ? `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:3px solid #f59e0b;border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:12px">
+            ↩ Replacement for return <strong style="color:#f59e0b">${tx.source_return_number}</strong>
+          </div>` : ''}
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px;font-size:13px">
             <div><span style="color:var(--text-muted)">Date:</span> ${this.fmtDateTime(tx.created_at)}</div>
             <div><span style="color:var(--text-muted)">Status:</span> <span class="badge-pill ${tx.status==='completed'?'badge-success':'badge-danger'}">${tx.status}</span></div>
@@ -3202,7 +3246,8 @@ const App = {
           <div style="text-align:right;border-top:1px solid var(--border);padding-top:10px">
             <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span>Subtotal</span><span>${this.fmt(tx.subtotal)}</span></div>
             <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span>Tax</span><span>${this.fmt(tx.tax_amount)}</span></div>
-            ${tx.discount_amount > 0 ? `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;color:var(--success)"><span>Discount${tx.promotion_code ? ` <span style="font-family:monospace;font-size:11px;background:var(--bg);padding:1px 5px;border-radius:4px;color:var(--text-muted)">${tx.promotion_code}</span>${tx.promotion_name ? ` <span style="color:var(--text-muted);font-size:11px">${tx.promotion_name}</span>` : ''}` : ''}</span><span>-${this.fmt(tx.discount_amount)}</span></div>` : ''}
+            ${tx.discount_amount > 0 ? `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;color:var(--success)"><span>${tx.source_return_number ? `↩ Return Credit <span style="font-family:monospace;font-size:11px;color:var(--text-muted)">${tx.source_return_number}</span>` : `Discount${tx.promotion_code ? ` <span style="font-family:monospace;font-size:11px;background:var(--bg);padding:1px 5px;border-radius:4px;color:var(--text-muted)">${tx.promotion_code}</span>${tx.promotion_name ? ` <span style="color:var(--text-muted);font-size:11px">${tx.promotion_name}</span>` : ''}` : ''}`}</span><span>-${this.fmt(tx.discount_amount)}</span></div>` : ''}
+            ${tx.store_credit_applied > 0 ? `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;color:#2e7d32"><span>💳 Store Credit Applied</span><span>-${this.fmt(tx.store_credit_applied)}</span></div>` : ''}
             <div style="display:flex;justify-content:space-between;font-size:16px;font-weight:700;margin-top:6px"><span>TOTAL</span><span>${this.fmt(tx.total)}</span></div>
             ${tx.change_amount > 0 ? `<div style="display:flex;justify-content:space-between;font-size:13px;color:var(--success)"><span>Change</span><span>${this.fmt(tx.change_amount)}</span></div>` : ''}
           </div>
@@ -3400,7 +3445,7 @@ const App = {
       document.getElementById('return-overlay')?.remove();
       if (resolution === 'replacement') {
         const tx = this._retTx;
-        this._returnCredit = { amount: ret.total, return_number: ret.return_number };
+        this._returnCredit = { id: ret.id, amount: ret.total, return_number: ret.return_number };
         this.cartDiscount = ret.total;
         if (tx?.customer_id) {
           try {

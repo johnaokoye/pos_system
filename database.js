@@ -635,6 +635,8 @@ async function _init() {
     'ALTER TABLE purchase_request_items ADD COLUMN product_url TEXT',
     'ALTER TABLE products ADD COLUMN is_service INTEGER DEFAULT 0',
     'ALTER TABLE products ADD COLUMN unit TEXT',
+    'ALTER TABLE transactions ADD COLUMN source_return_id INTEGER REFERENCES returns(id)',
+    'ALTER TABLE transactions ADD COLUMN store_credit_applied REAL DEFAULT 0',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
