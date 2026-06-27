@@ -1487,14 +1487,14 @@ const App = {
     if (existing) {
       existing.quantity++;
     } else {
-      this.cart.push({ product_id: product.id, name: product.name, price: product.price, tax_rate: product.tax_rate, quantity: 1, is_service: product.is_service || 0 });
+      this.cart.push({ product_id: product.id, category_id: product.category_id || null, name: product.name, price: product.price, tax_rate: product.tax_rate, quantity: 1, is_service: product.is_service || 0 });
     }
-    this.renderCart();
+    this._checkAutoPromos();
   },
 
   removeFromCart(idx) {
     this.cart.splice(idx, 1);
-    this.renderCart();
+    this._checkAutoPromos();
   },
 
   updateCartQty(idx, delta) {
@@ -1507,7 +1507,7 @@ const App = {
       if (newQty > stockLimit) { this.alert('Not enough stock', 'warning'); return; }
       item.quantity = newQty;
     }
-    this.renderCart();
+    this._checkAutoPromos();
   },
 
   applyDiscount() {
@@ -1555,11 +1555,41 @@ const App = {
     const pd = document.getElementById('promo-display');
     if (pd) { pd.style.display = 'none'; pd.textContent = ''; }
     document.getElementById('remove-promo-btn').style.display = 'none';
+    this._checkAutoPromos();
+  },
+
+  async _checkAutoPromos() {
+    // Don't override a manually applied promo code
+    if (this.appliedPromoCode) { this.renderCart(); return; }
+    if (!this.cart.length) {
+      this.autoAppliedPromo = null;
+      this.cartDiscount = 0;
+      this.renderCart();
+      return;
+    }
+    const subtotal = this.cart.reduce((s, i) => s + i.price * i.quantity, 0);
+    const cartItems = this.cart.map(i => ({ product_id: i.product_id, category_id: i.category_id, price: i.price, quantity: i.quantity }));
+    try {
+      const promo = await this.api('POST', '/promotions/auto-apply', { cart_items: cartItems, subtotal });
+      if (promo) {
+        this.autoAppliedPromo = promo;
+        this.cartDiscount = promo.discount_amount;
+        const pd = document.getElementById('promo-display');
+        if (pd) { pd.textContent = `✓ ${promo.name}: -${this.fmt(promo.discount_amount)}`; pd.style.display = 'block'; }
+        const rb = document.getElementById('remove-promo-btn');
+        if (rb) rb.style.display = 'none';
+      } else {
+        this.autoAppliedPromo = null;
+        this.cartDiscount = 0;
+        const pd = document.getElementById('promo-display');
+        if (pd) { pd.style.display = 'none'; pd.textContent = ''; }
+      }
+    } catch(e) {}
     this.renderCart();
   },
 
   clearCart() {
-    this.cart = []; this.cartCustomer = null; this.cartDiscount = 0; this._storeCreditApplied = 0; this.appliedPromoCode = null; this._returnCredit = null; this._activeQuoteId = null;
+    this.cart = []; this.cartCustomer = null; this.cartDiscount = 0; this._storeCreditApplied = 0; this.appliedPromoCode = null; this.autoAppliedPromo = null; this._returnCredit = null; this._activeQuoteId = null;
     this.renderCart();
     const aqBar = document.getElementById('active-quote-bar');
     if (aqBar) aqBar.style.display = 'none';
@@ -1612,7 +1642,7 @@ const App = {
     totals.innerHTML = `
       <div class="total-row"><span>Subtotal</span><span>${this.fmt(subtotal)}</span></div>
       <div class="total-row">${isTaxExempt ? `<span style="color:#2e7d32;font-weight:600">Tax Exempt</span><span style="color:#2e7d32">—</span>` : `<span>Tax</span><span>${this.fmt(tax)}</span>`}</div>
-      ${discount > 0 ? `<div class="total-row" style="color:var(--success)"><span>${this._returnCredit ? `↩ Return Credit <span style="font-size:11px;font-family:monospace;color:var(--text-muted)">${this._returnCredit.return_number}</span>` : 'Discount'}</span><span>-${this.fmt(discount)}</span></div>` : ''}
+      ${discount > 0 ? `<div class="total-row" style="color:var(--success)"><span>${this._returnCredit ? `↩ Return Credit <span style="font-size:11px;font-family:monospace;color:var(--text-muted)">${this._returnCredit.return_number}</span>` : this.autoAppliedPromo ? `🏷 ${this.autoAppliedPromo.name}` : 'Discount'}</span><span>-${this.fmt(discount)}</span></div>` : ''}
       ${this._storeCreditApplied > 0 ? `<div class="total-row" style="color:#2e7d32"><span>💳 Store Credit</span><span>-${this.fmt(this._storeCreditApplied)}</span></div>` : ''}
       <div class="total-row grand"><span>TOTAL</span><span>${this.fmt(total)}</span></div>`;
   },
@@ -1670,7 +1700,7 @@ const App = {
         items: this.cart.map(i => ({ product_id: i.product_id, variation_id: i.variation_id||null, quantity: i.quantity })),
         discount_amount: discount,
         promotion_code: this.appliedPromoCode?.code || null,
-        promotion_name: this.appliedPromoCode?.promo_name || null,
+        promotion_name: this.appliedPromoCode?.promo_name || this.autoAppliedPromo?.name || null,
         payment_method: method,
         amount_tendered: amountTendered,
         source_return_id: this._returnCredit?.id || null,
@@ -2886,7 +2916,7 @@ const App = {
     if (inCart >= variation.stock_qty) { this.alert('Not enough stock', 'warning'); return; }
     if (existing) { existing.quantity++; }
     else {
-      this.cart.push({ product_id: product.id, variation_id: variation.id, name: product.name, variation_name: variation.name, price: this._pickerSelectedPrice, tax_rate: product.tax_rate, quantity: 1, stock_qty: variation.stock_qty });
+      this.cart.push({ product_id: product.id, category_id: product.category_id || null, variation_id: variation.id, name: product.name, variation_name: variation.name, price: this._pickerSelectedPrice, tax_rate: product.tax_rate, quantity: 1, stock_qty: variation.stock_qty });
     }
     this.closeModal();
     this.renderCart();

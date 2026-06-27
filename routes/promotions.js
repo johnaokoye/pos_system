@@ -115,6 +115,45 @@ router.delete('/:id/codes/:codeId', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Auto-apply: find the best active promotion that requires no code
+router.post('/auto-apply', async (req, res) => {
+  try {
+    const { cart_items = [], subtotal = 0 } = req.body;
+    const today = new Date().toISOString().split('T')[0];
+    const { rows: promos } = await db.execute({
+      sql: `SELECT p.* FROM promotions p
+            WHERE p.active = 1
+              AND (p.start_date IS NULL OR p.start_date <= ?)
+              AND (p.end_date IS NULL OR p.end_date >= ?)
+              AND (SELECT COUNT(*) FROM promotion_codes WHERE promotion_id = p.id) = 0`,
+      args: [today, today]
+    });
+
+    let bestPromo = null;
+    let bestDiscount = 0;
+
+    for (const promo of promos) {
+      if (promo.min_purchase > 0 && subtotal < promo.min_purchase) continue;
+      let eligibleAmount = subtotal;
+      if (promo.applies_to === 'specific') {
+        const { rows: items } = await db.execute({ sql: 'SELECT * FROM promotion_items WHERE promotion_id = ?', args: [promo.id] });
+        const productIds = new Set(items.filter(i => i.item_type === 'product').map(i => i.item_id));
+        const categoryIds = new Set(items.filter(i => i.item_type === 'category').map(i => i.item_id));
+        eligibleAmount = cart_items.reduce((sum, ci) => {
+          if (productIds.has(ci.product_id) || categoryIds.has(ci.category_id)) return sum + ci.price * ci.quantity;
+          return sum;
+        }, 0);
+        if (eligibleAmount === 0) continue;
+      }
+      const discount = promo.type === 'percentage'
+        ? parseFloat((eligibleAmount * promo.value / 100).toFixed(2))
+        : parseFloat(Math.min(promo.value, eligibleAmount).toFixed(2));
+      if (discount > bestDiscount) { bestDiscount = discount; bestPromo = { ...promo, discount_amount: discount }; }
+    }
+    res.json(bestPromo || null);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Validate and apply a promo code (used by POS)
 router.post('/validate-code', async (req, res) => {
   try {
