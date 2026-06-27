@@ -93,6 +93,24 @@ router.get('/dashboard', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// AR Collections report
+router.get('/ar-collections', async (req, res) => {
+  try {
+    const { start, end, branch_id } = req.query;
+    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+    const e = end || new Date().toISOString().slice(0, 10);
+    const bf = branch_id ? ' AND p.branch_id = ?' : '';
+    const bp = branch_id ? [branch_id] : [];
+
+    const { rows: [summary] } = await db.execute({ sql: `SELECT COUNT(*) as payment_count, COALESCE(SUM(amount), 0) as total_collected FROM account_payments p WHERE date(p.created_at) BETWEEN date(?) AND date(?)${bf}`, args: [s, e, ...bp] });
+    const { rows: byDay } = await db.execute({ sql: `SELECT date(p.created_at) as date, COUNT(*) as payments, COALESCE(SUM(p.amount), 0) as collected FROM account_payments p WHERE date(p.created_at) BETWEEN date(?) AND date(?)${bf} GROUP BY date(p.created_at) ORDER BY date`, args: [s, e, ...bp] });
+    const { rows: byMethod } = await db.execute({ sql: `SELECT p.payment_method, COUNT(*) as count, COALESCE(SUM(p.amount), 0) as total FROM account_payments p WHERE date(p.created_at) BETWEEN date(?) AND date(?)${bf} GROUP BY p.payment_method ORDER BY total DESC`, args: [s, e, ...bp] });
+    const { rows: byCustomer } = await db.execute({ sql: `SELECT c.customer_number, c.first_name || ' ' || c.last_name as customer_name, COUNT(*) as payments, COALESCE(SUM(p.amount), 0) as total_paid, c.account_balance as outstanding FROM account_payments p JOIN customers c ON p.customer_id = c.id WHERE date(p.created_at) BETWEEN date(?) AND date(?)${bf} GROUP BY p.customer_id ORDER BY total_paid DESC`, args: [s, e, ...bp] });
+
+    res.json({ summary, byDay, byMethod, byCustomer });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Promotions report
 router.get('/promotions', async (req, res) => {
   try {

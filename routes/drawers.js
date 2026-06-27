@@ -143,10 +143,10 @@ router.patch('/sessions/:id/close', async (req, res) => {
 
 router.post('/sessions/:id/reconcile', async (req, res) => {
   try {
-    const { cash_counted, card_counted, check_counted, gift_card_counted, credit_counted, notes, reconciled_by, note_counts } = req.body;
+    const { cash_counted, card_counted, check_counted, gift_card_counted, credit_counted, direct_deposit_counted, notes, reconciled_by, note_counts } = req.body;
     const tx = await db.transaction('write');
     try {
-      await tx.execute({ sql: 'INSERT OR REPLACE INTO drawer_reconciliations (session_id, cash_counted, card_counted, check_counted, gift_card_counted, credit_counted, notes, reconciled_by) VALUES (?,?,?,?,?,?,?,?)', args: [req.params.id, cash_counted || 0, card_counted || 0, check_counted || 0, gift_card_counted || 0, credit_counted || 0, notes || null, reconciled_by || null] });
+      await tx.execute({ sql: 'INSERT OR REPLACE INTO drawer_reconciliations (session_id, cash_counted, card_counted, check_counted, gift_card_counted, credit_counted, direct_deposit_counted, notes, reconciled_by) VALUES (?,?,?,?,?,?,?,?,?)', args: [req.params.id, cash_counted || 0, card_counted || 0, check_counted || 0, gift_card_counted || 0, credit_counted || 0, direct_deposit_counted || 0, notes || null, reconciled_by || null] });
       const { rows: [rec] } = await tx.execute({ sql: 'SELECT id FROM drawer_reconciliations WHERE session_id = ?', args: [req.params.id] });
       if (rec && Array.isArray(note_counts) && note_counts.length > 0) {
         for (const { denomination_id, quantity } of note_counts) {

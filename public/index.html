@@ -481,6 +481,7 @@ const App = {
   cartCustomer: null,
   cartDiscount: 0,
   _storeCreditApplied: 0,
+  _activeQuoteId: null,
   allProducts: [],
   allCategories: [],
   posCategory: 'all',
@@ -1010,6 +1011,114 @@ const App = {
     };
   },
 
+  // ─── Card Approval Code Modal ─────────────────────────────
+  showCardApprovalModal() {
+    return new Promise(resolve => {
+      document.querySelectorAll('.modal-overlay').forEach(el => el.remove());
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.innerHTML = `
+        <div class="modal" style="max-width:360px">
+          <div class="modal-header"><span class="modal-title">Card Payment</span><button id="cam-x" class="modal-close">✕</button></div>
+          <div class="modal-body">
+            <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px">Enter the approval code from the card terminal.</p>
+            <div class="form-group">
+              <label>Approval Code</label>
+              <input id="cam-code" placeholder="e.g. 123456" style="font-size:18px;font-weight:600;letter-spacing:2px;text-transform:uppercase">
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-secondary" id="cam-cancel">Cancel</button>
+            <button class="btn btn-primary" id="cam-confirm">Confirm Payment</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      const cancel = () => { overlay.remove(); resolve(null); };
+      overlay.addEventListener('click', e => { if (e.target === overlay) cancel(); });
+      overlay.querySelector('#cam-x').addEventListener('click', cancel);
+      overlay.querySelector('#cam-cancel').addEventListener('click', cancel);
+      overlay.querySelector('#cam-confirm').addEventListener('click', () => {
+        const code = overlay.querySelector('#cam-code').value.trim().toUpperCase();
+        if (!code) { this.alert('Please enter the approval code', 'error'); return; }
+        overlay.remove();
+        resolve(code);
+      });
+      setTimeout(() => overlay.querySelector('#cam-code')?.focus(), 50);
+    });
+  },
+
+  // ─── Gift Card Number Modal ───────────────────────────────
+  showGiftCardModal() {
+    return new Promise(resolve => {
+      document.querySelectorAll('.modal-overlay').forEach(el => el.remove());
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.innerHTML = `
+        <div class="modal" style="max-width:360px">
+          <div class="modal-header"><span class="modal-title">Gift Card Payment</span><button id="gcm-x" class="modal-close">✕</button></div>
+          <div class="modal-body">
+            <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px">Enter the gift card number.</p>
+            <div class="form-group">
+              <label>Gift Card #</label>
+              <input id="gcm-num" placeholder="e.g. GC-0001-2345-6789" style="font-size:16px;font-weight:600;letter-spacing:1px">
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-secondary" id="gcm-cancel">Cancel</button>
+            <button class="btn btn-primary" id="gcm-confirm">Confirm Payment</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      const cancel = () => { overlay.remove(); resolve(null); };
+      overlay.addEventListener('click', e => { if (e.target === overlay) cancel(); });
+      overlay.querySelector('#gcm-x').addEventListener('click', cancel);
+      overlay.querySelector('#gcm-cancel').addEventListener('click', cancel);
+      overlay.querySelector('#gcm-confirm').addEventListener('click', () => {
+        const num = overlay.querySelector('#gcm-num').value.trim();
+        if (!num) { this.alert('Please enter the gift card number', 'error'); return; }
+        overlay.remove();
+        resolve(num);
+      });
+      setTimeout(() => overlay.querySelector('#gcm-num')?.focus(), 50);
+    });
+  },
+
+  // ─── Direct Deposit Reference Modal ──────────────────────
+  showDepositReferenceModal() {
+    return new Promise(resolve => {
+      document.querySelectorAll('.modal-overlay').forEach(el => el.remove());
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.innerHTML = `
+        <div class="modal" style="max-width:360px">
+          <div class="modal-header"><span class="modal-title">Direct Deposit</span><button id="ddm-x" class="modal-close">✕</button></div>
+          <div class="modal-body">
+            <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px">Enter the bank transfer / deposit reference number.</p>
+            <div class="form-group">
+              <label>Deposit Reference #</label>
+              <input id="ddm-ref" placeholder="e.g. TRF-20260627-001" style="font-size:16px;font-weight:600;letter-spacing:1px">
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-secondary" id="ddm-cancel">Cancel</button>
+            <button class="btn btn-primary" id="ddm-confirm">Confirm Payment</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      const cancel = () => { overlay.remove(); resolve(null); };
+      overlay.addEventListener('click', e => { if (e.target === overlay) cancel(); });
+      overlay.querySelector('#ddm-x').addEventListener('click', cancel);
+      overlay.querySelector('#ddm-cancel').addEventListener('click', cancel);
+      overlay.querySelector('#ddm-confirm').addEventListener('click', () => {
+        const ref = overlay.querySelector('#ddm-ref').value.trim();
+        if (!ref) { this.alert('Please enter the deposit reference number', 'error'); return; }
+        overlay.remove();
+        resolve(ref);
+      });
+      setTimeout(() => overlay.querySelector('#ddm-ref')?.focus(), 50);
+    });
+  },
+
   // ─── Alternate Currency Helpers ───────────────────────────
   _renderAltCurrenciesTable() {
     const base = this.activeCurrency || this.settings.currency || 'USD';
@@ -1257,6 +1366,7 @@ const App = {
               <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
               <input type="text" id="pos-search" placeholder="Search products by name, SKU, or barcode..." style="font-size:14px;">
             </div>
+            ${this.can('quotations') ? `<button class="btn btn-outline btn-sm" onclick="App.showQuoteSearch()" style="white-space:nowrap;flex-shrink:0;font-weight:600">📋 Invoice</button>` : ''}
           </div>
           <div class="category-bar" id="cat-bar" style="margin-bottom:10px;">
             <div class="cat-btn active" data-cat="all">All</div>
@@ -1267,13 +1377,21 @@ const App = {
         <div class="pos-right" style="padding:14px;background:#fff;display:flex;flex-direction:column;gap:10px;">
           <div style="display:flex;align-items:center;justify-content:space-between;">
             <span style="font-weight:700;font-size:15px;">Cart</span>
-            <button class="btn btn-secondary btn-sm" onclick="App.clearCart()">Clear</button>
+            <div style="display:flex;gap:6px;align-items:center;">
+              ${this.can('pos_hold') ? `<button class="btn btn-sm" style="background:#f59e0b;color:#fff;border:none;font-weight:600" onclick="App.recallOrder()">Recall <span id="hold-count-badge" style="display:none;background:rgba(0,0,0,0.15);border-radius:10px;padding:0 5px;font-size:10px;margin-left:2px"></span></button><button class="btn btn-sm" style="background:#6366f1;color:#fff;border:none;font-weight:600" onclick="App.holdOrder()">Hold</button>` : ''}
+              <button class="btn btn-secondary btn-sm" onclick="App.clearCart()">Clear</button>
+            </div>
           </div>
           <div class="customer-bar" id="cart-customer-bar">
             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
             <span id="cart-customer-name" style="flex:1">Walk-in Customer</span>
             <button class="btn btn-outline btn-sm" onclick="App.selectCustomer()">Select</button>
             <button class="btn btn-secondary btn-sm" id="remove-customer-btn" style="display:none" onclick="App.removeCustomer()">✕</button>
+          </div>
+          <div id="active-quote-bar" style="display:none;background:#e8f0fe;border:1px solid #b3c8f7;border-radius:6px;padding:6px 10px;font-size:12px;align-items:center;gap:8px">
+            <svg viewBox="0 0 24 24" fill="#1a73e8" width="14" height="14"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 1.5L18.5 9H13V3.5zM16 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-4H8V6h5v2z"/></svg>
+            <span style="color:#1a73e8">Invoice: <strong id="active-quote-number"></strong></span>
+            <button class="btn btn-sm btn-secondary" style="padding:2px 8px;font-size:11px;margin-left:auto" onclick="App.clearActiveQuote()">✕ Remove</button>
           </div>
           <div id="store-credit-bar" style="display:none;background:#e8f5e9;border:1px solid #a5d6a7;border-radius:6px;padding:6px 10px;font-size:12px;display:none;align-items:center;gap:8px">
             <span style="color:#2e7d32">💳 Store Credit: <strong id="store-credit-balance"></strong></span>
@@ -1299,6 +1417,7 @@ const App = {
             <button class="pay-btn pay-check" onclick="App.processPayment('check')"><span>🏦</span> Check<span>Personal / Business</span></button>
             <button class="pay-btn" style="background:#9C27B0;color:#fff;" onclick="App.processPayment('credit')"><span>🧾</span> Credit<span>Charge Account</span></button>
             <button class="pay-btn pay-split" onclick="App.processPayment('gift_card')"><span>🎁</span> Gift Card<span>Stored Value</span></button>
+            <button class="pay-btn" style="background:#0277BD;color:#fff;" onclick="App.processPayment('direct_deposit')"><span>🏛️</span> Direct Deposit<span>Bank Transfer</span></button>
           </div>
         </div>
         </div>
@@ -1309,6 +1428,7 @@ const App = {
     this.renderProductGrid();
     this.renderCart();
     this.checkPOSDrawer();
+    if (this.can('pos_hold')) this.updateHoldBadge();
 
     document.getElementById('pos-search').addEventListener('input', e => {
       this.posSearch = e.target.value;
@@ -1439,8 +1559,10 @@ const App = {
   },
 
   clearCart() {
-    this.cart = []; this.cartCustomer = null; this.cartDiscount = 0; this._storeCreditApplied = 0; this.appliedPromoCode = null; this._returnCredit = null;
+    this.cart = []; this.cartCustomer = null; this.cartDiscount = 0; this._storeCreditApplied = 0; this.appliedPromoCode = null; this._returnCredit = null; this._activeQuoteId = null;
     this.renderCart();
+    const aqBar = document.getElementById('active-quote-bar');
+    if (aqBar) aqBar.style.display = 'none';
     document.getElementById('cart-customer-name').textContent = 'Walk-in Customer';
     document.getElementById('remove-customer-btn').style.display = 'none';
     const di = document.getElementById('discount-input');
@@ -1482,13 +1604,14 @@ const App = {
       </div>`).join('');
 
     let subtotal = this.cart.reduce((s, i) => s + i.price * i.quantity, 0);
-    let tax = this.cart.reduce((s, i) => s + (i.price * i.quantity * i.tax_rate / 100), 0);
+    const isTaxExempt = !!this.cartCustomer?.tax_exempt;
+    let tax = isTaxExempt ? 0 : this.cart.reduce((s, i) => s + (i.price * i.quantity * i.tax_rate / 100), 0);
     const discount = this.cartDiscount || 0;
     const total = subtotal + tax - discount;
 
     totals.innerHTML = `
       <div class="total-row"><span>Subtotal</span><span>${this.fmt(subtotal)}</span></div>
-      <div class="total-row"><span>Tax</span><span>${this.fmt(tax)}</span></div>
+      <div class="total-row">${isTaxExempt ? `<span style="color:#2e7d32;font-weight:600">Tax Exempt</span><span style="color:#2e7d32">—</span>` : `<span>Tax</span><span>${this.fmt(tax)}</span>`}</div>
       ${discount > 0 ? `<div class="total-row" style="color:var(--success)"><span>${this._returnCredit ? `↩ Return Credit <span style="font-size:11px;font-family:monospace;color:var(--text-muted)">${this._returnCredit.return_number}</span>` : 'Discount'}</span><span>-${this.fmt(discount)}</span></div>` : ''}
       ${this._storeCreditApplied > 0 ? `<div class="total-row" style="color:#2e7d32"><span>💳 Store Credit</span><span>-${this.fmt(this._storeCreditApplied)}</span></div>` : ''}
       <div class="total-row grand"><span>TOTAL</span><span>${this.fmt(total)}</span></div>`;
@@ -1496,7 +1619,8 @@ const App = {
 
   getCartTotals() {
     const subtotal = this.cart.reduce((s, i) => s + i.price * i.quantity, 0);
-    const tax = this.cart.reduce((s, i) => s + (i.price * i.quantity * i.tax_rate / 100), 0);
+    const isTaxExempt = !!this.cartCustomer?.tax_exempt;
+    const tax = isTaxExempt ? 0 : this.cart.reduce((s, i) => s + (i.price * i.quantity * i.tax_rate / 100), 0);
     const discount = this.cartDiscount || 0;
     const storeCredit = this._storeCreditApplied || 0;
     const total = Math.max(0, subtotal + tax - discount - storeCredit);
@@ -1517,13 +1641,25 @@ const App = {
     let amountTendered = total;
     let changeAmount = 0;
     let cashResult = null;
+    let approvalCode = null;
 
     if (method === 'cash') {
       cashResult = await this.showCashTenderModal(total);
       if (!cashResult) return;
       amountTendered = cashResult.amountTendered;
       changeAmount = cashResult.changeAmount;
+    } else if (method === 'credit_card' || method === 'debit_card') {
+      approvalCode = await this.showCardApprovalModal();
+      if (approvalCode === null) return;
+    } else if (method === 'direct_deposit') {
+      approvalCode = await this.showDepositReferenceModal();
+      if (approvalCode === null) return;
+    } else if (method === 'gift_card') {
+      approvalCode = await this.showGiftCardModal();
+      if (approvalCode === null) return;
     }
+
+    const isTaxExempt = !!this.cartCustomer?.tax_exempt;
 
     try {
       const tx = await this.api('POST', '/transactions', {
@@ -1539,6 +1675,10 @@ const App = {
         amount_tendered: amountTendered,
         source_return_id: this._returnCredit?.id || null,
         store_credit_applied: this._storeCreditApplied || 0,
+        quote_id: this._activeQuoteId || null,
+        tax_exempt: isTaxExempt ? 1 : 0,
+        tax_exemption_number: isTaxExempt ? (this.cartCustomer?.tax_exemption_number || null) : null,
+        approval_code: approvalCode || null,
       });
 
       // Record promo code usage
@@ -1569,6 +1709,269 @@ const App = {
     }
   },
 
+  async holdOrder() {
+    if (!this.cart.length) { this.alert('Cart is empty', 'warning'); return; }
+    try {
+      const cartItems = this.cart.map(i => {
+        const product = this.allProducts?.find(p => p.id === i.product_id);
+        return {
+          product_id: i.product_id,
+          variation_id: i.variation_id || null,
+          product_name: i.name,
+          sku: product?.sku || '',
+          quantity: i.quantity,
+          unit_price: i.price,
+          tax_rate: i.tax_rate || 0,
+          variation_name: i.variation_name || null,
+        };
+      });
+      await this.api('POST', '/transactions/hold', {
+        customer_id: this.cartCustomer?.id || null,
+        employee_id: this.currentUser?.id || 1,
+        branch_id: this.posBranch?.id || null,
+        items: cartItems,
+        discount_amount: this.cartDiscount || 0,
+      });
+      const customerName = this.cartCustomer ? `${this.cartCustomer.first_name} ${this.cartCustomer.last_name}` : 'Walk-in Customer';
+      this.clearCart();
+      this.alert(`Order held for ${customerName}`, 'success');
+      this.updateHoldBadge();
+    } catch(e) {
+      this.alert(e.message, 'error');
+    }
+  },
+
+  async recallOrder() {
+    const customerId = this.cartCustomer?.id;
+    const url = customerId ? `/transactions?status=hold&customer_id=${customerId}` : '/transactions?status=hold&limit=50';
+    try {
+      const held = await this.api('GET', url);
+      if (!held.length) {
+        this.alert(customerId ? `No held orders for ${this.cartCustomer.first_name} ${this.cartCustomer.last_name}` : 'No held orders', 'info');
+        return;
+      }
+      this.showModal(`
+        <div class="modal">
+          <div class="modal-header">
+            <span class="modal-title">Recall Held Order</span>
+            <button class="modal-close">✕</button>
+          </div>
+          <div class="modal-body" style="padding:0">
+            <div style="max-height:420px;overflow-y:auto;padding:14px">
+              ${held.map(h => `
+                <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px;cursor:pointer;transition:background 0.15s" onmouseover="this.style.background='#f0f4ff'" onmouseout="this.style.background=''" onclick="App.loadHeldOrder(${h.id})">
+                  <div style="display:flex;justify-content:space-between;align-items:center">
+                    <strong style="font-size:14px">${h.customer_name || 'Walk-in Customer'}</strong>
+                    <span style="font-size:12px;color:var(--text-muted);font-family:monospace">${h.transaction_number}</span>
+                  </div>
+                  <div style="font-size:13px;color:var(--text-muted);margin-top:3px">
+                    Total: <strong>${this.fmt(h.total)}</strong> &bull; ${new Date(h.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}
+                    ${h.notes ? `&bull; ${h.notes}` : ''}
+                  </div>
+                </div>`).join('')}
+            </div>
+          </div>
+        </div>`);
+    } catch(e) {
+      this.alert(e.message, 'error');
+    }
+  },
+
+  async loadHeldOrder(id) {
+    try {
+      const held = await this.api('GET', `/transactions/${id}`);
+      if (this.cart.length) {
+        if (!confirm('Loading this held order will replace your current cart. Continue?')) return;
+      }
+      this.cart = held.items.map(item => {
+        const product = this.allProducts?.find(p => p.id === item.product_id);
+        return {
+          product_id: item.product_id,
+          variation_id: item.variation_id || null,
+          name: item.product_name,
+          price: parseFloat(item.unit_price),
+          tax_rate: product?.tax_rate || 0,
+          quantity: item.quantity,
+          variation_name: item.variation_name || null,
+          is_service: product?.product_type === 'service' ? 1 : 0,
+          stock_qty: product?.stock_qty ?? 999,
+        };
+      });
+      this.cartDiscount = parseFloat(held.discount_amount || 0);
+      this._storeCreditApplied = 0;
+      this.appliedPromoCode = null;
+      this._returnCredit = null;
+      if (held.customer_id) {
+        const customer = await this.api('GET', `/customers/${held.customer_id}`);
+        this.cartCustomer = customer;
+        document.getElementById('cart-customer-name').textContent = `${customer.first_name} ${customer.last_name}`;
+        document.getElementById('remove-customer-btn').style.display = 'inline-flex';
+        const bar = document.getElementById('store-credit-bar');
+        if (bar) bar.style.display = 'none';
+      } else {
+        this.cartCustomer = null;
+        document.getElementById('cart-customer-name').textContent = 'Walk-in Customer';
+        document.getElementById('remove-customer-btn').style.display = 'none';
+      }
+      await this.api('DELETE', `/transactions/${id}/hold`);
+      this.closeModal();
+      this.renderCart();
+      this.updateHoldBadge();
+      this.alert('Order recalled', 'success');
+    } catch(e) {
+      this.alert(e.message, 'error');
+    }
+  },
+
+  async updateHoldBadge() {
+    try {
+      const held = await this.api('GET', '/transactions?status=hold&limit=50');
+      const badge = document.getElementById('hold-count-badge');
+      if (!badge) return;
+      if (held.length > 0) {
+        badge.textContent = held.length;
+        badge.style.display = 'inline';
+      } else {
+        badge.style.display = 'none';
+      }
+    } catch(e) {}
+  },
+
+  async showQuoteSearch() {
+    const customerId = this.cartCustomer?.id;
+    let quotes = [];
+    try {
+      const qs = customerId
+        ? await this.api('GET', `/quotations?customer_id=${customerId}`)
+        : await this.api('GET', '/quotations?limit=50');
+      quotes = qs.filter(q => !['converted','declined','cancelled'].includes(q.status));
+    } catch(e) {}
+
+    const renderList = (list) => list.length
+      ? list.map(q => {
+          const statusColors = { draft:'#9ca3af', sent:'#3b82f6', accepted:'#10b981' };
+          const color = statusColors[q.status] || '#9ca3af';
+          return `<div style="border:1px solid var(--border);border-radius:8px;padding:11px 14px;margin-bottom:8px;cursor:pointer;transition:background 0.15s" onmouseover="this.style.background='#f0f4ff'" onmouseout="this.style.background=''" onclick="App.loadQuoteToCart(${q.id})">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+              <strong style="font-size:13px;font-family:monospace">${q.quote_number}</strong>
+              <span style="font-size:11px;background:${color}22;color:${color};border-radius:10px;padding:1px 8px;font-weight:600;text-transform:uppercase">${q.status}</span>
+            </div>
+            <div style="font-size:13px;margin-top:3px">${q.customer_name || 'No customer'}</div>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:1px">Total: <strong>${this.fmt(q.total)}</strong> &bull; ${new Date(q.created_at).toLocaleDateString()}</div>
+          </div>`;
+        }).join('')
+      : '<p style="color:var(--text-muted);text-align:center;padding:20px 0">No open quotes found</p>';
+
+    const overlay = this.showModal(`
+      <div class="modal" style="max-width:480px">
+        <div class="modal-header">
+          <span class="modal-title">Load Quote / Invoice</span>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body" style="padding:14px">
+          <div style="display:flex;gap:8px;margin-bottom:12px">
+            <input type="text" id="qt-search" placeholder="Quote # or customer name…" style="flex:1;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px">
+            <button class="btn btn-primary btn-sm" onclick="App._filterQuoteList()">Search</button>
+          </div>
+          <div id="qt-list" style="max-height:380px;overflow-y:auto">${renderList(quotes)}</div>
+        </div>
+      </div>`);
+
+    this._quoteSearchData = quotes;
+
+    overlay.querySelector('#qt-search').addEventListener('keydown', e => { if (e.key === 'Enter') this._filterQuoteList(); });
+    overlay.querySelector('#qt-search').addEventListener('input', () => this._filterQuoteList());
+  },
+
+  async _filterQuoteList() {
+    const input = document.getElementById('qt-search');
+    if (!input) return;
+    const q = input.value.trim().toLowerCase();
+    if (!q) {
+      const filtered = (this._quoteSearchData || []).filter(x => !['converted','declined','cancelled'].includes(x.status));
+      document.getElementById('qt-list').innerHTML = filtered.length
+        ? filtered.map(x => this._quoteRow(x)).join('') : '<p style="color:var(--text-muted);text-align:center;padding:20px 0">No open quotes found</p>';
+      return;
+    }
+    try {
+      const results = await this.api('GET', `/quotations?quote_number=${encodeURIComponent(q)}&limit=30`);
+      const filtered = results.filter(x => !['converted','declined','cancelled'].includes(x.status))
+        .filter(x => x.quote_number.toLowerCase().includes(q) || (x.customer_name||'').toLowerCase().includes(q));
+      document.getElementById('qt-list').innerHTML = filtered.length
+        ? filtered.map(x => this._quoteRow(x)).join('') : '<p style="color:var(--text-muted);text-align:center;padding:20px 0">No matching quotes</p>';
+    } catch(e) {}
+  },
+
+  _quoteRow(q) {
+    const statusColors = { draft:'#9ca3af', sent:'#3b82f6', accepted:'#10b981' };
+    const color = statusColors[q.status] || '#9ca3af';
+    return `<div style="border:1px solid var(--border);border-radius:8px;padding:11px 14px;margin-bottom:8px;cursor:pointer;transition:background 0.15s" onmouseover="this.style.background='#f0f4ff'" onmouseout="this.style.background=''" onclick="App.loadQuoteToCart(${q.id})">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <strong style="font-size:13px;font-family:monospace">${q.quote_number}</strong>
+        <span style="font-size:11px;background:${color}22;color:${color};border-radius:10px;padding:1px 8px;font-weight:600;text-transform:uppercase">${q.status}</span>
+      </div>
+      <div style="font-size:13px;margin-top:3px">${q.customer_name || 'No customer'}</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-top:1px">Total: <strong>${this.fmt(q.total)}</strong> &bull; ${new Date(q.created_at).toLocaleDateString()}</div>
+    </div>`;
+  },
+
+  async loadQuoteToCart(quoteId) {
+    try {
+      const quote = await this.api('GET', `/quotations/${quoteId}`);
+      if (quote.status === 'converted') { this.alert('This quote has already been converted to a transaction', 'error'); return; }
+      if (['declined','cancelled'].includes(quote.status)) { this.alert(`Cannot load a ${quote.status} quote`, 'error'); return; }
+      if (!quote.items || !quote.items.length) { this.alert('Quote has no items', 'error'); return; }
+
+      if (this.cart.length && !confirm(`Loading ${quote.quote_number} will replace your current cart. Continue?`)) return;
+
+      this.cart = quote.items.map(item => {
+        const product = this.allProducts?.find(p => p.id === item.product_id);
+        return {
+          product_id: item.product_id,
+          variation_id: null,
+          name: item.product_name,
+          price: parseFloat(item.unit_price),
+          tax_rate: product?.tax_rate || 0,
+          quantity: item.quantity,
+          is_service: product?.product_type === 'service' ? 1 : 0,
+          stock_qty: product?.stock_qty ?? 999,
+        };
+      });
+      this.cartDiscount = parseFloat(quote.discount_amount || 0);
+      this._storeCreditApplied = 0;
+      this.appliedPromoCode = null;
+      this._returnCredit = null;
+      this._activeQuoteId = quote.id;
+
+      if (quote.customer_id) {
+        const customer = await this.api('GET', `/customers/${quote.customer_id}`);
+        this.cartCustomer = customer;
+        document.getElementById('cart-customer-name').textContent = `${customer.first_name} ${customer.last_name}`;
+        document.getElementById('remove-customer-btn').style.display = 'inline-flex';
+        const bar = document.getElementById('store-credit-bar');
+        if (bar) bar.style.display = 'none';
+      }
+
+      const aqBar = document.getElementById('active-quote-bar');
+      if (aqBar) {
+        document.getElementById('active-quote-number').textContent = quote.quote_number;
+        aqBar.style.display = 'flex';
+      }
+
+      this.closeModal();
+      this.renderCart();
+      this.alert(`Loaded ${quote.quote_number} — select payment method to complete`, 'success');
+    } catch(e) {
+      this.alert(e.message, 'error');
+    }
+  },
+
+  clearActiveQuote() {
+    this._activeQuoteId = null;
+    const aqBar = document.getElementById('active-quote-bar');
+    if (aqBar) aqBar.style.display = 'none';
+  },
+
   showReceipt(tx, change = 0, cashResult = null) {
     const items = tx.items || [];
     const storeName = this.settings.store_name || 'My Store';
@@ -1594,12 +1997,13 @@ const App = {
             ${items.map(i => `<div class="receipt-row"><span>${i.product_name}</span><span>${this.fmt(i.total)}</span></div>${i.quantity > 1 ? `<div style="color:#666;font-size:11px;padding-left:4px">${i.quantity} x ${this.fmt(i.unit_price)}</div>` : ''}`).join('')}
             <hr>
             <div class="receipt-row"><span>Subtotal</span><span>${this.fmt(tx.subtotal)}</span></div>
-            <div class="receipt-row"><span>Tax</span><span>${this.fmt(tx.tax_amount)}</span></div>
+            ${tx.tax_exempt ? `<div class="receipt-row" style="color:#2e7d32"><span>Tax Exempt${tx.tax_exemption_number ? ` — Ref: ${tx.tax_exemption_number}` : ''}</span><span>—</span></div>` : `<div class="receipt-row"><span>Tax</span><span>${this.fmt(tx.tax_amount)}</span></div>`}
             ${tx.discount_amount > 0 ? `<div class="receipt-row"><span>Discount${tx.promotion_code ? ` (${tx.promotion_code})` : ''}</span><span>-${this.fmt(tx.discount_amount)}</span></div>${tx.promotion_name ? `<div style="color:#666;font-size:11px;padding-left:4px">${tx.promotion_name}</div>` : ''}` : ''}
             <hr>
             <div class="receipt-row receipt-total"><span>TOTAL</span><span>${this.fmt(tx.total)}</span></div>
             <div class="receipt-row"><span>Payment</span><span>${tx.payment_method.replace('_',' ').toUpperCase()}</span></div>
             ${tx.amount_tendered > tx.total ? (cashResult?.rate > 1 ? `<div class="receipt-row"><span>Tendered (${cashResult.currency})</span><span>${cashResult.currency} ${cashResult.tenderedAlt.toFixed(2)}</span></div><div class="receipt-row" style="font-size:10px;color:#666"><span>Equivalent</span><span>${this.fmt(tx.amount_tendered)}</span></div><div class="receipt-row"><span>Change</span><span>${this.fmt(change)}</span></div>` : `<div class="receipt-row"><span>Tendered</span><span>${this.fmt(tx.amount_tendered)}</span></div><div class="receipt-row"><span>Change</span><span>${this.fmt(change)}</span></div>`) : ''}
+            ${tx.approval_code ? `<div class="receipt-row"><span>${tx.payment_method === 'direct_deposit' ? 'Deposit Ref #' : tx.payment_method === 'gift_card' ? 'Gift Card #' : 'Approval Code'}</span><span style="font-family:monospace;font-weight:600">${tx.approval_code}</span></div>` : ''}
             <hr>
             <div style="text-align:center;margin-top:4px">${footer}</div>
           </div>
@@ -1631,11 +2035,14 @@ const App = {
                 const blockedTag = blocked
                   ? `<span style="font-size:10px;padding:1px 5px;border-radius:4px;background:#ffebee;color:#c62828;margin-left:4px">BLOCKED</span>`
                   : '';
+                const taxExemptTag = c.tax_exempt
+                  ? `<span style="font-size:10px;padding:1px 5px;border-radius:4px;background:#e8f5e9;color:#2e7d32;margin-left:4px">Tax Exempt</span>`
+                  : '';
                 const clickHandler = blocked
                   ? `App.alert('Account blocked: overdue balance must be settled before making purchases.','error')`
                   : `App.setCartCustomer(${c.id},'${c.first_name} ${c.last_name}')`;
                 return `<div class="nav-item" style="color:var(--text);border-radius:6px;${blocked?'opacity:0.6':''}" onclick="${clickHandler}">
-                  <div><strong>${c.first_name} ${c.last_name}</strong><span style="color:var(--text-muted);font-size:12px;margin-left:4px">${c.customer_number}</span>${typeTag}${blockedTag}</div>
+                  <div><strong>${c.first_name} ${c.last_name}</strong><span style="color:var(--text-muted);font-size:12px;margin-left:4px">${c.customer_number}</span>${typeTag}${blockedTag}${taxExemptTag}</div>
                   <div style="font-size:12px;color:var(--text-muted)">${c.phone || ''} &bull; ${c.loyalty_points} pts</div>
                 </div>`;
               }).join('')}
@@ -1654,7 +2061,7 @@ const App = {
   },
 
   setCartCustomer(id, name) {
-    this.api('GET', `/customers/${id}`).then(c => {
+    this.api('GET', `/customers/${id}`).then(async c => {
       this.cartCustomer = c;
       this._storeCreditApplied = 0;
       document.getElementById('cart-customer-name').textContent = name;
@@ -1668,7 +2075,16 @@ const App = {
       } else {
         bar.style.display = 'none';
       }
+      this.renderCart();
       this.closeModal();
+      if (this.can('pos_hold')) {
+        try {
+          const held = await this.api('GET', `/transactions?status=hold&customer_id=${id}`);
+          if (held.length > 0) {
+            this.alert(`${held.length} held order${held.length > 1 ? 's' : ''} found for ${name} — click Recall to load`, 'info');
+          }
+        } catch(e) {}
+      }
     });
   },
 
@@ -2882,10 +3298,11 @@ const App = {
         const typeBadge = isCredit
           ? `<span class="badge-pill badge-info">Credit</span>${c.account_blocked ? ' <span class="badge-pill badge-danger">Blocked</span>' : ''}`
           : '<span class="badge-pill" style="background:#e0e0e0;color:#555">Cash</span>';
+        const taxExemptBadge = c.tax_exempt ? ' <span class="badge-pill" style="background:#e8f5e9;color:#2e7d32;border:1px solid #a5d6a7">Tax Exempt</span>' : '';
         return `<tr>
         <td style="font-family:monospace;font-size:12px">${c.customer_number}</td>
         <td class="fw-600">${c.first_name} ${c.last_name}</td>
-        <td style="white-space:nowrap">${typeBadge}</td>
+        <td style="white-space:nowrap">${typeBadge}${taxExemptBadge}</td>
         <td style="color:var(--text-muted)">${c.email||'—'}</td>
         <td>${c.phone||'—'}</td>
         <td style="color:var(--text-muted)">${c.city||'—'}</td>
@@ -2902,6 +3319,7 @@ const App = {
   async showCustomerForm(id) {
     const c = id ? await this.api('GET', `/customers/${id}`) : {};
     const isCredit = (c.customer_type || 'cash') === 'credit';
+    const isTaxExempt = c.tax_exempt ? true : false;
     this.showModal(`
       <div class="modal">
         <div class="modal-header"><span class="modal-title">${id ? 'Edit Customer' : 'Add Customer'}</span><button class="modal-close">✕</button></div>
@@ -2935,6 +3353,15 @@ const App = {
             </div>
             ${id && c.account_blocked ? `<div style="padding:8px 12px;background:#fff3f3;border:1px solid #f44336;border-radius:6px;color:#c62828;font-size:13px;margin-top:4px">&#9888; Account is blocked due to overdue payment.</div>` : ''}
           </div>
+          <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">
+            <label style="display:flex;align-items:center;gap:4px;font-weight:600;cursor:pointer">
+              Tax Exempt
+              <input type="checkbox" id="cf-tax-exempt" ${isTaxExempt?'checked':''} onchange="App.toggleTaxExemptFields()" style="margin:0">
+            </label>
+            <div id="cf-tax-exempt-fields" style="display:${isTaxExempt?'block':'none'};margin-top:10px">
+              <div class="form-group"><label>Tax Exemption Reference #</label><input id="cf-tax-ref" value="${c.tax_exemption_number||''}" placeholder="e.g. EX-123456"></div>
+            </div>
+          </div>
         </div>
         <div class="modal-footer">
           ${id ? `<button class="btn btn-danger" onclick="App.deleteCustomer(${id})">Delete</button>` : ''}
@@ -2950,8 +3377,15 @@ const App = {
     if (panel) panel.style.display = type === 'credit' ? 'block' : 'none';
   },
 
+  toggleTaxExemptFields() {
+    const checked = document.getElementById('cf-tax-exempt')?.checked;
+    const panel = document.getElementById('cf-tax-exempt-fields');
+    if (panel) panel.style.display = checked ? 'block' : 'none';
+  },
+
   async saveCustomer(id) {
     const customerType = document.getElementById('cf-type')?.value || 'cash';
+    const taxExempt = document.getElementById('cf-tax-exempt')?.checked ? 1 : 0;
     const data = {
       first_name: document.getElementById('cf-first').value.trim(),
       last_name: document.getElementById('cf-last').value.trim(),
@@ -2965,6 +3399,8 @@ const App = {
       customer_type: customerType,
       credit_terms_days: parseInt(document.getElementById('cf-terms')?.value) || 30,
       credit_limit: parseFloat(document.getElementById('cf-limit')?.value) || 0,
+      tax_exempt: taxExempt,
+      tax_exemption_number: taxExempt ? (document.getElementById('cf-tax-ref')?.value.trim() || null) : null,
     };
     if (!data.first_name || !data.last_name) { this.alert('First and last name required', 'error'); return; }
     if (data.customer_type === 'credit' && data.credit_terms_days < 1) { this.alert('Credit terms must be at least 1 day', 'error'); return; }
@@ -3172,7 +3608,8 @@ const App = {
             <option value="completed">Completed</option>
             <option value="voided">Voided</option>
           </select>
-          <input type="text" id="tx-number" placeholder="Tx # search…" style="width:160px">
+          <input type="text" id="tx-number" placeholder="Tx # search…" style="width:150px">
+          <input type="text" id="tx-customer" placeholder="Customer name…" style="width:160px">
           <button class="btn btn-primary" onclick="App.loadTransactions()">Search</button>
         </div>
       </div>
@@ -3210,10 +3647,12 @@ const App = {
     const branch = document.getElementById('tx-branch').value;
     const status = document.getElementById('tx-status').value;
     const txNumber = document.getElementById('tx-number').value.trim();
+    const customerName = document.getElementById('tx-customer').value.trim();
     let url = `/transactions?start=${start}&end=${end}`;
     if (branch) url += `&branch_id=${branch}`;
     if (status) url += `&status=${status}`;
     if (txNumber) url += `&transaction_number=${encodeURIComponent(txNumber)}`;
+    if (customerName) url += `&customer_name=${encodeURIComponent(customerName)}`;
     const txs = await this.api('GET', url);
     document.getElementById('tx-table').innerHTML = this.buildTxTable(txs);
   },
@@ -3562,12 +4001,13 @@ const App = {
     const end = document.getElementById('rpt-end')?.value || '';
     const branchId = document.getElementById('rpt-branch')?.value || '';
     const bq = branchId ? `&branch_id=${branchId}` : '';
-    const [sales, topProds, byCat, inv, promoRpt] = await Promise.all([
+    const [sales, topProds, byCat, inv, promoRpt, arRpt] = await Promise.all([
       this.api('GET', `/reports/sales?start=${start}&end=${end}${bq}`),
       this.api('GET', `/reports/top-products?start=${start}&end=${end}&limit=8${bq}`),
       this.api('GET', `/reports/by-category?start=${start}&end=${end}${bq}`),
       this.api('GET', `/reports/inventory${bq ? '?' + bq.slice(1) : ''}`),
       this.api('GET', `/reports/promotions?start=${start}&end=${end}${bq}`),
+      this.api('GET', `/reports/ar-collections?start=${start}&end=${end}${bq}`),
     ]);
 
     const s = sales.summary;
@@ -3653,6 +4093,55 @@ const App = {
             <td class="fw-600 color-success">${this.fmt(promoRpt.totals.total_sales)}</td>
           </tr></tfoot>
         </table>` : '<p style="color:var(--text-muted)">No promotions used in this period.</p>'}
+      </div>
+      <div class="card" style="margin-top:16px">
+        <div class="card-header"><span class="card-title">AR Collections — Payments Received on Account</span></div>
+        <div class="stats-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:14px">
+          <div class="stat-card green"><div class="stat-label">Total Collected</div><div class="stat-value" style="font-size:20px">${this.fmt(arRpt.summary.total_collected)}</div></div>
+          <div class="stat-card blue"><div class="stat-label">Payments Received</div><div class="stat-value">${arRpt.summary.payment_count}</div></div>
+          <div class="stat-card"><div class="stat-label">Avg Payment</div><div class="stat-value" style="font-size:20px">${arRpt.summary.payment_count > 0 ? this.fmt(arRpt.summary.total_collected / arRpt.summary.payment_count) : this.fmt(0)}</div></div>
+        </div>
+        ${arRpt.summary.payment_count > 0 ? `
+        <div class="two-col" style="margin-bottom:14px">
+          <div>
+            <h4 style="font-size:13px;font-weight:600;margin-bottom:8px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">By Payment Method</h4>
+            <table>
+              <thead><tr><th>Method</th><th style="text-align:center">Payments</th><th>Amount</th></tr></thead>
+              <tbody>${arRpt.byMethod.map(m => `<tr>
+                <td><span class="badge-pill badge-info">${m.payment_method.replace('_',' ')}</span></td>
+                <td style="text-align:center">${m.count}</td>
+                <td class="fw-600 color-success">${this.fmt(m.total)}</td>
+              </tr>`).join('')}</tbody>
+            </table>
+          </div>
+          <div>
+            <h4 style="font-size:13px;font-weight:600;margin-bottom:8px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Daily Collections</h4>
+            <table>
+              <thead><tr><th>Date</th><th style="text-align:center">Payments</th><th>Collected</th></tr></thead>
+              <tbody>${arRpt.byDay.map(d => `<tr>
+                <td>${new Date(d.date + 'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</td>
+                <td style="text-align:center">${d.payments}</td>
+                <td class="fw-600 color-success">${this.fmt(d.collected)}</td>
+              </tr>`).join('')}</tbody>
+            </table>
+          </div>
+        </div>
+        <h4 style="font-size:13px;font-weight:600;margin-bottom:8px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">By Customer</h4>
+        <table>
+          <thead><tr><th>Customer #</th><th>Name</th><th style="text-align:center">Payments</th><th>Total Paid</th><th>Outstanding Balance</th></tr></thead>
+          <tbody>${arRpt.byCustomer.map(c => `<tr>
+            <td style="font-family:monospace;font-size:12px">${c.customer_number}</td>
+            <td class="fw-600">${c.customer_name}</td>
+            <td style="text-align:center">${c.payments}</td>
+            <td class="fw-600 color-success">${this.fmt(c.total_paid)}</td>
+            <td class="${c.outstanding > 0 ? 'fw-600 color-danger' : 'color-success'}">${this.fmt(c.outstanding)}</td>
+          </tr>`).join('')}</tbody>
+          <tfoot><tr style="border-top:2px solid var(--border);background:var(--bg)">
+            <td class="fw-600" colspan="3">Total</td>
+            <td class="fw-600 color-success">${this.fmt(arRpt.summary.total_collected)}</td>
+            <td></td>
+          </tr></tfoot>
+        </table>` : '<p style="color:var(--text-muted)">No AR payments received in this period.</p>'}
       </div>`;
   },
 
@@ -8969,15 +9458,16 @@ const App = {
     const s = await this.api('GET', `/drawers/sessions/${id}`);
     const tenderMap = {};
     (s.tenders || []).forEach(t => { tenderMap[t.payment_method] = t; });
-    const tenderLabels = { cash:'Cash', credit_card:'Card', check:'Check', gift_card:'Gift Card', credit:'Charge Account' };
-    const allTenders = ['cash','credit_card','check','gift_card','credit'];
+    const tenderLabels = { cash:'Cash', credit_card:'Card', check:'Check', gift_card:'Gift Card', credit:'Charge Account', direct_deposit:'Direct Deposit' };
+    const allTenders = ['cash','credit_card','check','gift_card','credit','direct_deposit'];
     const expectedCash = parseFloat(s.opening_float||0) + parseFloat(tenderMap['cash']?.total||0);
     const rec = s.reconciliation;
 
     const tenderRows = allTenders.map(k => {
       const t = tenderMap[k] || { tx_count:0, total:0 };
       const expected = k === 'cash' ? expectedCash : parseFloat(t.total||0);
-      const counted = rec ? parseFloat(rec[`${k==='credit_card'?'card':k==='gift_card'?'gift_card':k}_counted`]||0) : null;
+      const recKey = k === 'credit_card' ? 'card' : k;
+      const counted = rec ? parseFloat(rec[`${recKey}_counted`]||0) : null;
       const variance = counted !== null ? (counted - expected) : null;
       const varStyle = variance === null ? '' : variance < 0 ? 'color:var(--danger)' : variance > 0 ? 'color:var(--success)' : 'color:var(--text-muted)';
       return `<tr>
@@ -9038,10 +9528,11 @@ const App = {
     (rec.note_counts || []).forEach(nc => { savedCounts[nc.denomination_id] = nc.quantity; });
 
     const nonCashRows = [
-      { key:'card',      label:'Card',           expected: parseFloat(tenderMap['credit_card']?.total||0), counted: rec.card_counted },
-      { key:'check',     label:'Check',          expected: parseFloat(tenderMap['check']?.total||0),       counted: rec.check_counted },
-      { key:'gift_card', label:'Gift Card',      expected: parseFloat(tenderMap['gift_card']?.total||0),   counted: rec.gift_card_counted },
-      { key:'credit',    label:'Charge Account', expected: parseFloat(tenderMap['credit']?.total||0),      counted: rec.credit_counted },
+      { key:'card',           label:'Card',           expected: parseFloat(tenderMap['credit_card']?.total||0),     counted: rec.card_counted },
+      { key:'check',          label:'Check',          expected: parseFloat(tenderMap['check']?.total||0),           counted: rec.check_counted },
+      { key:'gift_card',      label:'Gift Card',      expected: parseFloat(tenderMap['gift_card']?.total||0),       counted: rec.gift_card_counted },
+      { key:'credit',         label:'Charge Account', expected: parseFloat(tenderMap['credit']?.total||0),          counted: rec.credit_counted },
+      { key:'direct_deposit', label:'Direct Deposit', expected: parseFloat(tenderMap['direct_deposit']?.total||0),  counted: rec.direct_deposit_counted },
     ];
 
     const denomsHtml = denoms.length ? `
@@ -9167,11 +9658,12 @@ const App = {
     })).filter(nc => nc.quantity > 0);
 
     const data = {
-      cash_counted:      parseFloat(document.getElementById('rc-cash')?.value)     || 0,
-      card_counted:      parseFloat(document.getElementById('rc-card')?.value)     || 0,
-      check_counted:     parseFloat(document.getElementById('rc-check')?.value)    || 0,
-      gift_card_counted: parseFloat(document.getElementById('rc-gift_card')?.value)|| 0,
-      credit_counted:    parseFloat(document.getElementById('rc-credit')?.value)   || 0,
+      cash_counted:           parseFloat(document.getElementById('rc-cash')?.value)           || 0,
+      card_counted:           parseFloat(document.getElementById('rc-card')?.value)           || 0,
+      check_counted:          parseFloat(document.getElementById('rc-check')?.value)          || 0,
+      gift_card_counted:      parseFloat(document.getElementById('rc-gift_card')?.value)      || 0,
+      credit_counted:         parseFloat(document.getElementById('rc-credit')?.value)         || 0,
+      direct_deposit_counted: parseFloat(document.getElementById('rc-direct_deposit')?.value) || 0,
       notes:             document.getElementById('rc-notes')?.value.trim() || null,
       reconciled_by:     this.currentUser?.id,
       note_counts,
@@ -9191,11 +9683,12 @@ const App = {
     const rec = s.reconciliation;
     const expectedCash = parseFloat(s.opening_float||0) + parseFloat(tenderMap['cash']?.total||0);
     const rows = [
-      { label:'Cash',           expected: expectedCash,                                   sales: parseFloat(tenderMap['cash']?.total||0),         cnt: rec?.cash_counted },
-      { label:'Card',           expected: parseFloat(tenderMap['credit_card']?.total||0), sales: parseFloat(tenderMap['credit_card']?.total||0),   cnt: rec?.card_counted },
-      { label:'Check',          expected: parseFloat(tenderMap['check']?.total||0),       sales: parseFloat(tenderMap['check']?.total||0),         cnt: rec?.check_counted },
-      { label:'Gift Card',      expected: parseFloat(tenderMap['gift_card']?.total||0),   sales: parseFloat(tenderMap['gift_card']?.total||0),     cnt: rec?.gift_card_counted },
-      { label:'Charge Account', expected: parseFloat(tenderMap['credit']?.total||0),      sales: parseFloat(tenderMap['credit']?.total||0),        cnt: rec?.credit_counted },
+      { label:'Cash',           expected: expectedCash,                                           sales: parseFloat(tenderMap['cash']?.total||0),            cnt: rec?.cash_counted },
+      { label:'Card',           expected: parseFloat(tenderMap['credit_card']?.total||0),     sales: parseFloat(tenderMap['credit_card']?.total||0),     cnt: rec?.card_counted },
+      { label:'Check',          expected: parseFloat(tenderMap['check']?.total||0),            sales: parseFloat(tenderMap['check']?.total||0),           cnt: rec?.check_counted },
+      { label:'Gift Card',      expected: parseFloat(tenderMap['gift_card']?.total||0),        sales: parseFloat(tenderMap['gift_card']?.total||0),       cnt: rec?.gift_card_counted },
+      { label:'Charge Account', expected: parseFloat(tenderMap['credit']?.total||0),           sales: parseFloat(tenderMap['credit']?.total||0),          cnt: rec?.credit_counted },
+      { label:'Direct Deposit', expected: parseFloat(tenderMap['direct_deposit']?.total||0),   sales: parseFloat(tenderMap['direct_deposit']?.total||0),  cnt: rec?.direct_deposit_counted },
     ];
     const tableRows = rows.map(r => {
       const v = r.cnt != null ? (r.cnt - r.expected).toFixed(2) : '—';

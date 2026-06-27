@@ -637,6 +637,12 @@ async function _init() {
     'ALTER TABLE products ADD COLUMN unit TEXT',
     'ALTER TABLE transactions ADD COLUMN source_return_id INTEGER REFERENCES returns(id)',
     'ALTER TABLE transactions ADD COLUMN store_credit_applied REAL DEFAULT 0',
+    'ALTER TABLE customers ADD COLUMN tax_exempt INTEGER DEFAULT 0',
+    'ALTER TABLE customers ADD COLUMN tax_exemption_number TEXT',
+    'ALTER TABLE transactions ADD COLUMN tax_exempt INTEGER DEFAULT 0',
+    'ALTER TABLE transactions ADD COLUMN tax_exemption_number TEXT',
+    'ALTER TABLE transactions ADD COLUMN approval_code TEXT',
+    'ALTER TABLE drawer_reconciliations ADD COLUMN direct_deposit_counted REAL DEFAULT 0',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

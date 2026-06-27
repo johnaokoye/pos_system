@@ -69,7 +69,7 @@ router.get('/:id/transactions', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
-  const { first_name, last_name, email, phone, address, city, state, zip, notes, customer_type, credit_terms_days, credit_limit } = req.body;
+  const { first_name, last_name, email, phone, address, city, state, zip, notes, customer_type, credit_terms_days, credit_limit, tax_exempt, tax_exemption_number } = req.body;
   if (!first_name || !last_name) return res.status(400).json({ error: 'First and last name required' });
   try {
     const { rows: [num] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM customers', args: [] });
@@ -78,7 +78,8 @@ router.post('/', async (req, res) => {
     const creditEnabled = type === 'credit' ? 1 : 0;
     const terms = parseInt(credit_terms_days) || 30;
     const limit = parseFloat(credit_limit) || 0;
-    const result = await db.execute({ sql: `INSERT INTO customers (customer_number,first_name,last_name,email,phone,address,city,state,zip,notes,customer_type,credit_terms_days,credit_limit,credit_enabled) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [customer_number, first_name, last_name, email||null, phone||null, address||null, city||null, state||null, zip||null, notes||null, type, terms, limit, creditEnabled] });
+    const taxExempt = tax_exempt ? 1 : 0;
+    const result = await db.execute({ sql: `INSERT INTO customers (customer_number,first_name,last_name,email,phone,address,city,state,zip,notes,customer_type,credit_terms_days,credit_limit,credit_enabled,tax_exempt,tax_exemption_number) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [customer_number, first_name, last_name, email||null, phone||null, address||null, city||null, state||null, zip||null, notes||null, type, terms, limit, creditEnabled, taxExempt, tax_exemption_number||null] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [Number(result.lastInsertRowid)] });
     res.status(201).json(row);
   } catch (e) {
@@ -87,13 +88,14 @@ router.post('/', async (req, res) => {
 });
 
 router.put('/:id', async (req, res) => {
-  const { first_name, last_name, email, phone, address, city, state, zip, notes, active, customer_type, credit_terms_days, credit_limit } = req.body;
+  const { first_name, last_name, email, phone, address, city, state, zip, notes, active, customer_type, credit_terms_days, credit_limit, tax_exempt, tax_exemption_number } = req.body;
   try {
     const type = customer_type || 'cash';
     const creditEnabled = type === 'credit' ? 1 : 0;
     const terms = parseInt(credit_terms_days) || 30;
     const limit = parseFloat(credit_limit) || 0;
-    await db.execute({ sql: `UPDATE customers SET first_name=?,last_name=?,email=?,phone=?,address=?,city=?,state=?,zip=?,notes=?,active=?,customer_type=?,credit_terms_days=?,credit_limit=?,credit_enabled=? WHERE id=?`, args: [first_name, last_name, email||null, phone||null, address||null, city||null, state||null, zip||null, notes||null, active??1, type, terms, limit, creditEnabled, req.params.id] });
+    const taxExempt = tax_exempt ? 1 : 0;
+    await db.execute({ sql: `UPDATE customers SET first_name=?,last_name=?,email=?,phone=?,address=?,city=?,state=?,zip=?,notes=?,active=?,customer_type=?,credit_terms_days=?,credit_limit=?,credit_enabled=?,tax_exempt=?,tax_exemption_number=? WHERE id=?`, args: [first_name, last_name, email||null, phone||null, address||null, city||null, state||null, zip||null, notes||null, active??1, type, terms, limit, creditEnabled, taxExempt, tax_exemption_number||null, req.params.id] });
     if (type === 'cash') {
       await db.execute({ sql: 'UPDATE customers SET account_blocked = 0 WHERE id = ?', args: [req.params.id] });
     } else {

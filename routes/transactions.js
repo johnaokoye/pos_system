@@ -3,15 +3,73 @@ const router = express.Router();
 const { db } = require('../database');
 const { calcCommission } = require('./commissions');
 
+// Put order on hold (no stock updates, no payment processing)
+router.post('/hold', async (req, res) => {
+  try {
+    const { customer_id, employee_id, branch_id, items, discount_amount, notes } = req.body;
+    if (!items || items.length === 0) return res.status(400).json({ error: 'No items in cart' });
+
+    const hold_number = 'HOLD-' + Date.now();
+    let subtotal = 0, tax_amount = 0;
+    for (const item of items) {
+      const lineTotal = parseFloat((parseFloat(item.unit_price) * item.quantity).toFixed(2));
+      const lineTax = parseFloat((lineTotal * (parseFloat(item.tax_rate) || 0) / 100).toFixed(2));
+      subtotal += lineTotal;
+      tax_amount += lineTax;
+    }
+    subtotal = parseFloat(subtotal.toFixed(2));
+    tax_amount = parseFloat(tax_amount.toFixed(2));
+    const disc = parseFloat(discount_amount || 0);
+    const total = parseFloat((subtotal + tax_amount - disc).toFixed(2));
+
+    const txn = await db.transaction('write');
+    try {
+      const result = await txn.execute({
+        sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,subtotal,tax_amount,discount_amount,total,payment_method,status,notes,amount_tendered,change_amount) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,0)`,
+        args: [hold_number, customer_id || null, employee_id || 1, branch_id || null, subtotal, tax_amount, disc, total, 'hold', 'hold', notes || null]
+      });
+      const txId = Number(result.lastInsertRowid);
+      for (const item of items) {
+        const lineTotal = parseFloat((parseFloat(item.unit_price) * item.quantity).toFixed(2));
+        const lineTax = parseFloat((lineTotal * (parseFloat(item.tax_rate) || 0) / 100).toFixed(2));
+        await txn.execute({
+          sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name) VALUES (?,?,?,?,?,?,0,?,?,?,?)`,
+          args: [txId, item.product_id, item.product_name, item.sku || '', item.quantity, parseFloat(item.unit_price), lineTax, lineTotal, item.variation_id || null, item.variation_name || null]
+        });
+      }
+      await txn.commit();
+      const { rows: [savedTx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id WHERE t.id = ?`, args: [txId] });
+      const { rows: savedItems } = await db.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [txId] });
+      savedTx.items = savedItems;
+      res.status(201).json(savedTx);
+    } catch(e) {
+      await txn.rollback();
+      res.status(400).json({ error: e.message });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Cancel / delete a held order
+router.delete('/:id/hold', async (req, res) => {
+  try {
+    const { rows: [held] } = await db.execute({ sql: `SELECT id FROM transactions WHERE id = ? AND status = 'hold'`, args: [req.params.id] });
+    if (!held) return res.status(404).json({ error: 'Held order not found' });
+    await db.execute({ sql: 'DELETE FROM transaction_items WHERE transaction_id = ?', args: [req.params.id] });
+    await db.execute({ sql: 'DELETE FROM transactions WHERE id = ?', args: [req.params.id] });
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/', async (req, res) => {
   try {
-    const { start, end, customer_id, status, branch_id, payment_method, transaction_number, limit = 100 } = req.query;
+    const { start, end, customer_id, customer_name, status, branch_id, payment_method, transaction_number, limit = 100 } = req.query;
     let sql = `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN branches b ON t.branch_id = b.id WHERE 1=1`;
     const params = [];
     if (transaction_number) { sql += ' AND t.transaction_number LIKE ?'; params.push(`%${transaction_number}%`); }
     if (start) { sql += ' AND date(t.created_at) >= date(?)'; params.push(start); }
     if (end) { sql += ' AND date(t.created_at) <= date(?)'; params.push(end); }
     if (customer_id) { sql += ' AND t.customer_id = ?'; params.push(customer_id); }
+    if (customer_name) { sql += " AND (c.first_name || ' ' || c.last_name) LIKE ?"; params.push(`%${customer_name}%`); }
     if (status) { sql += ' AND t.status = ?'; params.push(status); }
     if (branch_id) { sql += ' AND t.branch_id = ?'; params.push(branch_id); }
     if (payment_method) { sql += ' AND t.payment_method = ?'; params.push(payment_method); }
@@ -34,12 +92,13 @@ router.get('/:id', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const { customer_id, employee_id, branch_id, drawer_session_id, items, discount_amount, promotion_code, promotion_name, payment_method, amount_tendered, notes, source_return_id, store_credit_applied } = req.body;
+    const { customer_id, employee_id, branch_id, drawer_session_id, items, discount_amount, promotion_code, promotion_name, payment_method, amount_tendered, notes, source_return_id, store_credit_applied, quote_id, tax_exempt, tax_exemption_number, approval_code } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in transaction' });
 
     const { rows: [txCount] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM transactions', args: [] });
     const transaction_number = `TXN-${String(Number(txCount.c) + 1).padStart(6, '0')}`;
 
+    const isTaxExempt = tax_exempt ? 1 : 0;
     let subtotal = 0, tax_amount = 0;
     const processedItems = [];
     for (const item of items) {
@@ -53,7 +112,7 @@ router.post('/', async (req, res) => {
         unit_price = v.price != null ? v.price : parseFloat((product.price + (v.price_modifier || 0)).toFixed(2));
       }
       const lineTotal = parseFloat((unit_price * item.quantity).toFixed(2));
-      const lineTax = parseFloat((lineTotal * product.tax_rate / 100).toFixed(2));
+      const lineTax = isTaxExempt ? 0 : parseFloat((lineTotal * product.tax_rate / 100).toFixed(2));
       subtotal += lineTotal;
       tax_amount += lineTax;
       processedItems.push({ product, variation, quantity: item.quantity, unit_price, lineTotal, lineTax, discount: item.discount || 0 });
@@ -79,7 +138,7 @@ router.post('/', async (req, res) => {
 
     const tx = await db.transaction('write');
     try {
-      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,promotion_code,promotion_name,total,payment_method,amount_tendered,change_amount,is_credit,notes,source_return_id,store_credit_applied) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id || null, employee_id || 1, branch_id || null, drawer_session_id || null, subtotal, tax_amount, disc, promotion_code || null, promotion_name || null, total, method, tendered, change > 0 ? change : 0, isCredit ? 1 : 0, notes || null, source_return_id || null, storeCredit > 0 ? storeCredit : 0] });
+      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,promotion_code,promotion_name,total,payment_method,amount_tendered,change_amount,is_credit,notes,source_return_id,store_credit_applied,tax_exempt,tax_exemption_number,approval_code) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id || null, employee_id || 1, branch_id || null, drawer_session_id || null, subtotal, tax_amount, disc, promotion_code || null, promotion_name || null, total, method, tendered, change > 0 ? change : 0, isCredit ? 1 : 0, notes || null, source_return_id || null, storeCredit > 0 ? storeCredit : 0, isTaxExempt, tax_exemption_number || null, approval_code || null] });
       const txId = Number(txResult.lastInsertRowid);
 
       for (const { product, variation, quantity, unit_price, lineTotal, lineTax, discount } of processedItems) {
@@ -105,6 +164,10 @@ router.post('/', async (req, res) => {
         if (storeCredit > 0) {
           await tx.execute({ sql: 'UPDATE customers SET account_balance = MAX(0, account_balance - ?) WHERE id = ?', args: [storeCredit, customer_id] });
         }
+      }
+
+      if (quote_id) {
+        await tx.execute({ sql: `UPDATE quotations SET status = 'converted', converted_to_tx = ? WHERE id = ? AND status NOT IN ('converted','declined','cancelled')`, args: [txId, quote_id] });
       }
 
       await tx.commit();
