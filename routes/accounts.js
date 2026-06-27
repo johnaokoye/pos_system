@@ -14,7 +14,24 @@ router.get('/', async (req, res) => {
 // AR aging report
 router.get('/aging', async (req, res) => {
   try {
-    const { rows: aging } = await db.execute({ sql: `SELECT c.id, c.customer_number, c.first_name || ' ' || c.last_name as customer_name, c.email, c.phone, c.account_balance, COALESCE(SUM(CASE WHEN CAST(julianday('now') - julianday(t.created_at) AS INTEGER) <= 30 THEN t.total ELSE 0 END), 0) as current_30, COALESCE(SUM(CASE WHEN CAST(julianday('now') - julianday(t.created_at) AS INTEGER) BETWEEN 31 AND 60 THEN t.total ELSE 0 END), 0) as days_31_60, COALESCE(SUM(CASE WHEN CAST(julianday('now') - julianday(t.created_at) AS INTEGER) BETWEEN 61 AND 90 THEN t.total ELSE 0 END), 0) as days_61_90, COALESCE(SUM(CASE WHEN CAST(julianday('now') - julianday(t.created_at) AS INTEGER) > 90 THEN t.total ELSE 0 END), 0) as over_90 FROM customers c LEFT JOIN transactions t ON c.id = t.customer_id AND t.payment_method = 'credit' AND t.status = 'completed' WHERE c.credit_enabled = 1 AND c.active = 1 GROUP BY c.id ORDER BY c.account_balance DESC`, args: [] });
+    const { rows: aging } = await db.execute({ sql: `
+      SELECT c.id, c.customer_number, c.first_name || ' ' || c.last_name as customer_name,
+        c.email, c.phone, c.account_balance,
+        COALESCE(SUM(CASE WHEN CAST(julianday('now') - julianday(t.created_at) AS INTEGER) <= 30
+          THEN MAX(0, t.total - COALESCE(alloc.total_allocated, 0)) ELSE 0 END), 0) as current_30,
+        COALESCE(SUM(CASE WHEN CAST(julianday('now') - julianday(t.created_at) AS INTEGER) BETWEEN 31 AND 60
+          THEN MAX(0, t.total - COALESCE(alloc.total_allocated, 0)) ELSE 0 END), 0) as days_31_60,
+        COALESCE(SUM(CASE WHEN CAST(julianday('now') - julianday(t.created_at) AS INTEGER) BETWEEN 61 AND 90
+          THEN MAX(0, t.total - COALESCE(alloc.total_allocated, 0)) ELSE 0 END), 0) as days_61_90,
+        COALESCE(SUM(CASE WHEN CAST(julianday('now') - julianday(t.created_at) AS INTEGER) > 90
+          THEN MAX(0, t.total - COALESCE(alloc.total_allocated, 0)) ELSE 0 END), 0) as over_90
+      FROM customers c
+      LEFT JOIN transactions t ON c.id = t.customer_id AND t.payment_method = 'credit' AND t.status = 'completed'
+      LEFT JOIN (SELECT transaction_id, SUM(amount) as total_allocated FROM payment_allocations GROUP BY transaction_id) alloc
+        ON t.id = alloc.transaction_id
+      WHERE c.credit_enabled = 1 AND c.active = 1
+      GROUP BY c.id
+      ORDER BY c.account_balance DESC`, args: [] });
     res.json(aging);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
