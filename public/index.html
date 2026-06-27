@@ -6497,7 +6497,7 @@ const App = {
             </tr></thead>
             <tbody>
               ${allocs.map(a => `<tr>
-                <td class="fw-600" style="font-size:12px">${a.transaction_number}</td>
+                <td style="font-size:12px"><a href="#" class="fw-600" style="color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.viewTransaction(${a.transaction_id})">${a.transaction_number}</a></td>
                 <td style="font-size:12px;color:var(--text-muted)">${this.fmtDate(a.invoice_date)}</td>
                 <td style="font-size:12px">${this.fmt(a.invoice_total)}</td>
                 <td class="fw-600 color-success" style="font-size:12px">${this.fmt(a.amount)}</td>
