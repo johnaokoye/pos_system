@@ -4,9 +4,22 @@ if (process.env.VERCEL && !process.env.TURSO_DATABASE_URL) {
   throw new Error('TURSO_DATABASE_URL is not set. Add it in Vercel project → Settings → Environment Variables.');
 }
 
-const db = createClient({
+const _rawDb = createClient({
   url: process.env.TURSO_DATABASE_URL || 'file:pos.db',
   authToken: process.env.TURSO_AUTH_TOKEN,
+});
+
+// Turso remote requires args:[] on every batch statement; local SQLite is lenient.
+const db = new Proxy(_rawDb, {
+  get(target, prop) {
+    if (prop === 'batch') {
+      return (stmts, mode) => target.batch(
+        stmts.map(s => typeof s === 'string' ? { sql: s, args: [] } : { args: [], ...s }),
+        mode
+      );
+    }
+    return typeof target[prop] === 'function' ? target[prop].bind(target) : target[prop];
+  },
 });
 
 let initPromise = null;

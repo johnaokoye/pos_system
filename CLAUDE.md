@@ -34,7 +34,7 @@ There is no linter configured.
 ### Frontend
 - **`public/index.html`** — ~9,690-line single-file vanilla JS SPA. All CSS, HTML templates, and JS live here. The entire application is one `App` object with `render<Section>()` methods (e.g. `renderPOS()`, `renderInventory()`, `renderCRM()`). `App.showSection(name)` is the router.
 - **`App.api(method, url, data)`** — central fetch wrapper (`/api` prefix, JSON in/out, throws on non-2xx).
-- **`App.can(key)`** — permission helper; reads `App.currentUser.permissions` (JSON blob from `security_groups`). Returns `true` if the user has the permission directly or via a parent permission in `_permissionTree`.
+- **`App.can(key)`** — permission helper; reads `App.currentUser.permissions` (JSON blob from `security_groups`). Bidirectional: `can('inventory')` returns true if the user has `inventory` OR any of its sub-permissions (`inventory_add`, `inventory_edit`, …); `can('inventory_add')` returns true if the user has `inventory_add` OR the parent `inventory`. Use sub-permission keys to gate fine-grained features without granting the full module.
 - **Auth** — `POST /api/employees/login` returns the employee record; stored as `App.currentUser` in memory only (no token, no session, no cookies). Passwords are stored as plaintext. Default admin credentials on first run: username `admin`, password `123456` (forced password change on first login).
 
 ### Adding schema columns
@@ -69,8 +69,37 @@ New columns must be appended to the `migrations` array in `database.js:_init()` 
 - Inter-branch stock: `branch_transfers` records movement between branches; `transfers` permission gates the UI
 
 ### Permission keys
-The `security_groups.permissions` JSON blob uses these keys (all boolean):
-`dashboard`, `pos`, `inventory`, `customers`, `transactions`, `reports`, `employees`, `settings`, `purchasing`, `branches`, `security`, `accounts`, `quotations`, `suppliers`, `transfers`, `crm`, `commissions`, `multi_branch_access`, `warehouse`, `shipping`, `cycle-counts`, `drawers`, `void_transactions`, `promotions`, `process_returns`, `purchase_requests`
+The `security_groups.permissions` JSON blob uses these keys (all boolean). Module-level keys grant full access; sub-keys gate specific actions within a module — `App.can()` checks both directions.
+
+**Module keys:** `dashboard`, `pos`, `drawers`, `inventory`, `customers`, `transactions`, `reports`, `employees`, `suppliers`, `services`, `purchase_requests`, `purchasing`, `transfers`, `quotations`, `accounts`, `crm`, `commissions`, `warehouse`, `shipping`, `cycle-counts`, `branches`, `security`, `promotions`, `settings`
+
+**Sub-permission keys** (stored and checked via `App.can()` exactly as shown):
+- `pos` → `pos_discounts`, `pos_refunds`, `pos_void_items`, `pos_hold`
+- `drawers` → `drawers_manage`, `drawers_open`, `drawers_close`, `void_transactions`
+- `inventory` → `inventory_add`, `inventory_edit`, `inventory_delete`, `inventory_adjust`
+- `customers` → `customers_add`, `customers_edit`, `customers_delete`, `customers_credit`
+- `transactions` → `transactions_export`, `transactions_refund`, `transactions_returns`
+- `reports` → `reports_export`, `reports_financial`
+- `employees` → `employees_add`, `employees_edit`, `employees_delete`, `employees_salaries`
+- `suppliers` → `suppliers_add`, `suppliers_edit`, `suppliers_delete`
+- `purchase_requests` → `pr_create`, `pr_approve`, `pr_convert`
+- `purchasing` → `purchasing_create`, `purchasing_approve`, `purchasing_receive`
+- `transfers` → `transfers_create`, `transfers_approve`
+- `quotations` → `quotations_create`, `quotations_approve`, `quotations_convert`
+- `accounts` → `accounts_create`, `accounts_payments`, `accounts_writeoff`
+- `crm` → `crm_leads`, `crm_opportunities`
+- `commissions` → `commissions_plans`, `commissions_approve`, `commissions_pay`
+- `warehouse` → `warehouse_bins`, `warehouse_assign`
+- `shipping` → `shipping_create`, `shipping_carriers`
+- `cycle-counts` → `cyclecounts_create`, `cyclecounts_approve`
+- `branches` → `branches_add`, `branches_edit`, `branches_delete`
+- `security` → `security_manage`, `security_assign`
+- `promotions` → `promotions_create`, `promotions_codes`
+- `settings` → `settings_company`, `settings_tax`, `settings_payment`, `settings_integrations`
+
+`multi_branch_access` is stored directly in the permissions blob and checked standalone; it has no sub-permissions and does not appear in `_permissionTree`.
+
+**Shipping note:** The `shipping` permission and `renderShipping()` section exist in the frontend, but there is no `routes/shipping.js` and no `/api/shipping` route mounted in `server.js`. The backend for shipping is not yet implemented.
 
 Three built-in groups seed on first run: **Administrator** (all true), **Manager** (all except `settings`, `branches`, `security`), **Cashier** (pos, customers, transactions, quotations, dashboard only).
 

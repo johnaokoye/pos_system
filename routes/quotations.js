@@ -5,11 +5,12 @@ const { calcCommission } = require('./commissions');
 
 router.get('/', async (req, res) => {
   try {
-    const { status, customer_id, start, end, limit = 100 } = req.query;
+    const { status, customer_id, quote_number, start, end, limit = 100 } = req.query;
     let sql = `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name, t.transaction_number as converted_tx_number FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id WHERE 1=1`;
     const params = [];
     if (status) { sql += ' AND q.status = ?'; params.push(status); }
     if (customer_id) { sql += ' AND q.customer_id = ?'; params.push(customer_id); }
+    if (quote_number) { sql += ' AND q.quote_number LIKE ?'; params.push(`%${quote_number}%`); }
     if (start) { sql += ' AND date(q.created_at) >= ?'; params.push(start); }
     if (end) { sql += ' AND date(q.created_at) <= ?'; params.push(end); }
     sql += ' ORDER BY q.created_at DESC LIMIT ?';
