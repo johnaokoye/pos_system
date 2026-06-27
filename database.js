@@ -736,7 +736,7 @@ async function _init() {
     }
   } catch(e) {}
 
-  // Set default admin password on first run
+  // Ensure admin always has a password (safety net for existing DBs where password was never set)
   try {
     const { rows: [adminEmp] } = await db.execute({ sql: 'SELECT id, password FROM employees WHERE username = ?', args: ['admin'] });
     if (adminEmp && !adminEmp.password) {
@@ -854,11 +854,11 @@ async function _init() {
     await db.execute({ sql: cSql, args: ['CUST-0004','Emily','Davis','emily.d@email.com','555-0104','321 Elm St','Naperville','IL','60540',75,37.50] });
     await db.execute({ sql: cSql, args: ['CUST-0005','Robert','Wilson','rwilson@email.com','555-0105','654 Maple Dr','Joliet','IL','60431',310,155.00] });
 
-    // Employees
-    const eSql = 'INSERT INTO employees (employee_number,first_name,last_name,username,pin,role) VALUES (?,?,?,?,?,?)';
-    await db.execute({ sql: eSql, args: ['EMP-0001','Admin','User','admin','1234','admin'] });
-    await db.execute({ sql: eSql, args: ['EMP-0002','Jane','Doe','jdoe','5678','cashier'] });
-    await db.execute({ sql: eSql, args: ['EMP-0003','Bob','Smith','bsmith','9012','cashier'] });
+    // Employees — admin seeded with default password so first login works immediately
+    const eSql = 'INSERT INTO employees (employee_number,first_name,last_name,username,pin,password,must_change_password,role) VALUES (?,?,?,?,?,?,?,?)';
+    await db.execute({ sql: eSql, args: ['EMP-0001','Admin','User','admin','1234','123456',1,'admin'] });
+    await db.execute({ sql: eSql, args: ['EMP-0002','Jane','Doe','jdoe','5678',null,0,'cashier'] });
+    await db.execute({ sql: eSql, args: ['EMP-0003','Bob','Smith','bsmith','9012',null,0,'cashier'] });
 
     // Settings
     const sSql = 'INSERT INTO settings (key, value, description) VALUES (?, ?, ?)';
