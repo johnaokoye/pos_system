@@ -15,6 +15,20 @@ router.get('/', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// All product/category assignments across active promotions (for exclusivity display)
+router.get('/product-assignments', async (req, res) => {
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT pi.item_id, pi.item_type, pi.promotion_id, p.name as promotion_name
+            FROM promotion_items pi
+            JOIN promotions p ON pi.promotion_id = p.id
+            WHERE p.active = 1`,
+      args: []
+    });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Get single promotion with items and codes
 router.get('/:id', async (req, res) => {
   try {
@@ -63,11 +77,18 @@ router.delete('/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Add item/category to promotion
+// Add item/category to promotion (enforces exclusivity across active promotions)
 router.post('/:id/items', async (req, res) => {
   try {
     const { item_type, item_id } = req.body;
     if (!['product', 'category'].includes(item_type)) return res.status(400).json({ error: 'item_type must be product or category' });
+    const { rows: conflicts } = await db.execute({
+      sql: `SELECT p.name FROM promotion_items pi
+            JOIN promotions p ON pi.promotion_id = p.id
+            WHERE pi.item_type = ? AND pi.item_id = ? AND pi.promotion_id != ? AND p.active = 1`,
+      args: [item_type, item_id, req.params.id]
+    });
+    if (conflicts.length) return res.status(400).json({ error: `Already assigned to active promotion "${conflicts[0].name}"` });
     await db.execute({ sql: 'INSERT OR IGNORE INTO promotion_items (promotion_id, item_type, item_id) VALUES (?, ?, ?)', args: [req.params.id, item_type, item_id] });
     res.json({ success: true });
   } catch (e) { res.status(400).json({ error: e.message }); }
@@ -115,7 +136,7 @@ router.delete('/:id/codes/:codeId', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Auto-apply: find the best active promotion that requires no code
+// Auto-apply: return ALL active promotions that require no code and match cart, sorted by discount desc
 router.post('/auto-apply', async (req, res) => {
   try {
     const { cart_items = [], subtotal = 0 } = req.body;
@@ -129,16 +150,15 @@ router.post('/auto-apply', async (req, res) => {
       args: [today, today]
     });
 
-    let bestPromo = null;
-    let bestDiscount = 0;
+    const results = [];
 
     for (const promo of promos) {
       if (promo.min_purchase > 0 && subtotal < promo.min_purchase) continue;
       let eligibleAmount = subtotal;
-      if (promo.applies_to === 'specific') {
+      if (['specific', 'categories', 'items'].includes(promo.applies_to)) {
         const { rows: items } = await db.execute({ sql: 'SELECT * FROM promotion_items WHERE promotion_id = ?', args: [promo.id] });
-        const productIds = new Set(items.filter(i => i.item_type === 'product').map(i => i.item_id));
-        const categoryIds = new Set(items.filter(i => i.item_type === 'category').map(i => i.item_id));
+        const productIds = new Set(promo.applies_to !== 'categories' ? items.filter(i => i.item_type === 'product').map(i => i.item_id) : []);
+        const categoryIds = new Set(promo.applies_to !== 'items' ? items.filter(i => i.item_type === 'category').map(i => i.item_id) : []);
         eligibleAmount = cart_items.reduce((sum, ci) => {
           if (productIds.has(ci.product_id) || categoryIds.has(ci.category_id)) return sum + ci.price * ci.quantity;
           return sum;
@@ -148,9 +168,11 @@ router.post('/auto-apply', async (req, res) => {
       const discount = promo.type === 'percentage'
         ? parseFloat((eligibleAmount * promo.value / 100).toFixed(2))
         : parseFloat(Math.min(promo.value, eligibleAmount).toFixed(2));
-      if (discount > bestDiscount) { bestDiscount = discount; bestPromo = { ...promo, discount_amount: discount }; }
+      results.push({ ...promo, discount_amount: discount });
     }
-    res.json(bestPromo || null);
+
+    results.sort((a, b) => b.discount_amount - a.discount_amount);
+    res.json(results);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -181,10 +203,10 @@ router.post('/validate-code', async (req, res) => {
 
     // Calculate eligible amount
     let eligibleAmount = subtotal;
-    if (pc.applies_to === 'specific' && cart_items && cart_items.length) {
+    if (['specific', 'categories', 'items'].includes(pc.applies_to) && cart_items && cart_items.length) {
       const { rows: items } = await db.execute({ sql: `SELECT * FROM promotion_items WHERE promotion_id = ?`, args: [pc.promotion_id] });
-      const productIds = items.filter(i => i.item_type === 'product').map(i => i.item_id);
-      const categoryIds = items.filter(i => i.item_type === 'category').map(i => i.item_id);
+      const productIds = pc.applies_to !== 'categories' ? items.filter(i => i.item_type === 'product').map(i => i.item_id) : [];
+      const categoryIds = pc.applies_to !== 'items' ? items.filter(i => i.item_type === 'category').map(i => i.item_id) : [];
       eligibleAmount = cart_items.reduce((sum, ci) => {
         if (productIds.includes(ci.product_id) || categoryIds.includes(ci.category_id)) {
           return sum + ci.price * ci.quantity;

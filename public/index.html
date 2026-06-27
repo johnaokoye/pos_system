@@ -1559,10 +1559,10 @@ const App = {
   },
 
   async _checkAutoPromos() {
-    // Don't override a manually applied promo code
     if (this.appliedPromoCode) { this.renderCart(); return; }
     if (!this.cart.length) {
       this.autoAppliedPromo = null;
+      this._availablePromos = [];
       this.cartDiscount = 0;
       this.renderCart();
       return;
@@ -1570,26 +1570,72 @@ const App = {
     const subtotal = this.cart.reduce((s, i) => s + i.price * i.quantity, 0);
     const cartItems = this.cart.map(i => ({ product_id: i.product_id, category_id: i.category_id, price: i.price, quantity: i.quantity }));
     try {
-      const promo = await this.api('POST', '/promotions/auto-apply', { cart_items: cartItems, subtotal });
-      if (promo) {
-        this.autoAppliedPromo = promo;
-        this.cartDiscount = promo.discount_amount;
+      const promos = await this.api('POST', '/promotions/auto-apply', { cart_items: cartItems, subtotal });
+      this._availablePromos = promos || [];
+      if (this._availablePromos.length > 0) {
+        const best = this._availablePromos[0];
+        this.autoAppliedPromo = best;
+        this.cartDiscount = best.discount_amount;
         const pd = document.getElementById('promo-display');
-        if (pd) { pd.textContent = `✓ ${promo.name}: -${this.fmt(promo.discount_amount)}`; pd.style.display = 'block'; }
+        if (pd) {
+          const changeBtn = this._availablePromos.length > 1
+            ? ` <button class="btn btn-sm" onclick="App._showPromoPickerDropdown()" style="font-size:11px;padding:2px 8px;margin-left:6px">${this._availablePromos.length} promos ▼</button>`
+            : '';
+          pd.innerHTML = `✓ ${best.name}: -${this.fmt(best.discount_amount)}${changeBtn}`;
+          pd.style.display = 'block';
+        }
         const rb = document.getElementById('remove-promo-btn');
         if (rb) rb.style.display = 'none';
       } else {
         this.autoAppliedPromo = null;
+        this._availablePromos = [];
         this.cartDiscount = 0;
         const pd = document.getElementById('promo-display');
-        if (pd) { pd.style.display = 'none'; pd.textContent = ''; }
+        if (pd) { pd.style.display = 'none'; pd.innerHTML = ''; }
       }
     } catch(e) {}
     this.renderCart();
   },
 
+  _showPromoPickerDropdown() {
+    const promos = this._availablePromos || [];
+    if (!promos.length) return;
+    this.showModal(`
+      <div class="modal" style="max-width:380px">
+        <div class="modal-header">
+          <span class="modal-title">Select Promotion</span>
+          <button class="modal-close" onclick="App.closeModal()">✕</button>
+        </div>
+        <div class="modal-body" style="padding:8px">
+          ${promos.map(p => `
+            <button class="btn btn-outline" style="width:100%;text-align:left;margin-bottom:8px;padding:10px 14px;${this.autoAppliedPromo?.id===p.id?'border-color:var(--primary);background:var(--primary-light,#e8f4fd)':''}" onclick="App._selectAutoPromo(${p.id})">
+              <div class="fw-600">${p.name}</div>
+              <div style="font-size:12px;color:var(--text-muted)">${p.type==='percentage'?p.value+'% off':this.fmt(p.value)+' off'} · saves ${this.fmt(p.discount_amount)}</div>
+            </button>`).join('')}
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button></div>
+      </div>`);
+  },
+
+  _selectAutoPromo(promoId) {
+    const promo = (this._availablePromos || []).find(p => p.id === promoId);
+    if (!promo) return;
+    this.autoAppliedPromo = promo;
+    this.cartDiscount = promo.discount_amount;
+    const pd = document.getElementById('promo-display');
+    if (pd) {
+      const changeBtn = this._availablePromos.length > 1
+        ? ` <button class="btn btn-sm" onclick="App._showPromoPickerDropdown()" style="font-size:11px;padding:2px 8px;margin-left:6px">${this._availablePromos.length} promos ▼</button>`
+        : '';
+      pd.innerHTML = `✓ ${promo.name}: -${this.fmt(promo.discount_amount)}${changeBtn}`;
+      pd.style.display = 'block';
+    }
+    this.closeModal();
+    this.renderCart();
+  },
+
   clearCart() {
-    this.cart = []; this.cartCustomer = null; this.cartDiscount = 0; this._storeCreditApplied = 0; this.appliedPromoCode = null; this.autoAppliedPromo = null; this._returnCredit = null; this._activeQuoteId = null;
+    this.cart = []; this.cartCustomer = null; this.cartDiscount = 0; this._storeCreditApplied = 0; this.appliedPromoCode = null; this.autoAppliedPromo = null; this._availablePromos = []; this._returnCredit = null; this._activeQuoteId = null;
     this.renderCart();
     const aqBar = document.getElementById('active-quote-bar');
     if (aqBar) aqBar.style.display = 'none';
@@ -10185,14 +10231,14 @@ const App = {
                 <td class="fw-600">${p.name}</td>
                 <td>${p.type === 'percentage' ? 'Percentage' : 'Fixed'}</td>
                 <td>${p.type === 'percentage' ? p.value + '%' : this.fmt(p.value)}</td>
-                <td>${p.applies_to === 'all' ? 'All Items' : `<span class="badge-pill badge-purple">${p.item_count} items/cats</span>`}</td>
+                <td>${p.applies_to === 'all' ? 'All Items' : p.applies_to === 'categories' ? `<span class="badge-pill badge-purple">${p.item_count} categories</span>` : p.applies_to === 'items' ? `<span class="badge-pill badge-blue">${p.item_count} products</span>` : `<span class="badge-pill badge-purple">${p.item_count} items/cats</span>`}</td>
                 <td style="font-size:12px">${p.start_date || '—'} → ${p.end_date || '∞'}</td>
                 <td><span class="badge-pill badge-blue">${p.code_count} codes</span></td>
                 <td>${statusBadge(p)}</td>
                 <td>
                   <button class="btn btn-sm btn-secondary" onclick="App.showPromoForm(${p.id})">Edit</button>
                   <button class="btn btn-sm btn-outline" onclick="App.managePromoCodes(${p.id},'${p.name.replace(/'/g,"\\'")}')">Codes</button>
-                  ${p.applies_to === 'specific' ? `<button class="btn btn-sm btn-outline" onclick="App.managePromoItems(${p.id},'${p.name.replace(/'/g,"\\'")}')">Items</button>` : ''}
+                  ${p.applies_to !== 'all' ? `<button class="btn btn-sm btn-outline" onclick="App.managePromoItems(${p.id},'${p.name.replace(/'/g,"\\'")}')">Items</button>` : ''}
                   <button class="btn btn-sm btn-danger" onclick="App.deletePromotion(${p.id})">Del</button>
                 </td>
               </tr>`).join('') : '<tr><td colspan="8" class="empty-state">No promotions yet</td></tr>'}
@@ -10203,22 +10249,47 @@ const App = {
 
   async showPromoForm(id) {
     let p = { type: 'percentage', value: 0, applies_to: 'all', active: 1, min_purchase: 0, items: [] };
-    const [promoData, categories] = await Promise.all([
+    const [promoData, categories, products, assignments] = await Promise.all([
       id ? this.api('GET', `/promotions/${id}`) : Promise.resolve(p),
       this.api('GET', '/categories'),
+      this.api('GET', '/products'),
+      this.api('GET', '/promotions/product-assignments'),
     ]);
     if (id) p = promoData;
 
-    // Map assigned category item IDs (category_id → promotion_item.id) for diffing on save
     const assignedCatMap = new Map((p.items||[]).filter(i=>i.item_type==='category').map(i=>[i.item_id, i.id]));
-    const isSpecific = p.applies_to === 'specific';
+    const assignedProdMap = new Map((p.items||[]).filter(i=>i.item_type==='product').map(i=>[i.item_id, i.id]));
 
-    const catCheckboxes = categories.map(c => `
-      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;min-width:140px">
+    // Build map of items in OTHER active promotions for exclusivity display
+    const otherPromoMap = new Map();
+    for (const a of assignments) {
+      if (!id || Number(a.promotion_id) !== Number(id)) {
+        otherPromoMap.set(`${a.item_type}-${a.item_id}`, a.promotion_name);
+      }
+    }
+
+    const catCheckboxes = categories.map(c => {
+      const inOther = otherPromoMap.get(`category-${c.id}`);
+      const dis = inOther && !assignedCatMap.has(c.id);
+      return `<label style="display:flex;align-items:center;gap:6px;cursor:${dis?'not-allowed':'pointer'};font-size:13px;min-width:140px;${dis?'opacity:0.5':''}">
         <input type="checkbox" class="pm-cat-cb" value="${c.id}" data-promo-item-id="${assignedCatMap.get(c.id)||''}"
-          ${assignedCatMap.has(c.id)?'checked':''} style="width:auto">
-        ${c.name}
-      </label>`).join('');
+          ${assignedCatMap.has(c.id)?'checked':''} ${dis?'disabled':''} style="width:auto">
+        ${c.name}${inOther ? ` <small style="color:var(--danger);font-size:10px">(${inOther})</small>` : ''}
+      </label>`;
+    }).join('');
+
+    const prodCheckboxes = products.filter(pr=>pr.active).map(pr => {
+      const inOther = otherPromoMap.get(`product-${pr.id}`);
+      const dis = inOther && !assignedProdMap.has(pr.id);
+      return `<label class="pm-prod-label" style="display:flex;align-items:center;gap:6px;cursor:${dis?'not-allowed':'pointer'};padding:3px 0;${dis?'opacity:0.5':''}">
+        <input type="checkbox" class="pm-prod-cb" value="${pr.id}" data-promo-item-id="${assignedProdMap.get(pr.id)||''}"
+          ${assignedProdMap.has(pr.id)?'checked':''} ${dis?'disabled':''} style="width:auto;flex-shrink:0">
+        <span style="font-size:13px"><span class="fw-600">${pr.name}</span> <span style="color:var(--text-muted);font-size:11px">${pr.sku||''}</span>${inOther ? ` <span style="color:var(--danger);font-size:10px">(${inOther})</span>` : ''}</span>
+      </label>`;
+    }).join('');
+
+    // Normalise legacy 'specific' value to 'items' in the UI
+    const appliesToVal = (p.applies_to === 'specific') ? 'items' : (p.applies_to || 'all');
 
     this.showModal(`
       <div class="modal" style="max-width:540px">
@@ -10244,17 +10315,24 @@ const App = {
             <div class="form-group"><label>Min Purchase Amount</label><input type="number" id="pm-minpur" value="${p.min_purchase||0}" min="0" step="0.01"></div>
             <div class="form-group"><label>Applies To</label>
               <select id="pm-applies" onchange="App._promoAppliesToToggle()">
-                <option value="all" ${p.applies_to==='all'?'selected':''}>All Items</option>
-                <option value="specific" ${p.applies_to==='specific'?'selected':''}>Specific Items / Categories</option>
+                <option value="all" ${appliesToVal==='all'?'selected':''}>All Items</option>
+                <option value="categories" ${appliesToVal==='categories'?'selected':''}>Specific Categories</option>
+                <option value="items" ${appliesToVal==='items'?'selected':''}>Specific Products</option>
               </select>
             </div>
           </div>
-          <div id="pm-cat-section" style="display:${isSpecific?'':'none'};margin-bottom:12px">
+          <div id="pm-cat-section" style="display:${appliesToVal==='categories'?'':'none'};margin-bottom:12px">
             <label style="font-weight:600;font-size:13px;display:block;margin-bottom:8px">Categories</label>
-            <div style="display:flex;flex-wrap:wrap;gap:8px;max-height:160px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:10px;background:var(--bg-secondary,var(--bg))">
+            <div style="display:flex;flex-wrap:wrap;gap:6px;max-height:160px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:10px;background:var(--bg-secondary,var(--bg))">
               ${categories.length ? catCheckboxes : '<span style="font-size:13px;color:var(--text-muted)">No categories found</span>'}
             </div>
-            <p style="font-size:11px;color:var(--text-muted);margin-top:6px">For product-level assignments use the Items manager after saving.</p>
+          </div>
+          <div id="pm-items-section" style="display:${appliesToVal==='items'?'':'none'};margin-bottom:12px">
+            <label style="font-weight:600;font-size:13px;display:block;margin-bottom:6px">Specific Products</label>
+            <input type="text" id="pm-prod-search" placeholder="Search products..." oninput="App._filterPromoProducts()" style="width:100%;margin-bottom:8px">
+            <div id="pm-prod-list" style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:10px;background:var(--bg-secondary,var(--bg))">
+              ${products.filter(pr=>pr.active).length ? prodCheckboxes : '<span style="font-size:13px;color:var(--text-muted)">No products found</span>'}
+            </div>
           </div>
           <div class="input-row">
             <div class="form-group"><label>Start Date (optional)</label><input type="date" id="pm-start" value="${p.start_date||''}"></div>
@@ -10279,8 +10357,17 @@ const App = {
 
   _promoAppliesToToggle() {
     const val = document.getElementById('pm-applies')?.value;
-    const sec = document.getElementById('pm-cat-section');
-    if (sec) sec.style.display = val === 'specific' ? '' : 'none';
+    const catSec = document.getElementById('pm-cat-section');
+    const itemSec = document.getElementById('pm-items-section');
+    if (catSec) catSec.style.display = val === 'categories' ? '' : 'none';
+    if (itemSec) itemSec.style.display = val === 'items' ? '' : 'none';
+  },
+
+  _filterPromoProducts() {
+    const q = (document.getElementById('pm-prod-search')?.value || '').toLowerCase();
+    document.querySelectorAll('#pm-prod-list .pm-prod-label').forEach(lbl => {
+      lbl.style.display = lbl.textContent.toLowerCase().includes(q) ? '' : 'none';
+    });
   },
 
   async savePromotion(id) {
@@ -10297,8 +10384,9 @@ const App = {
     };
     if (!data.name) return this.alert('Name required', 'error');
 
-    // Snapshot checkbox state before modal closes
-    const checkboxes = [...document.querySelectorAll('.pm-cat-cb')];
+    // Snapshot both checkbox lists before modal closes
+    const catCbs = [...document.querySelectorAll('.pm-cat-cb')];
+    const prodCbs = [...document.querySelectorAll('.pm-prod-cb')];
 
     try {
       let promoId = id;
@@ -10309,22 +10397,41 @@ const App = {
         promoId = res.id;
       }
 
-      // Sync category assignments when applies_to=specific
-      if (data.applies_to === 'specific' && checkboxes.length) {
-        for (const cb of checkboxes) {
+      const errors = [];
+
+      if (data.applies_to === 'categories' && catCbs.length) {
+        for (const cb of catCbs) {
           const catId = parseInt(cb.value);
           const promoItemId = cb.dataset.promoItemId;
           if (cb.checked && !promoItemId) {
-            await this.api('POST', `/promotions/${promoId}/items`, { item_type: 'category', item_id: catId });
+            try { await this.api('POST', `/promotions/${promoId}/items`, { item_type: 'category', item_id: catId }); }
+            catch(e) { errors.push(e.message); }
           } else if (!cb.checked && promoItemId) {
             await this.api('DELETE', `/promotions/${promoId}/items/${promoItemId}`);
           }
         }
       }
 
-      this.alert('Promotion saved');
+      if (data.applies_to === 'items' && prodCbs.length) {
+        for (const cb of prodCbs) {
+          const prodId = parseInt(cb.value);
+          const promoItemId = cb.dataset.promoItemId;
+          if (cb.checked && !promoItemId) {
+            try { await this.api('POST', `/promotions/${promoId}/items`, { item_type: 'product', item_id: prodId }); }
+            catch(e) { errors.push(e.message); }
+          } else if (!cb.checked && promoItemId) {
+            await this.api('DELETE', `/promotions/${promoId}/items/${promoItemId}`);
+          }
+        }
+      }
+
       this.closeModal();
       this.renderPromotions();
+      if (errors.length) {
+        this.alert('Promotion saved. Some items could not be assigned (already in another promotion):\n' + errors.join('\n'), 'error');
+      } else {
+        this.alert('Promotion saved');
+      }
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
