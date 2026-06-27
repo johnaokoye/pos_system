@@ -64,6 +64,8 @@ async function _init() {
       last_name TEXT NOT NULL,
       username TEXT UNIQUE NOT NULL,
       pin TEXT NOT NULL,
+      password TEXT,
+      must_change_password INTEGER DEFAULT 0,
       role TEXT NOT NULL DEFAULT 'cashier',
       active INTEGER DEFAULT 1,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -736,13 +738,13 @@ async function _init() {
     }
   } catch(e) {}
 
-  // Ensure admin always has a password (safety net for existing DBs where password was never set)
-  try {
+  // Ensure admin always has a password — runs unconditionally on every boot
+  {
     const { rows: [adminEmp] } = await db.execute({ sql: 'SELECT id, password FROM employees WHERE username = ?', args: ['admin'] });
     if (adminEmp && !adminEmp.password) {
-      await db.execute({ sql: 'UPDATE employees SET password = ?, must_change_password = 1 WHERE username = ?', args: ['123456', 'admin'] });
+      await db.execute({ sql: "UPDATE employees SET password='123456', must_change_password=1 WHERE username='admin'", args: [] });
     }
-  } catch(e) {}
+  }
 
   // Initialize branch_inventory for branch 1 for products with global stock but no branch records
   try {
