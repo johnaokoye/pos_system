@@ -7,3 +7,5 @@ uploads/po-attachments/*
 !uploads/products/.gitkeep
 !uploads/po-attachments/.gitkeep
 .env
+.vercel
+test-results/
