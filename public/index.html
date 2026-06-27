@@ -6442,17 +6442,23 @@ const App = {
     el.innerHTML = `
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Payment #</th><th>Customer</th><th>Amount</th><th>Method</th><th>Employee</th><th>Date</th></tr></thead>
+          <thead><tr><th></th><th>Payment #</th><th>Customer</th><th>Amount</th><th>Method</th><th>Employee</th><th>Date</th></tr></thead>
           <tbody>
             ${payments.length ? payments.map(p => `
               <tr>
+                <td style="width:28px;padding:4px 6px">
+                  <button class="btn btn-sm" style="padding:1px 6px;font-size:11px;line-height:1.4" onclick="App._togglePaymentAllocs(${p.id},this)" title="Show invoice allocations">&#9654;</button>
+                </td>
                 <td class="fw-600">${p.payment_number}</td>
                 <td>${p.customer_name||'-'} <small style="color:var(--text-muted)">${p.customer_number||''}</small></td>
                 <td class="fw-600 color-success">${this.fmt(p.amount)}</td>
                 <td><span class="badge-pill badge-info">${p.payment_method}</span></td>
                 <td>${p.employee_name||'-'}</td>
                 <td style="color:var(--text-muted)">${this.fmtDateTime(p.created_at)}</td>
-              </tr>`).join('') : '<tr><td colspan="6" class="empty-state">No payments recorded</td></tr>'}
+              </tr>
+              <tr id="pmt-allocs-${p.id}" style="display:none;background:var(--bg-secondary,var(--bg))">
+                <td colspan="7" style="padding:0 0 0 40px;border-top:none"></td>
+              </tr>`).join('') : '<tr><td colspan="7" class="empty-state">No payments recorded</td></tr>'}
           </tbody>
         </table>
       </div>`;
@@ -6460,6 +6466,48 @@ const App = {
 
   _arToggleSort() {
     this._loadARPayments(this._arCustomerId || '', this._arSortDir === 'desc' ? 'asc' : 'desc');
+  },
+
+  async _togglePaymentAllocs(paymentId, btn) {
+    const row = document.getElementById(`pmt-allocs-${paymentId}`);
+    if (!row) return;
+    if (row.style.display !== 'none') {
+      row.style.display = 'none';
+      btn.innerHTML = '&#9654;';
+      return;
+    }
+    btn.innerHTML = '&#9660;';
+    row.style.display = '';
+    const cell = row.querySelector('td');
+    cell.innerHTML = '<em style="color:var(--text-muted);font-size:12px;padding:8px 0;display:block">Loading...</em>';
+    try {
+      const allocs = await this.api('GET', `/accounts/payments/${paymentId}/allocations`);
+      if (!allocs.length) {
+        cell.innerHTML = '<em style="color:var(--text-muted);font-size:12px;padding:8px 0;display:block">No invoice allocations recorded for this payment.</em>';
+        return;
+      }
+      cell.innerHTML = `
+        <div style="padding:8px 0 12px">
+          <table style="width:auto">
+            <thead><tr>
+              <th style="font-size:11px">Invoice</th>
+              <th style="font-size:11px">Invoice Date</th>
+              <th style="font-size:11px">Invoice Total</th>
+              <th style="font-size:11px">Applied</th>
+            </tr></thead>
+            <tbody>
+              ${allocs.map(a => `<tr>
+                <td class="fw-600" style="font-size:12px">${a.transaction_number}</td>
+                <td style="font-size:12px;color:var(--text-muted)">${this.fmtDate(a.invoice_date)}</td>
+                <td style="font-size:12px">${this.fmt(a.invoice_total)}</td>
+                <td class="fw-600 color-success" style="font-size:12px">${this.fmt(a.amount)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>`;
+    } catch(e) {
+      cell.innerHTML = '<em style="color:var(--danger);font-size:12px;padding:8px 0;display:block">Failed to load allocations.</em>';
+    }
   },
 
   _arFilterCustomers(text) {
@@ -6505,33 +6553,91 @@ const App = {
 
   async showPaymentModal(customerId, customerName, balance) {
     const branches = this.currentUser.branches || [];
+    let invoices = [];
+    try { invoices = await this.api('GET', `/accounts/invoices/${customerId}`); } catch(e) {}
+    const hasInvoices = invoices.length > 0;
     this.showModal(`
-      <div class="modal" style="max-width:440px">
+      <div class="modal" style="max-width:600px">
         <div class="modal-header"><span class="modal-title">Record Payment</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
-          <p style="margin-bottom:14px;font-size:13px">Recording payment for <strong>${customerName}</strong><br>Outstanding Balance: <strong style="color:var(--danger)">${this.fmt(balance)}</strong></p>
-          <div class="form-group"><label>Amount *</label><input id="pmt-amount" type="number" step="0.01" value="${balance.toFixed(2)}"></div>
-          <div class="form-group"><label>Payment Method</label>
-            <select id="pmt-method">
-              <option value="cash">Cash</option>
-              <option value="credit_card">Credit Card</option>
-              <option value="check">Check</option>
-              <option value="bank_transfer">Bank Transfer</option>
-            </select>
+          <p style="margin-bottom:14px;font-size:13px">Recording payment for <strong>${customerName}</strong> &nbsp;|&nbsp; Outstanding Balance: <strong style="color:var(--danger)">${this.fmt(balance)}</strong></p>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div class="form-group" style="margin:0"><label>Amount *</label><input id="pmt-amount" type="number" step="0.01" value="${balance.toFixed(2)}" oninput="App._pmtAutoFill()"></div>
+            <div class="form-group" style="margin:0"><label>Payment Method</label>
+              <select id="pmt-method">
+                <option value="cash">Cash</option>
+                <option value="credit_card">Credit Card</option>
+                <option value="check">Check</option>
+                <option value="bank_transfer">Bank Transfer</option>
+              </select>
+            </div>
+            <div class="form-group" style="margin:0"><label>Branch</label>
+              <select id="pmt-branch">
+                <option value="">-- Select Branch --</option>
+                ${branches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
+              </select>
+            </div>
+            <div class="form-group" style="margin:0"><label>Notes</label><input id="pmt-notes"></div>
           </div>
-          <div class="form-group"><label>Branch</label>
-            <select id="pmt-branch">
-              <option value="">-- Select Branch --</option>
-              ${branches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
-            </select>
-          </div>
-          <div class="form-group"><label>Notes</label><input id="pmt-notes"></div>
+          ${hasInvoices ? `
+          <div style="border-top:1px solid var(--border);margin-top:16px;padding-top:14px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+              <span style="font-weight:600;font-size:13px">Apply to Invoices</span>
+              <span style="font-size:11px;color:var(--text-muted)">Leave blank to auto-apply oldest first</span>
+            </div>
+            <div class="table-wrap" style="max-height:200px;overflow-y:auto">
+              <table>
+                <thead><tr><th>Invoice</th><th>Date</th><th>Total</th><th>Balance Due</th><th>Apply</th></tr></thead>
+                <tbody id="pmt-inv-rows">
+                  ${invoices.map(inv => `<tr>
+                    <td class="fw-600" style="font-size:12px">${inv.transaction_number}</td>
+                    <td style="font-size:12px;color:var(--text-muted)">${this.fmtDate(inv.created_at)}</td>
+                    <td style="font-size:12px">${this.fmt(inv.total)}</td>
+                    <td style="font-size:12px" class="color-danger fw-600">${this.fmt(inv.balance_due)}</td>
+                    <td><input type="number" step="0.01" min="0" max="${inv.balance_due.toFixed(2)}"
+                         class="pmt-inv-input" data-inv-id="${inv.id}" data-max="${inv.balance_due.toFixed(2)}"
+                         style="width:85px;padding:3px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px"
+                         oninput="App._pmtUpdateTotal()" placeholder="0.00"></td>
+                  </tr>`).join('')}
+                </tbody>
+              </table>
+            </div>
+            <div style="text-align:right;margin-top:8px;font-size:12px;color:var(--text-muted)">
+              Allocated: <strong id="pmt-alloc-total" style="color:var(--accent)">$0.00</strong>
+              &nbsp;&mdash;&nbsp;<span id="pmt-alloc-remaining">$0.00 unallocated</span>
+            </div>
+          </div>` : `<p style="margin-top:14px;font-size:12px;color:var(--text-muted)">No outstanding invoices found — payment will be applied to account balance.</p>`}
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
           <button class="btn btn-success" onclick="App.savePayment(${customerId})">Record Payment</button>
         </div>
       </div>`);
+    this._pmtAutoFill();
+  },
+
+  _pmtAutoFill() {
+    const amt = parseFloat(document.getElementById('pmt-amount')?.value) || 0;
+    const inputs = document.querySelectorAll('.pmt-inv-input');
+    let remaining = amt;
+    inputs.forEach(inp => {
+      const max = parseFloat(inp.dataset.max) || 0;
+      const apply = Math.min(remaining, max);
+      inp.value = apply > 0.001 ? apply.toFixed(2) : '';
+      remaining = Math.max(0, parseFloat((remaining - apply).toFixed(2)));
+    });
+    this._pmtUpdateTotal();
+  },
+
+  _pmtUpdateTotal() {
+    const amt = parseFloat(document.getElementById('pmt-amount')?.value) || 0;
+    let allocated = 0;
+    document.querySelectorAll('.pmt-inv-input').forEach(inp => { allocated += parseFloat(inp.value) || 0; });
+    allocated = parseFloat(allocated.toFixed(2));
+    const el = document.getElementById('pmt-alloc-total');
+    const rem = document.getElementById('pmt-alloc-remaining');
+    if (el) el.textContent = this.fmt(allocated);
+    if (rem) rem.textContent = `${this.fmt(Math.max(0, amt - allocated))} unallocated`;
   },
 
   async savePayment(customerId) {
@@ -6540,8 +6646,13 @@ const App = {
     const branch_id = document.getElementById('pmt-branch').value;
     const notes = document.getElementById('pmt-notes').value;
     if (!amount || amount <= 0) { this.alert('Enter a valid amount', 'error'); return; }
+    const allocations = [];
+    document.querySelectorAll('.pmt-inv-input').forEach(inp => {
+      const val = parseFloat(inp.value);
+      if (val > 0) allocations.push({ transaction_id: parseInt(inp.dataset.invId), amount: val });
+    });
     try {
-      await this.api('POST', '/accounts/payments', { customer_id: customerId, amount, payment_method, branch_id: branch_id||null, notes });
+      await this.api('POST', '/accounts/payments', { customer_id: customerId, amount, payment_method, branch_id: branch_id||null, notes, allocations: allocations.length ? allocations : undefined });
       this.closeModal();
       this.alert('Payment recorded');
       this.renderAccounts();

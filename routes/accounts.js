@@ -56,10 +56,44 @@ router.patch('/customer/:id', async (req, res) => {
   }
 });
 
+// Outstanding invoices for a customer (with per-invoice balance_due)
+router.get('/invoices/:customer_id', async (req, res) => {
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT t.id, t.transaction_number, t.total, t.created_at,
+              COALESCE(SUM(pa.amount), 0) as paid_amount,
+              t.total - COALESCE(SUM(pa.amount), 0) as balance_due
+            FROM transactions t
+            LEFT JOIN payment_allocations pa ON t.id = pa.transaction_id
+            WHERE t.customer_id = ? AND t.payment_method = 'credit' AND t.status = 'completed'
+            GROUP BY t.id
+            HAVING t.total - COALESCE(SUM(pa.amount), 0) > 0.001
+            ORDER BY t.created_at ASC`,
+      args: [req.params.customer_id]
+    });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Allocations for a specific payment
+router.get('/payments/:id/allocations', async (req, res) => {
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT pa.*, t.transaction_number, t.total as invoice_total, t.created_at as invoice_date
+            FROM payment_allocations pa
+            LEFT JOIN transactions t ON pa.transaction_id = t.id
+            WHERE pa.payment_id = ?
+            ORDER BY t.created_at ASC`,
+      args: [req.params.id]
+    });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Record a payment from a customer
 router.post('/payments', async (req, res) => {
   try {
-    const { customer_id, employee_id, branch_id, amount, payment_method, notes } = req.body;
+    const { customer_id, employee_id, branch_id, amount, payment_method, notes, allocations } = req.body;
     if (!customer_id || !amount || parseFloat(amount) <= 0) return res.status(400).json({ error: 'customer_id and positive amount required' });
 
     const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [customer_id] });
@@ -69,15 +103,42 @@ router.post('/payments', async (req, res) => {
     const payment_number = `PMT-${String(Number(count.c) + 1).padStart(6, '0')}`;
     const amt = parseFloat(parseFloat(amount).toFixed(2));
 
+    // Build allocations: use provided or auto-FIFO oldest-first
+    let finalAllocations = [];
+    if (allocations && Array.isArray(allocations) && allocations.length > 0) {
+      finalAllocations = allocations.filter(a => parseFloat(a.amount) > 0).map(a => ({ transaction_id: parseInt(a.transaction_id), amount: parseFloat(parseFloat(a.amount).toFixed(2)) }));
+    } else {
+      const { rows: invoices } = await db.execute({
+        sql: `SELECT t.id, t.total, COALESCE(SUM(pa.amount), 0) as paid_amount
+              FROM transactions t
+              LEFT JOIN payment_allocations pa ON t.id = pa.transaction_id
+              WHERE t.customer_id = ? AND t.payment_method = 'credit' AND t.status = 'completed'
+              GROUP BY t.id
+              HAVING t.total - COALESCE(SUM(pa.amount), 0) > 0.001
+              ORDER BY t.created_at ASC`,
+        args: [customer_id]
+      });
+      let remaining = amt;
+      for (const inv of invoices) {
+        if (remaining <= 0.001) break;
+        const balance = parseFloat((inv.total - inv.paid_amount).toFixed(2));
+        const apply = parseFloat(Math.min(remaining, balance).toFixed(2));
+        finalAllocations.push({ transaction_id: inv.id, amount: apply });
+        remaining = parseFloat((remaining - apply).toFixed(2));
+      }
+    }
+
     const payTx = await db.transaction('write');
     try {
       const result = await payTx.execute({ sql: 'INSERT INTO account_payments (payment_number,customer_id,employee_id,branch_id,amount,payment_method,notes) VALUES (?,?,?,?,?,?,?)', args: [payment_number, customer_id, employee_id||null, branch_id||null, amt, payment_method||'cash', notes||null] });
       const payId = Number(result.lastInsertRowid);
+      for (const alloc of finalAllocations) {
+        await payTx.execute({ sql: 'INSERT INTO payment_allocations (payment_id, transaction_id, amount) VALUES (?,?,?)', args: [payId, alloc.transaction_id, alloc.amount] });
+      }
       await payTx.execute({ sql: 'UPDATE customers SET account_balance = MAX(0, account_balance - ?) WHERE id = ?', args: [amt, customer_id] });
       await payTx.commit();
 
       const { rows: [payRow] } = await db.execute({ sql: `SELECT p.*, c.first_name || ' ' || c.last_name as customer_name FROM account_payments p LEFT JOIN customers c ON p.customer_id = c.id WHERE p.id = ?`, args: [payId] });
-      // Re-evaluate block status after payment
       await runCreditCheck(customer_id);
       res.status(201).json(payRow);
     } catch(e) {

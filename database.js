@@ -224,6 +224,13 @@ async function _init() {
       notes TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    { sql: `CREATE TABLE IF NOT EXISTS payment_allocations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      payment_id INTEGER NOT NULL REFERENCES account_payments(id),
+      transaction_id INTEGER NOT NULL REFERENCES transactions(id),
+      amount REAL NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS branch_inventory (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       product_id INTEGER NOT NULL REFERENCES products(id),
