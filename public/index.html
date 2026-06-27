@@ -4830,7 +4830,7 @@ const App = {
     c.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
 
     const tabBtn = (key, label) => `
-      <button class="btn btn-sm ${tab===key?'btn-primary':'btn-outline'}"
+      <button class="tab-btn ${tab===key?'active':''}"
         onclick="App.renderPurchasing('${key}')">${label}</button>`;
 
     if (tab === 'orders') {
@@ -4848,7 +4848,7 @@ const App = {
             <button class="btn btn-primary" onclick="App.showPOForm()">+ New PO</button>
           </div>
         </div>
-        <div style="display:flex;gap:6px;margin-bottom:16px">
+        <div class="tab-bar">
           ${tabBtn('orders','Purchase Orders')}
           ${this.can('purchase_requests') ? tabBtn('requests','Purchase Requests') : ''}
         </div>
@@ -4897,7 +4897,7 @@ const App = {
           <h2>Purchasing</h2>
           <button class="btn btn-primary" onclick="App.showPRForm()">+ New Request</button>
         </div>
-        <div style="display:flex;gap:6px;margin-bottom:16px">
+        <div class="tab-bar">
           ${tabBtn('orders','Purchase Orders')}
           ${tabBtn('requests','Purchase Requests')}
         </div>
