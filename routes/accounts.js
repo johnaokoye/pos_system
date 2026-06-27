@@ -165,6 +165,33 @@ router.post('/payments', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Payment statement data for a customer (payments + per-payment allocations)
+router.get('/statement/:customer_id', async (req, res) => {
+  try {
+    const { start, end } = req.query;
+    const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.customer_id] });
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    let sql = `SELECT p.*, e.first_name || ' ' || e.last_name as employee_name
+               FROM account_payments p LEFT JOIN employees e ON p.employee_id = e.id
+               WHERE p.customer_id = ?`;
+    const params = [req.params.customer_id];
+    if (start) { sql += ' AND date(p.created_at) >= ?'; params.push(start); }
+    if (end)   { sql += ' AND date(p.created_at) <= ?'; params.push(end); }
+    sql += ' ORDER BY p.created_at ASC';
+    const { rows: payments } = await db.execute({ sql, args: params });
+    for (const p of payments) {
+      const { rows: allocs } = await db.execute({
+        sql: `SELECT pa.*, t.transaction_number, t.total as invoice_total, t.created_at as invoice_date
+              FROM payment_allocations pa LEFT JOIN transactions t ON pa.transaction_id = t.id
+              WHERE pa.payment_id = ? ORDER BY t.created_at ASC`,
+        args: [p.id]
+      });
+      p.allocations = allocs;
+    }
+    res.json({ customer, payments, period: { start: start || null, end: end || null } });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // List payments
 router.get('/payments', async (req, res) => {
   try {

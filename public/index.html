@@ -6397,6 +6397,7 @@ const App = {
                   oninput="App._arFilterCustomers(this.value)">
                 <div id="ar-cust-dd" style="display:none;position:absolute;top:100%;left:0;min-width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
               </div>
+              <span id="ar-stmt-btn"></span>
               <button id="ar-sort-btn" class="btn btn-sm btn-secondary" onclick="App._arToggleSort()">&#x2193; Newest First</button>
             </div>
           </div>
@@ -6433,6 +6434,11 @@ const App = {
     const sortBtn = document.getElementById('ar-sort-btn');
     if (sortBtn) sortBtn.innerHTML = this._arSortDir === 'desc' ? '&#x2193; Newest First' : '&#x2191; Oldest First';
 
+    const stmtBtn = document.getElementById('ar-stmt-btn');
+    if (stmtBtn) stmtBtn.innerHTML = customerId
+      ? `<button class="btn btn-sm btn-secondary" onclick="App.showStatementModal(${customerId})">&#128438; Statement</button>`
+      : '';
+
     const searchInput = document.getElementById('ar-cust-search');
     if (searchInput) {
       const customer = customerId ? this._arCustomers.find(c => String(c.id) === String(customerId)) : null;
@@ -6466,6 +6472,57 @@ const App = {
 
   _arToggleSort() {
     this._loadARPayments(this._arCustomerId || '', this._arSortDir === 'desc' ? 'asc' : 'desc');
+  },
+
+  showStatementModal(customerId) {
+    const customer = (this._arCustomers || []).find(c => String(c.id) === String(customerId));
+    const name = customer ? `${customer.first_name} ${customer.last_name}` : 'Customer';
+    const email = customer ? (customer.email || '') : '';
+    const today = new Date().toISOString().slice(0, 10);
+    const firstOfMonth = today.slice(0, 8) + '01';
+    this.showModal(`
+      <div class="modal" style="max-width:460px">
+        <div class="modal-header"><span class="modal-title">Account Statement &mdash; ${name}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
+            <div class="form-group" style="margin:0"><label>From Date</label><input type="date" id="stmt-start" value="${firstOfMonth}"></div>
+            <div class="form-group" style="margin:0"><label>To Date</label><input type="date" id="stmt-end" value="${today}"></div>
+          </div>
+          <div style="border-top:1px solid var(--border);padding-top:14px">
+            <div class="form-group" style="margin:0"><label>Email To</label>
+              <input type="email" id="stmt-email" value="${email}" placeholder="customer@email.com">
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-outline" onclick="App._printStatement(${customerId})">&#128438; Print / Preview</button>
+          <button class="btn btn-primary" onclick="App._emailStatement(${customerId})">&#9993; Send Email</button>
+        </div>
+      </div>`);
+  },
+
+  _printStatement(customerId) {
+    const start = document.getElementById('stmt-start').value;
+    const end = document.getElementById('stmt-end').value;
+    const params = new URLSearchParams();
+    if (start) params.set('start', start);
+    if (end)   params.set('end', end);
+    const url = `/api/email/statement-preview/${customerId}?${params}`;
+    const win = window.open(url, '_blank', 'width=820,height=700');
+    win.addEventListener('load', () => win.print());
+  },
+
+  async _emailStatement(customerId) {
+    const to = (document.getElementById('stmt-email').value || '').trim();
+    const start = document.getElementById('stmt-start').value;
+    const end = document.getElementById('stmt-end').value;
+    if (!to) { this.alert('Enter a recipient email address', 'error'); return; }
+    try {
+      await this.api('POST', `/email/send-statement/${customerId}`, { to, start: start||undefined, end: end||undefined });
+      this.closeModal();
+      this.alert(`Statement sent to ${to}`);
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   async _togglePaymentAllocs(paymentId, btn) {

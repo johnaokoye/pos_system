@@ -222,6 +222,152 @@ router.post('/send-quote/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+function buildStatementHtml(data, s) {
+  const { customer, payments, period } = data;
+  const storeName = s.store_name || 'My Store';
+  const storeAddr = s.store_address || '';
+  const storePhone = s.store_phone || '';
+  const customerName = `${customer.first_name} ${customer.last_name}`;
+  const totalPayments = payments.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
+  const periodText = (period.start || period.end)
+    ? `${period.start ? new Date(period.start + 'T00:00:00').toLocaleDateString() : 'Beginning'} – ${period.end ? new Date(period.end + 'T00:00:00').toLocaleDateString() : 'Today'}`
+    : 'All Time';
+
+  const paymentRows = payments.map(p => {
+    const allocRows = p.allocations && p.allocations.length
+      ? p.allocations.map(a => `
+          <tr style="background:#f9fafb">
+            <td style="padding:4px 8px 4px 28px;font-size:11px;color:#555;border-bottom:1px solid #f0f0f0">↳ ${a.transaction_number}</td>
+            <td style="padding:4px 8px;font-size:11px;color:#555;border-bottom:1px solid #f0f0f0">${new Date(a.invoice_date).toLocaleDateString()}</td>
+            <td style="padding:4px 8px;font-size:11px;color:#555;border-bottom:1px solid #f0f0f0;text-align:right">${fmt(a.invoice_total)}</td>
+            <td style="padding:4px 8px;font-size:11px;color:#16a34a;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(a.amount)}</td>
+          </tr>`).join('')
+      : `<tr style="background:#f9fafb"><td colspan="4" style="padding:4px 8px 4px 28px;font-size:11px;color:#aaa;border-bottom:1px solid #f0f0f0;font-style:italic">No invoice allocations</td></tr>`;
+    return `
+      <tr>
+        <td style="padding:8px;border-bottom:1px solid #e8e8e8;font-weight:700;font-size:13px">${p.payment_number}</td>
+        <td style="padding:8px;border-bottom:1px solid #e8e8e8;font-size:13px">${new Date(p.created_at).toLocaleDateString()}</td>
+        <td style="padding:8px;border-bottom:1px solid #e8e8e8;font-size:13px">${(p.payment_method||'cash').replace(/_/g,' ').toUpperCase()}</td>
+        <td style="padding:8px;border-bottom:1px solid #e8e8e8;font-size:13px;text-align:right;font-weight:700;color:#16a34a">${fmt(p.amount)}</td>
+      </tr>${allocRows}`;
+  }).join('');
+
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Account Statement – ${customerName}</title>
+<style>@media print{body{background:#fff!important}}</style>
+</head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
+<tr><td align="center">
+  <table width="640" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+    <tr><td style="background:#1a56db;padding:24px;text-align:center">
+      <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
+      ${storeAddr ? `<div style="color:#bcd4ff;font-size:12px;margin-top:4px">${storeAddr}</div>` : ''}
+      ${storePhone ? `<div style="color:#bcd4ff;font-size:12px">${storePhone}</div>` : ''}
+    </td></tr>
+    <tr><td style="padding:24px">
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px">
+        <tr>
+          <td style="vertical-align:top">
+            <div style="font-size:20px;font-weight:700;color:#111">ACCOUNT STATEMENT</div>
+            <div style="font-size:13px;color:#888;margin-top:2px">Period: ${periodText}</div>
+          </td>
+          <td style="text-align:right;vertical-align:top;font-size:13px;color:#444">
+            <div style="font-weight:700">${customerName}</div>
+            <div style="color:#888">${customer.customer_number || ''}</div>
+            ${customer.email ? `<div style="color:#888">${customer.email}</div>` : ''}
+            ${customer.phone ? `<div style="color:#888">${customer.phone}</div>` : ''}
+          </td>
+        </tr>
+      </table>
+      ${payments.length ? `
+      <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px;margin-bottom:16px">
+        <thead><tr style="background:#f9fafb">
+          <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Payment #</th>
+          <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Date</th>
+          <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Method</th>
+          <th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Amount</th>
+        </tr></thead>
+        <tbody>${paymentRows}</tbody>
+      </table>
+      <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444">
+        <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:4px 0"></td></tr>
+        <tr>
+          <td style="font-size:15px;font-weight:700;color:#111;padding:4px 0">Total Payments</td>
+          <td style="font-size:15px;font-weight:700;color:#16a34a;text-align:right;padding:4px 0">${fmt(totalPayments)}</td>
+        </tr>
+        <tr>
+          <td style="font-size:13px;color:#555;padding:2px 0">Outstanding Balance</td>
+          <td style="font-size:13px;font-weight:600;color:${parseFloat(customer.account_balance||0)>0?'#dc2626':'#111'};text-align:right;padding:2px 0">${fmt(customer.account_balance||0)}</td>
+        </tr>
+      </table>` : '<div style="text-align:center;padding:24px;color:#888;font-style:italic">No payments found for this period.</div>'}
+      <div style="text-align:center;margin-top:24px;font-size:11px;color:#aaa">Generated ${new Date().toLocaleString()}</div>
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body></html>`;
+}
+
+// Statement HTML preview (opens in new window for printing)
+router.get('/statement-preview/:customer_id', async (req, res) => {
+  try {
+    const { start, end } = req.query;
+    const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.customer_id] });
+    if (!customer) return res.status(404).send('<p>Customer not found</p>');
+    let sql = `SELECT p.*, e.first_name || ' ' || e.last_name as employee_name FROM account_payments p LEFT JOIN employees e ON p.employee_id = e.id WHERE p.customer_id = ?`;
+    const params = [req.params.customer_id];
+    if (start) { sql += ' AND date(p.created_at) >= ?'; params.push(start); }
+    if (end)   { sql += ' AND date(p.created_at) <= ?'; params.push(end); }
+    sql += ' ORDER BY p.created_at ASC';
+    const { rows: payments } = await db.execute({ sql, args: params });
+    for (const p of payments) {
+      const { rows: allocs } = await db.execute({ sql: `SELECT pa.*, t.transaction_number, t.total as invoice_total, t.created_at as invoice_date FROM payment_allocations pa LEFT JOIN transactions t ON pa.transaction_id = t.id WHERE pa.payment_id = ? ORDER BY t.created_at ASC`, args: [p.id] });
+      p.allocations = allocs;
+    }
+    const s = await getSettings();
+    const html = buildStatementHtml({ customer, payments, period: { start: start||null, end: end||null } }, s);
+    res.setHeader('Content-Type', 'text/html');
+    res.send(html);
+  } catch(e) { res.status(500).send(`<p>Error: ${e.message}</p>`); }
+});
+
+// Email an account statement
+router.post('/send-statement/:customer_id', async (req, res) => {
+  const { to, start, end } = req.body;
+  if (!to) return res.status(400).json({ error: 'Recipient email is required' });
+  try {
+    const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.customer_id] });
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    let sql = `SELECT p.*, e.first_name || ' ' || e.last_name as employee_name FROM account_payments p LEFT JOIN employees e ON p.employee_id = e.id WHERE p.customer_id = ?`;
+    const params = [req.params.customer_id];
+    if (start) { sql += ' AND date(p.created_at) >= ?'; params.push(start); }
+    if (end)   { sql += ' AND date(p.created_at) <= ?'; params.push(end); }
+    sql += ' ORDER BY p.created_at ASC';
+    const { rows: payments } = await db.execute({ sql, args: params });
+    for (const p of payments) {
+      const { rows: allocs } = await db.execute({ sql: `SELECT pa.*, t.transaction_number, t.total as invoice_total, t.created_at as invoice_date FROM payment_allocations pa LEFT JOIN transactions t ON pa.transaction_id = t.id WHERE pa.payment_id = ? ORDER BY t.created_at ASC`, args: [p.id] });
+      p.allocations = allocs;
+    }
+    const s = await getSettings();
+    const html = buildStatementHtml({ customer, payments, period: { start: start||null, end: end||null } }, s);
+    const customerName = `${customer.first_name} ${customer.last_name}`;
+    try {
+      const transporter = createTransporter(s);
+      const fromName = s.email_from_name || s.store_name || 'POS System';
+      const fromAddr = s.email_smtp_user || s.store_email || '';
+      await transporter.sendMail({
+        from: `"${fromName}" <${fromAddr}>`,
+        to,
+        subject: `Account Statement – ${customerName} | ${s.store_name || 'Our Store'}`,
+        html,
+      });
+      res.json({ success: true, message: `Statement sent to ${to}` });
+    } catch(e) { res.status(500).json({ error: `Failed to send email: ${e.message}` }); }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Test SMTP connection
 router.post('/test', async (req, res) => {
   try {
