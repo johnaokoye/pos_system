@@ -4479,6 +4479,14 @@ const App = {
               </tbody>
             </table>
           </div>
+          <div class="card" style="margin-bottom:16px">
+            <div class="card-header">
+              <span class="card-title">API Keys</span>
+              <button class="btn btn-primary btn-sm" onclick="App.showCreateApiKeyModal()">+ New Key</button>
+            </div>
+            <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">API keys allow external systems (e-commerce sites, integrations) to authenticate with this POS. Each key can be scoped to specific resources.</p>
+            <div id="api-keys-table"><p style="font-size:13px;color:var(--text-muted)">Loading…</p></div>
+          </div>
           <div class="card">
             <div class="card-header"><span class="card-title">System Info</span></div>
             <div style="font-size:13px;line-height:2;color:var(--text-muted)">
@@ -4492,6 +4500,7 @@ const App = {
       </div>`;
     this.loadDenominations();
     this.loadWooLogs();
+    this.loadApiKeys();
   },
 
   async loadDenominations() {
@@ -4529,6 +4538,85 @@ const App = {
   async deleteDenomination(id) {
     await this.api('DELETE', `/denominations/${id}`);
     this.loadDenominations();
+  },
+
+  async loadApiKeys() {
+    const wrap = document.getElementById('api-keys-table');
+    if (!wrap) return;
+    try {
+      const keys = await this.api('GET', '/api-keys');
+      if (!keys.length) {
+        wrap.innerHTML = `<p style="font-size:13px;color:var(--text-muted);margin:0">No API keys yet. Create one to allow external integrations.</p>`;
+        return;
+      }
+      const scopeLabel = s => s === '*' ? 'Full Access' : s;
+      wrap.innerHTML = `<table class="table" style="font-size:12px">
+        <thead><tr><th>Name</th><th>Prefix</th><th>Scopes</th><th>Last Used</th><th>Status</th><th></th></tr></thead>
+        <tbody>${keys.map(k => `<tr>
+          <td class="fw-600">${this.esc(k.name)}</td>
+          <td style="font-family:monospace">${k.key_prefix}…</td>
+          <td style="max-width:160px;white-space:normal">${JSON.parse(k.scopes||'[]').map(scopeLabel).join(', ')}</td>
+          <td style="color:var(--text-muted)">${k.last_used_at ? new Date(k.last_used_at).toLocaleDateString() : 'Never'}</td>
+          <td><span class="badge ${k.is_active?'badge-success':'badge-danger'}">${k.is_active?'Active':'Revoked'}</span></td>
+          <td>${k.is_active ? `<button class="btn btn-secondary btn-sm" onclick="App.revokeApiKey(${k.id})">Revoke</button>` : ''}</td>
+        </tr>`).join('')}</tbody>
+      </table>`;
+    } catch(e) { wrap.innerHTML = `<p style="color:var(--danger)">${e.message}</p>`; }
+  },
+
+  showCreateApiKeyModal() {
+    const scopeOptions = [
+      { value: '*',               label: 'Full Access (all endpoints)' },
+      { value: 'products:read',   label: 'Products — Read' },
+      { value: 'products:write',  label: 'Products — Write' },
+      { value: 'customers:read',  label: 'Customers — Read' },
+      { value: 'customers:write', label: 'Customers — Write' },
+      { value: 'orders:read',     label: 'Orders — Read' },
+      { value: 'orders:write',    label: 'Orders — Write' },
+    ];
+    this.showModal(`
+      <h3 style="margin:0 0 16px">Create API Key</h3>
+      <div class="form-group"><label>Name <span style="color:var(--text-muted);font-weight:400">(e.g. "E-commerce Site")</span></label>
+        <input id="ak-name" placeholder="My Integration" autofocus>
+      </div>
+      <div class="form-group">
+        <label>Scopes</label>
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 8px">Select what this key is allowed to do. For a full e-commerce integration, "Full Access" is simplest.</p>
+        ${scopeOptions.map(o => `<label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;cursor:pointer;font-weight:400">
+          <input type="checkbox" class="ak-scope" value="${o.value}" style="width:auto" ${o.value==='*'?'checked':''}>
+          <span><strong style="font-family:monospace;font-size:11px">${o.value}</strong> — ${o.label}</span>
+        </label>`).join('')}
+      </div>
+      <div style="display:flex;gap:8px;margin-top:16px">
+        <button class="btn btn-primary" onclick="App.createApiKey()">Generate Key</button>
+        <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+      </div>`);
+  },
+
+  async createApiKey() {
+    const name = document.getElementById('ak-name')?.value.trim();
+    if (!name) return this.alert('Enter a name for this key', 'error');
+    const scopes = [...document.querySelectorAll('.ak-scope:checked')].map(el => el.value);
+    if (!scopes.length) return this.alert('Select at least one scope', 'error');
+    try {
+      const result = await this.api('POST', '/api-keys', { name, scopes });
+      this.showModal(`
+        <h3 style="margin:0 0 8px">API Key Created</h3>
+        <p style="font-size:13px;color:var(--danger);margin:0 0 12px">Copy this key now — it will <strong>never be shown again</strong>.</p>
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;font-family:monospace;font-size:13px;word-break:break-all;margin-bottom:12px">${result.key}</div>
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 16px">Send it in the <code>X-API-Key</code> header or as <code>Authorization: Bearer &lt;key&gt;</code></p>
+        <button class="btn btn-primary" onclick="navigator.clipboard.writeText('${result.key}').then(()=>App.alert('Copied!','success'))">Copy to Clipboard</button>
+        <button class="btn btn-secondary" style="margin-left:8px" onclick="App.closeModal();App.loadApiKeys()">Done</button>`);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async revokeApiKey(id) {
+    if (!confirm('Revoke this API key? Any integrations using it will immediately lose access.')) return;
+    try {
+      await this.api('DELETE', `/api-keys/${id}`);
+      this.alert('API key revoked', 'success');
+      this.loadApiKeys();
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   async saveSettings() {

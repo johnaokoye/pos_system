@@ -6,6 +6,7 @@ const path = require('path');
 
 const { ensureReady, db } = require('./database');
 const { router: woocommerceRouter, runSyncAll: wooSyncAll } = require('./routes/woocommerce');
+const { apiKeyAuth } = require('./lib/apiKeyAuth');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -19,6 +20,10 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use(async (req, res, next) => {
   try { await ensureReady(); next(); } catch(e) { res.status(500).json({ error: 'Database initialization failed' }); }
 });
+
+// API key authentication — validates X-API-Key / Authorization: Bearer headers.
+// Requests without a key pass through unchanged (frontend browser sessions).
+app.use('/api', apiKeyAuth);
 
 app.use('/api/products',         require('./routes/products'));
 app.use('/api/categories',       require('./routes/categories'));
@@ -43,6 +48,7 @@ app.use('/api/drawers',         require('./routes/drawers'));
 app.use('/api/promotions',      require('./routes/promotions'));
 app.use('/api/denominations',   require('./routes/denominations'));
 app.use('/api/woocommerce',    woocommerceRouter);
+app.use('/api/api-keys',       require('./routes/api-keys'));
 
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));

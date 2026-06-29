@@ -616,6 +616,16 @@ async function _init() {
       started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       completed_at DATETIME
     )` },
+    { sql: `CREATE TABLE IF NOT EXISTS api_keys (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      key_prefix TEXT NOT NULL,
+      key_hash TEXT NOT NULL UNIQUE,
+      scopes TEXT NOT NULL DEFAULT '["*"]',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      last_used_at DATETIME,
+      is_active INTEGER NOT NULL DEFAULT 1
+    )` },
   ], 'write');
 
   // Migrations — each in its own try/catch
