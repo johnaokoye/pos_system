@@ -3697,6 +3697,11 @@ const App = {
             <option value="completed">Completed</option>
             <option value="voided">Voided</option>
           </select>
+          <select id="tx-source" style="width:145px">
+            <option value="">All Orders</option>
+            <option value="online">Online Orders</option>
+            <option value="pos">In-Store (POS)</option>
+          </select>
           <input type="text" id="tx-number" placeholder="Tx # search…" style="width:150px">
           <input type="text" id="tx-customer" placeholder="Customer name…" style="width:160px">
           <button class="btn btn-primary" onclick="App.loadTransactions()">Search</button>
@@ -3737,9 +3742,11 @@ const App = {
     const status = document.getElementById('tx-status').value;
     const txNumber = document.getElementById('tx-number').value.trim();
     const customerName = document.getElementById('tx-customer').value.trim();
+    const source = document.getElementById('tx-source').value;
     let url = `/transactions?start=${start}&end=${end}`;
     if (branch) url += `&branch_id=${branch}`;
     if (status) url += `&status=${status}`;
+    if (source) url += `&source=${encodeURIComponent(source)}`;
     if (txNumber) url += `&transaction_number=${encodeURIComponent(txNumber)}`;
     if (customerName) url += `&customer_name=${encodeURIComponent(customerName)}`;
     const txs = await this.api('GET', url);

@@ -62,7 +62,7 @@ router.delete('/:id/hold', async (req, res) => {
 
 router.get('/', async (req, res) => {
   try {
-    const { start, end, customer_id, customer_name, status, branch_id, payment_method, transaction_number, limit = 100 } = req.query;
+    const { start, end, customer_id, customer_name, status, branch_id, payment_method, transaction_number, source, limit = 100 } = req.query;
     let sql = `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN branches b ON t.branch_id = b.id WHERE 1=1`;
     const params = [];
     if (transaction_number) { sql += ' AND t.transaction_number LIKE ?'; params.push(`%${transaction_number}%`); }
@@ -73,6 +73,8 @@ router.get('/', async (req, res) => {
     if (status) { sql += ' AND t.status = ?'; params.push(status); }
     if (branch_id) { sql += ' AND t.branch_id = ?'; params.push(branch_id); }
     if (payment_method) { sql += ' AND t.payment_method = ?'; params.push(payment_method); }
+    if (source === 'online') { sql += " AND t.source IN ('online','woocommerce')"; }
+    else if (source) { sql += ' AND t.source = ?'; params.push(source); }
     sql += ' ORDER BY t.created_at DESC LIMIT ?';
     params.push(parseInt(limit));
     const { rows } = await db.execute({ sql, args: params });
