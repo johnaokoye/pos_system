@@ -4424,10 +4424,10 @@ const App = {
           </div>
           <div class="card" style="margin-top:16px">
             <div class="card-header">
-              <span class="card-title">WooCommerce Sync</span>
+              <span class="card-title">Ecommerce Sync</span>
               <span id="woo-conn-status" style="font-size:12px"></span>
             </div>
-            <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">Products and customers push from POS → WooCommerce. WooCommerce orders import as POS transactions.</p>
+            <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">Products and customers push from POS → Ecommerce. Ecommerce orders import as POS transactions.</p>
             <div class="form-group"><label>Store URL</label><input id="woo-url" placeholder="https://yourstore.com" value="${s.woo_url||''}"></div>
             <div class="form-group"><label>POS Public URL <span style="font-weight:400;color:var(--text-muted)">(for image sync)</span></label><input id="woo-pos-url" placeholder="https://your-pos-server.com" value="${s.woo_pos_url||''}"></div>
             <div class="input-row">
@@ -4680,7 +4680,7 @@ const App = {
     };
     try {
       await this.api('PUT', '/settings', data);
-      this.alert('WooCommerce settings saved');
+      this.alert('Ecommerce settings saved');
     } catch (e) { this.alert(e.message, 'error'); }
   },
 
