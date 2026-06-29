@@ -201,10 +201,27 @@ async function syncProducts() {
     const s = await getWcSettings();
     const catMap = await ensureWcCategories(s);
 
-    const { rows: products } = await db.execute({
-      sql: 'SELECT p.* FROM products p WHERE p.active = 1',
+    const { rows: [branchRow] } = await db.execute({
+      sql: "SELECT value FROM settings WHERE key = 'woo_sync_branch_id'",
       args: [],
     });
+    const syncBranchId = branchRow?.value ? Number(branchRow.value) : null;
+
+    let products;
+    if (syncBranchId) {
+      ({ rows: products } = await db.execute({
+        sql: `SELECT p.*, COALESCE(bi.stock_qty, 0) AS branch_stock_qty
+              FROM products p
+              LEFT JOIN branch_inventory bi ON bi.product_id = p.id AND bi.branch_id = ?
+              WHERE p.active = 1 AND p.online_available = 1`,
+        args: [syncBranchId],
+      }));
+    } else {
+      ({ rows: products } = await db.execute({
+        sql: 'SELECT p.*, p.stock_qty AS branch_stock_qty FROM products p WHERE p.active = 1 AND p.online_available = 1',
+        args: [],
+      }));
+    }
 
     const { rows: mapped } = await db.execute({
       sql: "SELECT local_id, woo_id FROM woo_sync_map WHERE entity_type = 'product'",
@@ -222,7 +239,7 @@ async function syncProducts() {
         regular_price: String(p.price),
         description: p.description || '',
         manage_stock: true,
-        stock_quantity: p.stock_qty,
+        stock_quantity: p.web_allotment != null ? Math.min(p.branch_stock_qty, p.web_allotment) : p.branch_stock_qty,
         status: 'publish',
         tax_status: p.tax_rate > 0 ? 'taxable' : 'none',
         ...(p.category_id && catMap[p.category_id]
@@ -400,8 +417,8 @@ async function syncOrders() {
           sql: `INSERT OR IGNORE INTO transactions
                   (transaction_number, customer_id, employee_id, subtotal, tax_amount,
                    discount_amount, total, payment_method, amount_tendered, change_amount,
-                   status, notes, created_at)
-                VALUES (?,?,1,?,?,?,?,?,?,0,?,?,?)`,
+                   status, notes, created_at, source)
+                VALUES (?,?,1,?,?,?,?,?,?,0,?,?,?,'woocommerce')`,
           args: [txNum, customerId, subtotal, taxAmount, discountAmount, total,
                  paymentMethod, total, 'completed',
                  `WooCommerce Order #${order.number}`, createdAt],

@@ -675,10 +675,18 @@ async function _init() {
     'ALTER TABLE transactions ADD COLUMN tax_exemption_number TEXT',
     'ALTER TABLE transactions ADD COLUMN approval_code TEXT',
     'ALTER TABLE drawer_reconciliations ADD COLUMN direct_deposit_counted REAL DEFAULT 0',
+    'ALTER TABLE products ADD COLUMN online_available INTEGER DEFAULT 0',
+    'ALTER TABLE products ADD COLUMN web_allotment INTEGER',
+    "ALTER TABLE transactions ADD COLUMN source TEXT DEFAULT 'pos'",
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
   }
+
+  // Backfill source for WooCommerce-imported transactions
+  try {
+    await db.execute({ sql: "UPDATE transactions SET source='woocommerce' WHERE transaction_number LIKE 'WC-%' AND (source IS NULL OR source='pos')", args: [] });
+  } catch(e) {}
 
   // Add CRM + commissions permissions to existing security groups
   try {
