@@ -2427,6 +2427,17 @@ const App = {
       <div class="form-group"><label>Status</label>
         <select id="pf-active"><option value="1" ${p.active!==0?'selected':''}>Active</option><option value="0" ${p.active===0?'selected':''}>Inactive</option></select>
       </div>
+      <div style="border:1px solid var(--border);border-radius:6px;padding:12px;margin-top:4px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <input type="checkbox" id="pf-online" ${p.online_available?'checked':''} onchange="document.getElementById('pf-web-allotment-wrap').style.display=this.checked?'':'none'" style="width:auto;margin:0">
+          <label for="pf-online" style="margin:0;font-weight:500;cursor:pointer">Available for Online Sales</label>
+        </div>
+        <div id="pf-web-allotment-wrap" style="display:${p.online_available?'':'none'}">
+          <div class="form-group" style="margin:0"><label>Web Sales Allotment <span style="font-weight:400;color:var(--text-muted)">(qty reserved for online — blank uses full stock)</span></label>
+            <input type="number" id="pf-web-allotment" value="${p.web_allotment??''}" min="0" placeholder="Leave blank to use full stock qty">
+          </div>
+        </div>
+      </div>
       ${id ? `<div class="form-group" style="margin-top:4px"><label>Product Image</label>
         <div style="display:flex;align-items:center;gap:10px;margin-top:4px">
           ${p.image_path ? `<img src="${p.image_path}" class="prod-img-thumb" id="pf-img-preview" alt="">` : `<div class="prod-img-placeholder" id="pf-img-preview" onclick="document.getElementById('pf-img-input').click()">📷</div>`}
@@ -2507,6 +2518,8 @@ const App = {
       stock_qty: parseInt(document.getElementById('pf-stock').value) || 0,
       min_stock: parseInt(document.getElementById('pf-minstock').value) || 5,
       active: parseInt(document.getElementById('pf-active').value),
+      online_available: document.getElementById('pf-online').checked ? 1 : 0,
+      web_allotment: document.getElementById('pf-web-allotment').value !== '' ? parseInt(document.getElementById('pf-web-allotment').value) : null,
     };
     if (!id) {
       const branchEl = document.getElementById('pf-branch');
@@ -3699,7 +3712,7 @@ const App = {
     return `<table>
       <thead><tr><th>Tx #</th><th>Date/Time</th><th>Customer</th><th>Branch</th><th>Items</th><th>Subtotal</th><th>Tax</th><th>Total</th><th>Method</th><th>Status</th><th>Actions</th></tr></thead>
       <tbody>${txs.map(tx => `<tr>
-        <td class="fw-600" style="font-family:monospace">${tx.transaction_number}</td>
+        <td class="fw-600" style="font-family:monospace">${tx.transaction_number}${tx.transaction_number.startsWith('WC-')?'<br><span style="font-size:10px;background:#6366f1;color:#fff;border-radius:3px;padding:1px 5px;font-family:sans-serif;font-weight:500;letter-spacing:.3px">ONLINE</span>':''}</td>
         <td style="white-space:nowrap">${this.fmtDateTime(tx.created_at)}</td>
         <td>${tx.customer_name || '<em style="color:#999">Walk-in</em>'}</td>
         <td style="font-size:12px;color:var(--text-muted)">${tx.branch_name || '—'}</td>
@@ -3739,6 +3752,7 @@ const App = {
       <div class="modal" style="max-width:500px">
         <div class="modal-header"><span class="modal-title">Transaction ${tx.transaction_number}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
+          ${tx.transaction_number.startsWith('WC-') ? `<div style="background:#eef2ff;border:1px solid #c7d2fe;border-left:3px solid #6366f1;border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:12px;display:flex;align-items:center;gap:8px"><span style="background:#6366f1;color:#fff;border-radius:3px;padding:2px 7px;font-weight:600;font-size:11px;letter-spacing:.3px">ONLINE</span><span>Imported from ecommerce &nbsp;·&nbsp; <span style="color:var(--text-muted)">${tx.notes||''}</span></span></div>` : ''}
           ${tx.source_quote_number ? `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--primary);border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:12px;display:flex;justify-content:space-between;align-items:center">
             <span>Converted from quotation <a href="#" style="font-weight:700;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewQuote(${tx.source_quote_id})">${tx.source_quote_number}</a>${tx.quote_created_by ? ` &nbsp;·&nbsp; <span style="color:var(--text-muted)">Created by</span> <strong>${tx.quote_created_by}</strong>` : ''}</span>
           </div>` : ''}
@@ -4337,8 +4351,11 @@ const App = {
 
   // ─── Settings ─────────────────────────────────────────────
   async renderSettings() {
-    const s = await this.api('GET', '/settings');
-    const categories = await this.api('GET', '/categories');
+    const [s, categories, branches] = await Promise.all([
+      this.api('GET', '/settings'),
+      this.api('GET', '/categories'),
+      this.api('GET', '/branches'),
+    ]);
 
     document.getElementById('content').innerHTML = `
       <div class="section-header"><h2>Settings</h2></div>
@@ -4443,6 +4460,13 @@ const App = {
                 <option value="60" ${s.woo_sync_interval==='60'?'selected':''}>Every hour</option>
                 <option value="120" ${s.woo_sync_interval==='120'?'selected':''}>Every 2 hours</option>
                 <option value="1440" ${s.woo_sync_interval==='1440'?'selected':''}>Daily</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Inventory Source <span style="font-weight:400;color:var(--text-muted)">(branch/warehouse whose stock levels are pushed online)</span></label>
+              <select id="woo-sync-branch">
+                <option value="" ${!s.woo_sync_branch_id?'selected':''}>Global Stock</option>
+                ${branches.map(b => `<option value="${b.id}" ${s.woo_sync_branch_id==b.id?'selected':''}>${b.name}${b.is_warehouse?' (Warehouse)':''}</option>`).join('')}
               </select>
             </div>
             <div style="display:flex;gap:8px;margin-bottom:16px">
@@ -4677,6 +4701,7 @@ const App = {
       woo_consumer_key: document.getElementById('woo-ck').value.trim(),
       woo_consumer_secret: document.getElementById('woo-cs').value.trim(),
       woo_sync_interval: document.getElementById('woo-interval').value,
+      woo_sync_branch_id: document.getElementById('woo-sync-branch').value || null,
     };
     try {
       await this.api('PUT', '/settings', data);
