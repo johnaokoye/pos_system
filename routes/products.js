@@ -15,9 +15,37 @@ const upload = multer({
 // GET all products
 router.get('/', async (req, res) => {
   try {
-    const { search, category, active, low_stock, branch_id, supplier_id, is_service } = req.query;
+    const { search, category, active, low_stock, branch_id, supplier_id, is_service, online } = req.query;
     const params = [];
     let sql;
+
+    if (online === '1' || online === 'true') {
+      const { rows: [setting] } = await db.execute({ sql: "SELECT value FROM settings WHERE key='woo_sync_branch_id'", args: [] });
+      const syncBranchId = setting?.value;
+      const onlineParams = [];
+      let stockExpr, joinClause = '';
+      if (syncBranchId) {
+        joinClause = ` LEFT JOIN branch_inventory bi ON p.id = bi.product_id AND bi.branch_id = ?`;
+        onlineParams.push(syncBranchId);
+        stockExpr = `CASE WHEN p.web_allotment IS NOT NULL THEN MIN(COALESCE(bi.stock_qty, 0), p.web_allotment) ELSE COALESCE(bi.stock_qty, 0) END`;
+      } else {
+        stockExpr = `CASE WHEN p.web_allotment IS NOT NULL THEN MIN(COALESCE(p.stock_qty, 0), p.web_allotment) ELSE COALESCE(p.stock_qty, 0) END`;
+      }
+      let onlineSql = `SELECT p.id, p.sku, p.name, p.description, p.category_id, p.price, p.cost,
+        p.tax_rate, p.active, p.image_path, p.is_service, p.unit,
+        p.online_available, p.web_allotment, p.stock_qty as global_stock_qty,
+        ${stockExpr} as stock_qty,
+        c.name as category_name,
+        (SELECT COUNT(*) FROM product_variations WHERE product_id = p.id AND active = 1) as has_variations
+        FROM products p
+        LEFT JOIN categories c ON p.category_id = c.id${joinClause}
+        WHERE p.active = 1 AND p.online_available = 1`;
+      if (search) { onlineSql += ` AND (p.name LIKE ? OR p.sku LIKE ?)`; onlineParams.push(`%${search}%`, `%${search}%`); }
+      if (category) { onlineSql += ` AND p.category_id = ?`; onlineParams.push(category); }
+      onlineSql += ` ORDER BY p.name`;
+      const { rows: onlineRows } = await db.execute({ sql: onlineSql, args: onlineParams });
+      return res.json(onlineRows);
+    }
 
     if (branch_id) {
       sql = `SELECT p.id, p.sku, p.barcode, p.name, p.description, p.category_id, p.price, p.cost, p.tax_rate, p.active, p.created_at, p.supplier_id, p.image_path, p.is_service, p.unit,
@@ -246,6 +274,30 @@ router.get('/:id/movements', async (req, res) => {
 // GET single product
 router.get('/:id', async (req, res) => {
   try {
+    const { online } = req.query;
+    if (online === '1' || online === 'true') {
+      const { rows: [setting] } = await db.execute({ sql: "SELECT value FROM settings WHERE key='woo_sync_branch_id'", args: [] });
+      const syncBranchId = setting?.value;
+      const onlineParams = [req.params.id];
+      let stockExpr, joinClause = '';
+      if (syncBranchId) {
+        joinClause = ` LEFT JOIN branch_inventory bi ON p.id = bi.product_id AND bi.branch_id = ?`;
+        onlineParams.unshift(syncBranchId);
+        stockExpr = `CASE WHEN p.web_allotment IS NOT NULL THEN MIN(COALESCE(bi.stock_qty, 0), p.web_allotment) ELSE COALESCE(bi.stock_qty, 0) END`;
+      } else {
+        stockExpr = `CASE WHEN p.web_allotment IS NOT NULL THEN MIN(COALESCE(p.stock_qty, 0), p.web_allotment) ELSE COALESCE(p.stock_qty, 0) END`;
+      }
+      const { rows: [product] } = await db.execute({
+        sql: `SELECT p.id, p.sku, p.name, p.description, p.category_id, p.price, p.cost, p.tax_rate,
+          p.active, p.image_path, p.is_service, p.unit,
+          p.online_available, p.web_allotment, p.stock_qty as global_stock_qty,
+          ${stockExpr} as stock_qty, c.name as category_name
+          FROM products p LEFT JOIN categories c ON p.category_id = c.id${joinClause} WHERE p.id = ?`,
+        args: onlineParams
+      });
+      if (!product) return res.status(404).json({ error: 'Product not found' });
+      return res.json(product);
+    }
     const { rows: [product] } = await db.execute({ sql: `SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE p.id = ?`, args: [req.params.id] });
     if (!product) return res.status(404).json({ error: 'Product not found' });
     res.json(product);
@@ -254,11 +306,11 @@ router.get('/:id', async (req, res) => {
 
 // POST create product
 router.post('/', async (req, res) => {
-  const { sku, barcode, name, description, category_id, price, cost, tax_rate, stock_qty, min_stock, active, branch_id, supplier_id, is_service, unit } = req.body;
+  const { sku, barcode, name, description, category_id, price, cost, tax_rate, stock_qty, min_stock, active, branch_id, supplier_id, is_service, unit, online_available, web_allotment } = req.body;
   if (!sku || !name) return res.status(400).json({ error: 'SKU and name are required' });
   try {
     const svc = is_service ? 1 : 0;
-    const result = await db.execute({ sql: `INSERT INTO products (sku,barcode,name,description,category_id,price,cost,tax_rate,stock_qty,min_stock,active,supplier_id,is_service,unit) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, tax_rate??8.5, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null] });
+    const result = await db.execute({ sql: `INSERT INTO products (sku,barcode,name,description,category_id,price,cost,tax_rate,stock_qty,min_stock,active,supplier_id,is_service,unit,online_available,web_allotment) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, tax_rate??8.5, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null] });
     const productId = Number(result.lastInsertRowid);
     if (!svc && branch_id && (parseInt(stock_qty) || 0) > 0) {
       await db.execute({ sql: 'INSERT OR IGNORE INTO branch_inventory (product_id, branch_id, stock_qty, min_stock) VALUES (?, ?, ?, ?)', args: [productId, branch_id, parseInt(stock_qty) || 0, parseInt(min_stock) || 5] });
@@ -272,10 +324,10 @@ router.post('/', async (req, res) => {
 
 // PUT update product
 router.put('/:id', async (req, res) => {
-  const { sku, barcode, name, description, category_id, price, cost, tax_rate, stock_qty, min_stock, active, supplier_id, is_service, unit } = req.body;
+  const { sku, barcode, name, description, category_id, price, cost, tax_rate, stock_qty, min_stock, active, supplier_id, is_service, unit, online_available, web_allotment } = req.body;
   try {
     const svc = is_service ? 1 : 0;
-    await db.execute({ sql: `UPDATE products SET sku=?,barcode=?,name=?,description=?,category_id=?,price=?,cost=?,tax_rate=?,stock_qty=?,min_stock=?,active=?,supplier_id=?,is_service=?,unit=? WHERE id=?`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, tax_rate??8.5, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, req.params.id] });
+    await db.execute({ sql: `UPDATE products SET sku=?,barcode=?,name=?,description=?,category_id=?,price=?,cost=?,tax_rate=?,stock_qty=?,min_stock=?,active=?,supplier_id=?,is_service=?,unit=?,online_available=?,web_allotment=? WHERE id=?`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, tax_rate??8.5, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null, req.params.id] });
     const { rows: [prod] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [req.params.id] });
     res.json(prod);
   } catch (e) {
