@@ -404,6 +404,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 14l-5-5 1.41-1.41L12 14.17l7.59-7.59L21 8l-9 9z"/></svg>
       Transactions
     </div>
+    <div class="nav-item" data-section="online-orders">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zm4.24 16L12 15.45 7.77 18l1.12-4.81-3.73-3.23 4.92-.42L12 5l1.92 4.53 4.92.42-3.73 3.23L16.23 18z"/></svg>
+      Online Orders
+    </div>
     <div class="nav-item" data-section="accounts">
       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M11.8 10.9c-2.27-.59-3-1.2-3-2.15 0-1.09 1.01-1.85 2.7-1.85 1.78 0 2.44.85 2.5 2.1h2.21c-.07-1.72-1.12-3.3-3.21-3.81V3h-3v2.16c-1.94.42-3.5 1.68-3.5 3.61 0 2.31 1.91 3.46 4.7 4.13 2.5.6 3 1.48 3 2.41 0 .69-.49 1.79-2.7 1.79-2.06 0-2.87-.92-2.98-2.1h-2.2c.12 2.19 1.76 3.42 3.68 3.83V21h3v-2.15c1.95-.37 3.5-1.5 3.5-3.55 0-2.84-2.43-3.81-4.7-4.4z"/></svg>
       Accounts / AR
@@ -803,7 +807,7 @@ const App = {
       const s = el.dataset.section;
       // Cash Drawers nav requires the drawers_manage sub-permission specifically;
       // the parent drawers key only grants POS drawer access
-      const show = s === 'drawers' ? !!perms.drawers_manage : this.can(s);
+      const show = s === 'drawers' ? !!perms.drawers_manage : s === 'online-orders' ? this.can('transactions') : this.can(s);
       el.style.display = show ? '' : 'none';
     });
     document.querySelectorAll('.nav-group-label').forEach(label => {
@@ -835,13 +839,13 @@ const App = {
     this.section = name;
     this.closeModal();
     document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.section === name));
-    const titles = { dashboard: 'Dashboard', pos: 'Point of Sale', inventory: 'Inventory Management', services: 'Services & Non-Inventory Items', customers: 'Customers', transactions: 'Transactions', reports: 'Reports & Analytics', employees: 'Employees', settings: 'Settings', suppliers: 'Suppliers', purchasing: 'Purchasing', quotations: 'Quotations', accounts: 'Accounts Receivable', branches: 'Branch Management', security: 'Security Groups', transfers: 'Branch Transfers', crm: 'CRM & Sales', commissions: 'Commission Tracking', warehouse: 'Warehouse Management', shipping: 'Shipping', 'cycle-counts': 'Cycle Counts', drawers: 'Cash Drawers', promotions: 'Promotions' };
+    const titles = { dashboard: 'Dashboard', pos: 'Point of Sale', inventory: 'Inventory Management', services: 'Services & Non-Inventory Items', customers: 'Customers', transactions: 'Transactions', 'online-orders': 'Online Orders', reports: 'Reports & Analytics', employees: 'Employees', settings: 'Settings', suppliers: 'Suppliers', purchasing: 'Purchasing', quotations: 'Quotations', accounts: 'Accounts Receivable', branches: 'Branch Management', security: 'Security Groups', transfers: 'Branch Transfers', crm: 'CRM & Sales', commissions: 'Commission Tracking', warehouse: 'Warehouse Management', shipping: 'Shipping', 'cycle-counts': 'Cycle Counts', drawers: 'Cash Drawers', promotions: 'Promotions' };
     document.getElementById('topbar-title').textContent = titles[name] || name;
     const content = document.getElementById('content');
     content.style.padding = name === 'pos' ? '0' : '20px';
     content.style.overflow = name === 'pos' ? 'hidden' : 'auto';
     content.style.height = name === 'pos' ? '100%' : 'auto';
-    const renders = { dashboard: () => this.renderDashboard(), pos: () => this.renderPOS(), inventory: () => this.renderInventory(), services: () => this.renderServices(), customers: () => this.renderCustomers(), transactions: () => this.renderTransactions(), reports: () => this.renderReports(), employees: () => this.renderEmployees(), settings: () => this.renderSettings(), suppliers: () => this.renderSuppliers(), purchasing: () => this.renderPurchasing(), quotations: () => this.renderQuotations(), accounts: () => this.renderAccounts(), branches: () => this.renderBranches(), security: () => this.renderSecurity(), transfers: () => this.renderTransfers(), crm: () => this.renderCRM(), commissions: () => this.renderCommissions(), warehouse: () => this.renderWarehouse(), shipping: () => this.renderShipping(), 'cycle-counts': () => this.renderCycleCounts(), drawers: () => this.renderDrawers(), promotions: () => this.renderPromotions() };
+    const renders = { dashboard: () => this.renderDashboard(), pos: () => this.renderPOS(), inventory: () => this.renderInventory(), services: () => this.renderServices(), customers: () => this.renderCustomers(), transactions: () => this.renderTransactions(), 'online-orders': () => this.renderOnlineOrders(), reports: () => this.renderReports(), employees: () => this.renderEmployees(), settings: () => this.renderSettings(), suppliers: () => this.renderSuppliers(), purchasing: () => this.renderPurchasing(), quotations: () => this.renderQuotations(), accounts: () => this.renderAccounts(), branches: () => this.renderBranches(), security: () => this.renderSecurity(), transfers: () => this.renderTransfers(), crm: () => this.renderCRM(), commissions: () => this.renderCommissions(), warehouse: () => this.renderWarehouse(), shipping: () => this.renderShipping(), 'cycle-counts': () => this.renderCycleCounts(), drawers: () => this.renderDrawers(), promotions: () => this.renderPromotions() };
     if (renders[name]) await renders[name]();
   },
 
@@ -3710,6 +3714,242 @@ const App = {
       <div class="card">
         <div class="table-wrap" id="tx-table">${this.buildTxTable(txs)}</div>
       </div>`;
+  },
+
+  // ─── Online Orders Dashboard ───────────────────────────────────────────────
+
+  async renderOnlineOrders() {
+    const today = new Date().toISOString().slice(0,10);
+    const weekAgo = new Date(Date.now()-7*86400000).toISOString().slice(0,10);
+    const [txs, settingRows] = await Promise.all([
+      this.api('GET', `/transactions?source=online&start=${weekAgo}&end=${today}`),
+      this.api('GET', '/settings').catch(() => [])
+    ]);
+    this._onlineCompanyName = (Array.isArray(settingRows) ? settingRows : []).find(s => s.key==='company_name')?.value || 'Store';
+    const todayStr = today;
+    const todayTxs = txs.filter(t => t.created_at && t.created_at.slice(0,10) === todayStr);
+    const todayRevenue = todayTxs.reduce((s,t)=>s+(t.total||0),0);
+    const cnt = st => txs.filter(t=>(t.fulfillment_status||'pending')===st).length;
+    document.getElementById('content').innerHTML = `
+      <div class="section-header">
+        <h2>Online Orders</h2>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <label style="font-size:13px;text-transform:none;color:var(--text)">From</label>
+          <input type="date" id="oo-start" value="${weekAgo}" style="width:150px">
+          <label style="font-size:13px;text-transform:none;color:var(--text)">To</label>
+          <input type="date" id="oo-end" value="${today}" style="width:150px">
+          <select id="oo-fulfillment" style="width:155px">
+            <option value="">All Statuses</option>
+            <option value="pending">Pending</option>
+            <option value="processing">Processing</option>
+            <option value="shipped">Shipped</option>
+            <option value="delivered">Delivered</option>
+            <option value="cancelled">Cancelled</option>
+          </select>
+          <input type="text" id="oo-customer" placeholder="Customer name…" style="width:160px">
+          <input type="text" id="oo-txnum" placeholder="Order # search…" style="width:150px">
+          <button class="btn btn-primary" onclick="App.loadOnlineOrders()">Search</button>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-bottom:20px">
+        ${[
+          {label:"Today's Revenue", val:this.fmt(todayRevenue), color:'var(--primary)'},
+          {label:"Today's Orders",  val:todayTxs.length,        color:'var(--primary)'},
+          {label:'Pending',         val:cnt('pending'),          color:'#f59e0b'},
+          {label:'Processing',      val:cnt('processing'),       color:'#3b82f6'},
+          {label:'Shipped',         val:cnt('shipped'),          color:'#8b5cf6'},
+          {label:'Delivered',       val:cnt('delivered'),        color:'#22c55e'},
+        ].map(s=>`<div class="card" style="padding:16px;text-align:center">
+          <div style="font-size:22px;font-weight:700;color:${s.color}">${s.val}</div>
+          <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-top:3px">${s.label}</div>
+        </div>`).join('')}
+      </div>
+      <div class="card">
+        <div class="table-wrap" id="oo-table">${this.buildOnlineOrdersTable(txs)}</div>
+      </div>`;
+  },
+
+  buildOnlineOrdersTable(txs) {
+    if (!txs.length) return '<div class="empty-state"><p>No online orders found</p></div>';
+    const sc = {pending:'#f59e0b',processing:'#3b82f6',shipped:'#8b5cf6',delivered:'#22c55e',cancelled:'#ef4444'};
+    return `<table>
+      <thead><tr><th>Order #</th><th>Date/Time</th><th>Customer</th><th>Branch</th><th>Total</th><th>Payment</th><th>Fulfillment</th><th>Actions</th></tr></thead>
+      <tbody>${txs.map(tx => {
+        const st = tx.fulfillment_status || 'pending';
+        const c = sc[st] || '#888';
+        return `<tr>
+          <td class="fw-600" style="font-family:monospace">${tx.transaction_number}<br><span style="font-size:10px;background:#6366f1;color:#fff;border-radius:3px;padding:1px 5px;font-family:sans-serif;font-weight:500;letter-spacing:.3px">ONLINE</span></td>
+          <td style="white-space:nowrap">${this.fmtDateTime(tx.created_at)}</td>
+          <td>${tx.customer_name||'<em style="color:#999">Walk-in</em>'}</td>
+          <td style="font-size:12px;color:var(--text-muted)">${tx.branch_name||'—'}</td>
+          <td class="fw-600">${this.fmt(tx.total)}</td>
+          <td><span class="badge-pill badge-info">${tx.payment_method.replace('_',' ')}</span></td>
+          <td><span style="display:inline-block;background:${c}22;color:${c};border:1px solid ${c}55;border-radius:12px;padding:2px 10px;font-size:11px;font-weight:600;text-transform:capitalize">${st}</span></td>
+          <td style="white-space:nowrap">
+            <button class="btn btn-secondary btn-sm" onclick="App.viewOnlineOrder(${tx.id})">View</button>
+            <button class="btn btn-sm" style="background:#0ea5e9;color:#fff;border:none;padding:4px 8px;border-radius:5px;cursor:pointer;font-size:12px;margin-left:3px" onclick="App.printLabel(${tx.id},'pickup')">🏪 Pickup</button>
+            <button class="btn btn-sm" style="background:#6366f1;color:#fff;border:none;padding:4px 8px;border-radius:5px;cursor:pointer;font-size:12px;margin-left:3px" onclick="App.printLabel(${tx.id},'shipping')">📦 Ship</button>
+          </td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table>`;
+  },
+
+  async loadOnlineOrders() {
+    const start = document.getElementById('oo-start').value;
+    const end = document.getElementById('oo-end').value;
+    const fulfillment = document.getElementById('oo-fulfillment').value;
+    const customer = document.getElementById('oo-customer').value.trim();
+    const txnum = document.getElementById('oo-txnum').value.trim();
+    let url = `/transactions?source=online&start=${start}&end=${end}`;
+    if (customer) url += `&customer_name=${encodeURIComponent(customer)}`;
+    if (txnum) url += `&transaction_number=${encodeURIComponent(txnum)}`;
+    let txs = await this.api('GET', url);
+    if (fulfillment) txs = txs.filter(t=>(t.fulfillment_status||'pending')===fulfillment);
+    document.getElementById('oo-table').innerHTML = this.buildOnlineOrdersTable(txs);
+  },
+
+  async viewOnlineOrder(id) {
+    const tx = await this.api('GET', `/transactions/${id}`);
+    const sc = {pending:'#f59e0b',processing:'#3b82f6',shipped:'#8b5cf6',delivered:'#22c55e',cancelled:'#ef4444'};
+    const st = tx.fulfillment_status || 'pending';
+    const c = sc[st] || '#888';
+    this.showModal(`
+      <div class="modal" style="max-width:560px">
+        <div class="modal-header">
+          <span class="modal-title"><span style="background:#6366f1;color:#fff;border-radius:3px;padding:2px 7px;font-weight:600;font-size:11px;letter-spacing:.3px;margin-right:8px">ONLINE</span>Order ${tx.transaction_number}</span>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <div style="background:#eef2ff;border:1px solid #c7d2fe;border-left:3px solid #6366f1;border-radius:6px;padding:12px;margin-bottom:14px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+              <span style="color:var(--text-muted);font-size:12px">Fulfillment:</span>
+              <span style="background:${c}22;color:${c};border:1px solid ${c}55;border-radius:12px;padding:2px 10px;font-size:12px;font-weight:600;text-transform:capitalize">${st}</span>
+              <span style="font-size:12px;color:var(--text-muted);margin-left:auto">${tx.source==='woocommerce'?'Imported from WooCommerce':'Placed via ecommerce site'}${tx.notes?` · ${tx.notes}`:''}</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px">
+              <span style="color:var(--text-muted);font-size:12px;white-space:nowrap">Update to:</span>
+              <select id="fulfillment-status-select" style="flex:1;font-size:12px;padding:3px 6px">
+                ${['pending','processing','shipped','delivered','cancelled'].map(s=>`<option value="${s}" ${st===s?'selected':''}>${s.charAt(0).toUpperCase()+s.slice(1)}</option>`).join('')}
+              </select>
+              <button class="btn btn-primary btn-sm" onclick="App.updateFulfillmentOnline(${tx.id})">Update</button>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px;font-size:13px">
+            <div><span style="color:var(--text-muted)">Date:</span> ${this.fmtDateTime(tx.created_at)}</div>
+            <div><span style="color:var(--text-muted)">Status:</span> <span class="badge-pill ${tx.status==='completed'?'badge-success':'badge-danger'}">${tx.status}</span></div>
+            <div><span style="color:var(--text-muted)">Customer:</span> ${tx.customer_name||'Walk-in'}</div>
+            ${tx.customer_email?`<div><span style="color:var(--text-muted)">Email:</span> ${tx.customer_email}</div>`:''}
+            ${tx.customer_phone?`<div><span style="color:var(--text-muted)">Phone:</span> ${tx.customer_phone}</div>`:''}
+            ${tx.customer_address?`<div style="grid-column:1/-1"><span style="color:var(--text-muted)">Ship to:</span> ${tx.customer_address}${tx.customer_city?', '+tx.customer_city:''}${tx.customer_state?' '+tx.customer_state:''}${tx.customer_zip?' '+tx.customer_zip:''}</div>`:''}
+            <div><span style="color:var(--text-muted)">Branch:</span> ${tx.branch_name||'—'}</div>
+            <div><span style="color:var(--text-muted)">Payment:</span> ${tx.payment_method.replace('_',' ')}</div>
+          </div>
+          <table style="margin-bottom:12px">
+            <thead><tr><th>Item</th><th>SKU</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
+            <tbody>${(tx.items||[]).map(i=>`<tr><td>${i.product_name}</td><td style="font-family:monospace;font-size:12px">${i.sku}</td><td style="text-align:center">${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}</tbody>
+          </table>
+          <div style="text-align:right;border-top:1px solid var(--border);padding-top:10px">
+            <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span>Subtotal</span><span>${this.fmt(tx.subtotal)}</span></div>
+            <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span>Tax</span><span>${this.fmt(tx.tax_amount)}</span></div>
+            ${tx.discount_amount>0?`<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;color:var(--success)"><span>Discount${tx.promotion_name?' — '+tx.promotion_name:''}${tx.promotion_code?` <span style="font-family:monospace;font-size:11px;background:var(--bg);padding:1px 5px;border-radius:4px">${tx.promotion_code}</span>`:''}</span><span>-${this.fmt(tx.discount_amount)}</span></div>`:''}
+            <div style="display:flex;justify-content:space-between;font-size:16px;font-weight:700;margin-top:6px"><span>TOTAL</span><span>${this.fmt(tx.total)}</span></div>
+          </div>
+        </div>
+        <div class="modal-footer" style="gap:6px;flex-wrap:wrap">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+          <button class="btn btn-secondary" onclick="App.emailReceipt(${tx.id},'${(tx.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email</button>
+          ${tx.status==='completed'&&this.can('transactions_returns')?`<button class="btn btn-sm" style="background:#f59e0b;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer" onclick="App.closeModal();App.processReturn(${tx.id})">↩ Return</button>`:''}
+          <button class="btn btn-sm" style="background:#0ea5e9;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer" onclick="App.printLabel(${tx.id},'pickup')">🏪 Pickup Label</button>
+          <button class="btn btn-sm" style="background:#6366f1;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer" onclick="App.printLabel(${tx.id},'shipping')">📦 Shipping Label</button>
+        </div>
+      </div>`);
+    this._viewTx = tx;
+  },
+
+  async updateFulfillmentOnline(txId) {
+    const sel = document.getElementById('fulfillment-status-select');
+    if (!sel) return;
+    const status = sel.value;
+    try {
+      await this.api('PATCH', `/transactions/${txId}/fulfillment`, { fulfillment_status: status });
+      this.alert(`Fulfillment updated to "${status}"`);
+      this.viewOnlineOrder(txId);
+      this.loadOnlineOrders().catch(()=>{});
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async printLabel(txId, type) {
+    const tx = await this.api('GET', `/transactions/${txId}`);
+    const company = this._onlineCompanyName || 'Store';
+    const items = (tx.items||[]).map(i=>`${i.quantity}× ${i.product_name}`).join('<br>');
+    const dt = this.fmtDateTime(tx.created_at);
+    const addrLine = [tx.customer_address, tx.customer_city && (tx.customer_city+(tx.customer_state?' '+tx.customer_state:'')+(tx.customer_zip?' '+tx.customer_zip:''))].filter(Boolean).join('<br>');
+
+    const base = `body{margin:0;padding:0;font-family:'Courier New',monospace}
+      .lbl{width:4in;padding:.3in;border:2px solid #000;margin:.25in auto;box-sizing:border-box}
+      hr{border:none;border-top:1px dashed #000;margin:.15in 0}
+      @media print{body{margin:0}}`;
+
+    let html;
+    if (type === 'shipping') {
+      html = `<!DOCTYPE html><html><head><title>Shipping Label</title><style>${base}
+        .from{font-size:11px;color:#555}.from-name{font-size:14px;font-weight:bold;color:#000}
+        .to-hdr{font-size:11px;font-weight:bold;letter-spacing:2px;border-bottom:1px solid #000;padding-bottom:4px;margin:.15in 0 .1in}
+        .cname{font-size:20px;font-weight:bold;margin-bottom:4px}
+        .addr{font-size:13px;line-height:1.6;color:#333}
+        .onum{font-size:22px;font-weight:bold;letter-spacing:1px;margin-bottom:4px}
+        .odate{font-size:11px;color:#666;margin-bottom:.1in}
+        .ilbl{font-size:11px;font-weight:bold;letter-spacing:2px;margin-bottom:6px}
+        .ilist{font-size:13px;line-height:1.7}
+        .total{font-size:16px;font-weight:bold;margin-top:.1in}
+        .barzone{border:1px solid #ccc;height:.45in;display:flex;align-items:center;justify-content:center;font-size:11px;color:#aaa;margin-top:.15in;letter-spacing:5px}
+      </style></head><body><div class="lbl">
+        <div class="from"><div class="from-name">${company}</div>FROM: Online Store</div>
+        <div class="to-hdr">Ship To</div>
+        <div class="cname">${tx.customer_name||'Customer'}</div>
+        <div class="addr">${addrLine||'<em style="color:#aaa">No address on file</em>'}${tx.customer_phone?'<br>Tel: '+tx.customer_phone:''}</div>
+        <hr>
+        <div class="onum">ORDER: ${tx.transaction_number}</div>
+        <div class="odate">${dt}</div>
+        <hr>
+        <div class="ilbl">Items</div>
+        <div class="ilist">${items}</div>
+        <hr>
+        <div class="total">TOTAL: ${this.fmt(tx.total)}</div>
+        <div class="barzone">${tx.transaction_number}</div>
+      </div><script>window.onload=()=>{window.print();}<\/script></body></html>`;
+    } else {
+      const code = tx.transaction_number.replace(/^TXN-0*/,'');
+      html = `<!DOCTYPE html><html><head><title>Pickup Label</title><style>${base}
+        .phdr{background:#000;color:#fff;text-align:center;padding:10px;font-size:16px;font-weight:bold;letter-spacing:3px;margin:-.3in -.3in .2in}
+        .onum{font-size:28px;font-weight:bold;text-align:center;letter-spacing:2px;margin:.1in 0}
+        .cname{font-size:18px;font-weight:bold;margin-bottom:2px}
+        .phone{font-size:13px;color:#444;margin-bottom:.1in}
+        .slbl{font-size:11px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;color:#666}
+        .ilist{font-size:13px;line-height:1.7}
+        .total{font-size:16px;font-weight:bold;text-align:right;margin-top:.1in}
+        .cbox{border:3px solid #000;text-align:center;padding:10px;margin-top:.15in}
+        .clbl{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#666}
+        .ccode{font-size:36px;font-weight:bold;letter-spacing:8px}
+        .foot{font-size:11px;color:#666;margin-top:.1in;text-align:center}
+      </style></head><body><div class="lbl">
+        <div class="phdr">IN-STORE PICKUP</div>
+        <div class="onum">${tx.transaction_number}</div>
+        <hr>
+        <div class="slbl">Customer</div>
+        <div class="cname">${tx.customer_name||'Customer'}</div>
+        ${tx.customer_phone?`<div class="phone">${tx.customer_phone}</div>`:''}
+        <hr>
+        <div class="slbl">Items</div>
+        <div class="ilist">${items}</div>
+        <div class="total">TOTAL: ${this.fmt(tx.total)}</div>
+        <div class="cbox"><div class="clbl">Pickup Code</div><div class="ccode">${code}</div></div>
+        <div class="foot">Ordered: ${dt}</div>
+      </div><script>window.onload=()=>{window.print();}<\/script></body></html>`;
+    }
+    const w = window.open('', '_blank', 'width=620,height=850');
+    if (w) { w.document.write(html); w.document.close(); }
   },
 
   buildTxTable(txs) {
