@@ -545,4 +545,4 @@ router.get('/logs', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-module.exports = { router, runSyncAll };
+module.exports = { router, runSyncAll, getWcSettings, wcRequest };

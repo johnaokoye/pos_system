@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { calcCommission } = require('./commissions');
+const { getWcSettings, wcRequest } = require('./woocommerce');
 
 // Put order on hold (no stock updates, no payment processing)
 router.post('/hold', async (req, res) => {
@@ -197,6 +198,34 @@ router.get('/:id/returns', async (req, res) => {
       r.items = items;
     }
     res.json(returns);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Update fulfillment status (online orders)
+router.patch('/:id/fulfillment', async (req, res) => {
+  const { fulfillment_status } = req.body;
+  const valid = ['pending', 'processing', 'shipped', 'delivered', 'cancelled'];
+  if (!valid.includes(fulfillment_status)) {
+    return res.status(400).json({ error: `Invalid status. Must be one of: ${valid.join(', ')}` });
+  }
+  try {
+    await db.execute({ sql: 'UPDATE transactions SET fulfillment_status = ? WHERE id = ?', args: [fulfillment_status, req.params.id] });
+    const { rows: [tx] } = await db.execute({ sql: 'SELECT * FROM transactions WHERE id = ?', args: [req.params.id] });
+    if (!tx) return res.status(404).json({ error: 'Transaction not found' });
+
+    // Push status to WooCommerce if this order was imported from WC
+    if (tx.source === 'woocommerce') {
+      const wcStatusMap = { pending: 'pending', processing: 'processing', shipped: 'on-hold', delivered: 'completed', cancelled: 'cancelled' };
+      try {
+        const { rows: [map] } = await db.execute({ sql: "SELECT woo_id FROM woo_sync_map WHERE entity_type='order' AND local_id=?", args: [tx.id] });
+        if (map?.woo_id) {
+          const s = await getWcSettings();
+          await wcRequest(s, 'PUT', `/orders/${map.woo_id}`, { status: wcStatusMap[fulfillment_status] });
+        }
+      } catch(e) { /* non-fatal — POS update already saved */ }
+    }
+
+    res.json(tx);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
