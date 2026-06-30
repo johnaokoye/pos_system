@@ -95,8 +95,15 @@ router.get('/:id', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const { customer_id, employee_id, branch_id, drawer_session_id, items, discount_amount, promotion_code, promotion_name, payment_method, amount_tendered, notes, source_return_id, store_credit_applied, quote_id, tax_exempt, tax_exemption_number, approval_code } = req.body;
+    const { customer_id, employee_id, drawer_session_id, items, discount_amount, promotion_code, promotion_name, payment_method, amount_tendered, notes, source_return_id, store_credit_applied, quote_id, tax_exempt, tax_exemption_number, approval_code } = req.body;
+    let { branch_id } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in transaction' });
+
+    // For API-authenticated (online) orders with no branch, use the ecommerce sync branch
+    if (!branch_id && req.apiKey) {
+      const { rows: [setting] } = await db.execute({ sql: "SELECT value FROM settings WHERE key='woo_sync_branch_id'", args: [] });
+      if (setting?.value) branch_id = setting.value;
+    }
 
     const { rows: [txCount] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM transactions', args: [] });
     const transaction_number = `TXN-${String(Number(txCount.c) + 1).padStart(6, '0')}`;
