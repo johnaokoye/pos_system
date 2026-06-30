@@ -835,7 +835,8 @@ const App = {
 
   async showSection(name) {
     const perms = this.currentUser?.permissions;
-    if (perms && !this.can(name)) return;
+    const sectionAllowed = name === 'online-orders' ? this.can('transactions') : this.can(name);
+    if (perms && !sectionAllowed) return;
     this.section = name;
     this.closeModal();
     document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.section === name));
