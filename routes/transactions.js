@@ -162,7 +162,13 @@ router.post('/', async (req, res) => {
           await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty - ? WHERE id = ?', args: [quantity, product.id] });
         }
         if (branch_id) {
-          await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = MAX(0, stock_qty - ?), updated_at = CURRENT_TIMESTAMP`, args: [product.id, branch_id, Math.max(0, product.stock_qty - quantity), product.min_stock, quantity] });
+          if (req.apiKey) {
+            // Online order: only touch the selected branch's existing stock record — no INSERT
+            // to avoid creating a record with a wrong initial value from global stock
+            await tx.execute({ sql: 'UPDATE branch_inventory SET stock_qty = MAX(0, stock_qty - ?), updated_at = CURRENT_TIMESTAMP WHERE product_id = ? AND branch_id = ?', args: [quantity, product.id, branch_id] });
+          } else {
+            await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = MAX(0, stock_qty - ?), updated_at = CURRENT_TIMESTAMP`, args: [product.id, branch_id, Math.max(0, product.stock_qty - quantity), product.min_stock, quantity] });
+          }
         }
       }
 
