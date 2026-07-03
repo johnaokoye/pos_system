@@ -222,6 +222,107 @@ router.post('/send-quote/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+function buildGrnHtml(po, s) {
+  const storeName = s.store_name || 'My Store';
+  const storeAddr = s.store_address || '';
+  const storePhone = s.store_phone || '';
+
+  const rows = (po.items || []).map(i => {
+    const damaged = i.quantity_damaged || 0;
+    const good = (i.quantity_received || 0) - damaged;
+    return `
+    <tr>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku || ''}</span></td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${i.quantity_ordered}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${i.quantity_received || 0}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center;${damaged > 0 ? 'color:#dc2626;font-weight:600' : ''}">${damaged}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center;font-weight:600">${good}</td>
+    </tr>`;
+  }).join('');
+
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Goods Received Note ${po.po_number}</title></head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
+<tr><td align="center">
+  <table width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+    <tr><td style="background:#1a56db;padding:24px;text-align:center">
+      <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
+      ${storeAddr ? `<div style="color:#bcd4ff;font-size:12px;margin-top:4px">${storeAddr}</div>` : ''}
+      ${storePhone ? `<div style="color:#bcd4ff;font-size:12px">${storePhone}</div>` : ''}
+    </td></tr>
+    <tr><td style="padding:20px 24px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px">
+        <div>
+          <div style="font-size:20px;font-weight:700;color:#111">GOODS RECEIVED NOTE</div>
+          <div style="font-size:13px;color:#888;margin-top:2px">${po.po_number}</div>
+        </div>
+        <div style="text-align:right;font-size:13px;color:#444">
+          <div><strong>Date:</strong> ${new Date().toLocaleDateString()}</div>
+          ${po.branch_name ? `<div><strong>Branch:</strong> ${po.branch_name}</div>` : ''}
+        </div>
+      </div>
+      ${po.supplier_name ? `<div style="background:#f9fafb;border:1px solid #e8e8e8;border-radius:6px;padding:12px;margin-bottom:16px;font-size:13px">
+        <strong>Supplier:</strong><br>${po.supplier_name}${po.supplier_contact ? `<br>${po.supplier_contact}` : ''}${po.supplier_email ? `<br>${po.supplier_email}` : ''}
+      </div>` : ''}
+      <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px">
+        <thead><tr style="background:#f9fafb">
+          <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Item</th>
+          <th style="padding:8px;text-align:center;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Ordered</th>
+          <th style="padding:8px;text-align:center;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Received</th>
+          <th style="padding:8px;text-align:center;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Damaged</th>
+          <th style="padding:8px;text-align:center;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Good</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      ${po.notes ? `<div style="margin-top:16px;font-size:13px;color:#444"><strong>Notes:</strong> ${po.notes}</div>` : ''}
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body>
+</html>`;
+}
+
+// Send goods received note
+router.post('/send-grn/:id', async (req, res) => {
+  const { to } = req.body;
+  if (!to) return res.status(400).json({ error: 'Recipient email is required' });
+
+  try {
+    const { rows: [po] } = await db.execute({ sql: `SELECT po.*, s.name as supplier_name, s.contact_name as supplier_contact, s.email as supplier_email,
+      b.name as branch_name
+      FROM purchase_orders po
+      LEFT JOIN suppliers s ON po.supplier_id = s.id
+      LEFT JOIN branches b ON po.branch_id = b.id
+      WHERE po.id = ?`, args: [req.params.id] });
+    if (!po) return res.status(404).json({ error: 'Purchase order not found' });
+    if (po.status !== 'received' && po.status !== 'partial') return res.status(400).json({ error: 'No items have been received on this order yet' });
+    const { rows: items } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ?', args: [req.params.id] });
+    po.items = items;
+
+    const s = await getSettings();
+    try {
+      const transporter = createTransporter(s);
+      const fromName = s.email_from_name || s.store_name || 'POS System';
+      const fromAddr = s.email_smtp_user || s.store_email || '';
+      await transporter.sendMail({
+        from: `"${fromName}" <${fromAddr}>`,
+        to,
+        subject: `Goods Received Note - ${po.po_number} from ${s.store_name || 'Our Store'}`,
+        html: buildGrnHtml(po, s),
+      });
+
+      await db.execute({ sql: 'UPDATE purchase_orders SET grn_sent_at = CURRENT_TIMESTAMP WHERE id = ?', args: [po.id] });
+
+      res.json({ success: true, message: `Goods received note sent to ${to}` });
+    } catch (e) {
+      res.status(500).json({ error: `Failed to send email: ${e.message}` });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 function buildStatementHtml(data, s) {
   const { customer, payments, period } = data;
   const storeName = s.store_name || 'My Store';

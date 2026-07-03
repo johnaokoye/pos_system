@@ -679,6 +679,9 @@ async function _init() {
     'ALTER TABLE products ADD COLUMN web_allotment INTEGER',
     "ALTER TABLE transactions ADD COLUMN source TEXT DEFAULT 'pos'",
     "ALTER TABLE transactions ADD COLUMN fulfillment_status TEXT DEFAULT 'pending'",
+    'ALTER TABLE purchase_order_items ADD COLUMN quantity_damaged INTEGER DEFAULT 0',
+    'ALTER TABLE purchase_order_items ADD COLUMN damage_notes TEXT',
+    'ALTER TABLE purchase_orders ADD COLUMN grn_sent_at DATETIME',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

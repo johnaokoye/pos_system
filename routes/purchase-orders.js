@@ -148,6 +148,49 @@ router.patch('/:id/receive', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Process items received damaged - reverses stock added by /receive and logs a stock movement
+router.patch('/:id/damage', async (req, res) => {
+  try {
+    const { items } = req.body;
+    const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });
+    if (!po) return res.status(404).json({ error: 'Not found' });
+
+    const tx = await db.transaction('write');
+    try {
+      for (const { item_id, quantity_damaged, reason } of (items || [])) {
+        const qty = parseInt(quantity_damaged);
+        if (!qty || qty <= 0) continue;
+        const { rows: [item] } = await tx.execute({ sql: 'SELECT * FROM purchase_order_items WHERE id = ? AND po_id = ?', args: [item_id, req.params.id] });
+        if (!item) continue;
+        const alreadyDamaged = item.quantity_damaged || 0;
+        const available = (item.quantity_received || 0) - alreadyDamaged;
+        if (qty > available) return res.status(400).json({ error: `Cannot mark ${qty} damaged for ${item.product_name} - only ${available} available to process` });
+
+        const newDamaged = alreadyDamaged + qty;
+        const notes = reason ? (item.damage_notes ? `${item.damage_notes}\n${reason}` : reason) : item.damage_notes;
+        await tx.execute({ sql: 'UPDATE purchase_order_items SET quantity_damaged = ?, damage_notes = ? WHERE id = ?', args: [newDamaged, notes || null, item_id] });
+
+        if (item.product_id) {
+          await tx.execute({ sql: 'UPDATE products SET stock_qty = MAX(0, stock_qty - ?) WHERE id = ?', args: [qty, item.product_id] });
+          if (po.branch_id) {
+            await tx.execute({ sql: 'UPDATE branch_inventory SET stock_qty = MAX(0, stock_qty - ?), updated_at = CURRENT_TIMESTAMP WHERE product_id = ? AND branch_id = ?', args: [qty, item.product_id, po.branch_id] });
+          }
+          await tx.execute({ sql: 'INSERT INTO stock_movements (product_id, branch_id, quantity_change, type, reference, reason) VALUES (?,?,?,?,?,?)', args: [item.product_id, po.branch_id || null, -qty, 'damaged', po.po_number, reason || 'Received damaged from supplier'] });
+        }
+      }
+      await tx.commit();
+    } catch(e) {
+      await tx.rollback();
+      return res.status(400).json({ error: e.message });
+    }
+
+    const { rows: [updated] } = await db.execute({ sql: `SELECT po.*, s.name as supplier_name, b.name as branch_name FROM purchase_orders po LEFT JOIN suppliers s ON po.supplier_id = s.id LEFT JOIN branches b ON po.branch_id = b.id WHERE po.id = ?`, args: [req.params.id] });
+    const { rows: updatedItems } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ?', args: [req.params.id] });
+    updated.items = updatedItems;
+    res.json(updated);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── Attachments ──────────────────────────────────────────────
 
 router.get('/:id/attachments', async (req, res) => {

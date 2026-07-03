@@ -350,10 +350,13 @@ router.post('/cycle-counts', async (req, res) => {
               await tx.execute({ sql: 'INSERT INTO cycle_count_items (session_id,product_id,product_name,sku,bin_id,bin_code,expected_qty) VALUES (?,?,?,?,?,?,?)', args: [sessionId, p.id, p.name, p.sku, a.bin_id, a.bin_code, a.quantity] });
             }
           } else {
+            // Match the Inventory page's per-branch figure exactly: when a branch is
+            // selected, a product with no branch_inventory row reads as 0 there
+            // (COALESCE(bi.stock_qty, 0) in routes/products.js), not the global total.
             let stockQty = p.stock_qty;
             if (branch_id) {
               const { rows: [inv] } = await tx.execute({ sql: 'SELECT stock_qty FROM branch_inventory WHERE product_id = ? AND branch_id = ?', args: [p.id, branch_id] });
-              if (inv) stockQty = inv.stock_qty;
+              stockQty = inv ? inv.stock_qty : 0;
             }
             await tx.execute({ sql: 'INSERT INTO cycle_count_items (session_id,product_id,product_name,sku,bin_id,bin_code,expected_qty) VALUES (?,?,?,?,?,?,?)', args: [sessionId, p.id, p.name, p.sku, null, null, stockQty] });
           }
@@ -451,6 +454,7 @@ router.patch('/cycle-counts/:id/commit', async (req, res) => {
             VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id=?), CURRENT_TIMESTAMP)
             ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, session.branch_id, item.variance, item.product_id, item.variance] });
         }
+        await tx.execute({ sql: 'INSERT INTO stock_movements (product_id, branch_id, quantity_change, type, reference, reason) VALUES (?,?,?,?,?,?)', args: [item.product_id, session.branch_id || null, item.variance, 'adjustment', session.session_number, `Cycle count variance (expected ${item.expected_qty}, counted ${item.counted_qty})`] });
       }
       await tx.execute({ sql: 'UPDATE cycle_count_sessions SET status = ?, committed_at = CURRENT_TIMESTAMP WHERE id = ?', args: ['committed', session.id] });
       await tx.commit();
