@@ -57,7 +57,10 @@ router.get('/inventory', async (req, res) => {
     const { rows: [summary] } = await db.execute({ sql: `SELECT COUNT(*) as total_products, SUM(stock_qty) as total_units, SUM(stock_qty * cost) as cost_value, SUM(stock_qty * price) as retail_value FROM products WHERE active = 1`, args: [] });
     const { rows: lowStock } = await db.execute({ sql: `SELECT p.sku, p.name, c.name as category_name, b.name as branch_name, bi.stock_qty, bi.min_stock FROM branch_inventory bi JOIN products p ON bi.product_id = p.id JOIN branches b ON bi.branch_id = b.id LEFT JOIN categories c ON p.category_id = c.id WHERE p.active=1 AND b.active=1 AND bi.stock_qty <= bi.min_stock${bf} ORDER BY bi.stock_qty ASC, b.name ASC`, args: [...bp] });
     const { rows: byCategory } = await db.execute({ sql: `SELECT c.name as category, COUNT(p.id) as products, SUM(p.stock_qty) as units, SUM(p.stock_qty * p.cost) as cost_value FROM products p JOIN categories c ON p.category_id = c.id WHERE p.active=1 GROUP BY c.id`, args: [] });
-    res.json({ summary, lowStock, byCategory });
+    // Warehouses carry no sales, so they're excluded from the sales-report branch
+    // filter above — but their stock still has real value, tracked separately here.
+    const { rows: warehouseValue } = await db.execute({ sql: `SELECT b.id as branch_id, b.name as branch_name, COUNT(DISTINCT bi.product_id) as total_products, SUM(bi.stock_qty) as total_units, SUM(bi.stock_qty * p.cost) as cost_value, SUM(bi.stock_qty * p.price) as retail_value FROM branch_inventory bi JOIN branches b ON bi.branch_id = b.id JOIN products p ON bi.product_id = p.id WHERE b.is_warehouse = 1 AND p.active = 1 GROUP BY b.id ORDER BY b.name`, args: [] });
+    res.json({ summary, lowStock, byCategory, warehouseValue });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

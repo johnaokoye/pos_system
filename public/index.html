@@ -4467,6 +4467,15 @@ const App = {
           <tbody>${inv.lowStock.map(p => `<tr><td style="font-family:monospace;font-size:12px">${p.sku}</td><td class="fw-600">${p.name}</td><td>${p.category_name||'—'}</td><td>${p.branch_name||'—'}</td><td class="fw-600 color-danger">${p.stock_qty}</td><td style="color:var(--text-muted)">${p.min_stock}</td></tr>`).join('')}</tbody>
         </table>` : '<p style="color:var(--success)">✓ All products have sufficient stock</p>'}
       </div>
+      ${inv.warehouseValue && inv.warehouseValue.length ? `
+      <div class="card" style="margin-top:16px">
+        <div class="card-header"><span class="card-title">Warehouse Inventory Value</span></div>
+        <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">Warehouses don't generate sales, so they're left out of the location filter above — this always shows their stock value regardless of the filter.</p>
+        <table>
+          <thead><tr><th>Warehouse</th><th>Products</th><th>Units</th><th>Cost Value</th><th>Retail Value</th></tr></thead>
+          <tbody>${inv.warehouseValue.map(w => `<tr><td class="fw-600">${w.branch_name}</td><td>${w.total_products}</td><td>${w.total_units}</td><td class="fw-600">${this.fmt(w.cost_value)}</td><td class="fw-600 color-success">${this.fmt(w.retail_value)}</td></tr>`).join('')}</tbody>
+        </table>
+      </div>` : ''}
       <div class="card" style="margin-top:16px">
         <div class="card-header"><span class="card-title">Promotions Used</span></div>
         <div class="stats-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:14px">
