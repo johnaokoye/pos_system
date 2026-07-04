@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { syncBinQty } = require('../lib/binSync');
 
 // GET all transfers
 router.get('/', async (req, res) => {
@@ -57,6 +58,7 @@ router.post('/', async (req, res) => {
         } else {
           await tx.execute({ sql: 'INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)', args: [item.product_id, from_branch_id, srcQty - qty, product.min_stock] });
         }
+        await syncBinQty(tx, item.product_id, from_branch_id, -qty);
         await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty - ? WHERE id = ?', args: [qty, item.product_id] });
       }
 
@@ -117,6 +119,7 @@ router.patch('/:id/receive', async (req, res) => {
 
         if (item.product_id) {
           await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, transfer.to_branch_id, actual, item.product_id, actual] });
+          await syncBinQty(tx, item.product_id, transfer.to_branch_id, actual);
           await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [actual, item.product_id] });
         }
       }
@@ -155,6 +158,7 @@ router.patch('/:id/cancel', async (req, res) => {
         const unreceived = item.quantity_requested - (item.quantity_received || 0);
         if (unreceived <= 0) continue;
         await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, transfer.from_branch_id, unreceived, item.product_id, unreceived] });
+        await syncBinQty(tx, item.product_id, transfer.from_branch_id, unreceived);
         await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [unreceived, item.product_id] });
       }
       await tx.execute({ sql: 'UPDATE branch_transfers SET status = ? WHERE id = ?', args: ['cancelled', req.params.id] });

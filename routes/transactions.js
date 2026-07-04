@@ -3,6 +3,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { calcCommission } = require('./commissions');
 const { getWcSettings, wcRequest } = require('./woocommerce');
+const { syncBinQty } = require('../lib/binSync');
 
 // Put order on hold (no stock updates, no payment processing)
 router.post('/hold', async (req, res) => {
@@ -169,6 +170,7 @@ router.post('/', async (req, res) => {
           } else {
             await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = MAX(0, stock_qty - ?), updated_at = CURRENT_TIMESTAMP`, args: [product.id, branch_id, Math.max(0, product.stock_qty - quantity), product.min_stock, quantity] });
           }
+          await syncBinQty(tx, product.id, branch_id, -quantity);
         }
       }
 
@@ -294,6 +296,7 @@ router.post('/:id/return', async (req, res) => {
         await retTx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [quantity, txItem.product_id] });
         if (tx.branch_id) {
           await retTx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [txItem.product_id, tx.branch_id, quantity, txItem.product_id, quantity] });
+          await syncBinQty(retTx, txItem.product_id, tx.branch_id, quantity);
         }
       }
 
@@ -342,6 +345,7 @@ router.patch('/:id/void', async (req, res) => {
         await voidTxn.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [item.quantity, item.product_id] });
         if (tx.branch_id) {
           await voidTxn.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, tx.branch_id, item.quantity, item.product_id, item.quantity] });
+          await syncBinQty(voidTxn, item.product_id, tx.branch_id, item.quantity);
         }
       }
       if (tx.customer_id) {

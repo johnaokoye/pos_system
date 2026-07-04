@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { syncBinQty } = require('../lib/binSync');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -351,6 +352,7 @@ router.patch('/:id/stock', async (req, res) => {
         VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = ?, updated_at = CURRENT_TIMESTAMP`,
         args: [req.params.id, branch_id, newQty, existing ? existing.min_stock : product.min_stock, newQty] });
+      await syncBinQty(db, req.params.id, branch_id, adj);
       await db.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [adj, req.params.id] });
       await db.execute({ sql: 'INSERT INTO stock_movements (product_id, branch_id, quantity_change, type, reason) VALUES (?, ?, ?, ?, ?)', args: [req.params.id, branch_id, adj, 'adjustment', reason || null] });
       return res.json({ stock_qty: newQty, branch_id });

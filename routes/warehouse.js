@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { syncBinQty } = require('../lib/binSync');
 
 // ─── ZONES ────────────────────────────────────────────────────────────────────
 
@@ -230,6 +231,7 @@ router.patch('/shipments/:id/ship', async (req, res) => {
           await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at)
             VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id=?), CURRENT_TIMESTAMP)
             ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty - ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, s.from_branch_id, -item.quantity, item.product_id, item.quantity] });
+          await syncBinQty(tx, item.product_id, s.from_branch_id, -item.quantity);
         }
       }
       await tx.execute({ sql: 'UPDATE shipments SET status=?, tracking_number=COALESCE(?,tracking_number), ship_date=COALESCE(?,ship_date), shipped_at=CURRENT_TIMESTAMP WHERE id=?', args: ['shipped', tracking_number || null, ship_date || null, req.params.id] });
@@ -271,6 +273,7 @@ router.patch('/shipments/:id/cancel', async (req, res) => {
             await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at)
               VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id=?), CURRENT_TIMESTAMP)
               ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, s.from_branch_id, item.quantity, item.product_id, item.quantity] });
+            await syncBinQty(tx, item.product_id, s.from_branch_id, item.quantity);
           }
         }
       }

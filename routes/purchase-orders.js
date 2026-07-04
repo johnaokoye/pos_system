@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { syncBinQty } = require('../lib/binSync');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -126,6 +127,7 @@ router.patch('/:id/receive', async (req, res) => {
           }
           if (po.branch_id) {
             await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, po.branch_id, qty, item.product_id, qty] });
+            await syncBinQty(tx, item.product_id, po.branch_id, qty);
           }
         }
       }
@@ -174,6 +176,7 @@ router.patch('/:id/damage', async (req, res) => {
           await tx.execute({ sql: 'UPDATE products SET stock_qty = MAX(0, stock_qty - ?) WHERE id = ?', args: [qty, item.product_id] });
           if (po.branch_id) {
             await tx.execute({ sql: 'UPDATE branch_inventory SET stock_qty = MAX(0, stock_qty - ?), updated_at = CURRENT_TIMESTAMP WHERE product_id = ? AND branch_id = ?', args: [qty, item.product_id, po.branch_id] });
+            await syncBinQty(tx, item.product_id, po.branch_id, -qty);
           }
           await tx.execute({ sql: 'INSERT INTO stock_movements (product_id, branch_id, quantity_change, type, reference, reason) VALUES (?,?,?,?,?,?)', args: [item.product_id, po.branch_id || null, -qty, 'damaged', po.po_number, reason || 'Received damaged from supplier'] });
         }
