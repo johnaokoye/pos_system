@@ -1354,6 +1354,7 @@ const App = {
   async renderPOS() {
     this.allCategories = await this.api('GET', '/categories');
     this.allProducts = await this.api('GET', '/products?active=1');
+    if (this.section !== 'pos') return;
     this.posCategory = 'all';
     this.posSearch = '';
 
@@ -1892,12 +1893,14 @@ const App = {
       if (held.customer_id) {
         const customer = await this.api('GET', `/customers/${held.customer_id}`);
         this.cartCustomer = customer;
+        if (this.section !== 'pos') return;
         document.getElementById('cart-customer-name').textContent = `${customer.first_name} ${customer.last_name}`;
         document.getElementById('remove-customer-btn').style.display = 'inline-flex';
         const bar = document.getElementById('store-credit-bar');
         if (bar) bar.style.display = 'none';
       } else {
         this.cartCustomer = null;
+        if (this.section !== 'pos') return;
         document.getElementById('cart-customer-name').textContent = 'Walk-in Customer';
         document.getElementById('remove-customer-btn').style.display = 'none';
       }
@@ -2034,11 +2037,13 @@ const App = {
       if (quote.customer_id) {
         const customer = await this.api('GET', `/customers/${quote.customer_id}`);
         this.cartCustomer = customer;
+        if (this.section !== 'pos') return;
         document.getElementById('cart-customer-name').textContent = `${customer.first_name} ${customer.last_name}`;
         document.getElementById('remove-customer-btn').style.display = 'inline-flex';
         const bar = document.getElementById('store-credit-bar');
         if (bar) bar.style.display = 'none';
       }
+      if (this.section !== 'pos') return;
 
       const aqBar = document.getElementById('active-quote-bar');
       if (aqBar) {
@@ -2210,6 +2215,7 @@ const App = {
       this.api('GET', '/categories'),
       this.api('GET', '/products/movements?limit=30'),
     ]);
+    if (this.section !== 'inventory') return;
     const branches = this.currentUser.branches || [];
 
     document.getElementById('content').innerHTML = `
@@ -2561,6 +2567,7 @@ const App = {
       this.api('GET', '/products?is_service=1'),
       this.api('GET', '/categories'),
     ]);
+    if (this.section !== 'services') return;
     const c = document.getElementById('content');
     c.innerHTML = `
       <div class="section-header">
@@ -3403,6 +3410,7 @@ const App = {
   // ─── Customers ────────────────────────────────────────────
   async renderCustomers() {
     const customers = await this.api('GET', '/customers?active=1');
+    if (this.section !== 'customers') return;
 
     document.getElementById('content').innerHTML = `
       <div class="section-header">
@@ -3731,6 +3739,7 @@ const App = {
     const weekAgo = new Date(Date.now() - 7*86400000).toISOString().slice(0,10);
     const branches = this.currentUser.branches || [];
     const txs = await this.api('GET', `/transactions?start=${weekAgo}&end=${today}`);
+    if (this.section !== 'transactions') return;
 
     document.getElementById('content').innerHTML = `
       <div class="section-header">
@@ -3773,6 +3782,7 @@ const App = {
       this.api('GET', `/transactions?source=online&start=${weekAgo}&end=${today}`),
       this.api('GET', '/settings').catch(() => [])
     ]);
+    if (this.section !== 'online-orders') return;
     this._onlineCompanyName = (Array.isArray(settingRows) ? settingRows : []).find(s => s.key==='company_name')?.value || 'Store';
     const todayStr = today;
     const todayTxs = txs.filter(t => t.created_at && t.created_at.slice(0,10) === todayStr);
@@ -3854,7 +3864,8 @@ const App = {
     if (txnum) url += `&transaction_number=${encodeURIComponent(txnum)}`;
     let txs = await this.api('GET', url);
     if (fulfillment) txs = txs.filter(t=>(t.fulfillment_status||'pending')===fulfillment);
-    document.getElementById('oo-table').innerHTML = this.buildOnlineOrdersTable(txs);
+    const ooTable = document.getElementById('oo-table');
+    if (ooTable) ooTable.innerHTML = this.buildOnlineOrdersTable(txs);
   },
 
   async viewOnlineOrder(id) {
@@ -4038,7 +4049,8 @@ const App = {
     if (txNumber) url += `&transaction_number=${encodeURIComponent(txNumber)}`;
     if (customerName) url += `&customer_name=${encodeURIComponent(customerName)}`;
     const txs = await this.api('GET', url);
-    document.getElementById('tx-table').innerHTML = this.buildTxTable(txs);
+    const txTable = document.getElementById('tx-table');
+    if (txTable) txTable.innerHTML = this.buildTxTable(txs);
   },
 
   async viewTransaction(id) {
@@ -4572,6 +4584,7 @@ const App = {
   // ─── Employees ────────────────────────────────────────────
   async renderEmployees() {
     const employees = await this.api('GET', '/employees');
+    if (this.section !== 'employees') return;
     document.getElementById('content').innerHTML = `
       <div class="section-header">
         <h2>Employees</h2>
@@ -4690,6 +4703,7 @@ const App = {
       this.api('GET', '/categories'),
       this.api('GET', '/branches'),
     ]);
+    if (this.section !== 'settings') return;
 
     document.getElementById('content').innerHTML = `
       <div class="section-header"><h2>Settings</h2></div>
@@ -5371,6 +5385,7 @@ const App = {
         this.api('GET', '/purchase-orders?limit=100'),
         this.api('GET', '/suppliers'),
       ]);
+      if (this.section !== 'purchasing') return;
       const branches = this.currentUser.branches || [];
       const statusColor = { draft:'badge-warning', sent:'badge-info', approved:'badge-teal', partial:'badge-purple', received:'badge-success', cancelled:'badge-danger' };
       c.innerHTML = `
@@ -5420,6 +5435,7 @@ const App = {
       if (filter !== 'all') params.set('status', filter);
       if (typeFilter !== 'all') params.set('request_type', typeFilter);
       const requests = await this.api('GET', `/purchase-requests?${params}`);
+      if (this.section !== 'purchasing') return;
       const prStatusColor = { draft:'badge-warning', submitted:'badge-info', approved:'badge-teal', rejected:'badge-danger', converted:'badge-success' };
       const typeLabel = { sale_items:'Sale Items', internal_use:'Internal Use' };
       const typeBadge = { sale_items:'badge-info', internal_use:'badge-purple' };
@@ -6388,6 +6404,7 @@ const App = {
     const [transfers] = await Promise.all([
       this.api('GET', '/transfers?limit=100'),
     ]);
+    if (this.section !== 'transfers') return;
     const branches = this.currentUser.branches || [];
     const statusColor = { pending:'badge-warning', in_transit:'badge-info', received:'badge-success', cancelled:'badge-danger' };
     c.innerHTML = `
@@ -6653,6 +6670,7 @@ const App = {
     const c = document.getElementById('content');
     c.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
     const quotes = await this.api('GET', '/quotations?limit=100');
+    if (this.section !== 'quotations') return;
     const statusColor = { draft:'badge-warning', sent:'badge-info', accepted:'badge-success', declined:'badge-danger', converted:'badge-teal' };
     c.innerHTML = `
       <div class="section-header">
@@ -6900,6 +6918,7 @@ const App = {
       this.api('GET', '/accounts/stats'),
       this.api('GET', '/accounts/aging'),
     ]);
+    if (this.section !== 'accounts') return;
     const maxBal = Math.max(...accounts.map(a => a.account_balance), 1);
     c.innerHTML = `
       <div class="section-header"><h2>Accounts Receivable</h2></div>
@@ -7373,6 +7392,7 @@ const App = {
     const c = document.getElementById('content');
     c.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
     const branches = await this.api('GET', '/branches');
+    if (this.section !== 'branches') return;
     c.innerHTML = `
       <div class="section-header">
         <h2>Branch Management</h2>
@@ -7522,6 +7542,7 @@ const App = {
     const c = document.getElementById('content');
     c.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
     const groups = await this.api('GET', '/security-groups');
+    if (this.section !== 'security') return;
     c.innerHTML = `
       <div class="section-header">
         <h2>Security Groups</h2>
@@ -10811,6 +10832,7 @@ const App = {
       this.api('GET', '/categories'),
       this.api('GET', '/products'),
     ]);
+    if (this.section !== 'promotions') return;
     this._promoCategories = categories;
     this._promoProducts = products;
 
