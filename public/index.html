@@ -9587,6 +9587,15 @@ const App = {
 
   // ─── SHIPPING ─────────────────────────────────────────────────────────────
 
+  _shipTabs: [
+    { key:'orders',    label:'Online Orders' },
+    { key:'all',       label:'All' },
+    { key:'draft',     label:'Draft' },
+    { key:'shipped',   label:'Shipped' },
+    { key:'delivered', label:'Delivered' },
+    { key:'cancelled', label:'Cancelled' },
+  ],
+
   async renderShipping() {
     this.shipFilter = this.shipFilter || 'all';
     document.getElementById('content').innerHTML = `
@@ -9595,19 +9604,24 @@ const App = {
         <button class="btn btn-primary btn-sm" onclick="App.showShipmentModal()">+ New Shipment</button>
       </div>
       <div class="crm-tabs" id="ship-tabs-nav">
-        ${['all','draft','shipped','delivered','cancelled'].map(s=>`
-          <button class="crm-tab ${this.shipFilter===s?'active':''}" onclick="App.filterShipments('${s}')">${s.charAt(0).toUpperCase()+s.slice(1)}</button>`).join('')}
+        ${this._shipTabs.map(t=>`
+          <button class="crm-tab ${this.shipFilter===t.key?'active':''}" onclick="App.filterShipments('${t.key}')">${t.label}</button>`).join('')}
       </div>
       <div id="ship-list"></div>`;
-    await this.loadShipments();
+    await this.loadShipmentsOrOrders();
   },
 
   async filterShipments(status) {
     this.shipFilter = status;
     document.querySelectorAll('#ship-tabs-nav .crm-tab').forEach((btn,i) => {
-      btn.classList.toggle('active', ['all','draft','shipped','delivered','cancelled'][i] === status);
+      btn.classList.toggle('active', this._shipTabs[i].key === status);
     });
-    await this.loadShipments();
+    await this.loadShipmentsOrOrders();
+  },
+
+  async loadShipmentsOrOrders() {
+    if (this.shipFilter === 'orders') return this.loadShipReadyOrders();
+    return this.loadShipments();
   },
 
   async loadShipments() {
@@ -9621,7 +9635,7 @@ const App = {
         <thead><tr><th>#</th><th>From</th><th>Customer</th><th>Carrier</th><th>Tracking</th><th>Ship Date</th><th>Items</th><th>Status</th><th></th></tr></thead>
         <tbody>${shipments.map(s=>`
           <tr>
-            <td><strong>${s.shipment_number}</strong></td>
+            <td><strong>${s.shipment_number}</strong>${s.transaction_id?' <span class="badge badge-info" title="Linked to an online order">ORDER</span>':''}</td>
             <td>${s.from_branch_name||'—'}</td>
             <td>${s.customer_name||'—'}</td>
             <td>${s.carrier||'—'}</td>
@@ -9640,6 +9654,98 @@ const App = {
           </tr>`).join('')}
         </tbody>
       </table>`;
+  },
+
+  async loadShipReadyOrders() {
+    const el = document.getElementById('ship-list');
+    if (!el) return;
+    el.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    const [orders, shipments] = await Promise.all([
+      this.api('GET', '/transactions?source=online&fulfillment_status=processing&limit=200'),
+      this.api('GET', '/warehouse/shipments'),
+    ]);
+    const shipByTx = {};
+    shipments.forEach(s => { if (s.transaction_id) shipByTx[s.transaction_id] = s; });
+
+    const el2 = document.getElementById('ship-list');
+    if (!el2) return;
+    el2.innerHTML = !orders.length ? `
+      <div class="empty-state">
+        <p>No online orders are currently marked "Processing".</p>
+        <p style="font-size:13px;color:var(--text-muted)">Set an order's fulfillment status to "Processing" from the Online Orders page to have it show up here for shipment.</p>
+      </div>` : `
+      <table class="table">
+        <thead><tr><th>Order #</th><th>Date</th><th>Customer</th><th>Branch</th><th>Total</th><th>Shipment</th><th></th></tr></thead>
+        <tbody>${orders.map(o => {
+          const ship = shipByTx[o.id];
+          return `<tr>
+            <td><strong>${o.transaction_number}</strong> <span class="badge badge-info" style="margin-left:4px">ONLINE</span></td>
+            <td style="color:var(--text-muted)">${this.fmtDate(o.created_at)}</td>
+            <td>${o.customer_name||'—'}</td>
+            <td>${o.branch_name||'—'}</td>
+            <td class="fw-600">${this.fmt(o.total)}</td>
+            <td>${ship ? `<span class="badge badge-secondary">${ship.shipment_number}</span>` : '<span style="color:var(--text-muted);font-size:12px">Not yet processed</span>'}</td>
+            <td style="text-align:right;white-space:nowrap">
+              ${ship
+                ? `<button class="btn btn-sm btn-outline" onclick="App.viewShipment(${ship.id})">View Shipment</button>`
+                : `<button class="btn btn-sm btn-primary" onclick="App.showProcessOrderModal(${o.id})">Process for Shipping</button>`}
+            </td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>`;
+  },
+
+  async showProcessOrderModal(txId) {
+    const order = await this.api('GET', `/transactions/${txId}`);
+    this.showModal(`
+      <div class="modal" style="max-width:560px">
+        <div class="modal-header">
+          <span class="modal-title">Process Order ${order.transaction_number} for Shipping</span>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="input-row" style="margin-bottom:10px">
+            <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Customer</label><div>${order.customer_name||'—'}</div></div>
+            <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Branch</label><div>${order.branch_name||'—'}</div></div>
+          </div>
+          <table class="table" style="margin-bottom:12px">
+            <thead><tr><th>Product</th><th>SKU</th><th>Qty</th></tr></thead>
+            <tbody>${order.items.map(i=>`<tr><td>${i.product_name}</td><td><span class="badge badge-secondary">${i.sku||'—'}</span></td><td>${i.quantity}</td></tr>`).join('')}</tbody>
+          </table>
+          <div class="input-row">
+            <div class="form-group"><label>Carrier</label>
+              <select id="po-carrier">
+                <option value="">Select…</option>
+                ${['UPS','FedEx','USPS','DHL','Local Delivery','Other'].map(c=>`<option>${c}</option>`).join('')}
+              </select>
+            </div>
+            <div class="form-group"><label>Tracking #</label>
+              <input id="po-tracking" placeholder="Optional">
+            </div>
+          </div>
+          <div class="input-row">
+            <div class="form-group"><label>Ship Date</label><input id="po-date" type="date"></div>
+            <div class="form-group"><label>Est. Delivery</label><input id="po-estdel" type="date"></div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.processOrderForShipping(${txId})">Create Shipment</button>
+        </div>
+      </div>`);
+  },
+
+  async processOrderForShipping(txId) {
+    const carrier = document.getElementById('po-carrier').value || null;
+    const tracking_number = document.getElementById('po-tracking').value.trim() || null;
+    const ship_date = document.getElementById('po-date').value || null;
+    const estimated_delivery = document.getElementById('po-estdel').value || null;
+    try {
+      const ship = await this.api('POST', `/warehouse/shipments/from-order/${txId}`, { carrier, tracking_number, ship_date, estimated_delivery });
+      this.closeModal();
+      this.alert(`Shipment ${ship.shipment_number} created`);
+      this.viewShipment(ship.id);
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   async showShipmentModal() {
@@ -9754,7 +9860,7 @@ const App = {
       await this.api('POST','/warehouse/shipments',data);
       this.alert('Shipment created as draft');
       this.closeModal();
-      this.loadShipments();
+      this.loadShipmentsOrOrders();
     } catch(e) { this.alert(e.message,'error'); }
   },
 
@@ -9770,6 +9876,7 @@ const App = {
         <div class="modal-body">
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
             <span class="badge ${sc[s.status]||'badge-secondary'}" style="font-size:13px">${s.status.toUpperCase()}</span>
+            ${s.order_number?`<span class="badge badge-info" style="font-size:13px" title="Linked online order">Order: ${s.order_number}</span>`:''}
             ${s.carrier?`<span style="font-size:13px">📦 ${s.carrier}</span>`:''}
             ${s.tracking_number?`<span style="font-family:monospace;font-size:12px;background:#f5f5f5;padding:2px 6px;border-radius:4px">${s.tracking_number}</span>`:''}
           </div>
@@ -9802,7 +9909,7 @@ const App = {
       await this.api('PATCH',`/warehouse/shipments/${id}/ship`,{ tracking_number: tracking });
       this.alert('Shipped — inventory deducted');
       this.closeModal();
-      this.loadShipments();
+      this.loadShipmentsOrOrders();
     } catch(e) { this.alert(e.message,'error'); }
   },
 
@@ -9812,7 +9919,7 @@ const App = {
       await this.api('PATCH',`/warehouse/shipments/${id}/deliver`,{});
       this.alert('Marked as delivered');
       this.closeModal();
-      this.loadShipments();
+      this.loadShipmentsOrOrders();
     } catch(e) { this.alert(e.message,'error'); }
   },
 
@@ -9822,7 +9929,7 @@ const App = {
       await this.api('PATCH',`/warehouse/shipments/${id}/cancel`,{});
       this.alert('Shipment cancelled');
       this.closeModal();
-      this.loadShipments();
+      this.loadShipmentsOrOrders();
     } catch(e) { this.alert(e.message,'error'); }
   },
 

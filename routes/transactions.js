@@ -64,7 +64,7 @@ router.delete('/:id/hold', async (req, res) => {
 
 router.get('/', async (req, res) => {
   try {
-    const { start, end, customer_id, customer_name, status, branch_id, payment_method, transaction_number, source, limit = 100 } = req.query;
+    const { start, end, customer_id, customer_name, status, branch_id, payment_method, transaction_number, source, fulfillment_status, limit = 100 } = req.query;
     let sql = `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN branches b ON t.branch_id = b.id WHERE 1=1`;
     const params = [];
     if (transaction_number) { sql += ' AND t.transaction_number LIKE ?'; params.push(`%${transaction_number}%`); }
@@ -75,6 +75,7 @@ router.get('/', async (req, res) => {
     if (status) { sql += ' AND t.status = ?'; params.push(status); }
     if (branch_id) { sql += ' AND t.branch_id = ?'; params.push(branch_id); }
     if (payment_method) { sql += ' AND t.payment_method = ?'; params.push(payment_method); }
+    if (fulfillment_status) { sql += ' AND t.fulfillment_status = ?'; params.push(fulfillment_status); }
     if (source === 'online') { sql += " AND t.source IN ('online','woocommerce')"; }
     else if (source) { sql += ' AND t.source = ?'; params.push(source); }
     sql += ' ORDER BY t.created_at DESC LIMIT ?';
@@ -216,32 +217,44 @@ router.get('/:id/returns', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Update fulfillment status (online orders)
-router.patch('/:id/fulfillment', async (req, res) => {
-  const { fulfillment_status } = req.body;
+// Shared by the fulfillment route below and by routes/warehouse.js, which calls
+// this when a shipment linked to an online order changes status (ship/deliver/cancel).
+async function updateFulfillmentStatus(txId, fulfillment_status) {
   const valid = ['pending', 'processing', 'shipped', 'delivered', 'cancelled'];
   if (!valid.includes(fulfillment_status)) {
-    return res.status(400).json({ error: `Invalid status. Must be one of: ${valid.join(', ')}` });
+    const e = new Error(`Invalid status. Must be one of: ${valid.join(', ')}`);
+    e.status = 400;
+    throw e;
   }
+  await db.execute({ sql: 'UPDATE transactions SET fulfillment_status = ? WHERE id = ?', args: [fulfillment_status, txId] });
+  const { rows: [tx] } = await db.execute({ sql: 'SELECT * FROM transactions WHERE id = ?', args: [txId] });
+  if (!tx) {
+    const e = new Error('Transaction not found');
+    e.status = 404;
+    throw e;
+  }
+
+  // Push status to WooCommerce if this order was imported from WC
+  if (tx.source === 'woocommerce') {
+    const wcStatusMap = { pending: 'pending', processing: 'processing', shipped: 'on-hold', delivered: 'completed', cancelled: 'cancelled' };
+    try {
+      const { rows: [map] } = await db.execute({ sql: "SELECT woo_id FROM woo_sync_map WHERE entity_type='order' AND local_id=?", args: [tx.id] });
+      if (map?.woo_id) {
+        const s = await getWcSettings();
+        await wcRequest(s, 'PUT', `/orders/${map.woo_id}`, { status: wcStatusMap[fulfillment_status] });
+      }
+    } catch(e) { /* non-fatal — POS update already saved */ }
+  }
+
+  return tx;
+}
+
+// Update fulfillment status (online orders)
+router.patch('/:id/fulfillment', async (req, res) => {
   try {
-    await db.execute({ sql: 'UPDATE transactions SET fulfillment_status = ? WHERE id = ?', args: [fulfillment_status, req.params.id] });
-    const { rows: [tx] } = await db.execute({ sql: 'SELECT * FROM transactions WHERE id = ?', args: [req.params.id] });
-    if (!tx) return res.status(404).json({ error: 'Transaction not found' });
-
-    // Push status to WooCommerce if this order was imported from WC
-    if (tx.source === 'woocommerce') {
-      const wcStatusMap = { pending: 'pending', processing: 'processing', shipped: 'on-hold', delivered: 'completed', cancelled: 'cancelled' };
-      try {
-        const { rows: [map] } = await db.execute({ sql: "SELECT woo_id FROM woo_sync_map WHERE entity_type='order' AND local_id=?", args: [tx.id] });
-        if (map?.woo_id) {
-          const s = await getWcSettings();
-          await wcRequest(s, 'PUT', `/orders/${map.woo_id}`, { status: wcStatusMap[fulfillment_status] });
-        }
-      } catch(e) { /* non-fatal — POS update already saved */ }
-    }
-
+    const tx = await updateFulfillmentStatus(req.params.id, req.body.fulfillment_status);
     res.json(tx);
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
 // Process a return
@@ -367,3 +380,4 @@ router.patch('/:id/void', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.updateFulfillmentStatus = updateFulfillmentStatus;

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { syncBinQty } = require('../lib/binSync');
+const { updateFulfillmentStatus } = require('./transactions');
 
 // ─── ZONES ────────────────────────────────────────────────────────────────────
 
@@ -193,6 +194,40 @@ router.post('/shipments', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Create a draft shipment from an online order (transaction), pulling items,
+// customer, and branch straight from the order so staff don't re-enter them.
+router.post('/shipments/from-order/:txId', async (req, res) => {
+  try {
+    const { rows: [existing] } = await db.execute({ sql: 'SELECT * FROM shipments WHERE transaction_id = ?', args: [req.params.txId] });
+    if (existing) return res.status(400).json({ error: `Shipment ${existing.shipment_number} already exists for this order` });
+
+    const { rows: [txn] } = await db.execute({ sql: 'SELECT * FROM transactions WHERE id = ?', args: [req.params.txId] });
+    if (!txn) return res.status(404).json({ error: 'Order not found' });
+    const { rows: items } = await db.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [req.params.txId] });
+    if (!items.length) return res.status(400).json({ error: 'Order has no items' });
+
+    const { carrier, tracking_number, ship_date, estimated_delivery } = req.body;
+    const { rows: [countRow] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM shipments', args: [] });
+    const shipment_number = `SHP-${String(Number(countRow.c) + 1).padStart(6, '0')}`;
+
+    const tx = await db.transaction('write');
+    try {
+      const result = await tx.execute({ sql: 'INSERT INTO shipments (shipment_number,from_branch_id,customer_id,transaction_id,carrier,tracking_number,ship_date,estimated_delivery,notes) VALUES (?,?,?,?,?,?,?,?,?)', args: [shipment_number, txn.branch_id || null, txn.customer_id || null, txn.id, carrier || null, tracking_number || null, ship_date || null, estimated_delivery || null, `Order ${txn.transaction_number}`] });
+      const shipId = Number(result.lastInsertRowid);
+      for (const item of items) {
+        if (!item.product_id) continue;
+        await tx.execute({ sql: 'INSERT INTO shipment_items (shipment_id,product_id,product_name,sku,quantity) VALUES (?,?,?,?,?)', args: [shipId, item.product_id, item.product_name, item.sku, item.quantity] });
+      }
+      await tx.commit();
+      const { rows: [shipRow] } = await db.execute({ sql: 'SELECT * FROM shipments WHERE id = ?', args: [shipId] });
+      res.status(201).json(shipRow);
+    } catch(e) {
+      await tx.rollback();
+      res.status(400).json({ error: e.message });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/shipments/:id', async (req, res) => {
   try {
     const { rows: [s] } = await db.execute({ sql: `
@@ -203,10 +238,12 @@ router.get('/shipments/:id', async (req, res) => {
         c.first_name || ' ' || c.last_name as customer_name,
         c.address as customer_address, c.city as customer_city,
         c.state as customer_state, c.zip as customer_zip,
-        c.phone as customer_phone, c.email as customer_email
+        c.phone as customer_phone, c.email as customer_email,
+        t.transaction_number as order_number
       FROM shipments s
       LEFT JOIN branches b ON s.from_branch_id = b.id
       LEFT JOIN customers c ON s.customer_id = c.id
+      LEFT JOIN transactions t ON s.transaction_id = t.id
       WHERE s.id = ?`, args: [req.params.id] });
     if (!s) return res.status(404).json({ error: 'Not found' });
     const { rows: items } = await db.execute({ sql: 'SELECT si.*, sb.bin_code FROM shipment_items si LEFT JOIN storage_bins sb ON si.bin_id = sb.id WHERE si.shipment_id = ?', args: [req.params.id] });
@@ -241,6 +278,9 @@ router.patch('/shipments/:id/ship', async (req, res) => {
       return res.status(400).json({ error: e.message });
     }
     const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM shipments WHERE id = ?', args: [req.params.id] });
+    if (updated.transaction_id) {
+      try { await updateFulfillmentStatus(updated.transaction_id, 'shipped'); } catch(e) { /* non-fatal — shipment already updated */ }
+    }
     res.json(updated);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -252,6 +292,9 @@ router.patch('/shipments/:id/deliver', async (req, res) => {
     if (s.status !== 'shipped') return res.status(400).json({ error: 'Only shipped shipments can be marked delivered' });
     await db.execute({ sql: 'UPDATE shipments SET status=?, delivered_at=CURRENT_TIMESTAMP WHERE id=?', args: ['delivered', req.params.id] });
     const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM shipments WHERE id = ?', args: [req.params.id] });
+    if (updated.transaction_id) {
+      try { await updateFulfillmentStatus(updated.transaction_id, 'delivered'); } catch(e) { /* non-fatal */ }
+    }
     res.json(updated);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -284,6 +327,9 @@ router.patch('/shipments/:id/cancel', async (req, res) => {
       return res.status(400).json({ error: e.message });
     }
     const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM shipments WHERE id = ?', args: [req.params.id] });
+    if (updated.transaction_id) {
+      try { await updateFulfillmentStatus(updated.transaction_id, 'cancelled'); } catch(e) { /* non-fatal */ }
+    }
     res.json(updated);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
