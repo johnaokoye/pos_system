@@ -409,6 +409,45 @@ async function _init() {
       quantity INTEGER NOT NULL DEFAULT 1,
       bin_id INTEGER REFERENCES storage_bins(id)
     )` },
+    { sql: `CREATE TABLE IF NOT EXISTS rental_agreements (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agreement_number TEXT UNIQUE NOT NULL,
+      customer_id INTEGER NOT NULL REFERENCES customers(id),
+      employee_id INTEGER REFERENCES employees(id),
+      branch_id INTEGER REFERENCES branches(id),
+      status TEXT NOT NULL DEFAULT 'active',
+      checkout_date DATE NOT NULL DEFAULT (date('now')),
+      due_date DATE NOT NULL,
+      returned_at DATETIME,
+      checkout_transaction_id INTEGER REFERENCES transactions(id),
+      settlement_transaction_id INTEGER REFERENCES transactions(id),
+      deposit_total REAL NOT NULL DEFAULT 0,
+      deposit_refunded REAL NOT NULL DEFAULT 0,
+      late_fee_total REAL NOT NULL DEFAULT 0,
+      damage_fee_total REAL NOT NULL DEFAULT 0,
+      notes TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS rental_agreement_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agreement_id INTEGER NOT NULL REFERENCES rental_agreements(id),
+      product_id INTEGER REFERENCES products(id),
+      product_name TEXT NOT NULL,
+      sku TEXT,
+      quantity INTEGER NOT NULL DEFAULT 1,
+      rate_type TEXT NOT NULL DEFAULT 'daily',
+      rate_amount REAL NOT NULL DEFAULT 0,
+      rental_fee REAL NOT NULL DEFAULT 0,
+      deposit_amount REAL NOT NULL DEFAULT 0,
+      replacement_value REAL DEFAULT 0,
+      late_fee_rate REAL DEFAULT 0,
+      quantity_returned INTEGER NOT NULL DEFAULT 0,
+      condition_out TEXT,
+      condition_in TEXT,
+      damage_notes TEXT,
+      damage_fee REAL DEFAULT 0,
+      returned_at DATETIME
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS cycle_count_sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_number TEXT UNIQUE NOT NULL,
@@ -683,6 +722,12 @@ async function _init() {
     'ALTER TABLE purchase_order_items ADD COLUMN damage_notes TEXT',
     'ALTER TABLE purchase_orders ADD COLUMN grn_sent_at DATETIME',
     'ALTER TABLE shipments ADD COLUMN transaction_id INTEGER REFERENCES transactions(id)',
+    'ALTER TABLE products ADD COLUMN is_rental INTEGER DEFAULT 0',
+    "ALTER TABLE products ADD COLUMN rental_rate_type TEXT DEFAULT 'daily'",
+    'ALTER TABLE products ADD COLUMN rental_rate REAL DEFAULT 0',
+    'ALTER TABLE products ADD COLUMN rental_deposit REAL DEFAULT 0',
+    'ALTER TABLE products ADD COLUMN rental_late_fee_rate REAL DEFAULT 0',
+    'ALTER TABLE products ADD COLUMN replacement_value REAL DEFAULT 0',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
@@ -781,6 +826,19 @@ async function _init() {
     }
   } catch(e) {}
 
+  // Add rentals permission to existing security groups — checkout/return is a
+  // daily front-counter task, so it defaults on for every group (like pos:true).
+  try {
+    const { rows: groups } = await db.execute({ sql: 'SELECT id, name, permissions FROM security_groups', args: [] });
+    for (const g of groups) {
+      const perms = JSON.parse(g.permissions || '{}');
+      if (!('rentals' in perms)) {
+        perms.rentals = true;
+        await db.execute({ sql: 'UPDATE security_groups SET permissions = ? WHERE id = ?', args: [JSON.stringify(perms), g.id] });
+      }
+    }
+  } catch(e) {}
+
   // Ensure admin always has a password — runs unconditionally on every boot
   {
     const { rows: [adminEmp] } = await db.execute({ sql: 'SELECT id, password FROM employees WHERE username = ?', args: ['admin'] });
@@ -814,9 +872,9 @@ async function _init() {
   // Seed security groups
   const { rows: [sgCount] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM security_groups', args: [] });
   if (Number(sgCount.c) === 0) {
-    await db.execute({ sql: 'INSERT INTO security_groups (name, description, permissions) VALUES (?,?,?)', args: ['Administrator','Full system access',JSON.stringify({dashboard:true,pos:true,inventory:true,customers:true,transactions:true,reports:true,employees:true,settings:true,purchasing:true,branches:true,security:true,accounts:true,quotations:true,suppliers:true,transfers:true,crm:true,commissions:true,multi_branch_access:true,warehouse:true,shipping:true,'cycle-counts':true,drawers:true,void_transactions:true,promotions:true,process_returns:true,purchase_requests:true,services:true})] });
-    await db.execute({ sql: 'INSERT INTO security_groups (name, description, permissions) VALUES (?,?,?)', args: ['Cashier','POS and basic operations',JSON.stringify({dashboard:true,pos:true,inventory:false,customers:true,transactions:true,reports:false,employees:false,settings:false,purchasing:false,branches:false,security:false,accounts:false,quotations:true,suppliers:false,transfers:false,crm:false,commissions:false,multi_branch_access:false,warehouse:false,shipping:false,'cycle-counts':false,drawers:false,void_transactions:false,promotions:false,process_returns:false,purchase_requests:false,services:false})] });
-    await db.execute({ sql: 'INSERT INTO security_groups (name, description, permissions) VALUES (?,?,?)', args: ['Manager','Store management without admin',JSON.stringify({dashboard:true,pos:true,inventory:true,customers:true,transactions:true,reports:true,employees:true,settings:false,purchasing:true,branches:false,security:false,accounts:true,quotations:true,suppliers:true,transfers:true,crm:true,commissions:true,multi_branch_access:true,warehouse:true,shipping:true,'cycle-counts':true,drawers:true,void_transactions:true,promotions:true,process_returns:true,purchase_requests:true,services:true})] });
+    await db.execute({ sql: 'INSERT INTO security_groups (name, description, permissions) VALUES (?,?,?)', args: ['Administrator','Full system access',JSON.stringify({dashboard:true,pos:true,inventory:true,customers:true,transactions:true,reports:true,employees:true,settings:true,purchasing:true,branches:true,security:true,accounts:true,quotations:true,suppliers:true,transfers:true,crm:true,commissions:true,multi_branch_access:true,warehouse:true,shipping:true,'cycle-counts':true,drawers:true,void_transactions:true,promotions:true,process_returns:true,purchase_requests:true,services:true,rentals:true})] });
+    await db.execute({ sql: 'INSERT INTO security_groups (name, description, permissions) VALUES (?,?,?)', args: ['Cashier','POS and basic operations',JSON.stringify({dashboard:true,pos:true,inventory:false,customers:true,transactions:true,reports:false,employees:false,settings:false,purchasing:false,branches:false,security:false,accounts:false,quotations:true,suppliers:false,transfers:false,crm:false,commissions:false,multi_branch_access:false,warehouse:false,shipping:false,'cycle-counts':false,drawers:false,void_transactions:false,promotions:false,process_returns:false,purchase_requests:false,services:false,rentals:true})] });
+    await db.execute({ sql: 'INSERT INTO security_groups (name, description, permissions) VALUES (?,?,?)', args: ['Manager','Store management without admin',JSON.stringify({dashboard:true,pos:true,inventory:true,customers:true,transactions:true,reports:true,employees:true,settings:false,purchasing:true,branches:false,security:false,accounts:true,quotations:true,suppliers:true,transfers:true,crm:true,commissions:true,multi_branch_access:true,warehouse:true,shipping:true,'cycle-counts':true,drawers:true,void_transactions:true,promotions:true,process_returns:true,purchase_requests:true,services:true,rentals:true})] });
 
     // Assign to existing employees
     try {

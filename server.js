@@ -49,6 +49,7 @@ app.use('/api/promotions',      require('./routes/promotions'));
 app.use('/api/denominations',   require('./routes/denominations'));
 app.use('/api/woocommerce',    woocommerceRouter);
 app.use('/api/api-keys',       require('./routes/api-keys'));
+app.use('/api/rentals',        require('./routes/rentals'));
 
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));

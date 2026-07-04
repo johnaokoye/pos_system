@@ -16,7 +16,7 @@ const upload = multer({
 // GET all products
 router.get('/', async (req, res) => {
   try {
-    const { search, category, active, low_stock, branch_id, supplier_id, is_service, online } = req.query;
+    const { search, category, active, low_stock, branch_id, supplier_id, is_service, is_rental, online } = req.query;
     const params = [];
     let sql;
 
@@ -48,20 +48,26 @@ router.get('/', async (req, res) => {
       return res.json(onlineRows);
     }
 
+    const rentalOutstandingExpr = `(SELECT COALESCE(SUM(rai.quantity - rai.quantity_returned),0)
+        FROM rental_agreement_items rai JOIN rental_agreements ra ON rai.agreement_id = ra.id
+        WHERE rai.product_id = p.id AND ra.status = 'active') as rental_outstanding_qty`;
+
     if (branch_id) {
       sql = `SELECT p.id, p.sku, p.barcode, p.name, p.description, p.category_id, p.price, p.cost, p.tax_rate, p.active, p.created_at, p.supplier_id, p.image_path, p.is_service, p.unit,
+        p.is_rental, p.rental_rate_type, p.rental_rate, p.rental_deposit, p.rental_late_fee_rate, p.replacement_value,
         COALESCE(bi.stock_qty, 0) as stock_qty,
         COALESCE(bi.min_stock, p.min_stock) as min_stock,
         p.stock_qty as global_stock_qty,
         c.name as category_name,
-        (SELECT COUNT(*) FROM product_variations WHERE product_id = p.id AND active = 1) as has_variations
+        (SELECT COUNT(*) FROM product_variations WHERE product_id = p.id AND active = 1) as has_variations,
+        ${rentalOutstandingExpr}
         FROM products p
         LEFT JOIN categories c ON p.category_id = c.id
         LEFT JOIN branch_inventory bi ON p.id = bi.product_id AND bi.branch_id = ?
         WHERE 1=1`;
       params.push(branch_id);
     } else {
-      sql = `SELECT p.*, c.name as category_name, (SELECT COUNT(*) FROM product_variations WHERE product_id = p.id AND active = 1) as has_variations FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE 1=1`;
+      sql = `SELECT p.*, c.name as category_name, (SELECT COUNT(*) FROM product_variations WHERE product_id = p.id AND active = 1) as has_variations, ${rentalOutstandingExpr} FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE 1=1`;
     }
 
     if (search) {
@@ -72,6 +78,7 @@ router.get('/', async (req, res) => {
     if (supplier_id) { sql += ` AND p.supplier_id = ?`; params.push(supplier_id); }
     if (active !== undefined) { sql += ` AND p.active = ?`; params.push(active); }
     if (is_service !== undefined) { sql += ` AND p.is_service = ?`; params.push(is_service); }
+    if (is_rental !== undefined) { sql += ` AND p.is_rental = ?`; params.push(is_rental); }
     if (low_stock === 'true') {
       if (branch_id) {
         sql += ` AND COALESCE(bi.stock_qty, p.stock_qty) <= COALESCE(bi.min_stock, p.min_stock)`;
@@ -307,11 +314,12 @@ router.get('/:id', async (req, res) => {
 
 // POST create product
 router.post('/', async (req, res) => {
-  const { sku, barcode, name, description, category_id, price, cost, tax_rate, stock_qty, min_stock, active, branch_id, supplier_id, is_service, unit, online_available, web_allotment } = req.body;
+  const { sku, barcode, name, description, category_id, price, cost, tax_rate, stock_qty, min_stock, active, branch_id, supplier_id, is_service, unit, online_available, web_allotment, is_rental, rental_rate_type, rental_rate, rental_deposit, rental_late_fee_rate, replacement_value } = req.body;
   if (!sku || !name) return res.status(400).json({ error: 'SKU and name are required' });
   try {
     const svc = is_service ? 1 : 0;
-    const result = await db.execute({ sql: `INSERT INTO products (sku,barcode,name,description,category_id,price,cost,tax_rate,stock_qty,min_stock,active,supplier_id,is_service,unit,online_available,web_allotment) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, tax_rate??8.5, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null] });
+    const rnt = is_rental ? 1 : 0;
+    const result = await db.execute({ sql: `INSERT INTO products (sku,barcode,name,description,category_id,price,cost,tax_rate,stock_qty,min_stock,active,supplier_id,is_service,unit,online_available,web_allotment,is_rental,rental_rate_type,rental_rate,rental_deposit,rental_late_fee_rate,replacement_value) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, tax_rate??8.5, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null, rnt, rental_rate_type||'daily', rental_rate||0, rental_deposit||0, rental_late_fee_rate||0, replacement_value||0] });
     const productId = Number(result.lastInsertRowid);
     if (!svc && branch_id && (parseInt(stock_qty) || 0) > 0) {
       await db.execute({ sql: 'INSERT OR IGNORE INTO branch_inventory (product_id, branch_id, stock_qty, min_stock) VALUES (?, ?, ?, ?)', args: [productId, branch_id, parseInt(stock_qty) || 0, parseInt(min_stock) || 5] });
@@ -325,10 +333,11 @@ router.post('/', async (req, res) => {
 
 // PUT update product
 router.put('/:id', async (req, res) => {
-  const { sku, barcode, name, description, category_id, price, cost, tax_rate, stock_qty, min_stock, active, supplier_id, is_service, unit, online_available, web_allotment } = req.body;
+  const { sku, barcode, name, description, category_id, price, cost, tax_rate, stock_qty, min_stock, active, supplier_id, is_service, unit, online_available, web_allotment, is_rental, rental_rate_type, rental_rate, rental_deposit, rental_late_fee_rate, replacement_value } = req.body;
   try {
     const svc = is_service ? 1 : 0;
-    await db.execute({ sql: `UPDATE products SET sku=?,barcode=?,name=?,description=?,category_id=?,price=?,cost=?,tax_rate=?,stock_qty=?,min_stock=?,active=?,supplier_id=?,is_service=?,unit=?,online_available=?,web_allotment=? WHERE id=?`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, tax_rate??8.5, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null, req.params.id] });
+    const rnt = is_rental ? 1 : 0;
+    await db.execute({ sql: `UPDATE products SET sku=?,barcode=?,name=?,description=?,category_id=?,price=?,cost=?,tax_rate=?,stock_qty=?,min_stock=?,active=?,supplier_id=?,is_service=?,unit=?,online_available=?,web_allotment=?,is_rental=?,rental_rate_type=?,rental_rate=?,rental_deposit=?,rental_late_fee_rate=?,replacement_value=? WHERE id=?`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, tax_rate??8.5, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null, rnt, rental_rate_type||'daily', rental_rate||0, rental_deposit||0, rental_late_fee_rate||0, replacement_value||0, req.params.id] });
     const { rows: [prod] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [req.params.id] });
     res.json(prod);
   } catch (e) {

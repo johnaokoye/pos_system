@@ -387,6 +387,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/><path d="M0 0h24v24H0z" fill="none"/><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
       Services
     </div>
+    <div class="nav-item" data-section="rentals">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M22.7 19l-9.1-9.1c.9-2.3.4-5-1.5-6.9-2-2-5-2.4-7.4-1.3L9 6l-3 3-4.3-4.3C.6 7.1 1 10.1 3 12.1c1.9 1.9 4.6 2.4 6.9 1.5l9.1 9.1c.4.4 1 .4 1.4 0l2.3-2.3c.4-.4.4-1 0-1.4z"/></svg>
+      Rentals
+    </div>
     <div class="nav-item" data-section="transfers">
       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.99 11L3 15l3.99 4v-3H14v-2H6.99v-3zM21 9l-3.99-4v3H10v2h7.01v3L21 9z"/></svg>
       Branch Transfers
@@ -843,13 +847,13 @@ const App = {
     this.section = name;
     this.closeModal();
     document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.section === name));
-    const titles = { dashboard: 'Dashboard', pos: 'Point of Sale', inventory: 'Inventory Management', services: 'Services & Non-Inventory Items', customers: 'Customers', transactions: 'Transactions', 'online-orders': 'Online Orders', reports: 'Reports & Analytics', employees: 'Employees', settings: 'Settings', suppliers: 'Suppliers', purchasing: 'Purchasing', quotations: 'Quotations', accounts: 'Accounts Receivable', branches: 'Branch Management', security: 'Security Groups', transfers: 'Branch Transfers', crm: 'CRM & Sales', commissions: 'Commission Tracking', warehouse: 'Warehouse Management', shipping: 'Shipping', 'cycle-counts': 'Cycle Counts', drawers: 'Cash Drawers', promotions: 'Promotions' };
+    const titles = { dashboard: 'Dashboard', pos: 'Point of Sale', inventory: 'Inventory Management', services: 'Services & Non-Inventory Items', rentals: 'Rentals', customers: 'Customers', transactions: 'Transactions', 'online-orders': 'Online Orders', reports: 'Reports & Analytics', employees: 'Employees', settings: 'Settings', suppliers: 'Suppliers', purchasing: 'Purchasing', quotations: 'Quotations', accounts: 'Accounts Receivable', branches: 'Branch Management', security: 'Security Groups', transfers: 'Branch Transfers', crm: 'CRM & Sales', commissions: 'Commission Tracking', warehouse: 'Warehouse Management', shipping: 'Shipping', 'cycle-counts': 'Cycle Counts', drawers: 'Cash Drawers', promotions: 'Promotions' };
     document.getElementById('topbar-title').textContent = titles[name] || name;
     const content = document.getElementById('content');
     content.style.padding = name === 'pos' ? '0' : '20px';
     content.style.overflow = name === 'pos' ? 'hidden' : 'auto';
     content.style.height = name === 'pos' ? '100%' : 'auto';
-    const renders = { dashboard: () => this.renderDashboard(), pos: () => this.renderPOS(), inventory: () => this.renderInventory(), services: () => this.renderServices(), customers: () => this.renderCustomers(), transactions: () => this.renderTransactions(), 'online-orders': () => this.renderOnlineOrders(), reports: () => this.renderReports(), employees: () => this.renderEmployees(), settings: () => this.renderSettings(), suppliers: () => this.renderSuppliers(), purchasing: () => this.renderPurchasing(), quotations: () => this.renderQuotations(), accounts: () => this.renderAccounts(), branches: () => this.renderBranches(), security: () => this.renderSecurity(), transfers: () => this.renderTransfers(), crm: () => this.renderCRM(), commissions: () => this.renderCommissions(), warehouse: () => this.renderWarehouse(), shipping: () => this.renderShipping(), 'cycle-counts': () => this.renderCycleCounts(), drawers: () => this.renderDrawers(), promotions: () => this.renderPromotions() };
+    const renders = { dashboard: () => this.renderDashboard(), pos: () => this.renderPOS(), inventory: () => this.renderInventory(), services: () => this.renderServices(), rentals: () => this.renderRentals(), customers: () => this.renderCustomers(), transactions: () => this.renderTransactions(), 'online-orders': () => this.renderOnlineOrders(), reports: () => this.renderReports(), employees: () => this.renderEmployees(), settings: () => this.renderSettings(), suppliers: () => this.renderSuppliers(), purchasing: () => this.renderPurchasing(), quotations: () => this.renderQuotations(), accounts: () => this.renderAccounts(), branches: () => this.renderBranches(), security: () => this.renderSecurity(), transfers: () => this.renderTransfers(), crm: () => this.renderCRM(), commissions: () => this.renderCommissions(), warehouse: () => this.renderWarehouse(), shipping: () => this.renderShipping(), 'cycle-counts': () => this.renderCycleCounts(), drawers: () => this.renderDrawers(), promotions: () => this.renderPromotions() };
     if (renders[name]) await renders[name]();
   },
 
@@ -2704,6 +2708,411 @@ const App = {
     this.closeModal();
     this.alert('Service deactivated');
     this.renderServices();
+  },
+
+  // ─── Rentals ──────────────────────────────────────────────────────────────
+
+  _rentalTabs: [
+    { key: 'items',     label: 'Rental Items' },
+    { key: 'active',    label: 'Active' },
+    { key: 'overdue',   label: 'Overdue' },
+    { key: 'all',       label: 'All Agreements' },
+    { key: 'returned',  label: 'Returned' },
+    { key: 'cancelled', label: 'Cancelled' },
+  ],
+
+  async renderRentals() {
+    this.rentalTab = this.rentalTab || 'active';
+    document.getElementById('content').innerHTML = `
+      <div class="section-header">
+        <h2>Rentals</h2>
+        <div id="rental-header-actions"></div>
+      </div>
+      <div class="crm-tabs" id="rental-tabs-nav">
+        ${this._rentalTabs.map(t=>`<button class="crm-tab ${this.rentalTab===t.key?'active':''}" onclick="App.filterRentals('${t.key}')">${t.label}</button>`).join('')}
+      </div>
+      <div id="rental-content"></div>`;
+    await this.loadRentalTab();
+  },
+
+  async filterRentals(tab) {
+    this.rentalTab = tab;
+    document.querySelectorAll('#rental-tabs-nav .crm-tab').forEach((btn,i) => {
+      btn.classList.toggle('active', this._rentalTabs[i].key === tab);
+    });
+    await this.loadRentalTab();
+  },
+
+  async loadRentalTab() {
+    const hdr = document.getElementById('rental-header-actions');
+    if (this.rentalTab === 'items') {
+      if (hdr) hdr.innerHTML = this.can('rentals_manage_items') ? `<button class="btn btn-primary btn-sm" onclick="App.showRentalItemForm()">+ Add Rental Item</button>` : '';
+      await this.loadRentalItems();
+    } else {
+      if (hdr) hdr.innerHTML = this.can('rentals_checkout') ? `<button class="btn btn-primary btn-sm" onclick="App.showRentalCheckoutModal()">+ New Rental</button>` : '';
+      await this.loadRentalAgreements();
+    }
+  },
+
+  async loadRentalItems() {
+    const el = document.getElementById('rental-content');
+    if (!el) return;
+    const items = await this.api('GET', '/products?is_rental=1');
+    if (!document.getElementById('rental-content')) return;
+    document.getElementById('rental-content').innerHTML = !items.length ? '<div class="empty-state"><p>No rental items yet.</p></div>' : `
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>SKU</th><th>Name</th><th>Category</th><th>Rate</th><th>Deposit</th><th>Late Fee/Day</th><th>Stock</th><th>Available</th><th>Status</th><th></th></tr></thead>
+            <tbody>${items.map(p => `<tr>
+              <td class="fw-600">${p.sku}</td>
+              <td>${p.name}</td>
+              <td>${p.category_name||'—'}</td>
+              <td>${this.fmt(p.rental_rate)} / ${p.rental_rate_type}</td>
+              <td>${this.fmt(p.rental_deposit)}</td>
+              <td>${this.fmt(p.rental_late_fee_rate)}</td>
+              <td>${p.stock_qty}</td>
+              <td class="${(p.stock_qty - (p.rental_outstanding_qty||0)) <= 0 ? 'color-danger fw-600' : ''}">${p.stock_qty - (p.rental_outstanding_qty||0)}</td>
+              <td><span class="badge-pill ${p.active ? 'badge-success' : 'badge-danger'}">${p.active ? 'Active' : 'Inactive'}</span></td>
+              <td><button class="btn btn-sm btn-secondary" onclick="App.showRentalItemForm(${p.id})">Edit</button></td>
+            </tr>`).join('')}</tbody>
+          </table>
+        </div>
+      </div>`;
+  },
+
+  async showRentalItemForm(id) {
+    const categories = await this.api('GET', '/categories');
+    const p = id ? await this.api('GET', `/products/${id}`) : {};
+    const defaultTax = p.tax_rate ?? this.settings?.tax_rate ?? 8.5;
+    this.showModal(`
+      <div class="modal">
+        <div class="modal-header">
+          <span class="modal-title">${id ? 'Edit Rental Item' : 'Add Rental Item'}</span>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="input-row">
+            <div class="form-group"><label>SKU *</label><input id="rf-sku" value="${p.sku||''}" placeholder="RENT-001"></div>
+            <div class="form-group"><label>Category</label>
+              <select id="rf-cat"><option value="">— None —</option>${categories.map(c => `<option value="${c.id}" ${p.category_id==c.id?'selected':''}>${c.name}</option>`).join('')}</select>
+            </div>
+          </div>
+          <div class="form-group"><label>Name *</label><input id="rf-name" value="${p.name||''}"></div>
+          <div class="form-group"><label>Description</label><input id="rf-desc" value="${p.description||''}"></div>
+          <div class="input-row-3">
+            <div class="form-group"><label>Stock Qty *</label><input type="number" id="rf-stock" value="${p.stock_qty??0}" min="0"></div>
+            <div class="form-group"><label>Min Stock</label><input type="number" id="rf-minstock" value="${p.min_stock??1}" min="0"></div>
+            <div class="form-group"><label>Tax Rate %</label><input type="number" id="rf-tax" value="${defaultTax}" min="0" step="0.1"></div>
+          </div>
+          <div class="input-row">
+            <div class="form-group"><label>Rate Type</label>
+              <select id="rf-ratetype">
+                ${['daily','weekly','flat'].map(t => `<option value="${t}" ${p.rental_rate_type===t?'selected':''}>${t.charAt(0).toUpperCase()+t.slice(1)}</option>`).join('')}
+              </select>
+            </div>
+            <div class="form-group"><label>Rate Amount *</label><input type="number" id="rf-rate" value="${p.rental_rate||0}" min="0" step="0.01"></div>
+          </div>
+          <div class="input-row">
+            <div class="form-group"><label>Deposit Amount</label><input type="number" id="rf-deposit" value="${p.rental_deposit||0}" min="0" step="0.01"></div>
+            <div class="form-group"><label>Late Fee (per day)</label><input type="number" id="rf-latefee" value="${p.rental_late_fee_rate||0}" min="0" step="0.01"></div>
+          </div>
+          <div class="form-group"><label>Replacement Value</label><input type="number" id="rf-replval" value="${p.replacement_value||0}" min="0" step="0.01"></div>
+          <div class="form-group"><label>Status</label>
+            <select id="rf-active"><option value="1" ${p.active!==0?'selected':''}>Active</option><option value="0" ${p.active===0?'selected':''}>Inactive</option></select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          ${id ? `<button class="btn btn-danger" onclick="App.deleteRentalItem(${id})">Delete</button>` : ''}
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.saveRentalItem(${id||'null'})">Save</button>
+        </div>
+      </div>`);
+  },
+
+  async saveRentalItem(id) {
+    const sku = document.getElementById('rf-sku').value.trim();
+    const name = document.getElementById('rf-name').value.trim();
+    if (!sku || !name) { this.alert('SKU and name are required', 'error'); return; }
+    const data = {
+      sku,
+      name,
+      description: document.getElementById('rf-desc').value.trim() || null,
+      category_id: document.getElementById('rf-cat').value || null,
+      stock_qty: parseInt(document.getElementById('rf-stock').value) || 0,
+      min_stock: parseInt(document.getElementById('rf-minstock').value) || 0,
+      tax_rate: parseFloat(document.getElementById('rf-tax').value) || 0,
+      rental_rate_type: document.getElementById('rf-ratetype').value,
+      rental_rate: parseFloat(document.getElementById('rf-rate').value) || 0,
+      rental_deposit: parseFloat(document.getElementById('rf-deposit').value) || 0,
+      rental_late_fee_rate: parseFloat(document.getElementById('rf-latefee').value) || 0,
+      replacement_value: parseFloat(document.getElementById('rf-replval').value) || 0,
+      active: parseInt(document.getElementById('rf-active').value),
+      is_rental: 1,
+      price: 0,
+    };
+    try {
+      if (id) await this.api('PUT', `/products/${id}`, data);
+      else await this.api('POST', '/products', data);
+      this.closeModal();
+      this.alert(id ? 'Rental item updated' : 'Rental item created');
+      this.renderRentals();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async deleteRentalItem(id) {
+    if (!confirm('Deactivate this rental item?')) return;
+    await this.api('DELETE', `/products/${id}`);
+    this.closeModal();
+    this.alert('Rental item deactivated');
+    this.renderRentals();
+  },
+
+  async loadRentalAgreements() {
+    const el = document.getElementById('rental-content');
+    if (!el) return;
+    const view = this.rentalTab === 'all' ? '' : this.rentalTab;
+    const agreements = await this.api('GET', `/rentals/agreements${view ? '?view='+view : ''}`);
+    if (!document.getElementById('rental-content')) return;
+    const sc = { active:'badge-info', overdue:'badge-danger', returned:'badge-success', cancelled:'badge-secondary' };
+    document.getElementById('rental-content').innerHTML = !agreements.length ? '<div class="empty-state"><p>No rental agreements found.</p></div>' : `
+      <table class="table">
+        <thead><tr><th>Agreement #</th><th>Customer</th><th>Branch</th><th>Checkout</th><th>Due</th><th>Items</th><th>Status</th><th></th></tr></thead>
+        <tbody>${agreements.map(a => `<tr>
+          <td class="fw-600">${a.agreement_number}</td>
+          <td>${a.customer_name||'—'}</td>
+          <td>${a.branch_name||'—'}</td>
+          <td>${this.fmtDate(a.checkout_date)}</td>
+          <td>${this.fmtDate(a.due_date)}</td>
+          <td><span class="badge badge-info">${a.item_count}</span></td>
+          <td><span class="badge-pill ${sc[a.display_status]||'badge-secondary'}">${a.display_status}</span></td>
+          <td style="text-align:right;white-space:nowrap">
+            <button class="btn btn-sm btn-outline" onclick="App.viewRentalAgreement(${a.id})">View</button>
+          </td>
+        </tr>`).join('')}</tbody>
+      </table>`;
+  },
+
+  async viewRentalAgreement(id) {
+    const a = await this.api('GET', `/rentals/agreements/${id}`);
+    const sc = { active:'badge-info', overdue:'badge-danger', returned:'badge-success', cancelled:'badge-secondary' };
+    this.showModal(`
+      <div class="modal" style="max-width:640px">
+        <div class="modal-header">
+          <span class="modal-title">${a.agreement_number}</span>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+            <span class="badge-pill ${sc[a.display_status]||'badge-secondary'}" style="font-size:13px">${a.display_status.toUpperCase()}</span>
+            ${a.checkout_transaction_number?`<span style="font-size:13px">Checkout: ${a.checkout_transaction_number}</span>`:''}
+            ${a.settlement_transaction_number?`<span style="font-size:13px">Settlement: ${a.settlement_transaction_number}</span>`:''}
+          </div>
+          <div class="input-row" style="margin-bottom:10px">
+            <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Customer</label><div>${a.customer_name||'—'}</div></div>
+            <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Branch</label><div>${a.branch_name||'—'}</div></div>
+            <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Checkout Date</label><div>${this.fmtDate(a.checkout_date)}</div></div>
+            <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Due Date</label><div>${this.fmtDate(a.due_date)}</div></div>
+          </div>
+          <table class="table" style="margin-bottom:12px">
+            <thead><tr><th>Product</th><th>Qty</th><th>Returned</th><th>Rate</th><th>Fee</th><th>Deposit</th><th>Condition Out</th><th>Condition In</th></tr></thead>
+            <tbody>${a.items.map(i=>`<tr>
+              <td>${i.product_name}</td>
+              <td>${i.quantity}</td>
+              <td>${i.quantity_returned}</td>
+              <td>${this.fmt(i.rate_amount)}/${i.rate_type}</td>
+              <td>${this.fmt(i.rental_fee)}</td>
+              <td>${this.fmt(i.deposit_amount)}</td>
+              <td style="color:var(--text-muted);font-size:12px">${i.condition_out||'—'}</td>
+              <td style="color:var(--text-muted);font-size:12px">${i.condition_in||'—'}${i.damage_notes?`<br><span class="color-danger">${i.damage_notes}</span>`:''}</td>
+            </tr>`).join('')}</tbody>
+          </table>
+          <div style="display:flex;justify-content:space-between;font-size:13px">
+            <span>Deposit Total: ${this.fmt(a.deposit_total)}</span>
+            <span>Late Fee: ${this.fmt(a.late_fee_total)}</span>
+            <span>Damage Fee: ${this.fmt(a.damage_fee_total)}</span>
+            <span>Deposit Refunded: ${this.fmt(a.deposit_refunded)}</span>
+          </div>
+        </div>
+        <div class="modal-footer">
+          ${a.status==='active' && this.can('rentals_returns') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showRentalReturnModal(${a.id})">Process Return</button>` : ''}
+          ${a.status==='active' && !a.items.some(i=>i.quantity_returned>0) && this.can('rentals_returns') ? `<button class="btn btn-danger" onclick="App.cancelRentalAgreement(${a.id})">Cancel Agreement</button>` : ''}
+          <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+        </div>
+      </div>`);
+  },
+
+  async cancelRentalAgreement(id) {
+    if (!confirm('Cancel this rental agreement? The checkout charge will be voided.')) return;
+    try {
+      await this.api('PATCH', `/rentals/agreements/${id}/cancel`);
+      this.closeModal();
+      this.alert('Rental agreement cancelled');
+      this.renderRentals();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async showRentalCheckoutModal() {
+    const [customers, products, branches] = await Promise.all([
+      this.api('GET', '/customers?active=1'),
+      this.api('GET', '/products?is_rental=1&active=1'),
+      Promise.resolve(this.currentUser.branches || []),
+    ]);
+    this._rentalProducts = products;
+    this._rentalLineIdx = 0;
+    const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0,10);
+    this.showModal(`
+      <div class="modal" style="max-width:640px">
+        <div class="modal-header">
+          <span class="modal-title">New Rental Checkout</span>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="input-row">
+            <div class="form-group"><label>Customer *</label>
+              <select id="rc-customer">
+                <option value="">Select customer…</option>
+                ${customers.map(c=>`<option value="${c.id}">${c.first_name} ${c.last_name}</option>`).join('')}
+              </select>
+            </div>
+            <div class="form-group"><label>Branch</label>
+              <select id="rc-branch">
+                <option value="">None</option>
+                ${branches.map(b=>`<option value="${b.id}">${b.name}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+          <div class="form-group"><label>Due Date *</label><input type="date" id="rc-duedate" value="${tomorrow}"></div>
+          <hr style="margin:12px 0">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <strong>Items</strong>
+            <button class="btn btn-sm btn-outline" onclick="App.addRentalCheckoutLine()">+ Add Item</button>
+          </div>
+          <div id="rental-checkout-lines"></div>
+          <hr style="margin:12px 0">
+          <div class="input-row">
+            <div class="form-group"><label>Payment Method</label>
+              <select id="rc-paymethod">
+                <option value="cash">Cash</option>
+                <option value="credit_card">Card</option>
+                <option value="check">Check</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.saveRentalCheckout()">Check Out</button>
+        </div>
+      </div>`);
+    this.addRentalCheckoutLine();
+  },
+
+  addRentalCheckoutLine() {
+    const container = document.getElementById('rental-checkout-lines');
+    if (!container) return;
+    const idx = this._rentalLineIdx++;
+    const products = this._rentalProducts || [];
+    const div = document.createElement('div');
+    div.id = `rental-line-${idx}`;
+    div.style.cssText = 'display:flex;gap:6px;margin-bottom:8px;align-items:flex-start';
+    div.innerHTML = `
+      <select id="rl-prod-${idx}" style="flex:2;padding:6px;border:1px solid var(--border);border-radius:4px;font-size:13px" onchange="App._updateRentalLineAvail(${idx})">
+        <option value="">Select item…</option>
+        ${products.map(p=>{
+          const avail = p.stock_qty - (p.rental_outstanding_qty||0);
+          return `<option value="${p.id}" data-avail="${avail}">${p.name} (${avail} available)</option>`;
+        }).join('')}
+      </select>
+      <input type="number" id="rl-qty-${idx}" value="1" min="1" style="width:70px;padding:6px;border:1px solid var(--border);border-radius:4px" onchange="App._updateRentalLineAvail(${idx})">
+      <input type="text" id="rl-cond-${idx}" placeholder="Condition out (optional)" style="flex:2;padding:6px;border:1px solid var(--border);border-radius:4px;font-size:13px">
+      <span id="rl-warn-${idx}" style="font-size:11px;color:var(--danger);align-self:center"></span>`;
+    container.appendChild(div);
+  },
+
+  _updateRentalLineAvail(idx) {
+    const sel = document.getElementById(`rl-prod-${idx}`);
+    const qtyEl = document.getElementById(`rl-qty-${idx}`);
+    const warnEl = document.getElementById(`rl-warn-${idx}`);
+    if (!sel || !qtyEl || !warnEl) return;
+    const avail = parseInt(sel.selectedOptions[0]?.dataset.avail) || 0;
+    const qty = parseInt(qtyEl.value) || 0;
+    warnEl.textContent = qty > avail ? `Only ${avail} available` : '';
+  },
+
+  async saveRentalCheckout() {
+    const customer_id = document.getElementById('rc-customer').value;
+    const branch_id = document.getElementById('rc-branch').value || null;
+    const due_date = document.getElementById('rc-duedate').value;
+    const payment_method = document.getElementById('rc-paymethod').value;
+    if (!customer_id) { this.alert('Please select a customer', 'error'); return; }
+    if (!due_date) { this.alert('Please select a due date', 'error'); return; }
+    const items = [];
+    document.querySelectorAll('#rental-checkout-lines [id^="rental-line-"]').forEach(line => {
+      const idx = line.id.replace('rental-line-','');
+      const product_id = document.getElementById(`rl-prod-${idx}`)?.value;
+      const quantity = parseInt(document.getElementById(`rl-qty-${idx}`)?.value) || 0;
+      const condition_out = document.getElementById(`rl-cond-${idx}`)?.value.trim() || null;
+      if (product_id && quantity > 0) items.push({ product_id, quantity, condition_out });
+    });
+    if (!items.length) { this.alert('Add at least one rental item', 'error'); return; }
+    try {
+      const agreement = await this.api('POST', '/rentals/agreements', { customer_id, branch_id, employee_id: this.currentUser.id, due_date, items, payment_method });
+      this.closeModal();
+      this.alert(`Rental ${agreement.agreement_number} checked out`);
+      this.renderRentals();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async showRentalReturnModal(id) {
+    const a = await this.api('GET', `/rentals/agreements/${id}`);
+    const outstanding = a.items.filter(i => i.quantity_returned < i.quantity);
+    if (!outstanding.length) { this.alert('All items on this agreement are already returned', 'warning'); return; }
+    this.showModal(`
+      <div class="modal" style="max-width:640px">
+        <div class="modal-header">
+          <span class="modal-title">Process Return — ${a.agreement_number}</span>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">All outstanding items must be included in this return.</p>
+          ${outstanding.map(i => {
+            const remaining = i.quantity - i.quantity_returned;
+            return `<div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:8px">
+              <div class="fw-600" style="margin-bottom:6px">${i.product_name} <span style="font-weight:400;color:var(--text-muted);font-size:12px">(${remaining} outstanding)</span></div>
+              <div class="input-row">
+                <div class="form-group"><label style="font-size:11px">Qty Returned</label><input type="number" id="rr-qty-${i.id}" value="${remaining}" min="0" max="${remaining}"></div>
+                <div class="form-group"><label style="font-size:11px">Damage Fee</label><input type="number" id="rr-fee-${i.id}" value="0" min="0" step="0.01"></div>
+              </div>
+              <div class="input-row">
+                <div class="form-group"><label style="font-size:11px">Condition In</label><input id="rr-cond-${i.id}" placeholder="e.g. Good condition"></div>
+                <div class="form-group"><label style="font-size:11px">Damage Notes</label><input id="rr-notes-${i.id}" placeholder="Optional"></div>
+              </div>
+            </div>`;
+          }).join('')}
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.saveRentalReturn(${id}, [${outstanding.map(i=>i.id).join(',')}])">Confirm Return</button>
+        </div>
+      </div>`);
+  },
+
+  async saveRentalReturn(agreementId, itemIds) {
+    const items = itemIds.map(id => ({
+      item_id: id,
+      quantity_returned: parseInt(document.getElementById(`rr-qty-${id}`)?.value) || 0,
+      damage_fee: parseFloat(document.getElementById(`rr-fee-${id}`)?.value) || 0,
+      condition_in: document.getElementById(`rr-cond-${id}`)?.value.trim() || null,
+      damage_notes: document.getElementById(`rr-notes-${id}`)?.value.trim() || null,
+    })).filter(i => i.quantity_returned > 0);
+    if (!items.length) { this.alert('Enter at least one returned quantity', 'error'); return; }
+    try {
+      const updated = await this.api('PATCH', `/rentals/agreements/${agreementId}/return`, { items });
+      this.closeModal();
+      this.alert(`Return processed — settlement ${updated.settlement_transaction_id ? 'recorded' : ''}`);
+      this.renderRentals();
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   // ─── Variation Management ────────────────────────────────────────────────
@@ -7621,6 +8030,11 @@ const App = {
       { key: 'suppliers_delete', label: 'Delete Suppliers' },
     ]},
     { key: 'services', label: 'Services & Non-Inventory', subs: [] },
+    { key: 'rentals', label: 'Rentals', subs: [
+      { key: 'rentals_manage_items', label: 'Manage Rental Items' },
+      { key: 'rentals_checkout', label: 'Check Out Rentals' },
+      { key: 'rentals_returns', label: 'Process Returns & Cancellations' },
+    ]},
     { key: 'purchase_requests', label: 'Purchase Requests', subs: [
       { key: 'pr_create', label: 'Create Requests' },
       { key: 'pr_approve', label: 'Approve Requests' },
