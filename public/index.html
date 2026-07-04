@@ -4382,6 +4382,11 @@ const App = {
     const branches = await this.api('GET', '/branches').catch(() => []);
     const activeBranches = (branches || []).filter(b => b.active && !b.is_warehouse);
 
+    // The user may have navigated to a different section while /branches was
+    // in flight — #content always exists, so without this check we'd silently
+    // overwrite whatever section they're actually looking at now.
+    if (this.section !== 'reports') return;
+
     document.getElementById('content').innerHTML = `
       <div class="section-header">
         <h2>Reports & Analytics</h2>
@@ -4415,10 +4420,15 @@ const App = {
       this.api('GET', `/reports/ar-collections?start=${start}&end=${end}${bq}`),
     ]);
 
+    // The user may have navigated away from Reports while these fetches were
+    // in flight — #report-content would be gone, so bail out instead of throwing.
+    const reportContentEl = document.getElementById('report-content');
+    if (!reportContentEl) return;
+
     const s = sales.summary;
     const maxSales = Math.max(...(sales.byDay.map(d => d.sales) || [1]), 1);
 
-    document.getElementById('report-content').innerHTML = `
+    reportContentEl.innerHTML = `
       <div class="stats-grid" style="margin-bottom:18px">
         <div class="stat-card blue"><div class="stat-label">Gross Sales</div><div class="stat-value">${this.fmt(s.gross_sales)}</div><div class="stat-sub">${s.transaction_count} transactions</div></div>
         <div class="stat-card green"><div class="stat-label">Tax Collected</div><div class="stat-value">${this.fmt(s.total_tax)}</div></div>
