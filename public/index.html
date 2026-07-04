@@ -541,8 +541,11 @@ const App = {
   async init() {
     this.updateClock();
     setInterval(() => this.updateClock(), 1000);
-    try { await this.loadSettings(); } catch(e) {}
+    // Show the login form (and bind its handlers) before the settings fetch,
+    // not after — otherwise showLoginScreen()'s field-clearing/focus setup
+    // races anyone who starts typing while that request is still in flight.
     this.showLoginScreen();
+    try { await this.loadSettings(); } catch(e) {}
   },
 
   updateClock() {
@@ -1206,9 +1209,13 @@ const App = {
     try {
       data = await this.api('GET', url);
     } catch(e) {
-      document.getElementById('dash-content').innerHTML = `<div class="empty-state"><p>Failed to load dashboard: ${e.message}</p></div>`;
+      const el = document.getElementById('dash-content');
+      if (el) el.innerHTML = `<div class="empty-state"><p>Failed to load dashboard: ${e.message}</p></div>`;
       return;
     }
+    // The user may have navigated away from the Dashboard while this fetch was
+    // in flight — #dash-content would be gone, so bail out instead of throwing.
+    if (!document.getElementById('dash-content')) return;
     const s = data.todayStats, m = data.monthStats;
 
     const days = [];
