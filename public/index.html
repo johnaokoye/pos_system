@@ -9178,14 +9178,12 @@ const App = {
     const branches = await this.api('GET', '/branches');
     const whCount = branches.filter(b => b.is_warehouse).length;
     el.innerHTML = `
-      <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">Mark any branch as a warehouse to enable zone and bin management.</p>
+      <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">Any active location — store or warehouse — can have zones (e.g. aisles) and bins (e.g. shelves) set up in the Zones and Bins tabs. Marking a branch as a "Warehouse" below only affects sales reporting (it's excluded from Dashboard/Reports sales figures), not bin management.</p>
       ${whCount > 0
         ? `<div style="margin-bottom:12px;padding:8px 14px;background:rgba(59,130,246,0.08);border-left:3px solid #3b82f6;border-radius:4px;font-size:13px;color:#3b82f6">
-            🏭 ${whCount} warehouse location${whCount>1?'s':''} active — manage zones and bins in the Zones and Bins tabs.
+            🏭 ${whCount} warehouse location${whCount>1?'s':''} excluded from sales reporting.
            </div>`
-        : `<div style="margin-bottom:12px;padding:8px 14px;background:rgba(245,158,11,0.08);border-left:3px solid #d97706;border-radius:4px;font-size:13px;color:#d97706">
-            No warehouse locations configured yet. Mark a branch below to enable zone and bin management.
-           </div>`}
+        : ''}
       <table class="table">
         <thead><tr><th>Code</th><th>Name</th><th>City / State</th><th>Manager</th><th>Type</th><th></th></tr></thead>
         <tbody>${branches.map(b => `
@@ -9220,23 +9218,23 @@ const App = {
       this.api('GET', '/branches'),
     ]);
     this._whBranches = branches;
-    const warehouses = branches.filter(b => b.is_warehouse);
+    const activeBranches = branches.filter(b => b.active);
     el.innerHTML = `
-      ${warehouses.length === 0 ? `<div style="margin-bottom:12px;padding:8px 14px;background:rgba(245,158,11,0.08);border-left:3px solid #d97706;border-radius:4px;font-size:13px;color:#d97706">
-        No warehouse locations configured. Go to the <strong>Locations</strong> tab to mark a branch as a warehouse first.
+      ${activeBranches.length === 0 ? `<div style="margin-bottom:12px;padding:8px 14px;background:rgba(245,158,11,0.08);border-left:3px solid #d97706;border-radius:4px;font-size:13px;color:#d97706">
+        No active locations configured. Go to the <strong>Locations</strong> tab to add one first.
       </div>` : ''}
       <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center">
-        <label style="font-size:13px;color:var(--text-muted)">Filter by warehouse:</label>
+        <label style="font-size:13px;color:var(--text-muted)">Filter by location:</label>
         <select id="zone-filter-branch" onchange="App.filterZones()" style="width:200px">
-          <option value="">All Warehouses</option>
-          ${warehouses.map(b=>`<option value="${b.id}">${b.name} 🏭</option>`).join('')}
+          <option value="">All Locations</option>
+          ${activeBranches.map(b=>`<option value="${b.id}">${b.name}${b.is_warehouse?' 🏭':''}</option>`).join('')}
         </select>
       </div>
       <table class="table">
         <thead><tr><th>Code</th><th>Zone Name</th><th>Location</th><th>Bins</th><th>Description</th><th></th></tr></thead>
         <tbody id="zones-tbody">${this._renderZoneRows(zones)}</tbody>
       </table>
-      ${zones.length===0?'<div class="empty-state"><p>No zones yet. Create zones to organise storage areas within a warehouse.</p></div>':''}`;
+      ${zones.length===0?'<div class="empty-state"><p>No zones yet. Create zones to organise storage areas (e.g. aisles) within a location.</p></div>':''}`;
   },
 
   _renderZoneRows(zones) {
@@ -9263,7 +9261,7 @@ const App = {
   },
 
   showZoneModal(zone) {
-    const branches = (this._whBranches || []).filter(b => b.is_warehouse);
+    const branches = (this._whBranches || []).filter(b => b.active);
     this.showModal(`
       <div class="modal" style="max-width:460px">
         <div class="modal-header">
@@ -9271,12 +9269,12 @@ const App = {
           <button class="modal-close">✕</button>
         </div>
         <div class="modal-body">
-          ${branches.length===0?'<div style="padding:8px 12px;background:rgba(245,158,11,0.1);border-radius:4px;color:#d97706;font-size:13px;margin-bottom:12px">No warehouse locations found. Mark a branch as a warehouse first.</div>':''}
+          ${branches.length===0?'<div style="padding:8px 12px;background:rgba(245,158,11,0.1);border-radius:4px;color:#d97706;font-size:13px;margin-bottom:12px">No active locations found. Add a branch first.</div>':''}
           <div class="input-row">
-            <div class="form-group"><label>Warehouse Location *</label>
+            <div class="form-group"><label>Location *</label>
               <select id="z-branch">
-                <option value="">Select warehouse…</option>
-                ${branches.map(b=>`<option value="${b.id}" ${zone&&zone.branch_id==b.id?'selected':''}>${b.name} 🏭</option>`).join('')}
+                <option value="">Select location…</option>
+                ${branches.map(b=>`<option value="${b.id}" ${zone&&zone.branch_id==b.id?'selected':''}>${b.name}${b.is_warehouse?' 🏭':''}</option>`).join('')}
               </select>
             </div>
             <div class="form-group"><label>Zone Code</label>
@@ -9284,7 +9282,7 @@ const App = {
             </div>
           </div>
           <div class="form-group"><label>Zone Name *</label>
-            <input id="z-name" placeholder="e.g. Receiving Area" value="${zone?zone.name:''}">
+            <input id="z-name" placeholder="e.g. Aisle 3, Receiving Area" value="${zone?zone.name:''}">
           </div>
           <div class="form-group"><label>Description</label>
             <input id="z-desc" placeholder="Optional" value="${zone&&zone.description?zone.description:''}">
@@ -9331,16 +9329,16 @@ const App = {
     ]);
     this._whZones = zones;
     this._whBranches = branches;
-    const warehouses = branches.filter(b => b.is_warehouse);
+    const activeBranches = branches.filter(b => b.active);
     el.innerHTML = `
-      ${warehouses.length === 0 ? `<div style="margin-bottom:12px;padding:8px 14px;background:rgba(245,158,11,0.08);border-left:3px solid #d97706;border-radius:4px;font-size:13px;color:#d97706">
-        No warehouse locations configured. Go to the <strong>Locations</strong> tab to mark a branch as a warehouse first.
+      ${activeBranches.length === 0 ? `<div style="margin-bottom:12px;padding:8px 14px;background:rgba(245,158,11,0.08);border-left:3px solid #d97706;border-radius:4px;font-size:13px;color:#d97706">
+        No active locations configured. Go to the <strong>Locations</strong> tab to add one first.
       </div>` : ''}
       <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <label style="font-size:13px;color:var(--text-muted)">Filter:</label>
         <select id="bin-filter-branch" onchange="App.filterBins()" style="width:175px">
-          <option value="">All Warehouses</option>
-          ${warehouses.map(b=>`<option value="${b.id}">${b.name} 🏭</option>`).join('')}
+          <option value="">All Locations</option>
+          ${activeBranches.map(b=>`<option value="${b.id}">${b.name}${b.is_warehouse?' 🏭':''}</option>`).join('')}
         </select>
         <select id="bin-filter-zone" onchange="App.filterBins()" style="width:175px">
           <option value="">All Zones</option>
@@ -9385,7 +9383,7 @@ const App = {
 
   showBinModal(bin) {
     const zones    = this._whZones    || [];
-    const branches = (this._whBranches || []).filter(b => b.is_warehouse);
+    const branches = (this._whBranches || []).filter(b => b.active);
     this.showModal(`
       <div class="modal" style="max-width:460px">
         <div class="modal-header">
@@ -9395,7 +9393,7 @@ const App = {
         <div class="modal-body">
           <div class="input-row">
             <div class="form-group"><label>Bin Code *</label>
-              <input id="b-code" placeholder="e.g. A-01-001" value="${bin?bin.bin_code:''}">
+              <input id="b-code" placeholder="e.g. Aisle3-Shelf2-BinA" value="${bin?bin.bin_code:''}">
             </div>
             <div class="form-group"><label>Capacity</label>
               <input id="b-cap" type="number" min="0" placeholder="Max units" value="${bin&&bin.capacity?bin.capacity:''}">
@@ -9408,10 +9406,10 @@ const App = {
                 ${zones.map(z=>`<option value="${z.id}" ${bin&&bin.zone_id==z.id?'selected':''}>${z.name} — ${z.branch_name}</option>`).join('')}
               </select>
             </div>
-            <div class="form-group"><label>Warehouse Location</label>
+            <div class="form-group"><label>Location</label>
               <select id="b-branch">
                 <option value="">No Location</option>
-                ${branches.map(br=>`<option value="${br.id}" ${bin&&bin.branch_id==br.id?'selected':''}>${br.name} 🏭</option>`).join('')}
+                ${branches.map(br=>`<option value="${br.id}" ${bin&&bin.branch_id==br.id?'selected':''}>${br.name}${br.is_warehouse?' 🏭':''}</option>`).join('')}
               </select>
             </div>
           </div>
