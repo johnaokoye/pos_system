@@ -10123,6 +10123,7 @@ const App = {
 
   async renderDrawerSessions() {
     const el = document.getElementById('drawer-tab-content');
+    if (!el) return;
     const hdr = document.getElementById('drawer-hdr-actions');
     if (hdr) hdr.innerHTML = '';
     const today = new Date().toISOString().slice(0,10);
@@ -10160,6 +10161,7 @@ const App = {
 
   async renderDrawerManage() {
     const el = document.getElementById('drawer-tab-content');
+    if (!el) return;
     const hdr = document.getElementById('drawer-hdr-actions');
     if (hdr) hdr.innerHTML = '<button class="btn btn-primary btn-sm" onclick="App.showDrawerFormModal()">+ New Drawer</button>';
     const [drawers, branches] = await Promise.all([
@@ -10306,8 +10308,10 @@ const App = {
 
   async removeDrawerAccess(drawerId, empId) {
     await this.api('DELETE', `/drawers/${drawerId}/access/${empId}`);
-    document.getElementById(`dac-use-${empId}`).checked = false;
-    document.getElementById(`dac-rec-${empId}`).checked = false;
+    const useEl = document.getElementById(`dac-use-${empId}`);
+    if (useEl) useEl.checked = false;
+    const recEl = document.getElementById(`dac-rec-${empId}`);
+    if (recEl) recEl.checked = false;
     const row = document.getElementById(`dac-row-${empId}`);
     if (row) row.querySelector('td:last-child').innerHTML = '';
     this.loadDrawerAccessSummary(drawerId);
