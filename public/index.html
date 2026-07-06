@@ -798,6 +798,7 @@ const App = {
       document.getElementById('pos-drawer-overlay')?.remove();
       this.updateDrawerBadge();
       this.renderPOSBranchBar();
+      this.renderRentalDrawerBanner();
       this.alert(`Drawer opened — float $${float.toFixed(2)}`);
     } catch(e) { if (errEl) errEl.textContent = e.message; }
   },
@@ -2728,11 +2729,23 @@ const App = {
         <h2>Rentals</h2>
         <div id="rental-header-actions"></div>
       </div>
+      <div id="rental-drawer-banner" style="display:none;align-items:center;gap:14px;padding:10px 16px;margin-bottom:14px;background:#fff8e1;border:2px solid #ffc107;border-radius:8px">
+        <svg viewBox="0 0 24 24" fill="#f59e0b" width="20" height="20"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>
+        <span style="font-size:14px;font-weight:500;color:#7c5c00">No cash drawer is open — rental checkouts/returns won't be tied to a drawer for reconciliation.</span>
+        <button class="btn btn-sm" style="background:#f59e0b;color:#fff;font-weight:600;border:none;padding:5px 14px" onclick="App.checkPOSDrawer()">Open Drawer</button>
+      </div>
       <div class="crm-tabs" id="rental-tabs-nav">
         ${this._rentalTabs.map(t=>`<button class="crm-tab ${this.rentalTab===t.key?'active':''}" onclick="App.filterRentals('${t.key}')">${t.label}</button>`).join('')}
       </div>
       <div id="rental-content"></div>`;
+    await this.checkPOSDrawer();
+    this.renderRentalDrawerBanner();
     await this.loadRentalTab();
+  },
+
+  renderRentalDrawerBanner() {
+    const banner = document.getElementById('rental-drawer-banner');
+    if (banner) banner.style.display = (!this.currentDrawerSession && this._posHasDrawers) ? 'flex' : 'none';
   },
 
   async filterRentals(tab) {
@@ -3243,7 +3256,7 @@ const App = {
     });
     if (!items.length) { this.alert('Add at least one rental item', 'error'); return; }
     try {
-      const agreement = await this.api('POST', '/rentals/agreements', { customer_id, branch_id, employee_id: this.currentUser.id, due_date, items, payment_method });
+      const agreement = await this.api('POST', '/rentals/agreements', { customer_id, branch_id, employee_id: this.currentUser.id, due_date, items, payment_method, drawer_session_id: this.currentDrawerSession?.id || null });
       this.closeModal();
       this.alert(`Rental ${agreement.agreement_number} checked out`);
       this.renderRentals();
@@ -3295,7 +3308,7 @@ const App = {
     })).filter(i => i.quantity_returned > 0);
     if (!items.length) { this.alert('Enter at least one returned quantity', 'error'); return; }
     try {
-      const updated = await this.api('PATCH', `/rentals/agreements/${agreementId}/return`, { items });
+      const updated = await this.api('PATCH', `/rentals/agreements/${agreementId}/return`, { items, drawer_session_id: this.currentDrawerSession?.id || null });
       this.closeModal();
       this.alert(`Return processed — settlement ${updated.settlement_transaction_id ? 'recorded' : ''}`);
       this.renderRentals();
@@ -4610,13 +4623,13 @@ const App = {
   buildTxTable(txs) {
     if (!txs.length) return '<div class="empty-state"><p>No transactions found</p></div>';
     return `<table>
-      <thead><tr><th>Tx #</th><th>Date/Time</th><th>Customer</th><th>Branch</th><th>Items</th><th>Subtotal</th><th>Tax</th><th>Total</th><th>Method</th><th>Status</th><th>Actions</th></tr></thead>
+      <thead><tr><th>Tx #</th><th>Date/Time</th><th>Customer</th><th>Branch</th><th>Type</th><th>Subtotal</th><th>Tax</th><th>Total</th><th>Method</th><th>Status</th><th>Actions</th></tr></thead>
       <tbody>${txs.map(tx => `<tr>
         <td class="fw-600" style="font-family:monospace">${tx.transaction_number}${(tx.source==='online'||tx.source==='woocommerce')?'<br><span style="font-size:10px;background:#6366f1;color:#fff;border-radius:3px;padding:1px 5px;font-family:sans-serif;font-weight:500;letter-spacing:.3px">ONLINE</span>':''}</td>
         <td style="white-space:nowrap">${this.fmtDateTime(tx.created_at)}</td>
         <td>${tx.customer_name || '<em style="color:#999">Walk-in</em>'}</td>
         <td style="font-size:12px;color:var(--text-muted)">${tx.branch_name || '—'}</td>
-        <td style="text-align:center">—</td>
+        <td>${tx.rental_agreement_number ? `<span class="badge-pill badge-info" title="${tx.rental_agreement_number} (${tx.rental_role})">Rental</span>` : `<span class="badge-pill badge-secondary">Retail</span>`}</td>
         <td>${this.fmt(tx.subtotal)}</td>
         <td style="color:var(--text-muted)">${this.fmt(tx.tax_amount)}</td>
         <td class="fw-600">${this.fmt(tx.total)}</td>
@@ -4663,6 +4676,18 @@ const App = {
                 ${['pending','processing','shipped','delivered','cancelled'].map(s=>`<option value="${s}" ${(tx.fulfillment_status||'pending')===s?'selected':''}>${s.charAt(0).toUpperCase()+s.slice(1)}</option>`).join('')}
               </select>
               <button class="btn btn-primary btn-sm" onclick="App.updateFulfillment(${tx.id})">Update</button>
+            </div>
+          </div>` : ''}
+          ${tx.rental_agreement_number ? `<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-left:3px solid #16a34a;border-radius:6px;padding:10px 12px;margin-bottom:12px;font-size:12px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+              <span style="background:#16a34a;color:#fff;border-radius:3px;padding:2px 7px;font-weight:600;font-size:11px;letter-spacing:.3px">RENTAL</span>
+              <span>${tx.rental_role === 'settlement' ? 'Rental settlement' : 'Rental checkout'} for <a href="#" style="font-weight:700;color:#16a34a;text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewRentalAgreement(${tx.rental_agreement_id})">${tx.rental_agreement_number}</a> <span class="badge-pill ${tx.rental_status==='returned'?'badge-success':tx.rental_status==='cancelled'?'badge-secondary':'badge-info'}" style="font-size:10px">${tx.rental_status}</span></span>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;color:#166534">
+              <div>Checked out: ${this.fmtDateTime(tx.rental_checkout_datetime)}</div>
+              <div>Due back: ${this.fmtDate(tx.rental_due_date)}</div>
+              <div>Deposit: ${this.fmt(tx.rental_deposit_total)}${tx.rental_deposit_refunded > 0 ? ` (${this.fmt(tx.rental_deposit_refunded)} refunded)` : ''}</div>
+              <div>${tx.rental_returned_at ? `Returned: ${this.fmtDateTime(tx.rental_returned_at)}` : 'Not yet returned'}</div>
             </div>
           </div>` : ''}
           ${tx.source_quote_number ? `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--primary);border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:12px;display:flex;justify-content:space-between;align-items:center">

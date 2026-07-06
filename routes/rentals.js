@@ -240,7 +240,7 @@ router.patch('/agreements/:id/cancel', async (req, res) => {
 
 router.patch('/agreements/:id/return', async (req, res) => {
   try {
-    const { items, duration_adjustment_override, payment_method } = req.body;
+    const { items, duration_adjustment_override, payment_method, drawer_session_id } = req.body;
     if (!items || !items.length) return res.status(400).json({ error: 'At least one item is required' });
 
     const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
@@ -330,7 +330,7 @@ router.patch('/agreements/:id/return', async (req, res) => {
       const { rows: [txCount] } = await tx.execute({ sql: 'SELECT COUNT(*) as c FROM transactions', args: [] });
       const transaction_number = `TXN-${String(Number(txCount.c) + 1).padStart(6, '0')}`;
       const method = settlementAmount >= 0 ? (payment_method || 'cash') : 'refund';
-      const settleResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, agreement.customer_id, agreement.employee_id, agreement.branch_id, settlementSubtotal, taxAdjustmentTotal, settlementAmount, method, 0, 0, `Rental settlement ${agreement.agreement_number}`, 'pos'] });
+      const settleResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, agreement.customer_id, agreement.employee_id, agreement.branch_id, drawer_session_id || null, settlementSubtotal, taxAdjustmentTotal, settlementAmount, method, 0, 0, `Rental settlement ${agreement.agreement_number}`, 'pos'] });
       const settlementTxId = Number(settleResult.lastInsertRowid);
 
       if (durationAdjustmentTotal !== 0) {
