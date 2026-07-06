@@ -417,6 +417,7 @@ async function _init() {
       branch_id INTEGER REFERENCES branches(id),
       status TEXT NOT NULL DEFAULT 'active',
       checkout_date DATE NOT NULL DEFAULT (date('now')),
+      checkout_datetime DATETIME DEFAULT CURRENT_TIMESTAMP,
       due_date DATE NOT NULL,
       returned_at DATETIME,
       checkout_transaction_id INTEGER REFERENCES transactions(id),
@@ -425,19 +426,28 @@ async function _init() {
       deposit_refunded REAL NOT NULL DEFAULT 0,
       late_fee_total REAL NOT NULL DEFAULT 0,
       damage_fee_total REAL NOT NULL DEFAULT 0,
+      duration_adjustment_total REAL NOT NULL DEFAULT 0,
       notes TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
     { sql: `CREATE TABLE IF NOT EXISTS rental_agreement_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       agreement_id INTEGER NOT NULL REFERENCES rental_agreements(id),
+      parent_item_id INTEGER REFERENCES rental_agreement_items(id),
       product_id INTEGER REFERENCES products(id),
       product_name TEXT NOT NULL,
       sku TEXT,
       quantity INTEGER NOT NULL DEFAULT 1,
       rate_type TEXT NOT NULL DEFAULT 'daily',
       rate_amount REAL NOT NULL DEFAULT 0,
+      rental_classification TEXT DEFAULT 'tool',
+      daily_rate REAL DEFAULT 0,
+      weekly_rate REAL DEFAULT 0,
+      monthly_rate REAL DEFAULT 0,
+      hourly_rate REAL DEFAULT 0,
+      is_mandatory INTEGER NOT NULL DEFAULT 0,
       rental_fee REAL NOT NULL DEFAULT 0,
+      final_rental_fee REAL NOT NULL DEFAULT 0,
       deposit_amount REAL NOT NULL DEFAULT 0,
       replacement_value REAL DEFAULT 0,
       late_fee_rate REAL DEFAULT 0,
@@ -447,6 +457,14 @@ async function _init() {
       damage_notes TEXT,
       damage_fee REAL DEFAULT 0,
       returned_at DATETIME
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS product_accessories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_id INTEGER NOT NULL REFERENCES products(id),
+      accessory_product_id INTEGER NOT NULL REFERENCES products(id),
+      is_mandatory INTEGER NOT NULL DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(product_id, accessory_product_id)
     )` },
     { sql: `CREATE TABLE IF NOT EXISTS cycle_count_sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -723,11 +741,26 @@ async function _init() {
     'ALTER TABLE purchase_orders ADD COLUMN grn_sent_at DATETIME',
     'ALTER TABLE shipments ADD COLUMN transaction_id INTEGER REFERENCES transactions(id)',
     'ALTER TABLE products ADD COLUMN is_rental INTEGER DEFAULT 0',
-    "ALTER TABLE products ADD COLUMN rental_rate_type TEXT DEFAULT 'daily'",
-    'ALTER TABLE products ADD COLUMN rental_rate REAL DEFAULT 0',
-    'ALTER TABLE products ADD COLUMN rental_deposit REAL DEFAULT 0',
-    'ALTER TABLE products ADD COLUMN rental_late_fee_rate REAL DEFAULT 0',
+    "ALTER TABLE products ADD COLUMN rental_rate_type TEXT DEFAULT 'daily'", // superseded by the daily/weekly/monthly/hourly rate columns below — dead column, kept for additive-migration compat
+    'ALTER TABLE products ADD COLUMN rental_rate REAL DEFAULT 0', // now means "daily rate"
+    'ALTER TABLE products ADD COLUMN rental_deposit REAL DEFAULT 0', // dead — deposit is now derived (= computed rental fee), not a catalog value
+    'ALTER TABLE products ADD COLUMN rental_late_fee_rate REAL DEFAULT 0', // dead — overage is now billed via the tiered rate columns, not a flat late fee
     'ALTER TABLE products ADD COLUMN replacement_value REAL DEFAULT 0',
+    "ALTER TABLE products ADD COLUMN rental_classification TEXT DEFAULT 'tool'",
+    'ALTER TABLE products ADD COLUMN rental_weekly_rate REAL DEFAULT 0',
+    'ALTER TABLE products ADD COLUMN rental_monthly_rate REAL DEFAULT 0',
+    'ALTER TABLE products ADD COLUMN rental_hourly_rate REAL DEFAULT 0',
+    'ALTER TABLE products ADD COLUMN is_accessory INTEGER DEFAULT 0',
+    'ALTER TABLE rental_agreements ADD COLUMN checkout_datetime DATETIME DEFAULT CURRENT_TIMESTAMP',
+    'ALTER TABLE rental_agreements ADD COLUMN duration_adjustment_total REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE rental_agreement_items ADD COLUMN parent_item_id INTEGER REFERENCES rental_agreement_items(id)',
+    "ALTER TABLE rental_agreement_items ADD COLUMN rental_classification TEXT DEFAULT 'tool'",
+    'ALTER TABLE rental_agreement_items ADD COLUMN daily_rate REAL DEFAULT 0',
+    'ALTER TABLE rental_agreement_items ADD COLUMN weekly_rate REAL DEFAULT 0',
+    'ALTER TABLE rental_agreement_items ADD COLUMN monthly_rate REAL DEFAULT 0',
+    'ALTER TABLE rental_agreement_items ADD COLUMN hourly_rate REAL DEFAULT 0',
+    'ALTER TABLE rental_agreement_items ADD COLUMN is_mandatory INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE rental_agreement_items ADD COLUMN final_rental_fee REAL NOT NULL DEFAULT 0',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

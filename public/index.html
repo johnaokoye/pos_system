@@ -2763,18 +2763,22 @@ const App = {
       <div class="card">
         <div class="table-wrap">
           <table>
-            <thead><tr><th>SKU</th><th>Name</th><th>Category</th><th>Rate</th><th>Deposit</th><th>Late Fee/Day</th><th>Stock</th><th>Available</th><th>Status</th><th></th></tr></thead>
+            <thead><tr><th>SKU</th><th>Name</th><th>Class</th><th>Daily</th><th>Weekly</th><th>Monthly</th><th>Hourly</th><th>Stock</th><th>Available</th><th>Status</th><th></th></tr></thead>
             <tbody>${items.map(p => `<tr>
-              <td class="fw-600">${p.sku}</td>
+              <td class="fw-600">${p.sku}${p.is_accessory?' <span class="badge-pill badge-secondary" style="font-size:10px">accessory</span>':''}</td>
               <td>${p.name}</td>
-              <td>${p.category_name||'—'}</td>
-              <td>${this.fmt(p.rental_rate)} / ${p.rental_rate_type}</td>
-              <td>${this.fmt(p.rental_deposit)}</td>
-              <td>${this.fmt(p.rental_late_fee_rate)}</td>
+              <td><span class="badge-pill ${p.rental_classification==='equipment'?'badge-info':'badge-secondary'}">${p.rental_classification==='equipment'?'Equipment':'Tool'}</span></td>
+              <td>${this.fmt(p.rental_rate)}</td>
+              <td>${this.fmt(p.rental_weekly_rate)}</td>
+              <td>${this.fmt(p.rental_monthly_rate)}</td>
+              <td>${p.rental_classification==='equipment' ? this.fmt(p.rental_hourly_rate) : '—'}</td>
               <td>${p.stock_qty}</td>
               <td class="${(p.stock_qty - (p.rental_outstanding_qty||0)) <= 0 ? 'color-danger fw-600' : ''}">${p.stock_qty - (p.rental_outstanding_qty||0)}</td>
               <td><span class="badge-pill ${p.active ? 'badge-success' : 'badge-danger'}">${p.active ? 'Active' : 'Inactive'}</span></td>
-              <td><button class="btn btn-sm btn-secondary" onclick="App.showRentalItemForm(${p.id})">Edit</button></td>
+              <td style="white-space:nowrap">
+                <button class="btn btn-sm btn-secondary" onclick="App.showRentalItemForm(${p.id})">Edit</button>
+                <button class="btn btn-sm btn-outline" onclick="App.showRentalAccessoriesModal(${p.id}, '${p.name.replace(/'/g,"\\'")}')">Accessories</button>
+              </td>
             </tr>`).join('')}</tbody>
           </table>
         </div>
@@ -2785,6 +2789,7 @@ const App = {
     const categories = await this.api('GET', '/categories');
     const p = id ? await this.api('GET', `/products/${id}`) : {};
     const defaultTax = p.tax_rate ?? this.settings?.tax_rate ?? 8.5;
+    const classification = p.rental_classification || 'tool';
     this.showModal(`
       <div class="modal">
         <div class="modal-header">
@@ -2800,26 +2805,41 @@ const App = {
           </div>
           <div class="form-group"><label>Name *</label><input id="rf-name" value="${p.name||''}"></div>
           <div class="form-group"><label>Description</label><input id="rf-desc" value="${p.description||''}"></div>
+          ${!id ? `<div class="form-group"><label>Branch / Location</label>
+            <select id="rf-branch">
+              <option value="">— Unassigned (global stock only) —</option>
+              ${(this.currentUser.branches||[]).map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
+            </select>
+          </div>` : ''}
           <div class="input-row-3">
             <div class="form-group"><label>Stock Qty *</label><input type="number" id="rf-stock" value="${p.stock_qty??0}" min="0"></div>
             <div class="form-group"><label>Min Stock</label><input type="number" id="rf-minstock" value="${p.min_stock??1}" min="0"></div>
             <div class="form-group"><label>Tax Rate %</label><input type="number" id="rf-tax" value="${defaultTax}" min="0" step="0.1"></div>
           </div>
-          <div class="input-row">
-            <div class="form-group"><label>Rate Type</label>
-              <select id="rf-ratetype">
-                ${['daily','weekly','flat'].map(t => `<option value="${t}" ${p.rental_rate_type===t?'selected':''}>${t.charAt(0).toUpperCase()+t.slice(1)}</option>`).join('')}
-              </select>
-            </div>
-            <div class="form-group"><label>Rate Amount *</label><input type="number" id="rf-rate" value="${p.rental_rate||0}" min="0" step="0.01"></div>
+          <div class="form-group"><label>Classification *</label>
+            <select id="rf-classification" onchange="App._toggleRentalHourlyField()">
+              <option value="tool" ${classification==='tool'?'selected':''}>Tool (24-hour day; overdue prorated at daily rate ÷ 24)</option>
+              <option value="equipment" ${classification==='equipment'?'selected':''}>Equipment (8-hour work day; hourly rate for partial days)</option>
+            </select>
           </div>
-          <div class="input-row">
-            <div class="form-group"><label>Deposit Amount</label><input type="number" id="rf-deposit" value="${p.rental_deposit||0}" min="0" step="0.01"></div>
-            <div class="form-group"><label>Late Fee (per day)</label><input type="number" id="rf-latefee" value="${p.rental_late_fee_rate||0}" min="0" step="0.01"></div>
+          <p style="font-size:11px;color:var(--text-muted);margin:-6px 0 8px">Rentals of 28+ days use the monthly rate; 7-27 days mix week/day blocks at their own rates.</p>
+          <div class="input-row-3">
+            <div class="form-group"><label>Daily Rate *</label><input type="number" id="rf-rate" value="${p.rental_rate||0}" min="0" step="0.01" oninput="App._suggestRentalTierRates()"></div>
+            <div class="form-group"><label>Weekly Rate *</label><input type="number" id="rf-weekly" value="${p.rental_weekly_rate||0}" min="0" step="0.01"></div>
+            <div class="form-group"><label>Monthly Rate *</label><input type="number" id="rf-monthly" value="${p.rental_monthly_rate||0}" min="0" step="0.01"></div>
+          </div>
+          <div class="form-group" id="rf-hourly-wrap" style="${classification==='equipment'?'':'display:none'}">
+            <label>Hourly Rate * <span style="font-weight:400;color:var(--text-muted)">(equipment only — bills partial days up to 8 hours)</span></label>
+            <input type="number" id="rf-hourly" value="${p.rental_hourly_rate||0}" min="0" step="0.01">
           </div>
           <div class="form-group"><label>Replacement Value</label><input type="number" id="rf-replval" value="${p.replacement_value||0}" min="0" step="0.01"></div>
-          <div class="form-group"><label>Status</label>
-            <select id="rf-active"><option value="1" ${p.active!==0?'selected':''}>Active</option><option value="0" ${p.active===0?'selected':''}>Inactive</option></select>
+          <div class="input-row">
+            <div class="form-group"><label>Status</label>
+              <select id="rf-active"><option value="1" ${p.active!==0?'selected':''}>Active</option><option value="0" ${p.active===0?'selected':''}>Inactive</option></select>
+            </div>
+            <div class="form-group"><label style="display:flex;align-items:center;gap:6px;margin-top:22px">
+              <input type="checkbox" id="rf-is-accessory" ${p.is_accessory?'checked':''} style="width:auto"> This is an accessory (can be attached to other rental items)
+            </label></div>
           </div>
         </div>
         <div class="modal-footer">
@@ -2830,10 +2850,28 @@ const App = {
       </div>`);
   },
 
+  _toggleRentalHourlyField() {
+    const cls = document.getElementById('rf-classification')?.value;
+    const wrap = document.getElementById('rf-hourly-wrap');
+    if (wrap) wrap.style.display = cls === 'equipment' ? '' : 'none';
+  },
+
+  // Convenience only — pre-fills week/month rates as a no-discount default
+  // (7x / 28x the daily rate) the first time a daily rate is entered, so
+  // staff aren't left with a $0 tier by accident. Editable afterward.
+  _suggestRentalTierRates() {
+    const daily = parseFloat(document.getElementById('rf-rate')?.value) || 0;
+    const weeklyEl = document.getElementById('rf-weekly');
+    const monthlyEl = document.getElementById('rf-monthly');
+    if (weeklyEl && !parseFloat(weeklyEl.value)) weeklyEl.value = (daily * 7).toFixed(2);
+    if (monthlyEl && !parseFloat(monthlyEl.value)) monthlyEl.value = (daily * 28).toFixed(2);
+  },
+
   async saveRentalItem(id) {
     const sku = document.getElementById('rf-sku').value.trim();
     const name = document.getElementById('rf-name').value.trim();
     if (!sku || !name) { this.alert('SKU and name are required', 'error'); return; }
+    const classification = document.getElementById('rf-classification').value;
     const data = {
       sku,
       name,
@@ -2842,15 +2880,18 @@ const App = {
       stock_qty: parseInt(document.getElementById('rf-stock').value) || 0,
       min_stock: parseInt(document.getElementById('rf-minstock').value) || 0,
       tax_rate: parseFloat(document.getElementById('rf-tax').value) || 0,
-      rental_rate_type: document.getElementById('rf-ratetype').value,
+      rental_classification: classification,
       rental_rate: parseFloat(document.getElementById('rf-rate').value) || 0,
-      rental_deposit: parseFloat(document.getElementById('rf-deposit').value) || 0,
-      rental_late_fee_rate: parseFloat(document.getElementById('rf-latefee').value) || 0,
+      rental_weekly_rate: parseFloat(document.getElementById('rf-weekly').value) || 0,
+      rental_monthly_rate: parseFloat(document.getElementById('rf-monthly').value) || 0,
+      rental_hourly_rate: classification === 'equipment' ? (parseFloat(document.getElementById('rf-hourly').value) || 0) : 0,
       replacement_value: parseFloat(document.getElementById('rf-replval').value) || 0,
       active: parseInt(document.getElementById('rf-active').value),
+      is_accessory: document.getElementById('rf-is-accessory').checked ? 1 : 0,
       is_rental: 1,
       price: 0,
     };
+    if (!id) data.branch_id = document.getElementById('rf-branch')?.value || null;
     try {
       if (id) await this.api('PUT', `/products/${id}`, data);
       else await this.api('POST', '/products', data);
@@ -2866,6 +2907,63 @@ const App = {
     this.closeModal();
     this.alert('Rental item deactivated');
     this.renderRentals();
+  },
+
+  async showRentalAccessoriesModal(productId, productName) {
+    const [assigned, allAccessories] = await Promise.all([
+      this.api('GET', `/products/${productId}/accessories`),
+      this.api('GET', '/products?is_rental=1&is_accessory=1&active=1'),
+    ]);
+    const assignedIds = assigned.map(a => a.accessory_product_id);
+    const available = allAccessories.filter(a => a.id !== productId && !assignedIds.includes(a.id));
+    this.showModal(`
+      <div class="modal" style="max-width:560px">
+        <div class="modal-header">
+          <span class="modal-title">Accessories — ${productName}</span>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px">Mandatory accessories are always included at no extra cost. Optional accessories add their own rental cost if selected at checkout.</p>
+          <table class="table" style="margin-bottom:14px">
+            <thead><tr><th>Accessory</th><th>Rate</th><th>Mandatory</th><th></th></tr></thead>
+            <tbody>${assigned.length ? assigned.map(a => `<tr>
+              <td>${a.name}</td>
+              <td>${this.fmt(a.rental_rate)}/day</td>
+              <td>${a.is_mandatory ? '<span class="badge-pill badge-success">Mandatory (free)</span>' : '<span class="badge-pill badge-secondary">Optional</span>'}</td>
+              <td><button class="btn btn-sm btn-danger" onclick="App._removeRentalAccessory(${productId}, ${a.id}, '${productName.replace(/'/g,"\\'")}')">Remove</button></td>
+            </tr>`).join('') : '<tr><td colspan="4" style="color:var(--text-muted)">No accessories assigned yet.</td></tr>'}</tbody>
+          </table>
+          <hr style="margin:10px 0">
+          <div style="display:flex;gap:8px;align-items:flex-end">
+            <div class="form-group" style="flex:2;margin-bottom:0"><label>Add Accessory</label>
+              <select id="ra-accessory">
+                <option value="">Select accessory item…</option>
+                ${available.map(a => `<option value="${a.id}">${a.name} (${a.sku})</option>`).join('')}
+              </select>
+            </div>
+            <div class="form-group" style="margin-bottom:0"><label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="ra-mandatory" style="width:auto"> Mandatory</label></div>
+            <button class="btn btn-primary btn-sm" onclick="App._addRentalAccessory(${productId}, '${productName.replace(/'/g,"\\'")}')">Add</button>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+        </div>
+      </div>`);
+  },
+
+  async _addRentalAccessory(productId, productName) {
+    const accessory_product_id = document.getElementById('ra-accessory')?.value;
+    if (!accessory_product_id) { this.alert('Select an accessory to add', 'error'); return; }
+    const is_mandatory = document.getElementById('ra-mandatory')?.checked || false;
+    try {
+      await this.api('POST', `/products/${productId}/accessories`, { accessory_product_id, is_mandatory });
+      this.showRentalAccessoriesModal(productId, productName);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async _removeRentalAccessory(productId, assignmentId, productName) {
+    await this.api('DELETE', `/products/${productId}/accessories/${assignmentId}`);
+    this.showRentalAccessoriesModal(productId, productName);
   },
 
   async loadRentalAgreements() {
@@ -2915,21 +3013,23 @@ const App = {
             <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Due Date</label><div>${this.fmtDate(a.due_date)}</div></div>
           </div>
           <table class="table" style="margin-bottom:12px">
-            <thead><tr><th>Product</th><th>Qty</th><th>Returned</th><th>Rate</th><th>Fee</th><th>Deposit</th><th>Condition Out</th><th>Condition In</th></tr></thead>
-            <tbody>${a.items.map(i=>`<tr>
-              <td>${i.product_name}</td>
+            <thead><tr><th>Product</th><th>Class</th><th>Qty</th><th>Returned</th><th>Est. Fee</th><th>Actual Fee</th><th>Deposit</th><th>Condition</th></tr></thead>
+            <tbody>${a.items.map(i=>{
+              const tag = i.parent_item_id ? (i.is_mandatory ? ' <span class="badge-pill badge-success" style="font-size:10px">included</span>' : ' <span class="badge-pill badge-secondary" style="font-size:10px">accessory</span>') : '';
+              return `<tr>
+              <td>${i.product_name}${tag}</td>
+              <td>${i.rental_classification==='equipment'?'Equipment':'Tool'}</td>
               <td>${i.quantity}</td>
               <td>${i.quantity_returned}</td>
-              <td>${this.fmt(i.rate_amount)}/${i.rate_type}</td>
               <td>${this.fmt(i.rental_fee)}</td>
+              <td>${i.quantity_returned>0 ? this.fmt(i.final_rental_fee) : '—'}</td>
               <td>${this.fmt(i.deposit_amount)}</td>
-              <td style="color:var(--text-muted);font-size:12px">${i.condition_out||'—'}</td>
-              <td style="color:var(--text-muted);font-size:12px">${i.condition_in||'—'}${i.damage_notes?`<br><span class="color-danger">${i.damage_notes}</span>`:''}</td>
-            </tr>`).join('')}</tbody>
+              <td style="color:var(--text-muted);font-size:12px">${i.condition_out||'—'} → ${i.condition_in||'—'}${i.damage_notes?`<br><span class="color-danger">${i.damage_notes}</span>`:''}</td>
+            </tr>`;}).join('')}</tbody>
           </table>
           <div style="display:flex;justify-content:space-between;font-size:13px">
             <span>Deposit Total: ${this.fmt(a.deposit_total)}</span>
-            <span>Late Fee: ${this.fmt(a.late_fee_total)}</span>
+            <span>Duration Adjustment: ${this.fmt(a.duration_adjustment_total)}</span>
             <span>Damage Fee: ${this.fmt(a.damage_fee_total)}</span>
             <span>Deposit Refunded: ${this.fmt(a.deposit_refunded)}</span>
           </div>
@@ -2953,10 +3053,11 @@ const App = {
   },
 
   async showRentalCheckoutModal() {
-    const [customers, products, branches] = await Promise.all([
+    const branches = this.currentUser.branches || [];
+    const defaultBranch = branches.find(b => b.is_default) || branches[0] || null;
+    const [customers, products] = await Promise.all([
       this.api('GET', '/customers?active=1'),
-      this.api('GET', '/products?is_rental=1&active=1'),
-      Promise.resolve(this.currentUser.branches || []),
+      this.api('GET', `/products?is_rental=1&active=1${defaultBranch ? '&branch_id='+defaultBranch.id : ''}`),
     ]);
     this._rentalProducts = products;
     this._rentalLineIdx = 0;
@@ -2975,13 +3076,14 @@ const App = {
                 ${customers.map(c=>`<option value="${c.id}">${c.first_name} ${c.last_name}</option>`).join('')}
               </select>
             </div>
-            <div class="form-group"><label>Branch</label>
-              <select id="rc-branch">
-                <option value="">None</option>
-                ${branches.map(b=>`<option value="${b.id}">${b.name}</option>`).join('')}
+            <div class="form-group"><label>Branch / Location *</label>
+              <select id="rc-branch" onchange="App._refreshRentalCheckoutBranch()">
+                <option value="">Select location…</option>
+                ${branches.map(b=>`<option value="${b.id}" ${defaultBranch && b.id===defaultBranch.id?'selected':''}>${b.name}</option>`).join('')}
               </select>
             </div>
           </div>
+          <p style="font-size:11px;color:var(--text-muted);margin-top:-6px">Item availability below reflects stock at the selected location.</p>
           <div class="form-group"><label>Due Date *</label><input type="date" id="rc-duedate" value="${tomorrow}"></div>
           <hr style="margin:12px 0">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
@@ -3013,21 +3115,24 @@ const App = {
     if (!container) return;
     const idx = this._rentalLineIdx++;
     const products = this._rentalProducts || [];
-    const div = document.createElement('div');
-    div.id = `rental-line-${idx}`;
-    div.style.cssText = 'display:flex;gap:6px;margin-bottom:8px;align-items:flex-start';
-    div.innerHTML = `
-      <select id="rl-prod-${idx}" style="flex:2;padding:6px;border:1px solid var(--border);border-radius:4px;font-size:13px" onchange="App._updateRentalLineAvail(${idx})">
-        <option value="">Select item…</option>
-        ${products.map(p=>{
-          const avail = p.stock_qty - (p.rental_outstanding_qty||0);
-          return `<option value="${p.id}" data-avail="${avail}">${p.name} (${avail} available)</option>`;
-        }).join('')}
-      </select>
-      <input type="number" id="rl-qty-${idx}" value="1" min="1" style="width:70px;padding:6px;border:1px solid var(--border);border-radius:4px" onchange="App._updateRentalLineAvail(${idx})">
-      <input type="text" id="rl-cond-${idx}" placeholder="Condition out (optional)" style="flex:2;padding:6px;border:1px solid var(--border);border-radius:4px;font-size:13px">
-      <span id="rl-warn-${idx}" style="font-size:11px;color:var(--danger);align-self:center"></span>`;
-    container.appendChild(div);
+    const wrap = document.createElement('div');
+    wrap.id = `rental-line-${idx}`;
+    wrap.style.cssText = 'border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:8px';
+    wrap.innerHTML = `
+      <div style="display:flex;gap:6px;align-items:flex-start">
+        <select id="rl-prod-${idx}" style="flex:2;padding:6px;border:1px solid var(--border);border-radius:4px;font-size:13px" onchange="App._onRentalLineProductChange(${idx})">
+          <option value="">Select item…</option>
+          ${products.map(p=>{
+            const avail = p.stock_qty - (p.rental_outstanding_qty||0);
+            return `<option value="${p.id}" data-avail="${avail}">${p.name} (${avail} available)</option>`;
+          }).join('')}
+        </select>
+        <input type="number" id="rl-qty-${idx}" value="1" min="1" style="width:70px;padding:6px;border:1px solid var(--border);border-radius:4px" onchange="App._onRentalLineProductChange(${idx})">
+        <input type="text" id="rl-cond-${idx}" placeholder="Condition out (optional)" style="flex:2;padding:6px;border:1px solid var(--border);border-radius:4px;font-size:13px">
+        <span id="rl-warn-${idx}" style="font-size:11px;color:var(--danger);align-self:center"></span>
+      </div>
+      <div id="rl-accessories-${idx}"></div>`;
+    container.appendChild(wrap);
   },
 
   _updateRentalLineAvail(idx) {
@@ -3040,12 +3145,55 @@ const App = {
     warnEl.textContent = qty > avail ? `Only ${avail} available` : '';
   },
 
+  // Loads and renders the mandatory/optional accessories for whichever item
+  // is currently selected on this checkout line — mandatory ones are always
+  // included at no cost; optional ones are checkboxes that add their own fee.
+  async _onRentalLineProductChange(idx) {
+    this._updateRentalLineAvail(idx);
+    const sel = document.getElementById(`rl-prod-${idx}`);
+    const accEl = document.getElementById(`rl-accessories-${idx}`);
+    if (!sel || !accEl) return;
+    const productId = sel.value;
+    if (!productId) { accEl.innerHTML = ''; return; }
+    const accessories = await this.api('GET', `/products/${productId}/accessories`);
+    if (!document.getElementById(`rl-accessories-${idx}`)) return;
+    if (!accessories.length) { accEl.innerHTML = ''; return; }
+    accEl.innerHTML = `<div style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--border);font-size:12px">
+      ${accessories.map(a => a.is_mandatory
+        ? `<div style="color:var(--text-muted)">✓ Includes ${a.name} <span style="font-size:11px">(mandatory, no charge)</span></div>`
+        : `<label style="display:flex;align-items:center;gap:6px"><input type="checkbox" class="rl-acc-${idx}" value="${a.accessory_product_id}" style="width:auto"> ${a.name} <span style="color:var(--text-muted)">(+${this.fmt(a.rental_rate)}/day)</span></label>`
+      ).join('')}
+    </div>`;
+  },
+
+  // Re-fetches rental items scoped to the newly-selected branch and refreshes
+  // every existing line's availability numbers in place (keeping whatever
+  // item/qty the user already picked).
+  async _refreshRentalCheckoutBranch() {
+    const branchId = document.getElementById('rc-branch')?.value;
+    this._rentalProducts = branchId ? await this.api('GET', `/products?is_rental=1&active=1&branch_id=${branchId}`) : [];
+    if (!document.getElementById('rc-branch')) return;
+    document.querySelectorAll('#rental-checkout-lines [id^="rental-line-"]').forEach(line => {
+      const idx = line.id.replace('rental-line-','');
+      const sel = document.getElementById(`rl-prod-${idx}`);
+      if (!sel) return;
+      const currentVal = sel.value;
+      sel.innerHTML = `<option value="">Select item…</option>${this._rentalProducts.map(p=>{
+        const avail = p.stock_qty - (p.rental_outstanding_qty||0);
+        return `<option value="${p.id}" data-avail="${avail}" ${String(p.id)===currentVal?'selected':''}>${p.name} (${avail} available)</option>`;
+      }).join('')}`;
+      this._updateRentalLineAvail(idx);
+      if (currentVal) this._onRentalLineProductChange(idx);
+    });
+  },
+
   async saveRentalCheckout() {
     const customer_id = document.getElementById('rc-customer').value;
     const branch_id = document.getElementById('rc-branch').value || null;
     const due_date = document.getElementById('rc-duedate').value;
     const payment_method = document.getElementById('rc-paymethod').value;
     if (!customer_id) { this.alert('Please select a customer', 'error'); return; }
+    if (!branch_id) { this.alert('Please select a branch/location', 'error'); return; }
     if (!due_date) { this.alert('Please select a due date', 'error'); return; }
     const items = [];
     document.querySelectorAll('#rental-checkout-lines [id^="rental-line-"]').forEach(line => {
@@ -3053,7 +3201,8 @@ const App = {
       const product_id = document.getElementById(`rl-prod-${idx}`)?.value;
       const quantity = parseInt(document.getElementById(`rl-qty-${idx}`)?.value) || 0;
       const condition_out = document.getElementById(`rl-cond-${idx}`)?.value.trim() || null;
-      if (product_id && quantity > 0) items.push({ product_id, quantity, condition_out });
+      const accessory_ids = Array.from(document.querySelectorAll(`.rl-acc-${idx}:checked`)).map(cb => cb.value);
+      if (product_id && quantity > 0) items.push({ product_id, quantity, condition_out, accessory_ids });
     });
     if (!items.length) { this.alert('Add at least one rental item', 'error'); return; }
     try {
@@ -3078,8 +3227,9 @@ const App = {
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">All outstanding items must be included in this return.</p>
           ${outstanding.map(i => {
             const remaining = i.quantity - i.quantity_returned;
+            const tag = i.parent_item_id ? (i.is_mandatory ? ' <span class="badge-pill badge-success" style="font-size:10px">included, no charge</span>' : ' <span class="badge-pill badge-secondary" style="font-size:10px">accessory</span>') : '';
             return `<div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:8px">
-              <div class="fw-600" style="margin-bottom:6px">${i.product_name} <span style="font-weight:400;color:var(--text-muted);font-size:12px">(${remaining} outstanding)</span></div>
+              <div class="fw-600" style="margin-bottom:6px">${i.product_name}${tag} <span style="font-weight:400;color:var(--text-muted);font-size:12px">(${remaining} outstanding)</span></div>
               <div class="input-row">
                 <div class="form-group"><label style="font-size:11px">Qty Returned</label><input type="number" id="rr-qty-${i.id}" value="${remaining}" min="0" max="${remaining}"></div>
                 <div class="form-group"><label style="font-size:11px">Damage Fee</label><input type="number" id="rr-fee-${i.id}" value="0" min="0" step="0.01"></div>
