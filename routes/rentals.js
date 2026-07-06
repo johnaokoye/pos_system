@@ -169,9 +169,9 @@ router.post('/agreements', async (req, res) => {
       for (const line of lines) {
         const p = line.product;
         const result = await tx.execute({ sql: `INSERT INTO rental_agreement_items
-          (agreement_id,parent_item_id,product_id,product_name,sku,quantity,rate_type,rate_amount,rental_classification,daily_rate,weekly_rate,monthly_rate,hourly_rate,is_mandatory,rental_fee,deposit_amount,replacement_value,condition_out)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          args: [agreementId, line.parentIndex != null ? insertedIds[line.parentIndex] : null, p.id, p.name, p.sku, line.quantity, 'daily', p.rental_rate || 0, p.rental_classification || 'tool', p.rental_rate || 0, p.rental_weekly_rate || 0, p.rental_monthly_rate || 0, p.rental_hourly_rate || 0, line.isMandatory ? 1 : 0, line.rentalFee, line.depositAmount, p.replacement_value || 0, line.condition_out] });
+          (agreement_id,parent_item_id,product_id,product_name,sku,quantity,rate_type,rate_amount,rental_classification,daily_rate,weekly_rate,monthly_rate,hourly_rate,tax_rate,is_mandatory,rental_fee,deposit_amount,replacement_value,condition_out)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          args: [agreementId, line.parentIndex != null ? insertedIds[line.parentIndex] : null, p.id, p.name, p.sku, line.quantity, 'daily', p.rental_rate || 0, p.rental_classification || 'tool', p.rental_rate || 0, p.rental_weekly_rate || 0, p.rental_monthly_rate || 0, p.rental_hourly_rate || 0, p.tax_rate || 0, line.isMandatory ? 1 : 0, line.rentalFee, line.depositAmount, p.replacement_value || 0, line.condition_out] });
         insertedIds.push(Number(result.lastInsertRowid));
         const itemLabel = line.parentIndex != null ? `${p.name}${line.isMandatory ? ' (included)' : ' (accessory)'}` : p.name;
         await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?,?)`, args: [checkoutTxId, p.id, itemLabel, p.sku, line.quantity, line.isMandatory ? 0 : (line.rentalFee / line.quantity), line.lineTax, line.rentalFee] });
@@ -258,7 +258,7 @@ router.patch('/agreements/:id/return', async (req, res) => {
 
     const tx = await db.transaction('write');
     try {
-      let durationAdjustmentTotal = 0, damageFeeTotal = 0;
+      let durationAdjustmentTotal = 0, damageFeeTotal = 0, taxAdjustmentTotal = 0;
       const settlementLines = [];
       for (const input of items) {
         const item = existingItems.find(i => i.id === input.item_id);
@@ -290,38 +290,52 @@ router.patch('/agreements/:id/return', async (req, res) => {
         const thisReturnEstimate = parseFloat((originalEstimatePerUnit * qty).toFixed(2));
         const delta = parseFloat((thisReturnActualFee - thisReturnEstimate).toFixed(2));
         durationAdjustmentTotal += delta;
+        // The tax originally charged at checkout was based on the estimated
+        // fee — as the fee true-ups to the actual amount used, the tax owed
+        // on that same delta must true-up with it, or an early return leaves
+        // the customer paying tax on fee they never actually incurred (and a
+        // late return would undercharge tax on the extra time).
+        taxAdjustmentTotal += parseFloat((delta * (item.tax_rate || 0) / 100).toFixed(2));
 
         await tx.execute({ sql: `UPDATE rental_agreement_items SET quantity_returned = ?, condition_in = ?, damage_notes = ?, damage_fee = damage_fee + ?, final_rental_fee = final_rental_fee + ?, returned_at = ? WHERE id = ?`, args: [newReturned, input.condition_in || item.condition_in, notes || null, damageFee, thisReturnActualFee, nowFullyReturned ? now.toISOString() : item.returned_at, item.id] });
 
         damageFeeTotal += damageFee;
         if (damageFee > 0) settlementLines.push({ product_id: item.product_id, product_name: `Damage Fee — ${item.product_name}`, sku: item.sku, total: damageFee });
       }
-      if (duration_adjustment_override != null) durationAdjustmentTotal = parseFloat(duration_adjustment_override) || 0;
+      if (duration_adjustment_override != null) {
+        // An override replaces the auto-computed duration adjustment, but the
+        // tax truing-up (computed per item above) still applies to the real
+        // elapsed time and is not affected by a manual override.
+        durationAdjustmentTotal = parseFloat(duration_adjustment_override) || 0;
+      }
       durationAdjustmentTotal = parseFloat(durationAdjustmentTotal.toFixed(2));
       damageFeeTotal = parseFloat(damageFeeTotal.toFixed(2));
+      taxAdjustmentTotal = parseFloat(taxAdjustmentTotal.toFixed(2));
 
       const { rows: refreshedItems } = await tx.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
       const allReturned = refreshedItems.every(i => i.quantity_returned >= i.quantity);
       const newStatus = allReturned ? 'returned' : 'active';
 
-      // settlement_amount is intentionally signed: positive = customer owes more
+      // settlement total is intentionally signed: positive = customer owes more
       // (actual rental time + damage exceed the deposit), negative = net refund
       // due back to the customer (e.g. returned early). This is the one place
       // in the schema a negative `total` is expected — drawer reconciliation
       // just SUMs by payment_method, so this nets out correctly with no
-      // changes needed there.
-      const settlementAmount = parseFloat((damageFeeTotal + durationAdjustmentTotal - agreement.deposit_total).toFixed(2));
-      const depositRefunded = Math.max(0, agreement.deposit_total - (damageFeeTotal + durationAdjustmentTotal));
+      // changes needed there. tax_amount carries the tax truing-up separately
+      // from the pre-tax subtotal, same as every other transaction in the app.
+      const settlementSubtotal = parseFloat((damageFeeTotal + durationAdjustmentTotal - agreement.deposit_total).toFixed(2));
+      const settlementAmount = parseFloat((settlementSubtotal + taxAdjustmentTotal).toFixed(2));
+      const depositRefunded = Math.max(0, agreement.deposit_total - (damageFeeTotal + durationAdjustmentTotal + taxAdjustmentTotal));
 
       const { rows: [txCount] } = await tx.execute({ sql: 'SELECT COUNT(*) as c FROM transactions', args: [] });
       const transaction_number = `TXN-${String(Number(txCount.c) + 1).padStart(6, '0')}`;
       const method = settlementAmount >= 0 ? (payment_method || 'cash') : 'refund';
-      const settleResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, agreement.customer_id, agreement.employee_id, agreement.branch_id, settlementAmount, 0, settlementAmount, method, 0, 0, `Rental settlement ${agreement.agreement_number}`, 'pos'] });
+      const settleResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, agreement.customer_id, agreement.employee_id, agreement.branch_id, settlementSubtotal, taxAdjustmentTotal, settlementAmount, method, 0, 0, `Rental settlement ${agreement.agreement_number}`, 'pos'] });
       const settlementTxId = Number(settleResult.lastInsertRowid);
 
       if (durationAdjustmentTotal !== 0) {
         const label = durationAdjustmentTotal > 0 ? 'Additional Rental Time' : 'Rental Fee Credit (returned early)';
-        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?)`, args: [settlementTxId, label, 'DURATION-ADJ', 1, durationAdjustmentTotal, 0, durationAdjustmentTotal] });
+        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?)`, args: [settlementTxId, label, 'DURATION-ADJ', 1, durationAdjustmentTotal, taxAdjustmentTotal, durationAdjustmentTotal] });
       }
       for (const line of settlementLines) {
         await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?,?)`, args: [settlementTxId, line.product_id, line.product_name, line.sku, 1, line.total, 0, line.total] });
@@ -330,7 +344,7 @@ router.patch('/agreements/:id/return', async (req, res) => {
         await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?)`, args: [settlementTxId, depositRefunded > 0 ? 'Deposit Refunded' : 'Deposit Applied', 'DEPOSIT', 1, -agreement.deposit_total, 0, -agreement.deposit_total] });
       }
 
-      await tx.execute({ sql: `UPDATE rental_agreements SET settlement_transaction_id = ?, deposit_refunded = ?, duration_adjustment_total = duration_adjustment_total + ?, damage_fee_total = damage_fee_total + ?, status = ?, returned_at = ? WHERE id = ?`, args: [settlementTxId, depositRefunded, durationAdjustmentTotal, damageFeeTotal, newStatus, allReturned ? now.toISOString() : agreement.returned_at, req.params.id] });
+      await tx.execute({ sql: `UPDATE rental_agreements SET settlement_transaction_id = ?, deposit_refunded = ?, duration_adjustment_total = duration_adjustment_total + ?, tax_adjustment_total = tax_adjustment_total + ?, damage_fee_total = damage_fee_total + ?, status = ?, returned_at = ? WHERE id = ?`, args: [settlementTxId, depositRefunded, durationAdjustmentTotal, taxAdjustmentTotal, damageFeeTotal, newStatus, allReturned ? now.toISOString() : agreement.returned_at, req.params.id] });
       await tx.commit();
     } catch(e) {
       await tx.rollback();

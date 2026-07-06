@@ -2786,10 +2786,17 @@ const App = {
   },
 
   async showRentalItemForm(id) {
-    const categories = await this.api('GET', '/categories');
+    const [categories, allAccessories, currentAccessories] = await Promise.all([
+      this.api('GET', '/categories'),
+      this.api('GET', '/products?is_rental=1&is_accessory=1&active=1'),
+      id ? this.api('GET', `/products/${id}/accessories`) : Promise.resolve([]),
+    ]);
     const p = id ? await this.api('GET', `/products/${id}`) : {};
     const defaultTax = p.tax_rate ?? this.settings?.tax_rate ?? 8.5;
     const classification = p.rental_classification || 'tool';
+    const mandatoryIds = currentAccessories.filter(a => a.is_mandatory).map(a => a.accessory_product_id);
+    const accessoryOptions = allAccessories.filter(a => a.id !== id);
+    this._rentalFormAccessorySource = currentAccessories; // so save can diff against the assignment ids, not just product ids
     this.showModal(`
       <div class="modal">
         <div class="modal-header">
@@ -2840,6 +2847,15 @@ const App = {
             <div class="form-group"><label style="display:flex;align-items:center;gap:6px;margin-top:22px">
               <input type="checkbox" id="rf-is-accessory" ${p.is_accessory?'checked':''} style="width:auto"> This is an accessory (can be attached to other rental items)
             </label></div>
+          </div>
+          <div class="form-group">
+            <label>Mandatory Accessories <span style="font-weight:400;color:var(--text-muted)">(always included with this item, no extra charge)</span></label>
+            <div style="max-height:140px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:8px">
+              ${accessoryOptions.length ? accessoryOptions.map(a => `<label style="display:flex;align-items:center;gap:6px;padding:2px 0">
+                <input type="checkbox" class="rf-mandatory-acc" value="${a.id}" ${mandatoryIds.includes(a.id)?'checked':''} style="width:auto"> ${a.name} <span style="color:var(--text-muted);font-size:12px">(${a.sku})</span>
+              </label>`).join('') : '<span style="color:var(--text-muted);font-size:12px">No accessory items exist yet — create one and flag it as an accessory first.</span>'}
+            </div>
+            <p style="font-size:11px;color:var(--text-muted);margin-top:4px">For optional (paid) accessories, use the "Accessories" action on the item's row after saving.</p>
           </div>
         </div>
         <div class="modal-footer">
@@ -2892,13 +2908,34 @@ const App = {
       price: 0,
     };
     if (!id) data.branch_id = document.getElementById('rf-branch')?.value || null;
+    const selectedMandatoryIds = Array.from(document.querySelectorAll('.rf-mandatory-acc:checked')).map(cb => parseInt(cb.value));
     try {
+      let productId = id;
       if (id) await this.api('PUT', `/products/${id}`, data);
-      else await this.api('POST', '/products', data);
+      else { const created = await this.api('POST', '/products', data); productId = created.id; }
+      await this._syncRentalMandatoryAccessories(productId, selectedMandatoryIds);
       this.closeModal();
       this.alert(id ? 'Rental item updated' : 'Rental item created');
       this.renderRentals();
     } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // Reconciles the item form's mandatory-accessory checkboxes against
+  // whatever was already assigned — checked-but-not-assigned gets added
+  // (or promoted from optional to mandatory), previously-mandatory-but-now-
+  // unchecked gets removed entirely. Optional (paid) assignments made via
+  // the separate "Accessories" modal are left untouched either way.
+  async _syncRentalMandatoryAccessories(productId, selectedIds) {
+    const existing = this._rentalFormAccessorySource || [];
+    const existingMandatory = existing.filter(a => a.is_mandatory);
+    const toRemove = existingMandatory.filter(a => !selectedIds.includes(a.accessory_product_id));
+    const toAdd = selectedIds.filter(pid => !existingMandatory.some(a => a.accessory_product_id === pid));
+    for (const a of toRemove) {
+      await this.api('DELETE', `/products/${productId}/accessories/${a.id}`);
+    }
+    for (const pid of toAdd) {
+      await this.api('POST', `/products/${productId}/accessories`, { accessory_product_id: pid, is_mandatory: true });
+    }
   },
 
   async deleteRentalItem(id) {
