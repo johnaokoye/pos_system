@@ -1,9 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { requirePermission } = require('../lib/permissions');
 
 // List all promotions with code count
-router.get('/', async (req, res) => {
+router.get('/', requirePermission('promotions'), async (req, res) => {
   try {
     const { rows } = await db.execute({ sql: `
       SELECT p.*,
@@ -16,7 +17,7 @@ router.get('/', async (req, res) => {
 });
 
 // All product/category assignments across active promotions (for exclusivity display)
-router.get('/product-assignments', async (req, res) => {
+router.get('/product-assignments', requirePermission('promotions'), async (req, res) => {
   try {
     const { rows } = await db.execute({
       sql: `SELECT pi.item_id, pi.item_type, pi.promotion_id, p.name as promotion_name
@@ -30,7 +31,7 @@ router.get('/product-assignments', async (req, res) => {
 });
 
 // Get single promotion with items and codes
-router.get('/:id', async (req, res) => {
+router.get('/:id', requirePermission('promotions'), async (req, res) => {
   try {
     const { rows: [promo] } = await db.execute({ sql: 'SELECT * FROM promotions WHERE id = ?', args: [req.params.id] });
     if (!promo) return res.status(404).json({ error: 'Not found' });
@@ -43,7 +44,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // Create promotion
-router.post('/', async (req, res) => {
+router.post('/', requirePermission('promotions'), async (req, res) => {
   try {
     const { name, description, type, value, min_purchase, applies_to, start_date, end_date, active } = req.body;
     if (!name) return res.status(400).json({ error: 'Name required' });
@@ -57,7 +58,7 @@ router.post('/', async (req, res) => {
 });
 
 // Update promotion
-router.put('/:id', async (req, res) => {
+router.put('/:id', requirePermission('promotions'), async (req, res) => {
   try {
     const { name, description, type, value, min_purchase, applies_to, start_date, end_date, active } = req.body;
     if (!name) return res.status(400).json({ error: 'Name required' });
@@ -70,7 +71,7 @@ router.put('/:id', async (req, res) => {
 });
 
 // Delete promotion
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requirePermission('promotions'), async (req, res) => {
   try {
     await db.execute({ sql: 'DELETE FROM promotions WHERE id = ?', args: [req.params.id] });
     res.json({ success: true });
@@ -78,7 +79,7 @@ router.delete('/:id', async (req, res) => {
 });
 
 // Add item/category to promotion (enforces exclusivity across active promotions)
-router.post('/:id/items', async (req, res) => {
+router.post('/:id/items', requirePermission('promotions'), async (req, res) => {
   try {
     const { item_type, item_id } = req.body;
     if (!['product', 'category'].includes(item_type)) return res.status(400).json({ error: 'item_type must be product or category' });
@@ -95,7 +96,7 @@ router.post('/:id/items', async (req, res) => {
 });
 
 // Remove item from promotion
-router.delete('/:id/items/:itemId', async (req, res) => {
+router.delete('/:id/items/:itemId', requirePermission('promotions'), async (req, res) => {
   try {
     await db.execute({ sql: 'DELETE FROM promotion_items WHERE promotion_id = ? AND id = ?', args: [req.params.id, req.params.itemId] });
     res.json({ success: true });
@@ -103,7 +104,7 @@ router.delete('/:id/items/:itemId', async (req, res) => {
 });
 
 // Create promotion code
-router.post('/:id/codes', async (req, res) => {
+router.post('/:id/codes', requirePermission('promotions'), async (req, res) => {
   try {
     const { code, usage_limit } = req.body;
     if (!code) return res.status(400).json({ error: 'Code required' });
@@ -120,7 +121,7 @@ router.post('/:id/codes', async (req, res) => {
 });
 
 // Update promotion code
-router.put('/:id/codes/:codeId', async (req, res) => {
+router.put('/:id/codes/:codeId', requirePermission('promotions'), async (req, res) => {
   try {
     const { usage_limit, active } = req.body;
     await db.execute({ sql: 'UPDATE promotion_codes SET usage_limit=?, active=? WHERE id=? AND promotion_id=?', args: [usage_limit || null, active ? 1 : 0, req.params.codeId, req.params.id] });
@@ -129,7 +130,7 @@ router.put('/:id/codes/:codeId', async (req, res) => {
 });
 
 // Delete promotion code
-router.delete('/:id/codes/:codeId', async (req, res) => {
+router.delete('/:id/codes/:codeId', requirePermission('promotions'), async (req, res) => {
   try {
     await db.execute({ sql: 'DELETE FROM promotion_codes WHERE id = ? AND promotion_id = ?', args: [req.params.codeId, req.params.id] });
     res.json({ success: true });
@@ -137,7 +138,10 @@ router.delete('/:id/codes/:codeId', async (req, res) => {
 });
 
 // Auto-apply: return ALL active promotions that require no code and match cart, sorted by discount desc
-router.post('/auto-apply', async (req, res) => {
+// The next three are called from the POS cart during checkout (applying a
+// promo code to an in-progress sale), not the promotions management screen —
+// gated by `pos`, matching where they're actually invoked from.
+router.post('/auto-apply', requirePermission('pos'), async (req, res) => {
   try {
     const { cart_items = [], subtotal = 0 } = req.body;
     const today = new Date().toISOString().split('T')[0];
@@ -177,7 +181,7 @@ router.post('/auto-apply', async (req, res) => {
 });
 
 // Validate and apply a promo code (used by POS)
-router.post('/validate-code', async (req, res) => {
+router.post('/validate-code', requirePermission('pos'), async (req, res) => {
   try {
     const { code, subtotal, cart_items } = req.body;
     if (!code) return res.status(400).json({ error: 'Code required' });
@@ -232,7 +236,7 @@ router.post('/validate-code', async (req, res) => {
 });
 
 // Record usage of a promo code
-router.post('/use-code', async (req, res) => {
+router.post('/use-code', requirePermission('pos'), async (req, res) => {
   try {
     const { code_id } = req.body;
     await db.execute({ sql: 'UPDATE promotion_codes SET times_used = times_used + 1 WHERE id = ?', args: [code_id] });

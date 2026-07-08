@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const { db } = require('../database');
+const { requirePermission } = require('../lib/permissions');
 
 // ── WC API helpers ───────────────────────────────────────────────────────────
 
@@ -481,6 +482,9 @@ async function runSyncAll() {
 }
 
 // ── Routes ───────────────────────────────────────────────────────────────────
+
+// Lives on the Settings page alongside company/tax/API-keys config.
+router.use(requirePermission('settings'));
 
 router.get('/config', async (req, res) => {
   try {

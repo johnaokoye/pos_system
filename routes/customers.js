@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { requireAuth, requirePermission } = require('../lib/permissions');
 
 // Check if a credit customer has exceeded their payment terms and block/unblock accordingly
 async function runCreditCheck(customerId) {
@@ -23,7 +24,9 @@ async function runCreditCheck(customerId) {
   } catch(e) {}
 }
 
-router.get('/', async (req, res) => {
+// requireAuth only — used broadly (POS customer picker, CRM, accounts),
+// not just the Customers management screen itself.
+router.get('/', requireAuth, async (req, res) => {
   try {
     // Auto-block any overdue credit customers before returning list
     const { rows: overdue } = await db.execute({ sql: "SELECT id FROM customers WHERE customer_type = 'credit' AND active = 1 AND account_balance > 0", args: [] });
@@ -44,7 +47,7 @@ router.get('/', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/:id', async (req, res) => {
+router.get('/:id', requireAuth, async (req, res) => {
   try {
     const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.id] });
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
@@ -55,7 +58,7 @@ router.get('/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/:id/transactions', async (req, res) => {
+router.get('/:id/transactions', requireAuth, async (req, res) => {
   try {
     const { start, end } = req.query;
     let sql = 'SELECT * FROM transactions WHERE customer_id = ?';
@@ -68,7 +71,7 @@ router.get('/:id/transactions', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/', async (req, res) => {
+router.post('/', requirePermission('customers'), async (req, res) => {
   const { first_name, last_name, email, phone, address, city, state, zip, notes, customer_type, credit_terms_days, credit_limit, tax_exempt, tax_exemption_number } = req.body;
   if (!first_name || !last_name) return res.status(400).json({ error: 'First and last name required' });
   try {
@@ -87,7 +90,7 @@ router.post('/', async (req, res) => {
   }
 });
 
-router.put('/:id', async (req, res) => {
+router.put('/:id', requirePermission('customers'), async (req, res) => {
   const { first_name, last_name, email, phone, address, city, state, zip, notes, active, customer_type, credit_terms_days, credit_limit, tax_exempt, tax_exemption_number } = req.body;
   try {
     const type = customer_type || 'cash';
@@ -106,7 +109,7 @@ router.put('/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requirePermission('customers'), async (req, res) => {
   try {
     await db.execute({ sql: 'UPDATE customers SET active = 0 WHERE id = ?', args: [req.params.id] });
     res.json({ success: true });

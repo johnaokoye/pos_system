@@ -1,8 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { requireAuth, requirePermission } = require('../lib/permissions');
 
-router.get('/', async (req, res) => {
+// requireAuth only — used as a dropdown lookup in Inventory/PO forms, not
+// just the Suppliers management screen.
+router.get('/', requireAuth, async (req, res) => {
   try {
     const { search, active } = req.query;
     let sql = 'SELECT * FROM suppliers WHERE 1=1';
@@ -24,7 +27,7 @@ router.get('/', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/:id', async (req, res) => {
+router.get('/:id', requirePermission('suppliers'), async (req, res) => {
   try {
     const { rows: [supplier] } = await db.execute({ sql: 'SELECT * FROM suppliers WHERE id = ?', args: [req.params.id] });
     if (!supplier) return res.status(404).json({ error: 'Not found' });
@@ -34,7 +37,7 @@ router.get('/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/', async (req, res) => {
+router.post('/', requirePermission('suppliers'), async (req, res) => {
   const { name, contact_name, email, phone, address, city, state, zip, payment_terms, notes, is_local } = req.body;
   if (!name) return res.status(400).json({ error: 'Name required' });
   try {
@@ -48,7 +51,7 @@ router.post('/', async (req, res) => {
   }
 });
 
-router.put('/:id', async (req, res) => {
+router.put('/:id', requirePermission('suppliers'), async (req, res) => {
   const { name, contact_name, email, phone, address, city, state, zip, payment_terms, notes, active, is_local } = req.body;
   try {
     await db.execute({ sql: 'UPDATE suppliers SET name=?,contact_name=?,email=?,phone=?,address=?,city=?,state=?,zip=?,payment_terms=?,notes=?,active=?,is_local=? WHERE id=?', args: [name, contact_name||null, email||null, phone||null, address||null, city||null, state||null, zip||null, payment_terms||'Net 30', notes||null, active??1, is_local?1:0, req.params.id] });
@@ -59,7 +62,7 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requirePermission('suppliers'), async (req, res) => {
   try {
     await db.execute({ sql: 'UPDATE suppliers SET active = 0 WHERE id = ?', args: [req.params.id] });
     res.json({ success: true });

@@ -685,6 +685,15 @@ async function _init() {
       last_used_at DATETIME,
       is_active INTEGER NOT NULL DEFAULT 1
     )` },
+    { sql: `CREATE TABLE IF NOT EXISTS sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token_hash TEXT NOT NULL UNIQUE,
+      employee_id INTEGER NOT NULL REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      expires_at DATETIME NOT NULL,
+      revoked_at DATETIME
+    )` },
   ], 'write');
 
   // Migrations — each in its own try/catch

@@ -1,9 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { requireAuth, requirePermission } = require('../lib/permissions');
 
 // Sales summary for a date range
-router.get('/sales', async (req, res) => {
+router.get('/sales', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
     const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
@@ -20,7 +21,7 @@ router.get('/sales', async (req, res) => {
 });
 
 // Top selling products
-router.get('/top-products', async (req, res) => {
+router.get('/top-products', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, limit = 10, branch_id } = req.query;
     const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
@@ -34,7 +35,7 @@ router.get('/top-products', async (req, res) => {
 });
 
 // Sales by category
-router.get('/by-category', async (req, res) => {
+router.get('/by-category', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
     const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
@@ -48,7 +49,7 @@ router.get('/by-category', async (req, res) => {
 });
 
 // Inventory value report
-router.get('/inventory', async (req, res) => {
+router.get('/inventory', requirePermission('reports'), async (req, res) => {
   try {
     const { branch_id } = req.query;
     const bf = branch_id ? ' AND bi.branch_id = ?' : '';
@@ -64,8 +65,9 @@ router.get('/inventory', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Dashboard stats
-router.get('/dashboard', async (req, res) => {
+// requireAuth only — Dashboard is the universal post-login landing page for
+// every role, not gated by the reports permission.
+router.get('/dashboard', requireAuth, async (req, res) => {
   try {
     const { branch_id } = req.query;
     const today = new Date().toISOString().slice(0, 10);
@@ -97,7 +99,7 @@ router.get('/dashboard', async (req, res) => {
 });
 
 // AR Collections report
-router.get('/ar-collections', async (req, res) => {
+router.get('/ar-collections', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
     const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
@@ -115,7 +117,7 @@ router.get('/ar-collections', async (req, res) => {
 });
 
 // Promotions report
-router.get('/promotions', async (req, res) => {
+router.get('/promotions', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
     const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);

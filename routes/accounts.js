@@ -2,6 +2,13 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { runCreditCheck } = require('./customers');
+const { requirePermission } = require('../lib/permissions');
+
+// Every endpoint in this file is specific to the Accounts Receivable
+// screen (unlike e.g. employees.js, nothing here is used as a cross-feature
+// lookup), so the module-level `accounts` permission gates all of it —
+// matching how the section itself is gated in the frontend.
+router.use(requirePermission('accounts'));
 
 // AR summary - all credit-enabled customers with balances
 router.get('/', async (req, res) => {

@@ -1,6 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { requirePermission } = require('../lib/permissions');
+
+// Self-contained feature, not used as a cross-section lookup elsewhere —
+// module-level gate for all of it, matching the frontend's own section gate.
+router.use(requirePermission('purchase_requests'));
 
 const PR_SELECT = `
   SELECT pr.*,

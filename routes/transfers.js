@@ -2,6 +2,9 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { syncBinQty } = require('../lib/binSync');
+const { requirePermission } = require('../lib/permissions');
+
+router.use(requirePermission('transfers'));
 
 // GET all transfers
 router.get('/', async (req, res) => {

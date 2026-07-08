@@ -4,9 +4,10 @@ const { db } = require('../database');
 const { calcCommission } = require('./commissions');
 const { getWcSettings, wcRequest } = require('./woocommerce');
 const { syncBinQty } = require('../lib/binSync');
+const { requireAuth, requirePermission } = require('../lib/permissions');
 
 // Put order on hold (no stock updates, no payment processing)
-router.post('/hold', async (req, res) => {
+router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
   try {
     const { customer_id, employee_id, branch_id, items, discount_amount, notes } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in cart' });
@@ -52,7 +53,7 @@ router.post('/hold', async (req, res) => {
 });
 
 // Cancel / delete a held order
-router.delete('/:id/hold', async (req, res) => {
+router.delete('/:id/hold', requirePermission('pos_hold'), async (req, res) => {
   try {
     const { rows: [held] } = await db.execute({ sql: `SELECT id FROM transactions WHERE id = ? AND status = 'hold'`, args: [req.params.id] });
     if (!held) return res.status(404).json({ error: 'Held order not found' });
@@ -62,7 +63,7 @@ router.delete('/:id/hold', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/', async (req, res) => {
+router.get('/', requirePermission('transactions'), async (req, res) => {
   try {
     const { start, end, customer_id, customer_name, status, branch_id, payment_method, transaction_number, source, fulfillment_status, limit = 100 } = req.query;
     let sql = `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name,
@@ -90,7 +91,9 @@ router.get('/', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/:id', async (req, res) => {
+// requireAuth only — used broadly (POS hold-recall, receipt printing,
+// returns flow, online orders), not just the Transactions detail view.
+router.get('/:id', requireAuth, async (req, res) => {
   try {
     const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, c.phone as customer_phone, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone, q.id as source_quote_id, q.quote_number as source_quote_number, qe.first_name || ' ' || qe.last_name as quote_created_by, r.return_number as source_return_number, sh.carrier as shipment_carrier, sh.tracking_number as shipment_tracking_number, sh.status as shipment_status, sh.ship_date as shipment_ship_date, sh.estimated_delivery as shipment_estimated_delivery,
       ra.id as rental_agreement_id, ra.agreement_number as rental_agreement_number, ra.status as rental_status,
@@ -108,7 +111,7 @@ router.get('/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/', async (req, res) => {
+router.post('/', requirePermission('pos'), async (req, res) => {
   try {
     const { customer_id, employee_id, drawer_session_id, items, discount_amount, promotion_code, promotion_name, payment_method, amount_tendered, notes, source_return_id, store_credit_applied, quote_id, tax_exempt, tax_exemption_number, approval_code } = req.body;
     let { branch_id } = req.body;
@@ -219,7 +222,7 @@ router.post('/', async (req, res) => {
 });
 
 // Get returns for a transaction
-router.get('/:id/returns', async (req, res) => {
+router.get('/:id/returns', requireAuth, async (req, res) => {
   try {
     const { rows: returns } = await db.execute({ sql: 'SELECT * FROM returns WHERE original_transaction_id = ?', args: [req.params.id] });
     for (const r of returns) {
@@ -263,7 +266,7 @@ async function updateFulfillmentStatus(txId, fulfillment_status) {
 }
 
 // Update fulfillment status (online orders)
-router.patch('/:id/fulfillment', async (req, res) => {
+router.patch('/:id/fulfillment', requirePermission('transactions'), async (req, res) => {
   try {
     const tx = await updateFulfillmentStatus(req.params.id, req.body.fulfillment_status);
     res.json(tx);
@@ -271,7 +274,7 @@ router.patch('/:id/fulfillment', async (req, res) => {
 });
 
 // Process a return
-router.post('/:id/return', async (req, res) => {
+router.post('/:id/return', requirePermission('transactions_returns'), async (req, res) => {
   try {
     const { items, resolution, notes, employee_id } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items selected for return' });
@@ -347,7 +350,11 @@ router.post('/:id/return', async (req, res) => {
 });
 
 // Void transaction
-router.patch('/:id/void', async (req, res) => {
+// requireAuth as an outer gate only — the actual authorization for a void is
+// the existing inline PIN + void_transactions permission check just below,
+// which is preserved exactly as-is (a second, elevated re-auth factor, not
+// replaced by session auth).
+router.patch('/:id/void', requireAuth, async (req, res) => {
   try {
     const { pin } = req.body;
     if (!pin) return res.status(400).json({ error: 'Override PIN required' });

@@ -6,6 +6,9 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
+const { requirePermission } = require('../lib/permissions');
+
+router.use(requirePermission('purchasing'));
 
 const localUploadDir = path.join(__dirname, '../uploads/po-attachments');
 

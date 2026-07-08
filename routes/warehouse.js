@@ -3,10 +3,11 @@ const router = express.Router();
 const { db } = require('../database');
 const { syncBinQty } = require('../lib/binSync');
 const { updateFulfillmentStatus } = require('./transactions');
+const { requireAuth, requirePermission, requireAnyPermission } = require('../lib/permissions');
 
 // ─── ZONES ────────────────────────────────────────────────────────────────────
 
-router.get('/zones', async (req, res) => {
+router.get('/zones', requireAuth, async (req, res) => {
   try {
     const { branch_id } = req.query;
     let sql = `SELECT z.*, b.name as branch_name,
@@ -20,7 +21,7 @@ router.get('/zones', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/zones', async (req, res) => {
+router.post('/zones', requirePermission('warehouse'), async (req, res) => {
   try {
     const { branch_id, name, code, description } = req.body;
     if (!branch_id || !name) return res.status(400).json({ error: 'branch_id and name required' });
@@ -30,7 +31,7 @@ router.post('/zones', async (req, res) => {
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
 
-router.put('/zones/:id', async (req, res) => {
+router.put('/zones/:id', requirePermission('warehouse'), async (req, res) => {
   try {
     const { name, code, description } = req.body;
     await db.execute({ sql: 'UPDATE warehouse_zones SET name=?, code=?, description=? WHERE id=?', args: [name, code || null, description || null, req.params.id] });
@@ -39,7 +40,7 @@ router.put('/zones/:id', async (req, res) => {
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
 
-router.delete('/zones/:id', async (req, res) => {
+router.delete('/zones/:id', requirePermission('warehouse'), async (req, res) => {
   try {
     const { rows: [binCount] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM storage_bins WHERE zone_id = ?', args: [req.params.id] });
     if (Number(binCount.c) > 0) return res.status(400).json({ error: 'Zone has bins — remove bins first' });
@@ -50,7 +51,9 @@ router.delete('/zones/:id', async (req, res) => {
 
 // ─── BINS ─────────────────────────────────────────────────────────────────────
 
-router.get('/bins', async (req, res) => {
+// requireAuth only — also used by the Cycle Counts "New Session" modal's
+// scope picker (showCycleCountModal), not just Warehouse management.
+router.get('/bins', requireAuth, async (req, res) => {
   try {
     const { zone_id, branch_id } = req.query;
     let sql = `SELECT sb.*, z.name as zone_name, z.code as zone_code, br.name as branch_name,
@@ -68,7 +71,7 @@ router.get('/bins', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/bins', async (req, res) => {
+router.post('/bins', requirePermission('warehouse'), async (req, res) => {
   try {
     const { zone_id, branch_id, bin_code, description, capacity } = req.body;
     if (!bin_code) return res.status(400).json({ error: 'bin_code required' });
@@ -78,7 +81,7 @@ router.post('/bins', async (req, res) => {
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
 
-router.put('/bins/:id', async (req, res) => {
+router.put('/bins/:id', requirePermission('warehouse'), async (req, res) => {
   try {
     const { bin_code, description, capacity, active, zone_id, branch_id } = req.body;
     await db.execute({ sql: 'UPDATE storage_bins SET bin_code=?, description=?, capacity=?, active=?, zone_id=?, branch_id=? WHERE id=?', args: [bin_code, description || null, capacity || null, active ?? 1, zone_id || null, branch_id || null, req.params.id] });
@@ -87,7 +90,7 @@ router.put('/bins/:id', async (req, res) => {
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
 
-router.delete('/bins/:id', async (req, res) => {
+router.delete('/bins/:id', requirePermission('warehouse'), async (req, res) => {
   try {
     const { rows: [asnCount] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM product_bin_assignments WHERE bin_id = ?', args: [req.params.id] });
     if (Number(asnCount.c) > 0) return res.status(400).json({ error: 'Bin has product assignments — remove assignments first' });
@@ -98,7 +101,7 @@ router.delete('/bins/:id', async (req, res) => {
 
 // ─── PRODUCT BIN ASSIGNMENTS ──────────────────────────────────────────────────
 
-router.get('/assignments', async (req, res) => {
+router.get('/assignments', requireAuth, async (req, res) => {
   try {
     const { bin_id, product_id, branch_id } = req.query;
     let sql = `SELECT a.*, p.name as product_name, p.sku, p.stock_qty as total_stock,
@@ -120,7 +123,7 @@ router.get('/assignments', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/assignments', async (req, res) => {
+router.post('/assignments', requirePermission('warehouse'), async (req, res) => {
   try {
     const { product_id, bin_id, branch_id, quantity, is_primary } = req.body;
     if (!product_id || !bin_id) return res.status(400).json({ error: 'product_id and bin_id required' });
@@ -130,7 +133,7 @@ router.post('/assignments', async (req, res) => {
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
 
-router.put('/assignments/:id', async (req, res) => {
+router.put('/assignments/:id', requirePermission('warehouse'), async (req, res) => {
   try {
     const { quantity, is_primary } = req.body;
     await db.execute({ sql: 'UPDATE product_bin_assignments SET quantity=?, is_primary=?, updated_at=CURRENT_TIMESTAMP WHERE id=?', args: [quantity || 0, is_primary ? 1 : 0, req.params.id] });
@@ -139,7 +142,7 @@ router.put('/assignments/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/assignments/:id', async (req, res) => {
+router.delete('/assignments/:id', requirePermission('warehouse'), async (req, res) => {
   try {
     await db.execute({ sql: 'DELETE FROM product_bin_assignments WHERE id = ?', args: [req.params.id] });
     res.json({ success: true });
@@ -148,7 +151,9 @@ router.delete('/assignments/:id', async (req, res) => {
 
 // ─── SHIPMENTS ────────────────────────────────────────────────────────────────
 
-router.get('/shipments', async (req, res) => {
+// Shipments are reachable from both the Shipping screen and the Online
+// Orders dashboard (processOrderForShipping) — either permission suffices.
+router.get('/shipments', requireAnyPermission('shipping', 'transactions'), async (req, res) => {
   try {
     const { status, branch_id } = req.query;
     let sql = `SELECT s.*, b.name as from_branch_name,
@@ -167,7 +172,7 @@ router.get('/shipments', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/shipments', async (req, res) => {
+router.post('/shipments', requireAnyPermission('shipping', 'transactions'), async (req, res) => {
   try {
     const { from_branch_id, customer_id, carrier, tracking_number, ship_date, estimated_delivery, notes, items } = req.body;
     if (!items || !items.length) return res.status(400).json({ error: 'At least one item required' });
@@ -196,7 +201,7 @@ router.post('/shipments', async (req, res) => {
 
 // Create a draft shipment from an online order (transaction), pulling items,
 // customer, and branch straight from the order so staff don't re-enter them.
-router.post('/shipments/from-order/:txId', async (req, res) => {
+router.post('/shipments/from-order/:txId', requireAnyPermission('shipping', 'transactions'), async (req, res) => {
   try {
     const { rows: [existing] } = await db.execute({ sql: 'SELECT * FROM shipments WHERE transaction_id = ?', args: [req.params.txId] });
     if (existing) return res.status(400).json({ error: `Shipment ${existing.shipment_number} already exists for this order` });
@@ -228,7 +233,7 @@ router.post('/shipments/from-order/:txId', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/shipments/:id', async (req, res) => {
+router.get('/shipments/:id', requireAnyPermission('shipping', 'transactions'), async (req, res) => {
   try {
     const { rows: [s] } = await db.execute({ sql: `
       SELECT s.*,
@@ -252,7 +257,7 @@ router.get('/shipments/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.patch('/shipments/:id/ship', async (req, res) => {
+router.patch('/shipments/:id/ship', requireAnyPermission('shipping', 'transactions'), async (req, res) => {
   try {
     const { rows: [s] } = await db.execute({ sql: 'SELECT * FROM shipments WHERE id = ?', args: [req.params.id] });
     if (!s) return res.status(404).json({ error: 'Not found' });
@@ -285,7 +290,7 @@ router.patch('/shipments/:id/ship', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.patch('/shipments/:id/deliver', async (req, res) => {
+router.patch('/shipments/:id/deliver', requireAnyPermission('shipping', 'transactions'), async (req, res) => {
   try {
     const { rows: [s] } = await db.execute({ sql: 'SELECT * FROM shipments WHERE id = ?', args: [req.params.id] });
     if (!s) return res.status(404).json({ error: 'Not found' });
@@ -299,7 +304,7 @@ router.patch('/shipments/:id/deliver', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.patch('/shipments/:id/cancel', async (req, res) => {
+router.patch('/shipments/:id/cancel', requireAnyPermission('shipping', 'transactions'), async (req, res) => {
   try {
     const { rows: [s] } = await db.execute({ sql: 'SELECT * FROM shipments WHERE id = ?', args: [req.params.id] });
     if (!s) return res.status(404).json({ error: 'Not found' });
@@ -336,7 +341,7 @@ router.patch('/shipments/:id/cancel', async (req, res) => {
 
 // ─── CYCLE COUNTS ─────────────────────────────────────────────────────────────
 
-router.get('/cycle-counts', async (req, res) => {
+router.get('/cycle-counts', requirePermission('cycle-counts'), async (req, res) => {
   try {
     const { branch_id, status } = req.query;
     let sql = `SELECT cc.*, b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name,
@@ -356,7 +361,7 @@ router.get('/cycle-counts', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/cycle-counts', async (req, res) => {
+router.post('/cycle-counts', requirePermission('cycle-counts'), async (req, res) => {
   try {
     const { branch_id, employee_id, scope_type = 'all', scope_id, notes } = req.body;
 
@@ -422,7 +427,7 @@ router.post('/cycle-counts', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/cycle-counts/:id', async (req, res) => {
+router.get('/cycle-counts/:id', requirePermission('cycle-counts'), async (req, res) => {
   try {
     const { rows: [session] } = await db.execute({ sql: `SELECT cc.*, b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name FROM cycle_count_sessions cc LEFT JOIN branches b ON cc.branch_id = b.id LEFT JOIN employees e ON cc.employee_id = e.id WHERE cc.id = ?`, args: [req.params.id] });
     if (!session) return res.status(404).json({ error: 'Not found' });
@@ -433,7 +438,7 @@ router.get('/cycle-counts/:id', async (req, res) => {
 });
 
 // Export as CSV
-router.get('/cycle-counts/:id/export', async (req, res) => {
+router.get('/cycle-counts/:id/export', requirePermission('cycle-counts'), async (req, res) => {
   try {
     const { rows: [session] } = await db.execute({ sql: 'SELECT * FROM cycle_count_sessions WHERE id = ?', args: [req.params.id] });
     if (!session) return res.status(404).json({ error: 'Not found' });
@@ -450,7 +455,7 @@ router.get('/cycle-counts/:id/export', async (req, res) => {
 });
 
 // Import counted quantities (JSON array of {item_id, counted_qty})
-router.post('/cycle-counts/:id/import', async (req, res) => {
+router.post('/cycle-counts/:id/import', requirePermission('cycle-counts'), async (req, res) => {
   try {
     const { rows: [session] } = await db.execute({ sql: 'SELECT * FROM cycle_count_sessions WHERE id = ?', args: [req.params.id] });
     if (!session) return res.status(404).json({ error: 'Not found' });
@@ -482,7 +487,7 @@ router.post('/cycle-counts/:id/import', async (req, res) => {
 });
 
 // Commit adjustments to inventory
-router.patch('/cycle-counts/:id/commit', async (req, res) => {
+router.patch('/cycle-counts/:id/commit', requirePermission('cycle-counts'), async (req, res) => {
   try {
     const { rows: [session] } = await db.execute({ sql: 'SELECT * FROM cycle_count_sessions WHERE id = ?', args: [req.params.id] });
     if (!session) return res.status(404).json({ error: 'Not found' });

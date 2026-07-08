@@ -6,6 +6,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
+const { requireAuth, requirePermission, requireAnyPermission } = require('../lib/permissions');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -13,8 +14,11 @@ const upload = multer({
   fileFilter: (req, file, cb) => cb(null, /^image\//.test(file.mimetype)),
 });
 
+// requireAuth only — the product catalog is used everywhere (POS, inventory,
+// services, rentals, PO/transfer forms, ecommerce API key), not just the
+// Inventory management screen.
 // GET all products
-router.get('/', async (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
   try {
     const { search, category, active, low_stock, branch_id, supplier_id, is_service, is_rental, is_accessory, online } = req.query;
     const params = [];
@@ -100,7 +104,7 @@ router.get('/', async (req, res) => {
 });
 
 // GET recent stock movements (adjustments + transfers)
-router.get('/movements', async (req, res) => {
+router.get('/movements', requirePermission('inventory'), async (req, res) => {
   try {
     const { branch_id, limit = 50 } = req.query;
     const params = [];
@@ -135,7 +139,7 @@ router.get('/movements', async (req, res) => {
 });
 
 // GET export filtered products as CSV
-router.get('/export', async (req, res) => {
+router.get('/export', requirePermission('inventory'), async (req, res) => {
   try {
     const { search, category, active, low_stock, branch_id, supplier_id } = req.query;
     const params = [];
@@ -199,7 +203,7 @@ router.get('/export', async (req, res) => {
 });
 
 // GET CSV template for bulk import
-router.get('/export/template', (req, res) => {
+router.get('/export/template', requirePermission('inventory'), (req, res) => {
   const headers = ['sku','barcode','name','description','category_name','price','cost','tax_rate','stock_qty','min_stock','active','supplier_name'];
   const example = ['PROD-001','0001234567890','Example Product','Product description','Electronics','19.99','9.99','8.5','100','10','1','TechSupply Co'];
   const csv = [headers.join(','), example.join(',')].join('\r\n');
@@ -209,7 +213,7 @@ router.get('/export/template', (req, res) => {
 });
 
 // POST import products from CSV rows
-router.post('/import', async (req, res) => {
+router.post('/import', requirePermission('inventory'), async (req, res) => {
   try {
     const { rows } = req.body;
     if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ error: 'No rows provided' });
@@ -247,7 +251,7 @@ router.post('/import', async (req, res) => {
 });
 
 // GET per-product stock movement history (sales, transfers, adjustments)
-router.get('/:id/movements', async (req, res) => {
+router.get('/:id/movements', requirePermission('inventory'), async (req, res) => {
   try {
     const id = req.params.id;
     const { rows } = await db.execute({ sql: `
@@ -286,7 +290,7 @@ router.get('/:id/movements', async (req, res) => {
 });
 
 // GET single product
-router.get('/:id', async (req, res) => {
+router.get('/:id', requireAuth, async (req, res) => {
   try {
     const { online } = req.query;
     if (online === '1' || online === 'true') {
@@ -319,7 +323,10 @@ router.get('/:id', async (req, res) => {
 });
 
 // POST create product
-router.post('/', async (req, res) => {
+// Create/edit/delete are shared by three different frontend forms —
+// Inventory, Services, and Rentals items all go through this same endpoint —
+// so any one of those permissions is sufficient, matching each form's own gate.
+router.post('/', requireAnyPermission('inventory', 'services', 'rentals_manage_items'), async (req, res) => {
   const { sku, barcode, name, description, category_id, price, cost, tax_rate, stock_qty, min_stock, active, branch_id, supplier_id, is_service, unit, online_available, web_allotment, is_rental, rental_rate_type, rental_rate, rental_deposit, rental_late_fee_rate, replacement_value, rental_classification, rental_weekly_rate, rental_monthly_rate, rental_hourly_rate, is_accessory } = req.body;
   if (!sku || !name) return res.status(400).json({ error: 'SKU and name are required' });
   try {
@@ -339,7 +346,7 @@ router.post('/', async (req, res) => {
 });
 
 // PUT update product
-router.put('/:id', async (req, res) => {
+router.put('/:id', requireAnyPermission('inventory', 'services', 'rentals_manage_items'), async (req, res) => {
   const { sku, barcode, name, description, category_id, price, cost, tax_rate, stock_qty, min_stock, active, supplier_id, is_service, unit, online_available, web_allotment, is_rental, rental_rate_type, rental_rate, rental_deposit, rental_late_fee_rate, replacement_value, rental_classification, rental_weekly_rate, rental_monthly_rate, rental_hourly_rate, is_accessory } = req.body;
   try {
     const svc = is_service ? 1 : 0;
@@ -354,7 +361,7 @@ router.put('/:id', async (req, res) => {
 });
 
 // PATCH adjust stock (global or branch-specific)
-router.patch('/:id/stock', async (req, res) => {
+router.patch('/:id/stock', requirePermission('inventory'), async (req, res) => {
   try {
     const { adjustment, reason, branch_id } = req.body;
     const { rows: [product] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [req.params.id] });
@@ -383,7 +390,7 @@ router.patch('/:id/stock', async (req, res) => {
 });
 
 // DELETE product
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requireAnyPermission('inventory', 'services', 'rentals_manage_items'), async (req, res) => {
   try {
     await db.execute({ sql: 'UPDATE products SET active = 0 WHERE id = ?', args: [req.params.id] });
     res.json({ success: true });
@@ -391,7 +398,7 @@ router.delete('/:id', async (req, res) => {
 });
 
 // POST upload product image
-router.post('/:id/image', upload.single('image'), async (req, res) => {
+router.post('/:id/image', requirePermission('inventory'), upload.single('image'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No image uploaded' });
   try {
     const { rows: [existing] } = await db.execute({ sql: 'SELECT image_path FROM products WHERE id = ?', args: [req.params.id] });
@@ -430,7 +437,7 @@ router.post('/:id/image', upload.single('image'), async (req, res) => {
 });
 
 // DELETE product image
-router.delete('/:id/image', async (req, res) => {
+router.delete('/:id/image', requirePermission('inventory'), async (req, res) => {
   try {
     const { rows: [product] } = await db.execute({ sql: 'SELECT image_path FROM products WHERE id = ?', args: [req.params.id] });
     if (product?.image_path) {
@@ -447,7 +454,9 @@ router.delete('/:id/image', async (req, res) => {
 });
 
 // GET variation types for a product
-router.get('/:id/variation-types', async (req, res) => {
+// requireAuth only — the POS variation picker (any cashier adding a
+// variable product to cart) reads these too, not just Inventory management.
+router.get('/:id/variation-types', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.execute({ sql: 'SELECT * FROM product_variation_types WHERE product_id = ? ORDER BY sort_order, id', args: [req.params.id] });
     res.json(rows);
@@ -455,7 +464,7 @@ router.get('/:id/variation-types', async (req, res) => {
 });
 
 // PUT save variation types (replaces all)
-router.put('/:id/variation-types', async (req, res) => {
+router.put('/:id/variation-types', requirePermission('inventory'), async (req, res) => {
   const { types } = req.body;
   if (!Array.isArray(types)) return res.status(400).json({ error: 'types must be an array' });
   try {
@@ -472,7 +481,7 @@ router.put('/:id/variation-types', async (req, res) => {
 });
 
 // GET variations for a product
-router.get('/:id/variations', async (req, res) => {
+router.get('/:id/variations', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.execute({ sql: 'SELECT * FROM product_variations WHERE product_id = ? ORDER BY name', args: [req.params.id] });
     res.json(rows);
@@ -480,7 +489,7 @@ router.get('/:id/variations', async (req, res) => {
 });
 
 // POST create a variation
-router.post('/:id/variations', async (req, res) => {
+router.post('/:id/variations', requirePermission('inventory'), async (req, res) => {
   const { name, sku, barcode, attributes, price, price_modifier, cost, stock_qty, min_stock, active } = req.body;
   if (!name || !sku) return res.status(400).json({ error: 'Name and SKU are required' });
   try {
@@ -491,7 +500,7 @@ router.post('/:id/variations', async (req, res) => {
 });
 
 // PUT update a variation
-router.put('/:id/variations/:vid', async (req, res) => {
+router.put('/:id/variations/:vid', requirePermission('inventory'), async (req, res) => {
   const { name, sku, barcode, attributes, price, price_modifier, cost, stock_qty, min_stock, active } = req.body;
   try {
     await db.execute({ sql: 'UPDATE product_variations SET name=?,sku=?,barcode=?,attributes=?,price=?,price_modifier=?,cost=?,stock_qty=?,min_stock=?,active=? WHERE id=? AND product_id=?', args: [name, sku, barcode||null, JSON.stringify(attributes||{}), price!=null?price:null, price_modifier||0, cost!=null?cost:null, stock_qty||0, min_stock||5, active??1, req.params.vid, req.params.id] });
@@ -501,7 +510,7 @@ router.put('/:id/variations/:vid', async (req, res) => {
 });
 
 // DELETE a variation
-router.delete('/:id/variations/:vid', async (req, res) => {
+router.delete('/:id/variations/:vid', requirePermission('inventory'), async (req, res) => {
   try {
     await db.execute({ sql: 'DELETE FROM product_variations WHERE id = ? AND product_id = ?', args: [req.params.vid, req.params.id] });
     res.json({ success: true });
@@ -509,7 +518,7 @@ router.delete('/:id/variations/:vid', async (req, res) => {
 });
 
 // PATCH adjust stock for a variation
-router.patch('/:id/variations/:vid/stock', async (req, res) => {
+router.patch('/:id/variations/:vid/stock', requirePermission('inventory'), async (req, res) => {
   try {
     const { adjustment } = req.body;
     const adj = parseInt(adjustment) || 0;
@@ -526,7 +535,7 @@ router.patch('/:id/variations/:vid/stock', async (req, res) => {
 // whether each one is mandatory (free) or optional (adds its own rental
 // cost) — see routes/rentals.js's checkout handler for how these are billed.
 
-router.get('/:id/accessories', async (req, res) => {
+router.get('/:id/accessories', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.execute({ sql: `SELECT pa.id, pa.product_id, pa.accessory_product_id, pa.is_mandatory,
       p.sku, p.name, p.rental_classification, p.rental_rate, p.rental_weekly_rate, p.rental_monthly_rate, p.rental_hourly_rate,
@@ -537,7 +546,7 @@ router.get('/:id/accessories', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/:id/accessories', async (req, res) => {
+router.post('/:id/accessories', requirePermission('rentals_manage_items'), async (req, res) => {
   try {
     const { accessory_product_id, is_mandatory } = req.body;
     if (!accessory_product_id) return res.status(400).json({ error: 'accessory_product_id is required' });
@@ -551,7 +560,7 @@ router.post('/:id/accessories', async (req, res) => {
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
 
-router.delete('/:id/accessories/:accessoryId', async (req, res) => {
+router.delete('/:id/accessories/:accessoryId', requirePermission('rentals_manage_items'), async (req, res) => {
   try {
     await db.execute({ sql: 'DELETE FROM product_accessories WHERE product_id = ? AND id = ?', args: [req.params.id, req.params.accessoryId] });
     res.json({ success: true });

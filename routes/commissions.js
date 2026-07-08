@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { requirePermission } = require('../lib/permissions');
 
 // ── Shared calculation helper (also exported for use in other routes) ──
 async function calcCommission(employeeId, saleAmount, sourceType, sourceId, sourceRef) {
@@ -55,6 +56,8 @@ async function calcCommission(employeeId, saleAmount, sourceType, sourceId, sour
 }
 
 module.exports.calcCommission = calcCommission;
+
+router.use(requirePermission('commissions'));
 
 // ── Plans ──────────────────────────────────────────────────
 router.get('/plans', async (req, res) => {

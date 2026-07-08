@@ -1,8 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { requireAuth, requirePermission } = require('../lib/permissions');
 
-router.get('/', async (req, res) => {
+// requireAuth only — this list is also used as a dropdown lookup in the
+// employee add/edit form (showEmployeeForm), not just the Security Groups
+// screen. The management endpoints below carry the real `security` gate.
+router.get('/', requireAuth, async (req, res) => {
   try {
     const { rows: groups } = await db.execute({ sql: 'SELECT * FROM security_groups ORDER BY name', args: [] });
     for (const g of groups) {
@@ -14,7 +18,7 @@ router.get('/', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/:id', async (req, res) => {
+router.get('/:id', requirePermission('security'), async (req, res) => {
   try {
     const { rows: [group] } = await db.execute({ sql: 'SELECT * FROM security_groups WHERE id = ?', args: [req.params.id] });
     if (!group) return res.status(404).json({ error: 'Not found' });
@@ -25,7 +29,7 @@ router.get('/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/', async (req, res) => {
+router.post('/', requirePermission('security'), async (req, res) => {
   const { name, description, permissions } = req.body;
   if (!name) return res.status(400).json({ error: 'Name required' });
   try {
@@ -38,7 +42,7 @@ router.post('/', async (req, res) => {
   }
 });
 
-router.put('/:id', async (req, res) => {
+router.put('/:id', requirePermission('security'), async (req, res) => {
   const { name, description, permissions } = req.body;
   try {
     await db.execute({ sql: 'UPDATE security_groups SET name=?,description=?,permissions=? WHERE id=?', args: [name, description||null, JSON.stringify(permissions || {}), req.params.id] });
@@ -50,7 +54,7 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requirePermission('security'), async (req, res) => {
   try {
     const { rows: [count] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM employees WHERE security_group_id = ? AND active = 1', args: [req.params.id] });
     if (Number(count.c) > 0) return res.status(400).json({ error: 'Cannot delete group with assigned employees. Reassign them first.' });
@@ -62,7 +66,7 @@ router.delete('/:id', async (req, res) => {
 });
 
 // Assign employee to this security group
-router.post('/:id/assign', async (req, res) => {
+router.post('/:id/assign', requirePermission('security'), async (req, res) => {
   const { employee_id } = req.body;
   if (!employee_id) return res.status(400).json({ error: 'employee_id required' });
   try {
@@ -72,7 +76,7 @@ router.post('/:id/assign', async (req, res) => {
 });
 
 // Remove employee from security group
-router.delete('/:id/assign/:empId', async (req, res) => {
+router.delete('/:id/assign/:empId', requirePermission('security'), async (req, res) => {
   try {
     await db.execute({ sql: 'UPDATE employees SET security_group_id = NULL WHERE id = ? AND security_group_id = ?', args: [req.params.empId, req.params.id] });
     res.json({ success: true });

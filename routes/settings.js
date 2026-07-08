@@ -1,8 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { requireAuth, requirePermission } = require('../lib/permissions');
 
-router.get('/', async (req, res) => {
+// requireAuth only — loaded on app init for every logged-in user (tax rate
+// defaults, currency, etc.), not just the Settings screen itself.
+router.get('/', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.execute({ sql: 'SELECT * FROM settings', args: [] });
     const settings = {};
@@ -11,7 +14,7 @@ router.get('/', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/', async (req, res) => {
+router.put('/', requirePermission('settings'), async (req, res) => {
   try {
     for (const [key, value] of Object.entries(req.body)) {
       await db.execute({ sql: 'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', args: [key, value] });

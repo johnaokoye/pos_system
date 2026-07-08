@@ -1,10 +1,13 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { requireAuth, requirePermission } = require('../lib/permissions');
 
 // ── Cash Drawers (configuration) ─────────────────────────────────────────────
 
-router.get('/', async (req, res) => {
+// requireAuth only — any cashier needs to see available drawers to open a
+// session (App.checkPOSDrawer()), not just users who manage drawer config.
+router.get('/', requireAuth, async (req, res) => {
   try {
     const { branch_id } = req.query;
     let sql = `SELECT d.*, b.name as branch_name,
@@ -24,7 +27,7 @@ router.get('/', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/', async (req, res) => {
+router.post('/', requirePermission('drawers'), async (req, res) => {
   try {
     const { branch_id, name } = req.body;
     if (!name || !branch_id) return res.status(400).json({ error: 'branch_id and name required' });
@@ -34,7 +37,7 @@ router.post('/', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/:id', async (req, res) => {
+router.put('/:id', requirePermission('drawers'), async (req, res) => {
   try {
     const { name, active } = req.body;
     await db.execute({ sql: 'UPDATE cash_drawers SET name=?, active=? WHERE id=?', args: [name, active ?? 1, req.params.id] });
@@ -43,7 +46,7 @@ router.put('/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requirePermission('drawers'), async (req, res) => {
   try {
     await db.execute({ sql: 'UPDATE cash_drawers SET active=0 WHERE id=?', args: [req.params.id] });
     res.json({ success: true });
@@ -52,7 +55,9 @@ router.delete('/:id', async (req, res) => {
 
 // ── Drawer Sessions ───────────────────────────────────────────────────────────
 
-router.get('/sessions', async (req, res) => {
+// requireAuth only — App.checkPOSDrawer() calls this on every page load to
+// find the current user's own open session, regardless of drawers permission.
+router.get('/sessions', requireAuth, async (req, res) => {
   try {
     const { branch_id, date, status, employee_id } = req.query;
     let sql = `
@@ -80,7 +85,7 @@ router.get('/sessions', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/sessions/:id', async (req, res) => {
+router.get('/sessions/:id', requireAuth, async (req, res) => {
   try {
     const { rows: [session] } = await db.execute({ sql: `
       SELECT ds.*,
@@ -121,7 +126,9 @@ router.get('/sessions/:id', async (req, res) => {
 });
 
 // Open a session — returns existing open session for the employee if present
-router.post('/sessions', async (req, res) => {
+// requireAuth only — opening/closing/reconciling a drawer session is a
+// routine daily task for any cashier, not gated by a management permission.
+router.post('/sessions', requireAuth, async (req, res) => {
   try {
     const { drawer_id, branch_id, employee_id, opening_float } = req.body;
     if (!drawer_id || !employee_id) return res.status(400).json({ error: 'drawer_id and employee_id required' });
@@ -133,7 +140,7 @@ router.post('/sessions', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.patch('/sessions/:id/close', async (req, res) => {
+router.patch('/sessions/:id/close', requireAuth, async (req, res) => {
   try {
     await db.execute({ sql: "UPDATE drawer_sessions SET status='closed', closed_at=CURRENT_TIMESTAMP WHERE id=?", args: [req.params.id] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM drawer_sessions WHERE id = ?', args: [req.params.id] });
@@ -141,7 +148,7 @@ router.patch('/sessions/:id/close', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/sessions/:id/reconcile', async (req, res) => {
+router.post('/sessions/:id/reconcile', requireAuth, async (req, res) => {
   try {
     const { cash_counted, card_counted, check_counted, gift_card_counted, credit_counted, direct_deposit_counted, notes, reconciled_by, note_counts } = req.body;
     const tx = await db.transaction('write');
@@ -168,7 +175,7 @@ router.post('/sessions/:id/reconcile', async (req, res) => {
 
 // ── Drawer Employee Access ────────────────────────────────────────────────────
 
-router.get('/:id/access', async (req, res) => {
+router.get('/:id/access', requirePermission('drawers'), async (req, res) => {
   try {
     const { rows: access } = await db.execute({ sql: `
       SELECT dea.*, e.first_name || ' ' || e.last_name as employee_name, e.employee_number
@@ -179,7 +186,7 @@ router.get('/:id/access', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/:id/access', async (req, res) => {
+router.put('/:id/access', requirePermission('drawers'), async (req, res) => {
   try {
     const { employee_id, can_use, can_reconcile } = req.body;
     if (!employee_id) return res.status(400).json({ error: 'employee_id required' });
@@ -188,7 +195,7 @@ router.put('/:id/access', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/:id/access/:empId', async (req, res) => {
+router.delete('/:id/access/:empId', requirePermission('drawers'), async (req, res) => {
   try {
     await db.execute({ sql: 'DELETE FROM drawer_employee_access WHERE drawer_id = ? AND employee_id = ?', args: [req.params.id, req.params.empId] });
     res.json({ success: true });

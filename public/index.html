@@ -830,6 +830,9 @@ const App = {
   },
 
   logout() {
+    // Best-effort — destroys the server-side session so the cookie can't be
+    // replayed. Don't block the UI reset on it.
+    this.api('POST', '/employees/logout').catch(() => {});
     this.currentUser = null;
     this.currentDrawerSession = null;
     this._posHasDrawers = false;
@@ -864,7 +867,17 @@ const App = {
     if (data) opts.body = JSON.stringify(data);
     const res = await fetch('/api' + url, opts);
     const json = await res.json();
-    if (!res.ok) throw new Error(json.error || 'Request failed');
+    if (!res.ok) {
+      // Session expired/invalid server-side — force a clean re-login instead
+      // of leaving the UI in a confusing half-authenticated state. Skip this
+      // for the login endpoint itself (invalid credentials also come back as
+      // 401 and shouldn't bounce the user off the login screen they're on).
+      if (res.status === 401 && url !== '/employees/login' && this.currentUser) {
+        this.currentUser = null;
+        this.showLoginScreen();
+      }
+      throw new Error(json.error || 'Request failed');
+    }
     return json;
   },
 

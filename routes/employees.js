@@ -1,8 +1,23 @@
 const express = require('express');
 const router = express.Router();
+const bcrypt = require('bcryptjs');
 const { db } = require('../database');
+const { createSession, destroySession, setSessionCookie, clearSessionCookie, readCookie } = require('../lib/sessionAuth');
+const { requireAuth, requirePermission } = require('../lib/permissions');
 
-router.get('/', async (req, res) => {
+// True once a password has been migrated to a bcrypt hash (bcryptjs always
+// produces $2a$/$2b$-prefixed output). Plaintext legacy passwords never
+// start with '$2', which is what makes the lazy migration below safe.
+function isBcryptHash(value) {
+  return typeof value === 'string' && value.startsWith('$2');
+}
+
+// requireAuth only, not requirePermission('employees') — this list is used
+// as a general employee-picker lookup across ~13 unrelated features (CRM,
+// commissions, security groups, etc.), not just the Employees management
+// screen itself. Restricting it to the `employees` permission would break
+// every one of those pickers for roles that don't manage employees.
+router.get('/', requireAuth, async (req, res) => {
   try {
     const { rows: employees } = await db.execute({ sql: `SELECT e.id, e.employee_number, e.first_name, e.last_name, e.username, e.role, e.active, e.created_at, e.security_group_id, e.default_branch_id, e.must_change_password, sg.name as security_group_name, b.name as default_branch_name
       FROM employees e
@@ -17,13 +32,19 @@ router.get('/', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/', async (req, res) => {
+// Matches the "+ Add Employee" button's actual frontend gate — it's shown
+// to anyone with the `employees` module permission, not a finer sub-key
+// (the tree defines employees_add/_edit/_delete but the UI never checks
+// them individually), so enforcing a sub-key here would 403 users the UI
+// itself let through.
+router.post('/', requirePermission('employees'), async (req, res) => {
   const { first_name, last_name, username, pin, password, must_change_password, security_group_id, default_branch_id } = req.body;
   if (!first_name || !last_name || !username || !pin) return res.status(400).json({ error: 'Required fields missing' });
   try {
     const { rows: [num] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM employees', args: [] });
     const employee_number = `EMP-${String(Number(num.c) + 1).padStart(4, '0')}`;
-    const result = await db.execute({ sql: 'INSERT INTO employees (employee_number,first_name,last_name,username,pin,password,must_change_password,security_group_id,default_branch_id) VALUES (?,?,?,?,?,?,?,?,?)', args: [employee_number, first_name, last_name, username, pin, password || null, must_change_password ? 1 : 0, security_group_id || null, default_branch_id || null] });
+    const passwordHash = password ? await bcrypt.hash(password, 10) : null;
+    const result = await db.execute({ sql: 'INSERT INTO employees (employee_number,first_name,last_name,username,pin,password,must_change_password,security_group_id,default_branch_id) VALUES (?,?,?,?,?,?,?,?,?)', args: [employee_number, first_name, last_name, username, pin, passwordHash, must_change_password ? 1 : 0, security_group_id || null, default_branch_id || null] });
     const newId = Number(result.lastInsertRowid);
     if (default_branch_id) {
       await db.execute({ sql: 'INSERT OR IGNORE INTO employee_branches (employee_id, branch_id, is_default) VALUES (?,?,1)', args: [newId, default_branch_id] });
@@ -35,24 +56,42 @@ router.post('/', async (req, res) => {
   }
 });
 
-router.put('/:id/change-password', async (req, res) => {
+// Requires a valid session — closes the previous gap where this endpoint
+// accepted completely unauthenticated password resets for any employee id.
+// The frontend's change-password modal only collects a new password (no old
+// password field), so this doesn't re-verify the old one; a self-only /
+// employees_edit-gated restriction is folded into the broader per-route
+// permission rollout for this file rather than added ad hoc here.
+router.put('/:id/change-password', requireAuth, async (req, res) => {
   const { password } = req.body;
   if (!password) return res.status(400).json({ error: 'Password is required' });
   try {
-    await db.execute({ sql: 'UPDATE employees SET password=?,must_change_password=0 WHERE id=?', args: [password, req.params.id] });
+    const hash = await bcrypt.hash(password, 10);
+    await db.execute({ sql: 'UPDATE employees SET password=?,must_change_password=0 WHERE id=?', args: [hash, req.params.id] });
     res.json({ success: true });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
 });
 
-router.put('/:id', async (req, res) => {
+// Same reasoning as POST / above — matches the "Edit" button's actual gate.
+router.put('/:id', requirePermission('employees'), async (req, res) => {
   const { first_name, last_name, username, pin, password, must_change_password, active, security_group_id, default_branch_id } = req.body;
   try {
-    if (pin) {
-      await db.execute({ sql: 'UPDATE employees SET first_name=?,last_name=?,username=?,pin=?,password=?,must_change_password=?,active=?,security_group_id=?,default_branch_id=? WHERE id=?', args: [first_name, last_name, username, pin, password||null, must_change_password?1:0, active??1, security_group_id||null, default_branch_id||null, req.params.id] });
+    // The edit form omits `password` entirely when left blank ("leave blank
+    // to keep") — preserve the existing (already-hashed) value in that case
+    // instead of overwriting it with NULL, and hash a newly-provided one.
+    let passwordToStore;
+    if (password) {
+      passwordToStore = await bcrypt.hash(password, 10);
     } else {
-      await db.execute({ sql: 'UPDATE employees SET first_name=?,last_name=?,username=?,password=?,must_change_password=?,active=?,security_group_id=?,default_branch_id=? WHERE id=?', args: [first_name, last_name, username, password||null, must_change_password?1:0, active??1, security_group_id||null, default_branch_id||null, req.params.id] });
+      const { rows: [existing] } = await db.execute({ sql: 'SELECT password FROM employees WHERE id = ?', args: [req.params.id] });
+      passwordToStore = existing ? existing.password : null;
+    }
+    if (pin) {
+      await db.execute({ sql: 'UPDATE employees SET first_name=?,last_name=?,username=?,pin=?,password=?,must_change_password=?,active=?,security_group_id=?,default_branch_id=? WHERE id=?', args: [first_name, last_name, username, pin, passwordToStore, must_change_password?1:0, active??1, security_group_id||null, default_branch_id||null, req.params.id] });
+    } else {
+      await db.execute({ sql: 'UPDATE employees SET first_name=?,last_name=?,username=?,password=?,must_change_password=?,active=?,security_group_id=?,default_branch_id=? WHERE id=?', args: [first_name, last_name, username, passwordToStore, must_change_password?1:0, active??1, security_group_id||null, default_branch_id||null, req.params.id] });
     }
     if (default_branch_id) {
       await db.execute({ sql: 'INSERT OR IGNORE INTO employee_branches (employee_id, branch_id, is_default) VALUES (?,?,1)', args: [req.params.id, default_branch_id] });
@@ -65,7 +104,10 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-router.post('/validate-pin', async (req, res) => {
+// requireAuth only — this is an elevated-reauth helper used from many
+// different features to validate a *different* employee's PIN (e.g. a
+// manager override), not gated by any single permission of its own.
+router.post('/validate-pin', requireAuth, async (req, res) => {
   try {
     const { pin, permission } = req.body;
     if (!pin) return res.status(400).json({ error: 'PIN is required' });
@@ -85,8 +127,24 @@ router.post('/login', async (req, res) => {
     const { username, pin, password } = req.body;
     let emp = null;
     if (password) {
-      const { rows: [row] } = await db.execute({ sql: `SELECT e.id, e.first_name, e.last_name, e.username, e.role, e.must_change_password, e.security_group_id, e.default_branch_id, sg.name as security_group_name, sg.permissions, b.name as default_branch_name FROM employees e LEFT JOIN security_groups sg ON e.security_group_id = sg.id LEFT JOIN branches b ON e.default_branch_id = b.id WHERE e.username=? AND e.password=? AND e.active=1`, args: [username, password] });
-      emp = row || null;
+      const { rows: [row] } = await db.execute({ sql: `SELECT e.id, e.first_name, e.last_name, e.username, e.password, e.role, e.must_change_password, e.security_group_id, e.default_branch_id, sg.name as security_group_name, sg.permissions, b.name as default_branch_name FROM employees e LEFT JOIN security_groups sg ON e.security_group_id = sg.id LEFT JOIN branches b ON e.default_branch_id = b.id WHERE e.username=? AND e.active=1`, args: [username] });
+      if (row) {
+        // Lazy bcrypt migration: legacy plaintext passwords are compared
+        // directly once, then immediately rehashed on success so every
+        // subsequent login uses bcrypt.compare — no forced mass reset.
+        const stored = row.password;
+        let ok = false;
+        if (isBcryptHash(stored)) {
+          ok = await bcrypt.compare(password, stored);
+        } else {
+          ok = stored != null && password === stored;
+          if (ok) {
+            const newHash = await bcrypt.hash(password, 10);
+            await db.execute({ sql: 'UPDATE employees SET password = ? WHERE id = ?', args: [newHash, row.id] });
+          }
+        }
+        if (ok) { delete row.password; emp = row; }
+      }
     } else if (pin) {
       const { rows: [row] } = await db.execute({ sql: `SELECT e.id, e.first_name, e.last_name, e.username, e.role, e.must_change_password, e.security_group_id, e.default_branch_id, sg.name as security_group_name, sg.permissions, b.name as default_branch_name FROM employees e LEFT JOIN security_groups sg ON e.security_group_id = sg.id LEFT JOIN branches b ON e.default_branch_id = b.id WHERE e.username=? AND e.pin=? AND e.active=1`, args: [username, pin] });
       emp = row || null;
@@ -101,7 +159,17 @@ router.post('/login', async (req, res) => {
         ? (await db.execute({ sql: `SELECT b.id, b.branch_code, b.name, b.currency, 1 as is_default FROM branches b WHERE b.id = ?`, args: [emp.default_branch_id] })).rows
         : [];
     }
+    const token = await createSession(emp.id);
+    setSessionCookie(res, token);
     res.json(emp);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/logout', requireAuth, async (req, res) => {
+  try {
+    await destroySession(readCookie(req));
+    clearSessionCookie(res);
+    res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

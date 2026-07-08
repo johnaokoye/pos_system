@@ -7,6 +7,7 @@ const path = require('path');
 const { ensureReady, db } = require('./database');
 const { router: woocommerceRouter, runSyncAll: wooSyncAll } = require('./routes/woocommerce');
 const { apiKeyAuth } = require('./lib/apiKeyAuth');
+const { sessionAuth } = require('./lib/sessionAuth');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -24,6 +25,13 @@ app.use(async (req, res, next) => {
 // API key authentication — validates X-API-Key / Authorization: Bearer headers.
 // Requests without a key pass through unchanged (frontend browser sessions).
 app.use('/api', apiKeyAuth);
+
+// Session cookie authentication for the browser frontend. If apiKeyAuth already
+// authenticated this request (req.apiKey set), this no-ops. Otherwise, a valid
+// session cookie attaches req.employee; an absent/invalid one just passes
+// through with req.employee unset — enforcement happens per-route via
+// requireAuth()/requirePermission() (lib/permissions.js), not here.
+app.use('/api', sessionAuth);
 
 app.use('/api/products',         require('./routes/products'));
 app.use('/api/categories',       require('./routes/categories'));

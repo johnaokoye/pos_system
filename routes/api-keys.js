@@ -3,6 +3,11 @@ const crypto = require('crypto');
 const router = express.Router();
 const { db } = require('../database');
 const { hashKey } = require('../lib/apiKeyAuth');
+const { requirePermission } = require('../lib/permissions');
+
+// The API Keys card lives on the Settings page alongside company/tax/
+// integrations config — same module-level gate as the rest of that screen.
+router.use(requirePermission('settings'));
 
 const VALID_SCOPES = [
   'products:read', 'products:write',

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const nodemailer = require('nodemailer');
 const { db } = require('../database');
+const { requireAuth, requirePermission } = require('../lib/permissions');
 
 async function getSettings() {
   const { rows } = await db.execute({ sql: 'SELECT * FROM settings', args: [] });
@@ -147,7 +148,7 @@ function buildQuoteHtml(q, s) {
 }
 
 // Send transaction receipt
-router.post('/send-receipt/:id', async (req, res) => {
+router.post('/send-receipt/:id', requireAuth, async (req, res) => {
   const { to } = req.body;
   if (!to) return res.status(400).json({ error: 'Recipient email is required' });
 
@@ -182,7 +183,7 @@ router.post('/send-receipt/:id', async (req, res) => {
 });
 
 // Send quotation
-router.post('/send-quote/:id', async (req, res) => {
+router.post('/send-quote/:id', requireAuth, async (req, res) => {
   const { to } = req.body;
   if (!to) return res.status(400).json({ error: 'Recipient email is required' });
 
@@ -286,7 +287,7 @@ function buildGrnHtml(po, s) {
 }
 
 // Send goods received note
-router.post('/send-grn/:id', async (req, res) => {
+router.post('/send-grn/:id', requireAuth, async (req, res) => {
   const { to } = req.body;
   if (!to) return res.status(400).json({ error: 'Recipient email is required' });
 
@@ -412,7 +413,7 @@ function buildStatementHtml(data, s) {
 }
 
 // Statement HTML preview (opens in new window for printing)
-router.get('/statement-preview/:customer_id', async (req, res) => {
+router.get('/statement-preview/:customer_id', requireAuth, async (req, res) => {
   try {
     const { start, end } = req.query;
     const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.customer_id] });
@@ -435,7 +436,7 @@ router.get('/statement-preview/:customer_id', async (req, res) => {
 });
 
 // Email an account statement
-router.post('/send-statement/:customer_id', async (req, res) => {
+router.post('/send-statement/:customer_id', requireAuth, async (req, res) => {
   const { to, start, end } = req.body;
   if (!to) return res.status(400).json({ error: 'Recipient email is required' });
   try {
@@ -470,7 +471,7 @@ router.post('/send-statement/:customer_id', async (req, res) => {
 });
 
 // Test SMTP connection
-router.post('/test', async (req, res) => {
+router.post('/test', requirePermission('settings'), async (req, res) => {
   try {
     const s = await getSettings();
     const host = req.body.host || s.email_smtp_host;

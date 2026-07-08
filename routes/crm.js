@@ -2,6 +2,9 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { calcCommission } = require('./commissions');
+const { requirePermission } = require('../lib/permissions');
+
+router.use(requirePermission('crm'));
 
 // ── Dashboard ──────────────────────────────────────────────
 router.get('/dashboard', async (req, res) => {

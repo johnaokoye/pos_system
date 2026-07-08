@@ -3,10 +3,11 @@ const router = express.Router();
 const { db } = require('../database');
 const { getOutstandingQty } = require('../lib/rentalAvailability');
 const { calculateRentalFee } = require('../lib/rentalPricing');
+const { requirePermission } = require('../lib/permissions');
 
 // ─── Agreements list/detail ───────────────────────────────────────────────
 
-router.get('/agreements', async (req, res) => {
+router.get('/agreements', requirePermission('rentals'), async (req, res) => {
   try {
     const { customer_id, branch_id, view } = req.query;
     let sql = `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name,
@@ -30,7 +31,7 @@ router.get('/agreements', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/agreements/:id', async (req, res) => {
+router.get('/agreements/:id', requirePermission('rentals'), async (req, res) => {
   try {
     const { rows: [agreement] } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name,
       c.phone as customer_phone, c.email as customer_email,
@@ -63,7 +64,7 @@ async function getBranchStock(executor, productId, branchId, globalStockQty) {
   return bi ? bi.stock_qty : 0;
 }
 
-router.get('/availability', async (req, res) => {
+router.get('/availability', requirePermission('rentals'), async (req, res) => {
   try {
     const { product_id, branch_id } = req.query;
     if (!product_id) return res.status(400).json({ error: 'product_id is required' });
@@ -89,7 +90,7 @@ function feeFor(product, qty, startDateTime, endDateTime) {
 
 // ─── Checkout ───────────────────────────────────────────────────────────────
 
-router.post('/agreements', async (req, res) => {
+router.post('/agreements', requirePermission('rentals_checkout'), async (req, res) => {
   try {
     const { customer_id, employee_id, branch_id, drawer_session_id, due_date, items, payment_method, amount_tendered, notes } = req.body;
     if (!customer_id) return res.status(400).json({ error: 'A customer is required for rental checkout' });
@@ -201,7 +202,7 @@ router.post('/agreements', async (req, res) => {
 
 // ─── Cancel ─────────────────────────────────────────────────────────────────
 
-router.patch('/agreements/:id/cancel', async (req, res) => {
+router.patch('/agreements/:id/cancel', requirePermission('rentals_returns'), async (req, res) => {
   try {
     const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
     if (!agreement) return res.status(404).json({ error: 'Not found' });
@@ -238,7 +239,7 @@ router.patch('/agreements/:id/cancel', async (req, res) => {
 
 // ─── Return ─────────────────────────────────────────────────────────────────
 
-router.patch('/agreements/:id/return', async (req, res) => {
+router.patch('/agreements/:id/return', requirePermission('rentals_returns'), async (req, res) => {
   try {
     const { items, duration_adjustment_override, payment_method, drawer_session_id } = req.body;
     if (!items || !items.length) return res.status(400).json({ error: 'At least one item is required' });

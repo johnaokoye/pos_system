@@ -1,8 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { requireAuth, requirePermission } = require('../lib/permissions');
 
-router.get('/', async (req, res) => {
+// requireAuth only — branches are used as a dropdown/lookup across nearly
+// every form in the app (employees, products, POS branch bar, etc.), not
+// just the Branches management screen.
+router.get('/', requireAuth, async (req, res) => {
   try {
     const { rows: branches } = await db.execute({ sql: 'SELECT * FROM branches ORDER BY name', args: [] });
     for (const b of branches) {
@@ -13,7 +17,7 @@ router.get('/', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/:id', async (req, res) => {
+router.get('/:id', requirePermission('branches'), async (req, res) => {
   try {
     const { rows: [branch] } = await db.execute({ sql: 'SELECT * FROM branches WHERE id = ?', args: [req.params.id] });
     if (!branch) return res.status(404).json({ error: 'Not found' });
@@ -23,7 +27,7 @@ router.get('/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/', async (req, res) => {
+router.post('/', requirePermission('branches'), async (req, res) => {
   const { name, address, city, state, zip, phone, email, manager, currency } = req.body;
   if (!name) return res.status(400).json({ error: 'Name required' });
   try {
@@ -37,7 +41,7 @@ router.post('/', async (req, res) => {
   }
 });
 
-router.put('/:id', async (req, res) => {
+router.put('/:id', requirePermission('branches'), async (req, res) => {
   const { name, address, city, state, zip, phone, email, manager, active, currency, is_warehouse } = req.body;
   try {
     await db.execute({ sql: 'UPDATE branches SET name=?,address=?,city=?,state=?,zip=?,phone=?,email=?,manager=?,active=?,currency=?,is_warehouse=? WHERE id=?', args: [name, address||null, city||null, state||null, zip||null, phone||null, email||null, manager||null, active??1, currency||null, is_warehouse?1:0, req.params.id] });
@@ -48,7 +52,7 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requirePermission('branches'), async (req, res) => {
   try {
     await db.execute({ sql: 'UPDATE branches SET active = 0 WHERE id = ?', args: [req.params.id] });
     res.json({ success: true });
@@ -58,7 +62,7 @@ router.delete('/:id', async (req, res) => {
 });
 
 // Assign employee to branch
-router.post('/:id/employees', async (req, res) => {
+router.post('/:id/employees', requirePermission('branches'), async (req, res) => {
   const { employee_id, is_default } = req.body;
   if (!employee_id) return res.status(400).json({ error: 'employee_id required' });
   try {
@@ -73,7 +77,7 @@ router.post('/:id/employees', async (req, res) => {
 });
 
 // Remove employee from branch
-router.delete('/:id/employees/:empId', async (req, res) => {
+router.delete('/:id/employees/:empId', requirePermission('branches'), async (req, res) => {
   try {
     await db.execute({ sql: 'DELETE FROM employee_branches WHERE branch_id = ? AND employee_id = ?', args: [req.params.id, req.params.empId] });
     res.json({ success: true });
@@ -81,7 +85,7 @@ router.delete('/:id/employees/:empId', async (req, res) => {
 });
 
 // Get all employees not yet assigned to this branch
-router.get('/:id/available-employees', async (req, res) => {
+router.get('/:id/available-employees', requirePermission('branches'), async (req, res) => {
   try {
     const { rows: employees } = await db.execute({ sql: `SELECT e.id, e.employee_number, e.first_name, e.last_name, e.username FROM employees e WHERE e.active = 1 AND e.id NOT IN (SELECT employee_id FROM employee_branches WHERE branch_id = ?) ORDER BY e.first_name`, args: [req.params.id] });
     res.json(employees);

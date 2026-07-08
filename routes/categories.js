@@ -1,15 +1,20 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { requireAuth, requireAnyPermission } = require('../lib/permissions');
 
-router.get('/', async (req, res) => {
+// requireAuth only — categories are used as a filter/dropdown lookup across
+// nearly every product-related feature, not just category management.
+router.get('/', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.execute({ sql: 'SELECT c.*, COUNT(p.id) as product_count FROM categories c LEFT JOIN products p ON p.category_id = c.id AND p.active = 1 GROUP BY c.id ORDER BY c.name', args: [] });
     res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/', async (req, res) => {
+// Category management is reachable from both the Settings and Inventory
+// screens — either permission is sufficient, matching the frontend.
+router.post('/', requireAnyPermission('settings', 'inventory'), async (req, res) => {
   const { name, description } = req.body;
   if (!name) return res.status(400).json({ error: 'Name required' });
   try {
@@ -19,7 +24,7 @@ router.post('/', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/:id', async (req, res) => {
+router.put('/:id', requireAnyPermission('settings', 'inventory'), async (req, res) => {
   const { name, description } = req.body;
   try {
     await db.execute({ sql: 'UPDATE categories SET name=?, description=? WHERE id=?', args: [name, description || null, req.params.id] });
@@ -28,7 +33,7 @@ router.put('/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requireAnyPermission('settings', 'inventory'), async (req, res) => {
   try {
     const { rows: [inUse] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM products WHERE category_id = ?', args: [req.params.id] });
     if (Number(inUse.c) > 0) return res.status(400).json({ error: 'Category in use by products' });
