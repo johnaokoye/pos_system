@@ -1165,6 +1165,32 @@ async function _init() {
       await db.execute({ sql: dSql, args: [cur, val, lbl, ord] });
     }
   }
+
+  // Fresh-install ordering fix, runs unconditionally on every boot (no-op once
+  // already linked): the "Seed security groups" block above links admin/jdoe/
+  // bsmith to their groups by username, but it's gated on "security_groups
+  // table is empty" while the employees themselves are seeded later in the
+  // same function, gated on an unrelated "categories table is empty" check —
+  // so on a truly fresh database the linkage UPDATE runs before those
+  // employees exist and silently no-ops, leaving security_group_id NULL
+  // forever. This was harmless before backend permission enforcement existed
+  // (frontend fails open on missing permissions), but now locks a fresh admin
+  // out of every permission-gated action after their very first login. Placed
+  // at the very end of _init() so every seed block above has already run.
+  try {
+    const { rows: [adminGroup] } = await db.execute({ sql: "SELECT id FROM security_groups WHERE name = 'Administrator'", args: [] });
+    const { rows: [cashierGroup] } = await db.execute({ sql: "SELECT id FROM security_groups WHERE name = 'Cashier'", args: [] });
+    const { rows: [managerGroup] } = await db.execute({ sql: "SELECT id FROM security_groups WHERE name = 'Manager'", args: [] });
+    if (adminGroup) {
+      await db.execute({ sql: "UPDATE employees SET security_group_id = ? WHERE username = 'admin' AND security_group_id IS NULL", args: [adminGroup.id] });
+    }
+    if (cashierGroup) {
+      await db.execute({ sql: "UPDATE employees SET security_group_id = ? WHERE username = 'jdoe' AND security_group_id IS NULL", args: [cashierGroup.id] });
+    }
+    if (managerGroup) {
+      await db.execute({ sql: "UPDATE employees SET security_group_id = ? WHERE username = 'bsmith' AND security_group_id IS NULL", args: [managerGroup.id] });
+    }
+  } catch(e) {}
 }
 
 module.exports = { db, ensureReady };

@@ -1,0 +1,29 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      # Local SQLite, persisted via the ./data volume below — the simplest
+      # option for a self-hosted internal server. To use Turso instead,
+      # delete this line and set TURSO_DATABASE_URL + TURSO_AUTH_TOKEN in .env.
+      TURSO_DATABASE_URL: file:/app/data/pos.db
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./uploads:/app/uploads
+    expose:
+      - "3001"
+    # No `ports:` mapping — the app is only reachable through the cloudflared
+    # tunnel below, not directly from the host network.
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    depends_on:
+      - app
