@@ -153,6 +153,85 @@ router.patch('/:id/receive', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Link a received PO line item to a product — either an existing one or a
+// brand-new one created on the spot. PO items with no product_id (typically
+// a "Q" custom item quoted before it existed in the catalog) get skipped
+// entirely by /receive's stock update, so this is how their received
+// quantity actually lands in inventory. If the item traces back to a
+// quotation's "Q" line (quotation_item_id), that quote item is flipped over
+// to the new product too, closing the loop back to where it started.
+router.post('/:id/items/:itemId/link-product', async (req, res) => {
+  try {
+    const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });
+    if (!po) return res.status(404).json({ error: 'PO not found' });
+    const { rows: [item] } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE id = ? AND po_id = ?', args: [req.params.itemId, req.params.id] });
+    if (!item) return res.status(404).json({ error: 'PO item not found' });
+    if (item.product_id) return res.status(400).json({ error: 'Item is already linked to a product' });
+
+    const { product_id, sku, name, category_id, price, cost, tax_rate } = req.body;
+
+    const tx = await db.transaction('write');
+    try {
+      let productId;
+      if (product_id) {
+        const { rows: [existing] } = await tx.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [product_id] });
+        if (!existing) throw new Error('Product not found');
+        productId = existing.id;
+      } else {
+        if (!sku || !name) throw new Error('SKU and name are required to create a new product');
+        const qty = item.quantity_received || 0;
+        const result = await tx.execute({
+          sql: 'INSERT INTO products (sku,barcode,name,category_id,price,cost,tax_rate,stock_qty,min_stock,active,supplier_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+          args: [sku, null, name, category_id||null, parseFloat(price)||0, parseFloat(cost)||item.unit_cost||0, tax_rate??8.5, qty, 5, 1, po.supplier_id||null]
+        });
+        productId = Number(result.lastInsertRowid);
+      }
+
+      const { rows: [linkedProduct] } = await tx.execute({ sql: 'SELECT sku FROM products WHERE id = ?', args: [productId] });
+      await tx.execute({ sql: 'UPDATE purchase_order_items SET product_id = ?, sku = ? WHERE id = ?', args: [productId, linkedProduct.sku, item.id] });
+
+      const qty = item.quantity_received || 0;
+      if (qty > 0) {
+        // New products already start with stock_qty = qty; existing ones need it added.
+        if (product_id) await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [qty, productId] });
+        if (po.branch_id) {
+          await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [productId, po.branch_id, qty, productId, qty] });
+          await syncBinQty(tx, productId, po.branch_id, qty);
+        }
+      }
+
+      let quotationUpdated = false;
+      if (item.quotation_item_id) {
+        const { rows: [qItem] } = await tx.execute({ sql: 'SELECT * FROM quotation_items WHERE id = ?', args: [item.quotation_item_id] });
+        if (qItem) {
+          const { rows: [product] } = await tx.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [productId] });
+          await tx.execute({ sql: 'UPDATE quotation_items SET product_id=?, sku=?, is_temp_item=0 WHERE id=?', args: [productId, product.sku, qItem.id] });
+
+          const { rows: [quote] } = await tx.execute({ sql: 'SELECT * FROM quotations WHERE id = ?', args: [qItem.quote_id] });
+          // Once a quote is converted to an invoice its financials are frozen —
+          // still re-point the item at the real product above, just don't reprice it.
+          if (quote && quote.status !== 'converted') {
+            const newLineTax = parseFloat((qItem.total * product.tax_rate / 100).toFixed(2));
+            const taxDelta = parseFloat((newLineTax - qItem.tax_amount).toFixed(2));
+            await tx.execute({ sql: 'UPDATE quotation_items SET tax_amount = ? WHERE id = ?', args: [newLineTax, qItem.id] });
+            const newTaxTotal = parseFloat((quote.tax_amount + taxDelta).toFixed(2));
+            const newTotal = parseFloat((quote.subtotal + newTaxTotal - quote.discount_amount).toFixed(2));
+            await tx.execute({ sql: 'UPDATE quotations SET tax_amount=?, total=? WHERE id=?', args: [newTaxTotal, newTotal, quote.id] });
+          }
+          quotationUpdated = true;
+        }
+      }
+
+      await tx.commit();
+      const { rows: [updatedItem] } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE id = ?', args: [item.id] });
+      res.json({ item: updatedItem, quotation_updated: quotationUpdated });
+    } catch(e) {
+      await tx.rollback();
+      res.status(400).json({ error: e.message });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Process items received damaged - reverses stock added by /receive and logs a stock movement
 router.patch('/:id/damage', async (req, res) => {
   try {

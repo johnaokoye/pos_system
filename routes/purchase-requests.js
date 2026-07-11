@@ -53,6 +53,35 @@ router.get('/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Shared by create and edit. Items may reference a catalog product
+// (`product_id`) or just a free-typed `product_name` — either way a
+// `product_url` can be attached for online-sourced items.
+// `quotation_item_id` is carried through unchanged when a PR item that
+// originated from a quote's "Q" item is re-saved — it's how a product
+// created later at receiving time finds its way back to that quote.
+async function processPRItems(items, request_type) {
+  const processedItems = [];
+  for (const item of items) {
+    const product = item.product_id ? (await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] })).rows[0] : null;
+    const unit_cost = parseFloat(item.unit_cost || (product ? product.cost : 0)) || 0;
+    const qty = parseInt(item.quantity || 1);
+    const item_type = item.item_type || (request_type === 'internal_use' ? 'internal' : 'sale');
+    processedItems.push({
+      product_id: item.product_id || null,
+      product_name: item.product_name || (product ? product.name : 'Unknown'),
+      sku: item.sku || (product ? product.sku : ''),
+      quantity: qty,
+      unit_cost,
+      item_type,
+      product_url: item.product_url || null,
+      notes: item.notes || null,
+      quotation_item_id: item.quotation_item_id || null,
+      total: parseFloat((unit_cost * qty).toFixed(2))
+    });
+  }
+  return processedItems;
+}
+
 router.post('/', async (req, res) => {
   try {
     const { branch_id, employee_id, department, notes, required_date, request_type = 'sale_items',
@@ -62,25 +91,7 @@ router.post('/', async (req, res) => {
 
     const { rows: [count] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM purchase_requests', args: [] });
     const pr_number = `PR-${String(Number(count.c) + 1).padStart(6, '0')}`;
-
-    const processedItems = [];
-    for (const item of items) {
-      const product = item.product_id ? (await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] })).rows[0] : null;
-      const unit_cost = parseFloat(item.unit_cost || (product ? product.cost : 0)) || 0;
-      const qty = parseInt(item.quantity || 1);
-      const item_type = item.item_type || (request_type === 'internal_use' ? 'internal' : 'sale');
-      processedItems.push({
-        product_id: item.product_id || null,
-        product_name: item.product_name || (product ? product.name : 'Unknown'),
-        sku: item.sku || (product ? product.sku : ''),
-        quantity: qty,
-        unit_cost,
-        item_type,
-        product_url: item.product_url || null,
-        notes: item.notes || null,
-        total: parseFloat((unit_cost * qty).toFixed(2))
-      });
-    }
+    const processedItems = await processPRItems(items, request_type);
 
     const tx = await db.transaction('write');
     try {
@@ -93,8 +104,8 @@ router.post('/', async (req, res) => {
       const prId = Number(result.lastInsertRowid);
       for (const item of processedItems) {
         await tx.execute({
-          sql: 'INSERT INTO purchase_request_items (pr_id, product_id, product_name, sku, quantity, unit_cost, item_type, product_url, notes, total) VALUES (?,?,?,?,?,?,?,?,?,?)',
-          args: [prId, item.product_id, item.product_name, item.sku, item.quantity, item.unit_cost, item.item_type, item.product_url, item.notes, item.total]
+          sql: 'INSERT INTO purchase_request_items (pr_id, product_id, product_name, sku, quantity, unit_cost, item_type, product_url, notes, total, quotation_item_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+          args: [prId, item.product_id, item.product_name, item.sku, item.quantity, item.unit_cost, item.item_type, item.product_url, item.notes, item.total, item.quotation_item_id]
         });
       }
       await tx.commit();
@@ -102,6 +113,50 @@ router.post('/', async (req, res) => {
       const { rows: prItems } = await db.execute({ sql: 'SELECT * FROM purchase_request_items WHERE pr_id = ?', args: [prId] });
       pr.items = prItems;
       res.status(201).json(pr);
+    } catch(e) {
+      await tx.rollback();
+      res.status(400).json({ error: e.message });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Edit a purchase request (details + items, including product URLs for
+// online-sourced items) — only while it's still a draft. Once submitted,
+// approval/rejection history and downstream PO conversion depend on the
+// request being stable.
+router.put('/:id', async (req, res) => {
+  try {
+    const { rows: [pr] } = await db.execute({ sql: 'SELECT * FROM purchase_requests WHERE id = ?', args: [req.params.id] });
+    if (!pr) return res.status(404).json({ error: 'Not found' });
+    if (pr.status !== 'draft') return res.status(400).json({ error: 'Only draft purchase requests can be edited' });
+
+    const { branch_id, employee_id, department, notes, required_date, request_type = pr.request_type,
+            supplier_id, currency, is_online_purchase, tax_rate, tax_amount, items } = req.body;
+    if (!items || items.length === 0) return res.status(400).json({ error: 'No items in purchase request' });
+    if (!['sale_items', 'internal_use'].includes(request_type)) return res.status(400).json({ error: 'Invalid request_type' });
+
+    const processedItems = await processPRItems(items, request_type);
+
+    const tx = await db.transaction('write');
+    try {
+      await tx.execute({
+        sql: 'UPDATE purchase_requests SET branch_id=?, employee_id=?, department=?, notes=?, required_date=?, request_type=?, supplier_id=?, currency=?, is_online_purchase=?, tax_rate=?, tax_amount=? WHERE id=?',
+        args: [branch_id||null, employee_id||pr.employee_id||null, department||null, notes||null, required_date||null,
+               request_type, supplier_id||null, currency||null, is_online_purchase?1:0,
+               parseFloat(tax_rate)||0, parseFloat(tax_amount)||0, pr.id]
+      });
+      await tx.execute({ sql: 'DELETE FROM purchase_request_items WHERE pr_id = ?', args: [pr.id] });
+      for (const item of processedItems) {
+        await tx.execute({
+          sql: 'INSERT INTO purchase_request_items (pr_id, product_id, product_name, sku, quantity, unit_cost, item_type, product_url, notes, total, quotation_item_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+          args: [pr.id, item.product_id, item.product_name, item.sku, item.quantity, item.unit_cost, item.item_type, item.product_url, item.notes, item.total, item.quotation_item_id]
+        });
+      }
+      await tx.commit();
+      const { rows: [updated] } = await db.execute({ sql: PR_SELECT + ' WHERE pr.id = ?', args: [pr.id] });
+      const { rows: prItems } = await db.execute({ sql: 'SELECT * FROM purchase_request_items WHERE pr_id = ?', args: [pr.id] });
+      updated.items = prItems;
+      res.json(updated);
     } catch(e) {
       await tx.rollback();
       res.status(400).json({ error: e.message });
@@ -167,8 +222,8 @@ router.post('/:id/convert', async (req, res) => {
         // Internal-use items are added to PO but without a product link (won't update stock on receive)
         const productId = item.item_type === 'internal' ? null : item.product_id;
         await tx.execute({
-          sql: 'INSERT INTO purchase_order_items (po_id, product_id, product_name, sku, quantity_ordered, unit_cost, total) VALUES (?,?,?,?,?,?,?)',
-          args: [poId, productId, item.product_name, item.sku, item.quantity, item.unit_cost, item.total]
+          sql: 'INSERT INTO purchase_order_items (po_id, product_id, product_name, sku, quantity_ordered, unit_cost, total, quotation_item_id) VALUES (?,?,?,?,?,?,?,?)',
+          args: [poId, productId, item.product_name, item.sku, item.quantity, item.unit_cost, item.total, item.quotation_item_id]
         });
       }
 

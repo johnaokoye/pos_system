@@ -900,6 +900,10 @@ const App = {
   },
 
   // ─── Utilities ────────────────────────────────────────────
+  // For interpolating free text into an HTML attribute value="...". Without
+  // this, a stray " in the text terminates the attribute early and truncates
+  // everything after it (bit us in quotation/PR notes editing).
+  escapeAttr(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); },
   fmt(n) { return new Intl.NumberFormat('en-US', { style: 'currency', currency: this.activeCurrency || this.settings.currency || 'USD' }).format(n || 0); },
   fmtDate(d) { return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); },
   fmtDateTime(d) { return new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); },
@@ -6110,6 +6114,7 @@ const App = {
                     <td style="color:var(--text-muted)">${this.fmtDate(pr.created_at)}</td>
                     <td>
                       <button class="btn btn-sm btn-secondary" onclick="App.viewPR(${pr.id})">View</button>
+                      ${pr.status==='draft'?`<button class="btn btn-sm btn-outline" onclick="App.showPRForm(${pr.id})">Edit</button>`:''}
                       ${pr.status==='draft'?`<button class="btn btn-sm btn-primary" onclick="App.updatePRStatus(${pr.id},'submitted')">Submit</button>`:''}
                       ${pr.status==='submitted'?`<button class="btn btn-sm btn-success" onclick="App.approvePR(${pr.id})">Approve</button><button class="btn btn-sm btn-danger" onclick="App.rejectPR(${pr.id})">Reject</button>`:''}
                       ${pr.status==='approved'?`<button class="btn btn-sm btn-teal" onclick="App.showConvertPRtoPO(${pr.id})">Convert to PO</button>`:''}
@@ -6124,7 +6129,7 @@ const App = {
   },
 
   // ─── Purchase Requests ────────────────────────────────────
-  async showPRForm() {
+  async showPRForm(editId) {
     const [products, suppliers, settings] = await Promise.all([
       this.api('GET', '/products'),
       this.api('GET', '/suppliers'),
@@ -6134,10 +6139,14 @@ const App = {
     const defaultCurrency = (settings.currency || 'USD').toUpperCase();
     const currencies = ['USD','EUR','GBP','CAD','AUD','JMD','TTD','BBD','GYD','BSD','HTG','MXN','CNY','JPY','INR','NGN','GHS','KES','ZAR'];
     if (!currencies.includes(defaultCurrency)) currencies.unshift(defaultCurrency);
-    const supOpts = `<option value="">-- No Supplier --</option>${suppliers.map(s=>`<option value="${s.id}" data-local="${s.is_local||0}">${s.name}${s.is_local?' (Local)':''}</option>`).join('')}`;
+    this._editingPRId = editId || null;
+    const pr = editId ? await this.api('GET', `/purchase-requests/${editId}`) : null;
+    const prCurrency = (pr && pr.currency) || defaultCurrency;
+    if (!currencies.includes(prCurrency.toUpperCase())) currencies.unshift(prCurrency);
+    const supOpts = `<option value="">-- No Supplier --</option>${suppliers.map(s=>`<option value="${s.id}" data-local="${s.is_local||0}" ${pr&&pr.supplier_id===s.id?'selected':''}>${s.name}${s.is_local?' (Local)':''}</option>`).join('')}`;
     this.showModal(`
       <div class="modal" style="max-width:800px">
-        <div class="modal-header"><span class="modal-title">New Purchase Request</span><button class="modal-close">✕</button></div>
+        <div class="modal-header"><span class="modal-title">${editId ? `Edit Purchase Request: ${pr.pr_number}` : 'New Purchase Request'}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <div class="form-group" style="margin-bottom:14px">
             <label style="font-weight:600;margin-bottom:6px;display:block">Request Type</label>
@@ -6154,26 +6163,26 @@ const App = {
             </div>
             <div class="form-group"><label>Currency</label>
               <select id="pr-currency" onchange="App._onPRCurrencyChange()">
-                ${currencies.map(c=>`<option value="${c}" ${c===defaultCurrency?'selected':''}>${c}</option>`).join('')}
+                ${currencies.map(c=>`<option value="${c}" ${c===prCurrency?'selected':''}>${c}</option>`).join('')}
               </select>
             </div>
             <div class="form-group"><label>Branch</label>
               <select id="pr-branch">
                 <option value="">-- Select Branch --</option>
-                ${branches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
+                ${branches.map(b => `<option value="${b.id}" ${pr&&pr.branch_id===b.id?'selected':''}>${b.name}</option>`).join('')}
               </select>
             </div>
           </div>
 
           <div class="input-row">
-            <div class="form-group"><label>Department</label><input id="pr-dept" placeholder="e.g. Warehouse, Sales, Admin"></div>
-            <div class="form-group"><label>Required By Date</label><input id="pr-date" type="date"></div>
-            <div class="form-group"><label>Notes / Reason</label><input id="pr-notes" placeholder="Reason for request..."></div>
+            <div class="form-group"><label>Department</label><input id="pr-dept" placeholder="e.g. Warehouse, Sales, Admin" value="${this.escapeAttr(pr&&pr.department)}"></div>
+            <div class="form-group"><label>Required By Date</label><input id="pr-date" type="date" value="${pr&&pr.required_date?String(pr.required_date).slice(0,10):''}"></div>
+            <div class="form-group"><label>Notes / Reason</label><input id="pr-notes" placeholder="Reason for request..." value="${this.escapeAttr(pr&&pr.notes)}"></div>
           </div>
 
           <div style="display:flex;align-items:center;gap:16px;margin-bottom:12px;padding:10px 12px;background:var(--bg);border-radius:6px">
             <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:500;margin:0">
-              <input type="checkbox" id="pr-online" onchange="App._onPROnlineToggle()" style="width:16px;height:16px">
+              <input type="checkbox" id="pr-online" onchange="App._onPROnlineToggle()" style="width:16px;height:16px" ${pr&&pr.is_online_purchase?'checked':''}>
               Online Purchase
             </label>
             <span style="font-size:12px;color:var(--text-muted)">Enable to add product URLs per item</span>
@@ -6198,19 +6207,24 @@ const App = {
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-          <button class="btn btn-outline" onclick="App.savePR('draft')">Save Draft</button>
+          <button class="btn btn-outline" onclick="App.savePR('draft')">${editId ? 'Save Changes' : 'Save Draft'}</button>
           <button class="btn btn-primary" onclick="App.savePR('submitted')">Submit Request</button>
         </div>
       </div>`);
     this._prAllProducts = products;
     this._prAllSuppliers = suppliers;
     this._prItems = [];
-    this._prRequestType = 'sale_items';
+    this._prRequestType = (pr && pr.request_type) || 'sale_items';
     this._prTaxRate = parseFloat(settings.tax_rate) || 0;
     this._prDefaultCurrency = defaultCurrency;
-    this._prIsOnline = false;
+    this._prIsOnline = !!(pr && pr.is_online_purchase);
     this._prIsLocalSupplier = true; // default currency is pre-selected
-    this.addPRItem();
+    this._setPRType(this._prRequestType);
+    if (pr && pr.items.length) {
+      pr.items.forEach(item => this.addPRItem(item));
+    } else {
+      this.addPRItem();
+    }
     this._onPRCurrencyChange(); // show tax badge on open
   },
 
@@ -6260,22 +6274,22 @@ const App = {
     });
   },
 
-  addPRItem() {
+  addPRItem(prefill) {
     this._prItems = this._prItems || [];
     const idx = this._prItems.length;
     this._prItems.push({});
     const container = document.getElementById('pr-items');
-    const opts = `<option value="">-- Product (optional) --</option>${(this._prAllProducts||[]).map(p=>`<option value="${p.id}" data-cost="${p.cost||0}" data-name="${p.name}" data-sku="${p.sku||''}">${p.name} (${p.sku})</option>`).join('')}`;
-    const defaultType = (this._prRequestType === 'internal_use') ? 'internal' : 'sale';
+    const opts = `<option value="">-- Product (optional) --</option>${(this._prAllProducts||[]).map(p=>`<option value="${p.id}" data-cost="${p.cost||0}" data-name="${p.name}" data-sku="${p.sku||''}" ${prefill&&prefill.product_id===p.id?'selected':''}>${p.name} (${p.sku})</option>`).join('')}`;
+    const defaultType = prefill ? prefill.item_type : ((this._prRequestType === 'internal_use') ? 'internal' : 'sale');
     const wrap = document.createElement('div');
     wrap.id = `pr-item-${idx}`;
     wrap.style.cssText = 'border-bottom:1px solid var(--border);padding:8px 0';
     wrap.innerHTML = `
       <div style="display:grid;grid-template-columns:2fr 1.5fr 60px 90px 90px 28px;gap:6px;align-items:center">
         <select onchange="App.updatePRItem(${idx},this.value)" id="pri-prod-${idx}">${opts}</select>
-        <input id="pri-name-${idx}" placeholder="Or type item name" oninput="App.calcPRTotal()">
-        <input id="pri-qty-${idx}" type="number" min="1" value="1" placeholder="Qty" oninput="App.calcPRTotal()">
-        <input id="pri-cost-${idx}" type="number" step="0.01" placeholder="Est. Cost" oninput="App.calcPRTotal()">
+        <input id="pri-name-${idx}" placeholder="Or type item name" value="${prefill&&!prefill.product_id?this.escapeAttr(prefill.product_name):''}" data-qi-id="${prefill&&prefill.quotation_item_id||''}" oninput="App.calcPRTotal()">
+        <input id="pri-qty-${idx}" type="number" min="1" value="${prefill?prefill.quantity:1}" placeholder="Qty" oninput="App.calcPRTotal()">
+        <input id="pri-cost-${idx}" type="number" step="0.01" value="${prefill?prefill.unit_cost:''}" placeholder="Est. Cost" oninput="App.calcPRTotal()">
         <select id="pri-itype-${idx}" style="font-size:12px">
           <option value="sale" ${defaultType==='sale'?'selected':''}>Sale</option>
           <option value="internal" ${defaultType==='internal'?'selected':''}>Internal</option>
@@ -6285,7 +6299,7 @@ const App = {
       <div id="pri-url-row-${idx}" style="display:${this._prIsOnline?'':'none'};margin-top:6px;padding:0 0 2px 2px">
         <div style="display:flex;align-items:center;gap:6px">
           <span style="font-size:11px;color:var(--text-muted);white-space:nowrap;min-width:80px">Product URL:</span>
-          <input id="pri-url-${idx}" placeholder="https://..." style="flex:1">
+          <input id="pri-url-${idx}" placeholder="https://..." style="flex:1" value="${this.escapeAttr(prefill&&prefill.product_url)}">
         </div>
       </div>`;
     container.appendChild(wrap);
@@ -6342,7 +6356,8 @@ const App = {
       const idx = qEl.id.split('-').pop();
       const sel = document.getElementById(`pri-prod-${idx}`);
       const product_id = sel?.value || '';
-      const nameInput = document.getElementById(`pri-name-${idx}`)?.value.trim();
+      const nameEl = document.getElementById(`pri-name-${idx}`);
+      const nameInput = nameEl?.value.trim();
       const opt = sel?.options[sel.selectedIndex];
       const product_name = product_id ? (opt?.dataset.name || '') : nameInput;
       const sku = product_id ? (opt?.dataset.sku || '') : '';
@@ -6351,7 +6366,8 @@ const App = {
       const unit_cost = parseFloat(document.getElementById(`pri-cost-${idx}`)?.value) || 0;
       const item_type = document.getElementById(`pri-itype-${idx}`)?.value || (request_type === 'internal_use' ? 'internal' : 'sale');
       const product_url = document.getElementById(`pri-url-${idx}`)?.value.trim() || null;
-      items.push({ product_id: product_id || null, product_name, sku, quantity, unit_cost, item_type, product_url });
+      const quotation_item_id = nameEl?.dataset.qiId || null;
+      items.push({ product_id: product_id || null, product_name, sku, quantity, unit_cost, item_type, product_url, quotation_item_id });
     });
     if (!items.length) { this.alert('Add at least one item', 'error'); return; }
 
@@ -6359,17 +6375,20 @@ const App = {
     const tax_amount = parseFloat((subtotal * taxRate / 100).toFixed(2));
 
     try {
-      const pr = await this.api('POST', '/purchase-requests', {
+      const payload = {
         branch_id: branch_id||null, department: department||null, notes: notes||null,
         required_date: required_date||null, request_type,
         supplier_id: supplier_id||null, currency: currency||null,
         is_online_purchase, tax_rate: taxRate, tax_amount, items
-      });
+      };
+      const pr = this._editingPRId
+        ? await this.api('PUT', `/purchase-requests/${this._editingPRId}`, payload)
+        : await this.api('POST', '/purchase-requests', payload);
       if (initialStatus === 'submitted') {
         await this.api('PATCH', `/purchase-requests/${pr.id}/status`, { status: 'submitted' });
       }
       this.closeModal();
-      this.alert('Purchase request created');
+      this.alert(this._editingPRId ? 'Purchase request updated' : 'Purchase request created');
       this.renderPurchasing('requests');
     } catch(e) { this.alert(e.message, 'error'); }
   },
@@ -6441,6 +6460,7 @@ const App = {
           </div>
         </div>
         <div class="modal-footer">
+          ${pr.status==='draft' ? `<button class="btn btn-secondary" onclick="App.closeModal();App.showPRForm(${pr.id})">Edit</button>` : ''}
           ${pr.status==='draft' ? `<button class="btn btn-primary" onclick="App.updatePRStatus(${pr.id},'submitted');App.closeModal()">Submit Request</button>` : ''}
           ${pr.status==='submitted' ? `<button class="btn btn-success" onclick="App.closeModal();App.approvePR(${pr.id})">Approve</button><button class="btn btn-danger" onclick="App.closeModal();App.rejectPR(${pr.id})">Reject</button>` : ''}
           ${pr.status==='approved' ? `<button class="btn btn-teal" onclick="App.closeModal();App.showConvertPRtoPO(${pr.id})">Convert to PO</button>` : ''}
@@ -6821,7 +6841,7 @@ const App = {
               <thead><tr><th>Product</th><th>SKU</th><th>Ordered</th><th>Received</th><th>Damaged</th><th>Unit Cost</th><th>Total</th></tr></thead>
               <tbody>
                 ${po.items.map(i => `<tr>
-                  <td>${i.product_name}</td>
+                  <td>${i.product_name}${(!i.product_id && i.quantity_received>0) ? `<br><button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="App.showLinkToInventory(${po.id},${i.id})">+ Add to Inventory</button>` : ''}</td>
                   <td>${i.sku||'-'}</td>
                   <td>${i.quantity_ordered}</td>
                   <td><span class="${i.quantity_received>=i.quantity_ordered?'color-success':'color-warning'}">${i.quantity_received||0}</span></td>
@@ -6864,6 +6884,90 @@ const App = {
         </div>
       </div>`);
     this._viewingPOId = po.id;
+  },
+
+  // A received PO line with no product_id never touched stock (see
+  // /receive) — typically a "Q" custom item quoted before it existed in the
+  // catalog. This lets the receiver either link it to an existing product or
+  // create a new one on the spot; either way the received qty gets added to
+  // stock now, and if the line traces back to a quote it gets updated too.
+  async showLinkToInventory(poId, itemId) {
+    const [po, categories, products] = await Promise.all([
+      this.api('GET', `/purchase-orders/${poId}`),
+      this.api('GET', '/categories'),
+      this.api('GET', '/products'),
+    ]);
+    const item = po.items.find(i => i.id === itemId);
+    if (!item) return;
+    this._linkPOId = poId;
+    this._linkItemId = itemId;
+    this._linkMode = 'new';
+    this.showSecondaryModal(`
+      <div class="modal" style="max-width:520px">
+        <div class="modal-header"><span class="modal-title">Add "${item.product_name}" to Inventory</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div style="display:flex;gap:0;border:1px solid var(--border);border-radius:6px;overflow:hidden;width:fit-content;margin-bottom:14px">
+            <button id="link-mode-new" class="btn" style="border-radius:0;border:none;padding:8px 16px;background:var(--primary);color:#fff;font-weight:600" onclick="App._setLinkMode('new')">Create New Product</button>
+            <button id="link-mode-existing" class="btn" style="border-radius:0;border:none;padding:8px 16px;background:var(--card);color:var(--text)" onclick="App._setLinkMode('existing')">Link Existing Product</button>
+          </div>
+          <div id="link-new-panel">
+            <div class="input-row">
+              <div class="form-group"><label>SKU *</label><input id="link-sku" placeholder="PROD-001"></div>
+              <div class="form-group"><label>Category</label><select id="link-cat"><option value="">— None —</option>${categories.map(c=>`<option value="${c.id}">${c.name}</option>`).join('')}</select></div>
+            </div>
+            <div class="form-group"><label>Name *</label><input id="link-name" value="${this.escapeAttr(item.product_name)}"></div>
+            <div class="input-row-3">
+              <div class="form-group"><label>Price *</label><input type="number" id="link-price" step="0.01" value="0"></div>
+              <div class="form-group"><label>Cost</label><input type="number" id="link-cost" step="0.01" value="${item.unit_cost||0}"></div>
+              <div class="form-group"><label>Tax Rate %</label><input type="number" id="link-tax" step="0.1" value="${this.settings?.tax_rate ?? 8.5}"></div>
+            </div>
+            ${item.product_url ? `<p style="font-size:12px;color:var(--text-muted)">Sourced from: <a href="${item.product_url}" target="_blank" rel="noopener">${item.product_url}</a></p>` : ''}
+          </div>
+          <div id="link-existing-panel" style="display:none">
+            <div class="form-group"><label>Product</label>
+              <select id="link-existing-select"><option value="">-- Select Product --</option>${products.map(p=>`<option value="${p.id}">${p.name} (${p.sku})</option>`).join('')}</select>
+            </div>
+          </div>
+          <p style="font-size:12px;color:var(--text-muted);margin-top:10px">This will add <strong>${item.quantity_received}</strong> unit(s) to stock${po.branch_name?` at <strong>${po.branch_name}</strong>`:''}.</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeSecondaryModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.linkPOItemToProduct()">Add to Inventory</button>
+        </div>
+      </div>`);
+  },
+
+  _setLinkMode(mode) {
+    this._linkMode = mode;
+    const newBtn = document.getElementById('link-mode-new');
+    const existingBtn = document.getElementById('link-mode-existing');
+    newBtn.style.background = mode === 'new' ? 'var(--primary)' : 'var(--card)';
+    newBtn.style.color = mode === 'new' ? '#fff' : 'var(--text)';
+    existingBtn.style.background = mode === 'existing' ? 'var(--primary)' : 'var(--card)';
+    existingBtn.style.color = mode === 'existing' ? '#fff' : 'var(--text)';
+    document.getElementById('link-new-panel').style.display = mode === 'new' ? '' : 'none';
+    document.getElementById('link-existing-panel').style.display = mode === 'existing' ? '' : 'none';
+  },
+
+  async linkPOItemToProduct() {
+    const payload = this._linkMode === 'existing'
+      ? { product_id: document.getElementById('link-existing-select').value || null }
+      : {
+          sku: document.getElementById('link-sku').value.trim(),
+          name: document.getElementById('link-name').value.trim(),
+          category_id: document.getElementById('link-cat').value || null,
+          price: parseFloat(document.getElementById('link-price').value) || 0,
+          cost: parseFloat(document.getElementById('link-cost').value) || 0,
+          tax_rate: parseFloat(document.getElementById('link-tax').value) || 0,
+        };
+    if (this._linkMode === 'existing' && !payload.product_id) { this.alert('Select a product', 'error'); return; }
+    if (this._linkMode === 'new' && (!payload.sku || !payload.name)) { this.alert('SKU and name are required', 'error'); return; }
+    try {
+      const result = await this.api('POST', `/purchase-orders/${this._linkPOId}/items/${this._linkItemId}/link-product`, payload);
+      this.closeSecondaryModal();
+      this.alert(result.quotation_updated ? 'Added to inventory — the original quote was updated too' : 'Added to inventory');
+      this.viewPO(this._linkPOId);
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   showPOAttachForm(poId) {
@@ -7328,6 +7432,7 @@ const App = {
                   <td style="color:var(--text-muted)">${this.fmtDate(q.created_at)}</td>
                   <td>
                     <button class="btn btn-sm btn-secondary" onclick="App.viewQuote(${q.id})">View</button>
+                    ${q.status!=='converted'&&q.status!=='declined' ? `<button class="btn btn-sm btn-outline" onclick="App.showQuoteForm(${q.id})">Edit</button>` : ''}
                     ${q.status!=='converted'&&q.status!=='declined' ? `<button class="btn btn-sm btn-primary" onclick="App.showConvertQuote(${q.id})">Convert</button>` : ''}
                   </td>
                 </tr>`).join('') : '<tr><td colspan="9" class="empty-state">No quotations yet</td></tr>'}
@@ -7337,7 +7442,7 @@ const App = {
       </div>`;
   },
 
-  async showQuoteForm() {
+  async showQuoteForm(editId) {
     const [customers, employees, products] = await Promise.all([
       this.api('GET', '/customers?limit=200'),
       this.api('GET', '/employees'),
@@ -7346,44 +7451,55 @@ const App = {
     const branches = this.currentUser.branches || [];
     this._quoteProducts = products;
     this._quoteItems = [];
+    this._editingQuoteId = editId || null;
+    const q = editId ? await this.api('GET', `/quotations/${editId}`) : null;
     this.showModal(`
       <div class="modal" style="max-width:720px">
-        <div class="modal-header"><span class="modal-title">New Quotation</span><button class="modal-close">✕</button></div>
+        <div class="modal-header"><span class="modal-title">${editId ? `Edit Quotation: ${q.quote_number}` : 'New Quotation'}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <div class="input-row">
             <div class="form-group"><label>Customer</label>
               <select id="qt-cust">
                 <option value="">-- Walk-in / No Customer --</option>
-                ${customers.map(c => `<option value="${c.id}">${c.first_name} ${c.last_name} (${c.customer_number})</option>`).join('')}
+                ${customers.map(c => `<option value="${c.id}" ${q&&q.customer_id===c.id?'selected':''}>${c.first_name} ${c.last_name} (${c.customer_number})</option>`).join('')}
               </select>
             </div>
             <div class="form-group"><label>Branch</label>
               <select id="qt-branch">
                 <option value="">-- Select Branch --</option>
-                ${branches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
+                ${branches.map(b => `<option value="${b.id}" ${q&&q.branch_id===b.id?'selected':''}>${b.name}</option>`).join('')}
               </select>
             </div>
           </div>
           <div class="input-row">
-            <div class="form-group"><label>Valid Until</label><input id="qt-valid" type="date"></div>
-            <div class="form-group"><label>Discount ($)</label><input id="qt-disc" type="number" step="0.01" value="0" oninput="App.calcQuoteTotal()"></div>
+            <div class="form-group"><label>Valid Until</label><input id="qt-valid" type="date" value="${q&&q.valid_until?String(q.valid_until).slice(0,10):''}"></div>
+            <div class="form-group"><label>Discount ($)</label><input id="qt-disc" type="number" step="0.01" value="${q?q.discount_amount:0}" oninput="App.calcQuoteTotal()"></div>
           </div>
-          <div class="form-group"><label>Notes</label><input id="qt-notes"></div>
+          <div class="form-group"><label>Notes</label><input id="qt-notes" value="${this.escapeAttr(q&&q.notes)}"></div>
           <div style="margin-bottom:10px">
-            <div class="card-header"><span class="card-title">Items</span><button class="btn btn-sm btn-outline" onclick="App.addQuoteItem()">+ Add Item</button></div>
+            <div class="card-header"><span class="card-title">Items</span>
+              <div style="display:flex;gap:6px">
+                <button class="btn btn-sm btn-outline" onclick="App.addQuoteItem()">+ Add Item</button>
+                <button class="btn btn-sm btn-outline" onclick="App.addQuoteCustomItem()">+ Custom Item</button>
+              </div>
+            </div>
             <div id="qt-items"></div>
           </div>
           <div style="text-align:right;font-size:15px;font-weight:700">Total: <span id="qt-total">$0.00</span></div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-          <button class="btn btn-primary" onclick="App.saveQuote()">Create Quote</button>
+          <button class="btn btn-primary" onclick="App.saveQuote()">${editId ? 'Save Changes' : 'Create Quote'}</button>
         </div>
       </div>`);
-    this.addQuoteItem();
+    if (q && q.items.length) {
+      q.items.forEach(item => item.product_id ? this.addQuoteItem(item) : this.addQuoteCustomItem(item));
+    } else {
+      this.addQuoteItem();
+    }
   },
 
-  addQuoteItem() {
+  addQuoteItem(prefill) {
     this._quoteItems = this._quoteItems || [];
     const idx = this._quoteItems.length;
     this._quoteItems.push({});
@@ -7395,12 +7511,35 @@ const App = {
     div.innerHTML = `
       <select style="flex:2" onchange="App.updateQuoteItem(${idx},this.value)" id="qti-prod-${idx}">
         <option value="">-- Select Product --</option>
-        ${products.map(p => `<option value="${p.id}" data-price="${p.price}">${p.name} (${this.fmt(p.price)})</option>`).join('')}
+        ${products.map(p => `<option value="${p.id}" data-price="${p.price}" ${prefill&&prefill.product_id===p.id?'selected':''}>${p.name} (${this.fmt(p.price)})</option>`).join('')}
       </select>
-      <input id="qti-qty-${idx}" type="number" min="1" value="1" style="width:70px" placeholder="Qty" oninput="App.calcQuoteTotal()">
-      <input id="qti-price-${idx}" type="number" step="0.01" style="width:90px" placeholder="Price" oninput="App.calcQuoteTotal()">
+      <input id="qti-qty-${idx}" type="number" min="1" value="${prefill?prefill.quantity:1}" style="width:70px" placeholder="Qty" oninput="App.calcQuoteTotal()">
+      <input id="qti-price-${idx}" type="number" step="0.01" value="${prefill?prefill.unit_price:''}" style="width:90px" placeholder="Price" oninput="App.calcQuoteTotal()">
       <button class="btn btn-sm btn-danger" onclick="document.getElementById('qt-item-${idx}').remove();App.calcQuoteTotal()">✕</button>`;
     container.appendChild(div);
+    this.calcQuoteTotal();
+  },
+
+  // Temporary line item: no product_id, just a free-text description and a
+  // manual amount. Used to quote something not yet in inventory — the quote
+  // stays editable so this row can be swapped for a real product once the
+  // item is received into stock.
+  addQuoteCustomItem(prefill) {
+    this._quoteItems = this._quoteItems || [];
+    const idx = this._quoteItems.length;
+    this._quoteItems.push({ temp: true });
+    const container = document.getElementById('qt-items');
+    const div = document.createElement('div');
+    div.className = 'po-receive-row';
+    div.id = `qt-item-${idx}`;
+    div.innerHTML = `
+      <input id="qti-desc-${idx}" style="flex:2" placeholder="Custom item description" value="${prefill?this.escapeAttr(prefill.product_name):''}" data-pr-id="${prefill&&prefill.purchase_request_id||''}">
+      <input id="qti-qty-${idx}" type="number" min="1" value="${prefill?prefill.quantity:1}" style="width:70px" placeholder="Qty" oninput="App.calcQuoteTotal()">
+      <input id="qti-price-${idx}" type="number" step="0.01" value="${prefill?prefill.unit_price:''}" style="width:90px" placeholder="Amount" oninput="App.calcQuoteTotal()">
+      <span class="badge-pill badge-warning" style="flex-shrink:0" title="Flags this item for Purchasing to order — a Purchase Request is auto-created">Q</span>
+      <button class="btn btn-sm btn-danger" onclick="document.getElementById('qt-item-${idx}').remove();App.calcQuoteTotal()">✕</button>`;
+    container.appendChild(div);
+    this.calcQuoteTotal();
   },
 
   updateQuoteItem(idx, productId) {
@@ -7431,20 +7570,33 @@ const App = {
     const discount_amount = parseFloat(document.getElementById('qt-disc').value) || 0;
     const notes = document.getElementById('qt-notes').value;
     const items = [];
-    document.querySelectorAll('[id^="qti-prod-"]').forEach(sel => {
-      if (!sel.closest('[id^="qt-item-"]')) return;
-      const idx = sel.id.split('-').pop();
-      const product_id = sel.value;
-      if (!product_id) return;
+    document.querySelectorAll('#qt-items > [id^="qt-item-"]').forEach(row => {
+      const idx = row.id.split('-').pop();
       const quantity = parseInt(document.getElementById(`qti-qty-${idx}`).value) || 1;
       const unit_price = parseFloat(document.getElementById(`qti-price-${idx}`).value) || 0;
-      items.push({ product_id, quantity, unit_price });
+      const prodSel = document.getElementById(`qti-prod-${idx}`);
+      if (prodSel) {
+        if (!prodSel.value) return;
+        items.push({ product_id: prodSel.value, quantity, unit_price });
+        return;
+      }
+      const descInp = document.getElementById(`qti-desc-${idx}`);
+      const description = descInp?.value.trim();
+      if (!description) return;
+      const purchase_request_id = descInp.dataset.prId || null;
+      items.push({ description, quantity, unit_price, purchase_request_id });
     });
     if (!items.length) { this.alert('Add at least one item', 'error'); return; }
     try {
-      await this.api('POST', '/quotations', { customer_id: customer_id||null, branch_id: branch_id||null, discount_amount, notes, valid_until: valid_until||null, items });
+      const payload = { customer_id: customer_id||null, branch_id: branch_id||null, discount_amount, notes, valid_until: valid_until||null, items };
+      if (this._editingQuoteId) {
+        await this.api('PUT', `/quotations/${this._editingQuoteId}`, payload);
+        this.alert('Quotation updated');
+      } else {
+        await this.api('POST', '/quotations', payload);
+        this.alert('Quotation created');
+      }
       this.closeModal();
-      this.alert('Quotation created');
       this.renderQuotations();
     } catch(e) { this.alert(e.message, 'error'); }
   },
@@ -7473,7 +7625,7 @@ const App = {
             <table>
               <thead><tr><th>Product</th><th>Qty</th><th>Price</th><th>Tax</th><th>Total</th></tr></thead>
               <tbody>
-                ${q.items.map(i => `<tr><td>${i.product_name}</td><td>${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td>${this.fmt(i.tax_amount)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}
+                ${q.items.map(i => `<tr><td>${i.product_name}${i.is_temp_item ? ` <span class="badge-pill badge-warning" style="font-size:10px" title="Flagged for Purchasing to order">Q</span>${i.purchase_request_number ? ` <a href="#" style="font-size:11px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${i.purchase_request_id})">${i.purchase_request_number}</a>` : ''}` : ''}</td><td>${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td>${this.fmt(i.tax_amount)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}
               </tbody>
             </table>
           </div>
@@ -7486,6 +7638,7 @@ const App = {
         </div>
         <div class="modal-footer">
           ${q.status!=='converted'&&q.status!=='declined' ? `
+            <button class="btn btn-secondary" onclick="App.closeModal();App.showQuoteForm(${q.id})">Edit</button>
             <button class="btn btn-secondary" onclick="App.updateQuoteStatus(${q.id},'sent')">Mark Sent</button>
             <button class="btn btn-success" onclick="App.updateQuoteStatus(${q.id},'accepted')">Accept</button>
             <button class="btn btn-danger" onclick="App.updateQuoteStatus(${q.id},'declined')">Decline</button>

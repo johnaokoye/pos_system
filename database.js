@@ -774,6 +774,10 @@ async function _init() {
     'ALTER TABLE rental_agreement_items ADD COLUMN tax_rate REAL DEFAULT 0',
     'ALTER TABLE rental_agreement_items ADD COLUMN is_mandatory INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE rental_agreement_items ADD COLUMN final_rental_fee REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE quotation_items ADD COLUMN is_temp_item INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE quotation_items ADD COLUMN purchase_request_id INTEGER REFERENCES purchase_requests(id)',
+    'ALTER TABLE purchase_request_items ADD COLUMN quotation_item_id INTEGER REFERENCES quotation_items(id)',
+    'ALTER TABLE purchase_order_items ADD COLUMN quotation_item_id INTEGER REFERENCES quotation_items(id)',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
