@@ -292,7 +292,7 @@ router.get('/:id/movements', requirePermission('inventory'), async (req, res) =>
 // GET single product
 router.get('/:id', requireAuth, async (req, res) => {
   try {
-    const { online } = req.query;
+    const { online, branch_id } = req.query;
     if (online === '1' || online === 'true') {
       const { rows: [setting] } = await db.execute({ sql: "SELECT value FROM settings WHERE key='woo_sync_branch_id'", args: [] });
       const syncBranchId = setting?.value;
@@ -318,6 +318,13 @@ router.get('/:id', requireAuth, async (req, res) => {
     }
     const { rows: [product] } = await db.execute({ sql: `SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE p.id = ?`, args: [req.params.id] });
     if (!product) return res.status(404).json({ error: 'Product not found' });
+    // Additive fields only — used by the product form's Bin Locations panel to show
+    // the branch-scoped stock figure that bin quantities must split accurately against.
+    if (branch_id) {
+      const { rows: [bi] } = await db.execute({ sql: 'SELECT stock_qty, min_stock FROM branch_inventory WHERE product_id = ? AND branch_id = ?', args: [req.params.id, branch_id] });
+      product.branch_stock_qty = bi ? bi.stock_qty : 0;
+      product.branch_min_stock = bi ? bi.min_stock : product.min_stock;
+    }
     res.json(product);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

@@ -2458,11 +2458,19 @@ const App = {
         <div class="form-group"><label>Tax Rate %</label><input type="number" id="pf-tax" value="${defaultTax}" min="0" step="0.1"></div>
       </div>
       <div class="input-row">
-        <div class="form-group"><label>Stock Qty</label><input type="number" id="pf-stock" value="${p.stock_qty||0}" min="0"></div>
+        <div class="form-group"><label>Stock Qty</label><input type="number" id="pf-stock" value="${p.stock_qty||0}" min="0" oninput="App._updatePfBinSplitSummary()"></div>
         <div class="form-group"><label>Min Stock</label><input type="number" id="pf-minstock" value="${p.min_stock||5}" min="0"></div>
       </div>
       ${!id ? `<div class="form-group"><label>Assign to Branch <span style="color:var(--text-muted);font-weight:400;font-size:11px">(allocates initial stock to this branch)</span></label>
-        <select id="pf-branch"><option value="">— No specific branch (global) —</option>${branches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}</select>
+        <select id="pf-branch" onchange="App._onPfBranchChange()"><option value="">— No specific branch (global) —</option>${branches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}</select>
+      </div>
+      <div id="pf-bin-split-wrap" style="display:none;border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <div style="font-weight:600;font-size:13px">Split Stock Into Bins <span style="font-weight:400;color:var(--text-muted);font-size:11px">(optional — for precise picking &amp; cycle counts)</span></div>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="App._addPfBinRow()">+ Add Bin</button>
+        </div>
+        <div id="pf-bin-rows"></div>
+        <div id="pf-bin-summary" style="font-size:12px;color:var(--text-muted);margin-top:6px"></div>
       </div>` : ''}
       <div class="form-group"><label>Status</label>
         <select id="pf-active"><option value="1" ${p.active!==0?'selected':''}>Active</option><option value="0" ${p.active===0?'selected':''}>Inactive</option></select>
@@ -2497,9 +2505,11 @@ const App = {
         ${id ? `<div class="var-tab-bar">
           <div class="var-tab active" id="ptab-details" onclick="App._switchProdTab('details')">Details</div>
           <div class="var-tab" id="ptab-variations" onclick="App._switchProdTab('variations')">Variations</div>
+          <div class="var-tab" id="ptab-bins" onclick="App._switchProdTab('bins')">Bin Locations</div>
         </div>` : ''}
         <div id="ppanel-details" class="modal-body">${detailsPanel}</div>
-        ${id ? `<div id="ppanel-variations" style="display:none;overflow-y:auto;max-height:520px"><div id="var-panel"><div style="text-align:center;padding:30px;color:var(--text-muted)">Click the Variations tab to manage variants</div></div></div>` : ''}
+        ${id ? `<div id="ppanel-variations" style="display:none;overflow-y:auto;max-height:520px"><div id="var-panel"><div style="text-align:center;padding:30px;color:var(--text-muted)">Click the Variations tab to manage variants</div></div></div>
+        <div id="ppanel-bins" style="display:none;overflow-y:auto;max-height:520px"><div id="bin-panel"><div style="text-align:center;padding:30px;color:var(--text-muted)">Click the Bin Locations tab to manage bin assignments</div></div></div>` : ''}
         <div class="modal-footer">
           ${id ? `<button class="btn btn-danger" onclick="App.deleteProduct(${id})">Delete</button>` : ''}
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
@@ -2509,14 +2519,15 @@ const App = {
   },
 
   _switchProdTab(tab) {
-    ['details','variations'].forEach(t => {
+    ['details','variations','bins'].forEach(t => {
       document.getElementById(`ptab-${t}`)?.classList.toggle('active', t === tab);
       const panel = document.getElementById(`ppanel-${t}`);
       if (panel) panel.style.display = t === tab ? '' : 'none';
     });
     const saveBtn = document.getElementById('pf-save-btn');
-    if (saveBtn) saveBtn.style.display = tab === 'variations' ? 'none' : '';
+    if (saveBtn) saveBtn.style.display = (tab === 'variations' || tab === 'bins') ? 'none' : '';
     if (tab === 'variations' && this._editingProductId) this.showVariationsPanel(this._editingProductId);
+    if (tab === 'bins' && this._editingProductId) this.showBinLocationsPanel(this._editingProductId);
   },
 
   async uploadProductImage(productId, input) {
@@ -2561,17 +2572,216 @@ const App = {
       online_available: document.getElementById('pf-online').checked ? 1 : 0,
       web_allotment: document.getElementById('pf-web-allotment').value !== '' ? parseInt(document.getElementById('pf-web-allotment').value) : null,
     };
+    let binRows = [];
     if (!id) {
       const branchEl = document.getElementById('pf-branch');
       if (branchEl) data.branch_id = branchEl.value || null;
+      binRows = this._getPfBinRows();
+      const totalBinQty = binRows.reduce((s, r) => s + r.quantity, 0);
+      if (totalBinQty > data.stock_qty) {
+        this.alert(`Bin quantities (${totalBinQty}) can't exceed stock qty (${data.stock_qty})`, 'error');
+        return;
+      }
     }
     try {
-      if (id) await this.api('PUT', `/products/${id}`, data);
-      else await this.api('POST', '/products', data);
+      let prod;
+      if (id) prod = await this.api('PUT', `/products/${id}`, data);
+      else prod = await this.api('POST', '/products', data);
+      if (!id && data.branch_id && binRows.length) {
+        for (let i = 0; i < binRows.length; i++) {
+          const row = binRows[i];
+          try {
+            await this.api('POST', '/warehouse/assignments', {
+              product_id: prod.id, bin_id: row.bin_id, branch_id: data.branch_id,
+              quantity: row.quantity, is_primary: i === 0,
+            });
+          } catch(e) { /* keep placing the remaining rows even if one bin fails */ }
+        }
+      }
       this.closeModal();
       this.alert(id ? 'Product updated' : 'Product created');
       this.renderInventory();
     } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  // ─── Add-product bin split (initial stock) ──────────────────────────────
+
+  async _onPfBranchChange() {
+    const branchId = document.getElementById('pf-branch')?.value;
+    const wrap = document.getElementById('pf-bin-split-wrap');
+    const rowsEl = document.getElementById('pf-bin-rows');
+    if (!wrap || !rowsEl) return;
+    rowsEl.innerHTML = '';
+    this._pfBins = [];
+    if (!branchId) { wrap.style.display = 'none'; this._updatePfBinSplitSummary(); return; }
+    this._pfBins = await this.api('GET', `/warehouse/bins?branch_id=${branchId}`);
+    wrap.style.display = '';
+    if (!this._pfBins.length) {
+      rowsEl.innerHTML = `<p style="color:var(--text-muted);font-size:12px">No bins set up for this location yet. Add them in Warehouse → Bins.</p>`;
+    }
+    this._updatePfBinSplitSummary();
+  },
+
+  _pfBinRowHtml(binId = '', qty = '') {
+    const bins = this._pfBins || [];
+    return `<div class="input-row pf-bin-row" style="margin-bottom:6px">
+      <select class="pf-bin-select" style="flex:1" onchange="App._updatePfBinSplitSummary()">
+        <option value="">Select bin…</option>
+        ${bins.map(b => `<option value="${b.id}" ${String(b.id)===String(binId)?'selected':''}>${b.bin_code}${b.zone_name?' — '+b.zone_name:''}</option>`).join('')}
+      </select>
+      <input type="number" class="pf-bin-qty" min="0" value="${qty}" placeholder="Qty" style="max-width:90px" oninput="App._updatePfBinSplitSummary()">
+      <button type="button" class="btn btn-danger btn-sm" onclick="this.closest('.pf-bin-row').remove();App._updatePfBinSplitSummary()">✕</button>
+    </div>`;
+  },
+
+  _addPfBinRow() {
+    const rowsEl = document.getElementById('pf-bin-rows');
+    if (!rowsEl || !(this._pfBins||[]).length) return;
+    const div = document.createElement('div');
+    div.innerHTML = this._pfBinRowHtml();
+    rowsEl.appendChild(div.firstElementChild);
+  },
+
+  _getPfBinRows() {
+    return Array.from(document.querySelectorAll('#pf-bin-rows .pf-bin-row')).map(row => ({
+      bin_id: row.querySelector('.pf-bin-select')?.value || '',
+      quantity: parseInt(row.querySelector('.pf-bin-qty')?.value) || 0,
+    })).filter(r => r.bin_id && r.quantity > 0);
+  },
+
+  _updatePfBinSplitSummary() {
+    const summary = document.getElementById('pf-bin-summary');
+    if (!summary) return;
+    const stockQty = parseInt(document.getElementById('pf-stock')?.value) || 0;
+    const assigned = this._getPfBinRows().reduce((sum, r) => sum + r.quantity, 0);
+    const remaining = stockQty - assigned;
+    summary.style.color = remaining < 0 ? 'var(--danger)' : 'var(--text-muted)';
+    summary.textContent = remaining < 0
+      ? `Over-allocated by ${-remaining} — bin quantities can't exceed stock qty (${stockQty})`
+      : `${assigned} of ${stockQty} allocated to bins${remaining > 0 ? ` — ${remaining} unassigned` : ''}`;
+  },
+
+  // ─── Edit-product Bin Locations panel ────────────────────────────────────
+
+  async showBinLocationsPanel(productId) {
+    const panel = document.getElementById('bin-panel');
+    if (!panel) return;
+    panel.innerHTML = '<div style="text-align:center;padding:24px;color:var(--text-muted)">Loading...</div>';
+    const branches = await this.api('GET', '/branches');
+    this._binPanelBranches = branches.filter(b => b.active);
+    this._binPanelProductId = productId;
+    if (!this._binPanelBranches.length) {
+      panel.innerHTML = '<p style="padding:16px;color:var(--text-muted);font-size:13px">No active locations configured. Add one in Branches first.</p>';
+      return;
+    }
+    const branchId = this._binPanelBranchId || this._binPanelBranches[0].id;
+    await this._renderBinLocationsBody(productId, branchId);
+  },
+
+  async _renderBinLocationsBody(productId, branchId) {
+    const panel = document.getElementById('bin-panel');
+    if (!panel) return;
+    this._binPanelBranchId = branchId;
+    const [product, assignments, bins] = await Promise.all([
+      this.api('GET', `/products/${productId}?branch_id=${branchId}`),
+      this.api('GET', `/warehouse/assignments?product_id=${productId}&branch_id=${branchId}`),
+      this.api('GET', `/warehouse/bins?branch_id=${branchId}`),
+    ]);
+    this._binPanelAssignments = assignments;
+    this._binPanelBranchStock = product.branch_stock_qty || 0;
+    const branchStock = this._binPanelBranchStock;
+    const assigned = assignments.reduce((s, a) => s + a.quantity, 0);
+    const remaining = branchStock - assigned;
+    const unassignedBins = bins.filter(b => !assignments.some(a => a.bin_id === b.id));
+    panel.innerHTML = `
+      <div style="padding:16px;border-bottom:1px solid var(--border)">
+        <div class="form-group" style="margin-bottom:10px"><label>Location</label>
+          <select id="binp-branch" style="max-width:260px">
+            ${this._binPanelBranches.map(b => `<option value="${b.id}" ${String(b.id)===String(branchId)?'selected':''}>${b.name}</option>`).join('')}
+          </select>
+        </div>
+        <div style="font-size:13px;color:${remaining<0?'var(--danger)':'var(--text-muted)'}">
+          Branch stock: <strong>${branchStock}</strong> &nbsp;·&nbsp; Assigned to bins: <strong>${assigned}</strong>
+          ${remaining < 0 ? ` &nbsp;·&nbsp; <strong>Over-allocated by ${-remaining}</strong>` : remaining > 0 ? ` &nbsp;·&nbsp; ${remaining} unassigned` : ' &nbsp;·&nbsp; fully allocated'}
+        </div>
+      </div>
+      <div style="padding:16px">
+        ${bins.length === 0 ? `<p style="color:var(--text-muted);font-size:13px">No bins set up for this location. Add them in Warehouse → Bins.</p>` : ''}
+        ${assignments.length ? `<table class="table"><thead><tr><th>Bin</th><th>Zone</th><th>Qty</th><th>Primary</th><th></th></tr></thead>
+          <tbody>${assignments.map(a => `
+          <tr>
+            <td><strong>${a.bin_code}</strong></td>
+            <td style="color:var(--text-muted)">${a.zone_name||'—'}</td>
+            <td><input type="number" min="0" value="${a.quantity}" style="width:80px" onchange="App._updateBinLocQty(${a.id},this.value)"></td>
+            <td>${a.is_primary ? '<span class="badge-pill badge-success">Primary</span>' : `<button class="btn btn-secondary btn-sm" onclick="App._makeBinLocPrimary(${a.id})">Make Primary</button>`}</td>
+            <td><button class="btn btn-danger btn-sm" onclick="App._removeBinLoc(${a.id})">Remove</button></td>
+          </tr>`).join('')}</tbody></table>`
+          : '<div class="empty-state"><p>No bins assigned yet at this location.</p></div>'}
+        ${unassignedBins.length ? `
+        <div style="display:flex;gap:8px;align-items:flex-end;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+          <div class="form-group" style="margin:0;flex:1"><label>Add Bin</label>
+            <select id="binp-new-bin">${unassignedBins.map(b => `<option value="${b.id}">${b.bin_code}${b.zone_name?' — '+b.zone_name:''}</option>`).join('')}</select>
+          </div>
+          <div class="form-group" style="margin:0"><label>Qty</label><input type="number" id="binp-new-qty" min="0" value="0" style="width:90px"></div>
+          <button class="btn btn-primary btn-sm" onclick="App._addBinLoc()">Add</button>
+        </div>` : ''}
+      </div>`;
+    const branchSel = document.getElementById('binp-branch');
+    if (branchSel) branchSel.onchange = (e) => this._renderBinLocationsBody(productId, e.target.value);
+  },
+
+  async _addBinLoc() {
+    const binId = document.getElementById('binp-new-bin')?.value;
+    const qty = parseInt(document.getElementById('binp-new-qty')?.value) || 0;
+    if (!binId || qty <= 0) return this.alert('Select a bin and enter a quantity greater than 0', 'warning');
+    const branchStock = this._binPanelBranchStock || 0;
+    const currentlyAssigned = (this._binPanelAssignments||[]).reduce((s,a) => s + a.quantity, 0);
+    if (currentlyAssigned + qty > branchStock) {
+      return this.alert(`Only ${branchStock - currentlyAssigned} unit(s) unassigned at this location — reduce the quantity`, 'error');
+    }
+    try {
+      await this.api('POST', '/warehouse/assignments', {
+        product_id: this._binPanelProductId, bin_id: binId, branch_id: this._binPanelBranchId,
+        quantity: qty, is_primary: !(this._binPanelAssignments||[]).length,
+      });
+      this._renderBinLocationsBody(this._binPanelProductId, this._binPanelBranchId);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async _updateBinLocQty(assignmentId, qty) {
+    const q = parseInt(qty) || 0;
+    const branchStock = this._binPanelBranchStock || 0;
+    const others = (this._binPanelAssignments||[]).filter(a => a.id !== assignmentId).reduce((s,a) => s + a.quantity, 0);
+    if (others + q > branchStock) {
+      this.alert(`Total would exceed branch stock (${branchStock}) — reduce the quantity`, 'error');
+      this._renderBinLocationsBody(this._binPanelProductId, this._binPanelBranchId);
+      return;
+    }
+    const existing = (this._binPanelAssignments||[]).find(a => a.id === assignmentId);
+    try {
+      await this.api('PUT', `/warehouse/assignments/${assignmentId}`, { quantity: q, is_primary: !!existing?.is_primary });
+      this._renderBinLocationsBody(this._binPanelProductId, this._binPanelBranchId);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async _makeBinLocPrimary(assignmentId) {
+    try {
+      const others = (this._binPanelAssignments||[]).filter(a => a.is_primary && a.id !== assignmentId);
+      for (const o of others) {
+        await this.api('PUT', `/warehouse/assignments/${o.id}`, { quantity: o.quantity, is_primary: false });
+      }
+      const target = (this._binPanelAssignments||[]).find(a => a.id === assignmentId);
+      await this.api('PUT', `/warehouse/assignments/${assignmentId}`, { quantity: target?.quantity||0, is_primary: true });
+      this._renderBinLocationsBody(this._binPanelProductId, this._binPanelBranchId);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async _removeBinLoc(assignmentId) {
+    if (!confirm('Remove this bin assignment?')) return;
+    try {
+      await this.api('DELETE', `/warehouse/assignments/${assignmentId}`);
+      this._renderBinLocationsBody(this._binPanelProductId, this._binPanelBranchId);
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   async deleteProduct(id) {
