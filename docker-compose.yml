@@ -7,10 +7,15 @@ services:
       PORT: 3001
       # Local SQLite, persisted via the ./data volume below — the simplest
       # option for a self-hosted internal server. To use Turso instead,
-      # delete this line and set TURSO_DATABASE_URL + TURSO_AUTH_TOKEN in .env.
+      # delete this line and set TURSO_DATABASE_URL below to your libsql:// URL.
       TURSO_DATABASE_URL: file:/app/data/pos.db
-    env_file:
-      - .env
+      # Only read if TURSO_DATABASE_URL above is switched to a real Turso URL;
+      # harmless no-op otherwise. Substituted directly (not via `env_file:`) so
+      # this works whether the var comes from a local .env (docker compose CLI
+      # auto-loads one from the project dir) or from a UI-managed deployment
+      # tool like Portainer, which injects stack env vars into the compose
+      # process rather than writing a literal .env file into the stack folder.
+      TURSO_AUTH_TOKEN: ${TURSO_AUTH_TOKEN:-}
     volumes:
       - ./data:/app/data
       - ./uploads:/app/uploads
