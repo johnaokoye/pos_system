@@ -34,6 +34,7 @@ router.get('/aging', async (req, res) => {
           THEN MAX(0, t.total - COALESCE(alloc.total_allocated, 0)) ELSE 0 END), 0) as over_90
       FROM customers c
       LEFT JOIN transactions t ON c.id = t.customer_id AND t.payment_method = 'credit' AND t.status = 'completed'
+        AND t.id NOT IN (SELECT checkout_transaction_id FROM rental_agreements WHERE status = 'returned' AND checkout_transaction_id IS NOT NULL)
       LEFT JOIN (SELECT transaction_id, SUM(amount) as total_allocated FROM payment_allocations GROUP BY transaction_id) alloc
         ON t.id = alloc.transaction_id
       WHERE c.credit_enabled = 1 AND c.active = 1
@@ -90,6 +91,11 @@ router.get('/invoices/:customer_id', async (req, res) => {
             FROM transactions t
             LEFT JOIN payment_allocations pa ON t.id = pa.transaction_id
             WHERE t.customer_id = ? AND t.payment_method = 'credit' AND t.status = 'completed'
+              -- A returned rental's checkout invoice is already reconciled by its
+              -- settlement transaction (routes/rentals.js return handler) — without
+              -- this it would double-count here since that reconciliation isn't
+              -- expressed as a payment_allocations row.
+              AND t.id NOT IN (SELECT checkout_transaction_id FROM rental_agreements WHERE status = 'returned' AND checkout_transaction_id IS NOT NULL)
             GROUP BY t.id
             HAVING t.total - COALESCE(SUM(pa.amount), 0) > 0.001
             ORDER BY t.created_at ASC`,
@@ -137,6 +143,7 @@ router.post('/payments', async (req, res) => {
               FROM transactions t
               LEFT JOIN payment_allocations pa ON t.id = pa.transaction_id
               WHERE t.customer_id = ? AND t.payment_method = 'credit' AND t.status = 'completed'
+                AND t.id NOT IN (SELECT checkout_transaction_id FROM rental_agreements WHERE status = 'returned' AND checkout_transaction_id IS NOT NULL)
               GROUP BY t.id
               HAVING t.total - COALESCE(SUM(pa.amount), 0) > 0.001
               ORDER BY t.created_at ASC`,

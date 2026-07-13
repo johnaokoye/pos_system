@@ -3280,6 +3280,7 @@ const App = {
         <div class="modal-body">
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
             <span class="badge-pill ${sc[a.display_status]||'badge-secondary'}" style="font-size:13px">${a.display_status.toUpperCase()}</span>
+            ${a.checkout_payment_method === 'credit' ? `<span class="badge-pill badge-info" style="font-size:13px">Billed to Account</span>` : ''}
             ${a.checkout_transaction_number?`<span style="font-size:13px">Checkout: ${a.checkout_transaction_number}</span>`:''}
             ${a.settlement_transaction_number?`<span style="font-size:13px">Settlement: ${a.settlement_transaction_number}</span>`:''}
           </div>
@@ -3337,6 +3338,7 @@ const App = {
       this.api('GET', `/products?is_rental=1&active=1${defaultBranch ? '&branch_id='+defaultBranch.id : ''}`),
     ]);
     this._rentalProducts = products;
+    this._rentalCustomers = customers;
     this._rentalLineIdx = 0;
     const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0,10);
     this.showModal(`
@@ -3350,7 +3352,10 @@ const App = {
             <div class="form-group"><label>Customer *</label>
               <select id="rc-customer">
                 <option value="">Select customer…</option>
-                ${customers.map(c=>`<option value="${c.id}">${c.first_name} ${c.last_name}</option>`).join('')}
+                ${customers.map(c=>{
+                  const tag = c.customer_type === 'credit' ? (c.account_blocked ? ' — Credit (Blocked)' : ' — Credit') : '';
+                  return `<option value="${c.id}">${c.first_name} ${c.last_name}${tag}</option>`;
+                }).join('')}
               </select>
             </div>
             <div class="form-group"><label>Branch / Location *</label>
@@ -3375,6 +3380,7 @@ const App = {
                 <option value="cash">Cash</option>
                 <option value="credit_card">Card</option>
                 <option value="check">Check</option>
+                <option value="credit">Charge Account (Credit)</option>
               </select>
             </div>
           </div>
@@ -3472,6 +3478,11 @@ const App = {
     if (!customer_id) { this.alert('Please select a customer', 'error'); return; }
     if (!branch_id) { this.alert('Please select a branch/location', 'error'); return; }
     if (!due_date) { this.alert('Please select a due date', 'error'); return; }
+    if (payment_method === 'credit') {
+      const cust = (this._rentalCustomers||[]).find(c => String(c.id) === String(customer_id));
+      if (!cust || cust.customer_type !== 'credit') { this.alert('Selected customer does not have a credit account. Edit the customer and set type to Credit.', 'error'); return; }
+      if (cust.account_blocked) { this.alert('This customer\'s account is blocked due to overdue payment. Please settle the outstanding balance before making new credit purchases.', 'error'); return; }
+    }
     const items = [];
     document.querySelectorAll('#rental-checkout-lines [id^="rental-line-"]').forEach(line => {
       const idx = line.id.replace('rental-line-','');
@@ -3502,6 +3513,7 @@ const App = {
         </div>
         <div class="modal-body">
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">All outstanding items must be included in this return.</p>
+          ${a.checkout_payment_method === 'credit' ? `<div style="padding:8px 12px;background:rgba(59,130,246,0.08);border-left:3px solid #3b82f6;border-radius:4px;font-size:12px;color:#3b82f6;margin-bottom:12px">This rental was charged to the customer's account. The settlement (duration adjustment, damage fees, and deposit) will be applied directly to their account balance — no cash/card is collected here.</div>` : ''}
           ${outstanding.map(i => {
             const remaining = i.quantity - i.quantity_returned;
             const tag = i.parent_item_id ? (i.is_mandatory ? ' <span class="badge-pill badge-success" style="font-size:10px">included, no charge</span>' : ' <span class="badge-pill badge-secondary" style="font-size:10px">accessory</span>') : '';

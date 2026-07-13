@@ -4,6 +4,7 @@ const { db } = require('../database');
 const { getOutstandingQty } = require('../lib/rentalAvailability');
 const { calculateRentalFee } = require('../lib/rentalPricing');
 const { requirePermission } = require('../lib/permissions');
+const { runCreditCheck } = require('./customers');
 
 // ─── Agreements list/detail ───────────────────────────────────────────────
 
@@ -36,7 +37,7 @@ router.get('/agreements/:id', requirePermission('rentals'), async (req, res) => 
     const { rows: [agreement] } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name,
       c.phone as customer_phone, c.email as customer_email,
       b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name,
-      co.transaction_number as checkout_transaction_number,
+      co.transaction_number as checkout_transaction_number, co.payment_method as checkout_payment_method,
       se.transaction_number as settlement_transaction_number,
       CASE WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' ELSE ra.status END as display_status
       FROM rental_agreements ra
@@ -98,6 +99,19 @@ router.post('/agreements', requirePermission('rentals_checkout'), async (req, re
     if (!due_date) return res.status(400).json({ error: 'Due date is required' });
     if (!items || !items.length) return res.status(400).json({ error: 'At least one rental item is required' });
 
+    // Same validation the regular POS applies to a 'credit' sale (routes/transactions.js) —
+    // the customer must actually have a credit account and not be blocked for overdue payment.
+    const method = payment_method || 'cash';
+    const isCredit = method === 'credit';
+    let creditCustomer = null;
+    if (isCredit) {
+      const { rows: [cust] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [customer_id] });
+      if (!cust) return res.status(400).json({ error: 'Customer not found' });
+      if (cust.customer_type !== 'credit') return res.status(400).json({ error: 'Customer does not have a credit account' });
+      if (cust.account_blocked) return res.status(400).json({ error: 'Customer account is blocked due to overdue payment. Please settle the outstanding balance first.' });
+      creditCustomer = cust;
+    }
+
     const checkoutDateTime = new Date();
     // Due back by the same time-of-day as checkout, on the chosen due date —
     // needed so hour-level proration has a real instant to measure against,
@@ -146,8 +160,18 @@ router.post('/agreements', requirePermission('rentals_checkout'), async (req, re
     taxAmount = parseFloat(taxAmount.toFixed(2));
     depositTotal = parseFloat(depositTotal.toFixed(2));
     const total = parseFloat((rentalSubtotal + taxAmount + depositTotal).toFixed(2));
-    const method = payment_method || 'cash';
-    const tendered = parseFloat(amount_tendered || total);
+
+    // Credit limit is enforced here (checkout time) — the one point in the app where
+    // a NEW credit charge is created, matching where routes/transactions.js validates
+    // customer_type/account_blocked (though that route doesn't check credit_limit at all;
+    // rentals does, since the deposit+fee here can be a much larger one-off charge).
+    if (isCredit && creditCustomer.credit_limit > 0 && parseFloat((creditCustomer.account_balance + total).toFixed(2)) > creditCustomer.credit_limit) {
+      const available = Math.max(0, parseFloat((creditCustomer.credit_limit - creditCustomer.account_balance).toFixed(2)));
+      return res.status(400).json({ error: `This rental (${total.toFixed(2)}) would exceed the customer's credit limit. Available credit: ${available.toFixed(2)}` });
+    }
+
+    const tendered = isCredit ? 0 : parseFloat(amount_tendered || total);
+    const changeAmt = isCredit ? 0 : Math.max(0, parseFloat((tendered - total).toFixed(2)));
 
     const { rows: [agCount] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM rental_agreements', args: [] });
     const agreement_number = `RA-${String(Number(agCount.c) + 1).padStart(6, '0')}`;
@@ -163,7 +187,7 @@ router.post('/agreements', requirePermission('rentals_checkout'), async (req, re
       // Rental checkout never touches products.stock_qty/branch_inventory — the
       // physical fleet count stays constant; availability is computed live from
       // rental_agreement_items instead (see lib/rentalAvailability.js).
-      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id, employee_id || null, branch_id || null, drawer_session_id || null, rentalSubtotal + depositTotal, taxAmount, total, method, tendered, Math.max(0, parseFloat((tendered - total).toFixed(2))), `Rental checkout ${agreement_number}`, 'pos'] });
+      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id, employee_id || null, branch_id || null, drawer_session_id || null, rentalSubtotal + depositTotal, taxAmount, total, method, tendered, changeAmt, `Rental checkout ${agreement_number}`, 'pos'] });
       const checkoutTxId = Number(txResult.lastInsertRowid);
 
       const insertedIds = [];
@@ -186,8 +210,17 @@ router.post('/agreements', requirePermission('rentals_checkout'), async (req, re
       const loyaltyPts = Math.floor(rentalSubtotal * 0.5);
       await tx.execute({ sql: 'UPDATE customers SET loyalty_points = loyalty_points + ?, total_spent = total_spent + ? WHERE id = ?', args: [loyaltyPts, rentalSubtotal, customer_id] });
 
+      // Bill the full checkout total (fee + tax + deposit) to the customer's account —
+      // same shape as a regular POS 'credit' sale (routes/transactions.js). This is what
+      // makes the charge show up in Accounts Receivable (payment_method='credit' + status
+      // defaults to 'completed', which is exactly what routes/accounts.js filters on).
+      if (isCredit) {
+        await tx.execute({ sql: 'UPDATE customers SET account_balance = account_balance + ? WHERE id = ?', args: [total, customer_id] });
+      }
+
       await tx.execute({ sql: 'UPDATE rental_agreements SET checkout_transaction_id = ? WHERE id = ?', args: [checkoutTxId, agreementId] });
       await tx.commit();
+      if (isCredit) { try { await runCreditCheck(customer_id); } catch(e) {} }
 
       const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [agreementId] });
       const { rows: agItems } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [agreementId] });
@@ -210,6 +243,7 @@ router.patch('/agreements/:id/cancel', requirePermission('rentals_returns'), asy
     const { rows: items } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
     if (items.some(i => i.quantity_returned > 0)) return res.status(400).json({ error: 'Cannot cancel an agreement that already has items returned — process a return instead' });
 
+    let reversedCreditCustomerId = null;
     const tx = await db.transaction('write');
     try {
       if (agreement.checkout_transaction_id) {
@@ -223,11 +257,19 @@ router.patch('/agreements/:id/cancel', requirePermission('rentals_returns'), asy
             const rentalFeePortion = (checkoutTx.subtotal || 0) - (agreement.deposit_total || 0);
             const loyaltyPts = Math.floor(rentalFeePortion * 0.5);
             await tx.execute({ sql: 'UPDATE customers SET loyalty_points = MAX(0, loyalty_points - ?), total_spent = MAX(0, total_spent - ?) WHERE id = ?', args: [loyaltyPts, rentalFeePortion, checkoutTx.customer_id] });
+            // The checkout billed the full total to the customer's account —
+            // voiding it must take that same amount back off, or the receivable
+            // for a cancelled rental would stay on the books forever.
+            if (checkoutTx.payment_method === 'credit') {
+              await tx.execute({ sql: 'UPDATE customers SET account_balance = MAX(0, account_balance - ?) WHERE id = ?', args: [checkoutTx.total, checkoutTx.customer_id] });
+              reversedCreditCustomerId = checkoutTx.customer_id;
+            }
           }
         }
       }
       await tx.execute({ sql: "UPDATE rental_agreements SET status = 'cancelled' WHERE id = ?", args: [req.params.id] });
       await tx.commit();
+      if (reversedCreditCustomerId) { try { await runCreditCheck(reversedCreditCustomerId); } catch(e) {} }
     } catch(e) {
       await tx.rollback();
       return res.status(400).json({ error: e.message });
@@ -256,6 +298,18 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
 
     const now = new Date();
     const checkoutDateTime = agreement.checkout_datetime || `${agreement.checkout_date}T00:00:00.000Z`;
+
+    // A rental checked out on credit must also settle on credit — the deposit was
+    // never collected in cash to begin with, it just increased account_balance, so
+    // the settlement (whichever way it nets out) has to adjust that same balance
+    // rather than being collected/refunded at the counter. This is why the return
+    // modal has no payment-method picker: it's derived from how checkout was billed,
+    // not chosen fresh each time.
+    let checkoutIsCredit = false;
+    if (agreement.checkout_transaction_id) {
+      const { rows: [coTx] } = await db.execute({ sql: 'SELECT payment_method FROM transactions WHERE id = ?', args: [agreement.checkout_transaction_id] });
+      checkoutIsCredit = !!coTx && coTx.payment_method === 'credit';
+    }
 
     const tx = await db.transaction('write');
     try {
@@ -330,7 +384,7 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
 
       const { rows: [txCount] } = await tx.execute({ sql: 'SELECT COUNT(*) as c FROM transactions', args: [] });
       const transaction_number = `TXN-${String(Number(txCount.c) + 1).padStart(6, '0')}`;
-      const method = settlementAmount >= 0 ? (payment_method || 'cash') : 'refund';
+      const method = checkoutIsCredit ? 'credit' : (settlementAmount >= 0 ? (payment_method || 'cash') : 'refund');
       const settleResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, agreement.customer_id, agreement.employee_id, agreement.branch_id, drawer_session_id || null, settlementSubtotal, taxAdjustmentTotal, settlementAmount, method, 0, 0, `Rental settlement ${agreement.agreement_number}`, 'pos'] });
       const settlementTxId = Number(settleResult.lastInsertRowid);
 
@@ -345,8 +399,17 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
         await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?)`, args: [settlementTxId, depositRefunded > 0 ? 'Deposit Refunded' : 'Deposit Applied', 'DEPOSIT', 1, -agreement.deposit_total, 0, -agreement.deposit_total] });
       }
 
+      // settlementAmount is already signed the right way for this: positive
+      // increases what's owed, negative nets the deposit back out — a plain
+      // `+=` handles both charge and refund-style settlements in one line, with
+      // no separate "collect" vs "refund" branch needed for a credit account.
+      if (checkoutIsCredit) {
+        await tx.execute({ sql: 'UPDATE customers SET account_balance = MAX(0, account_balance + ?) WHERE id = ?', args: [settlementAmount, agreement.customer_id] });
+      }
+
       await tx.execute({ sql: `UPDATE rental_agreements SET settlement_transaction_id = ?, deposit_refunded = ?, duration_adjustment_total = duration_adjustment_total + ?, tax_adjustment_total = tax_adjustment_total + ?, damage_fee_total = damage_fee_total + ?, status = ?, returned_at = ? WHERE id = ?`, args: [settlementTxId, depositRefunded, durationAdjustmentTotal, taxAdjustmentTotal, damageFeeTotal, newStatus, allReturned ? now.toISOString() : agreement.returned_at, req.params.id] });
       await tx.commit();
+      if (checkoutIsCredit) { try { await runCreditCheck(agreement.customer_id); } catch(e) {} }
     } catch(e) {
       await tx.rollback();
       return res.status(400).json({ error: e.message });
