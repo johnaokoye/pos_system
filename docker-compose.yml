@@ -21,14 +21,6 @@ services:
       - ./uploads:/app/uploads
     expose:
       - "3001"
-    # No `ports:` mapping — the app is only reachable through the cloudflared
-    # tunnel below, not directly from the host network.
-
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    restart: unless-stopped
-    command: tunnel run
-    environment:
-      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
-    depends_on:
-      - app
+    # No `ports:` mapping — internal-only on the Docker network. Point your
+    # own reverse proxy (nginx, Traefik, etc.) at this container's :3001,
+    # or add a `ports:` mapping here if you want it reachable directly.
