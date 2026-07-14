@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "npx nodemon server.js"
+    "dev": "npx nodemon server.js",
+    "pull-turso-snapshot": "node scripts/pull-turso-snapshot.js"
   },
   "dependencies": {
     "@libsql/client": "^0.14.0",

@@ -2,6 +2,7 @@ node_modules/
 pos.db
 pos.db-shm
 pos.db-wal
+pos-turso-snapshot.db*
 uploads/products/*
 uploads/po-attachments/*
 !uploads/products/.gitkeep
