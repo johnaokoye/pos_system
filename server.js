@@ -12,6 +12,11 @@ const { sessionAuth } = require('./lib/sessionAuth');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Needed so req.secure reflects X-Forwarded-Proto from a reverse proxy (Vercel,
+// or a self-hosted TLS-terminating proxy) — the session cookie's Secure flag
+// depends on this being accurate (see lib/sessionAuth.js's setSessionCookie).
+app.set('trust proxy', true);
+
 app.use(cors());
 app.use(bodyParser.json());
 app.use(express.static(path.join(__dirname, 'public')));

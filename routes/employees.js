@@ -160,7 +160,7 @@ router.post('/login', async (req, res) => {
         : [];
     }
     const token = await createSession(emp.id);
-    setSessionCookie(res, token);
+    setSessionCookie(req, res, token);
     res.json(emp);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
