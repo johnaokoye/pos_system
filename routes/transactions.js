@@ -96,12 +96,14 @@ router.get('/', requirePermission('transactions'), async (req, res) => {
 router.get('/:id', requireAuth, async (req, res) => {
   try {
     const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, c.phone as customer_phone, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone, q.id as source_quote_id, q.quote_number as source_quote_number, qe.first_name || ' ' || qe.last_name as quote_created_by, r.return_number as source_return_number, sh.carrier as shipment_carrier, sh.tracking_number as shipment_tracking_number, sh.status as shipment_status, sh.ship_date as shipment_ship_date, sh.estimated_delivery as shipment_estimated_delivery,
+      ve.first_name || ' ' || ve.last_name as voided_by_name,
       ra.id as rental_agreement_id, ra.agreement_number as rental_agreement_number, ra.status as rental_status,
       ra.checkout_datetime as rental_checkout_datetime, ra.due_date as rental_due_date, ra.returned_at as rental_returned_at,
       ra.deposit_total as rental_deposit_total, ra.deposit_refunded as rental_deposit_refunded,
       ra.duration_adjustment_total as rental_duration_adjustment_total, ra.damage_fee_total as rental_damage_fee_total,
       CASE WHEN ra.checkout_transaction_id = t.id THEN 'checkout' WHEN ra.settlement_transaction_id = t.id THEN 'settlement' END as rental_role
       FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN branches b ON t.branch_id = b.id LEFT JOIN quotations q ON q.converted_to_tx = t.id LEFT JOIN employees qe ON q.employee_id = qe.id LEFT JOIN returns r ON t.source_return_id = r.id LEFT JOIN shipments sh ON sh.transaction_id = t.id
+      LEFT JOIN employees ve ON t.voided_by = ve.id
       LEFT JOIN rental_agreements ra ON ra.checkout_transaction_id = t.id OR ra.settlement_transaction_id = t.id
       WHERE t.id = ?`, args: [req.params.id] });
     if (!tx) return res.status(404).json({ error: 'Transaction not found' });
@@ -230,6 +232,27 @@ router.get('/:id/returns', requireAuth, async (req, res) => {
       r.items = items;
     }
     res.json(returns);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Single return by its own id, fully joined — used to build/reprint/email the
+// return receipt (routes/email.js's buildReturnReceiptHtml needs these joins).
+router.get('/returns/:id', requireAuth, async (req, res) => {
+  try {
+    const { rows: [ret] } = await db.execute({ sql: `SELECT r.*, t.transaction_number as original_transaction_number,
+      c.first_name || ' ' || c.last_name as customer_name, c.email as customer_email,
+      e.first_name || ' ' || e.last_name as employee_name,
+      b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone
+      FROM returns r
+      LEFT JOIN transactions t ON r.original_transaction_id = t.id
+      LEFT JOIN customers c ON r.customer_id = c.id
+      LEFT JOIN employees e ON r.employee_id = e.id
+      LEFT JOIN branches b ON r.branch_id = b.id
+      WHERE r.id = ?`, args: [req.params.id] });
+    if (!ret) return res.status(404).json({ error: 'Return not found' });
+    const { rows: items } = await db.execute({ sql: 'SELECT * FROM return_items WHERE return_id = ?', args: [req.params.id] });
+    ret.items = items;
+    res.json(ret);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -365,7 +388,7 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
 // replaced by session auth).
 router.patch('/:id/void', requireAuth, async (req, res) => {
   try {
-    const { pin } = req.body;
+    const { pin, reason } = req.body;
     if (!pin) return res.status(400).json({ error: 'Override PIN required' });
 
     const { rows: employees } = await db.execute({ sql: 'SELECT e.id, e.first_name, e.last_name, e.pin, sg.permissions FROM employees e LEFT JOIN security_groups sg ON e.security_group_id = sg.id WHERE e.active = 1', args: [] });
@@ -394,7 +417,7 @@ router.patch('/:id/void', requireAuth, async (req, res) => {
 
     const voidTxn = await db.transaction('write');
     try {
-      await voidTxn.execute({ sql: "UPDATE transactions SET status='voided', voided_by=?, voided_at=CURRENT_TIMESTAMP WHERE id=?", args: [authorizer.id, req.params.id] });
+      await voidTxn.execute({ sql: "UPDATE transactions SET status='voided', voided_by=?, voided_at=CURRENT_TIMESTAMP, void_reason=? WHERE id=?", args: [authorizer.id, reason || null, req.params.id] });
       const { rows: items } = await voidTxn.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [req.params.id] });
       for (const item of items) {
         await voidTxn.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [item.quantity, item.product_id] });

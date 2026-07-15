@@ -282,6 +282,7 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
 
 router.patch('/agreements/:id/cancel', requirePermission('rentals_returns'), async (req, res) => {
   try {
+    const { reason, employee_id } = req.body;
     const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
     if (!agreement) return res.status(404).json({ error: 'Not found' });
     // 'pending' (held, not yet paid) agreements have no checkout_transaction_id
@@ -297,7 +298,7 @@ router.patch('/agreements/:id/cancel', requirePermission('rentals_returns'), asy
       if (agreement.checkout_transaction_id) {
         const { rows: [checkoutTx] } = await tx.execute({ sql: 'SELECT * FROM transactions WHERE id = ?', args: [agreement.checkout_transaction_id] });
         if (checkoutTx && checkoutTx.status !== 'voided') {
-          await tx.execute({ sql: "UPDATE transactions SET status='voided', voided_at=CURRENT_TIMESTAMP WHERE id=?", args: [agreement.checkout_transaction_id] });
+          await tx.execute({ sql: "UPDATE transactions SET status='voided', voided_by=?, voided_at=CURRENT_TIMESTAMP, void_reason=? WHERE id=?", args: [employee_id || null, reason || null, agreement.checkout_transaction_id] });
           if (checkoutTx.customer_id) {
             // Loyalty was only ever accrued on the rental-fee portion of the
             // checkout, not the deposit (see POST /agreements) — reverse that
@@ -315,14 +316,29 @@ router.patch('/agreements/:id/cancel', requirePermission('rentals_returns'), asy
           }
         }
       }
-      await tx.execute({ sql: "UPDATE rental_agreements SET status = 'cancelled' WHERE id = ?", args: [req.params.id] });
+      await tx.execute({ sql: "UPDATE rental_agreements SET status = 'cancelled', cancellation_reason = ?, cancelled_by = ?, cancelled_at = CURRENT_TIMESTAMP WHERE id = ?", args: [reason || null, employee_id || null, req.params.id] });
       await tx.commit();
       if (reversedCreditCustomerId) { try { await runCreditCheck(reversedCreditCustomerId); } catch(e) {} }
     } catch(e) {
       await tx.rollback();
       return res.status(400).json({ error: e.message });
     }
-    const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    // Fully joined shape (same as GET /agreements/:id) so the frontend can
+    // build a cancellation receipt straight from this response, no second call.
+    const { rows: [updated] } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name,
+      c.phone as customer_phone, c.email as customer_email,
+      b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name,
+      ce.first_name || ' ' || ce.last_name as cancelled_by_name,
+      co.transaction_number as checkout_transaction_number, co.payment_method as checkout_payment_method, co.total as checkout_total
+      FROM rental_agreements ra
+      LEFT JOIN customers c ON ra.customer_id = c.id
+      LEFT JOIN branches b ON ra.branch_id = b.id
+      LEFT JOIN employees e ON ra.employee_id = e.id
+      LEFT JOIN employees ce ON ra.cancelled_by = ce.id
+      LEFT JOIN transactions co ON ra.checkout_transaction_id = co.id
+      WHERE ra.id = ?`, args: [req.params.id] });
+    const { rows: updatedItems } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
+    updated.items = updatedItems;
     res.json(updated);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

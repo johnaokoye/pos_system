@@ -778,6 +778,10 @@ async function _init() {
     'ALTER TABLE quotation_items ADD COLUMN purchase_request_id INTEGER REFERENCES purchase_requests(id)',
     'ALTER TABLE purchase_request_items ADD COLUMN quotation_item_id INTEGER REFERENCES quotation_items(id)',
     'ALTER TABLE purchase_order_items ADD COLUMN quotation_item_id INTEGER REFERENCES quotation_items(id)',
+    'ALTER TABLE transactions ADD COLUMN void_reason TEXT',
+    'ALTER TABLE rental_agreements ADD COLUMN cancellation_reason TEXT',
+    'ALTER TABLE rental_agreements ADD COLUMN cancelled_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE rental_agreements ADD COLUMN cancelled_at DATETIME',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

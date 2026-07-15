@@ -3344,14 +3344,84 @@ const App = {
       </div>`);
   },
 
-  async cancelRentalAgreement(id) {
-    if (!confirm('Cancel this rental agreement? Any checkout charge already collected will be voided.')) return;
+  cancelRentalAgreement(id) {
+    this.showModal(`
+      <div class="modal" style="max-width:400px">
+        <div class="modal-header">
+          <span class="modal-title">Cancel Rental Agreement</span>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px">Any checkout charge already collected will be voided.</p>
+          <div class="form-group"><label>Reason (optional)</label>
+            <input type="text" id="cancel-rental-reason" placeholder="e.g. Customer no longer needs the item...">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Back</button>
+          <button class="btn btn-danger" onclick="App._confirmCancelRentalAgreement(${id})">Cancel Agreement</button>
+        </div>
+      </div>`);
+  },
+
+  async _confirmCancelRentalAgreement(id) {
+    const reason = document.getElementById('cancel-rental-reason')?.value.trim() || null;
     try {
-      await this.api('PATCH', `/rentals/agreements/${id}/cancel`);
+      const agreement = await this.api('PATCH', `/rentals/agreements/${id}/cancel`, { reason, employee_id: this.currentUser?.id || null });
       this.closeModal();
       this.alert('Rental agreement cancelled');
       this.renderRentals();
+      this.showCancellationReceipt(agreement);
     } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  showCancellationReceipt(agreement) {
+    const items = (agreement.items || []).filter(i => !i.parent_item_id);
+    const storeName = this.settings.store_name || 'My Store';
+    const wasBilled = agreement.checkout_transaction_number != null;
+    this.showModal(`
+      <div class="modal" style="max-width:400px">
+        <div class="modal-header">
+          <span class="modal-title">Rental Cancellation Receipt</span>
+          <button class="modal-close" onclick="App.closeModal()">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="receipt">
+            <div class="receipt-title" style="color:var(--danger)">RENTAL CANCELLATION</div>
+            <div style="text-align:center;font-size:12px;color:#444;font-weight:600">${storeName}</div>
+            ${agreement.branch_name ? `<div style="text-align:center;font-size:11px;color:#666">${agreement.branch_name}</div>` : ''}
+            <hr>
+            <div class="receipt-row"><span>Agreement #:</span><span>${agreement.agreement_number}</span></div>
+            <div class="receipt-row"><span>Cancelled:</span><span>${agreement.cancelled_at ? this.fmtDateTime(agreement.cancelled_at) : '—'}</span></div>
+            ${agreement.customer_name ? `<div class="receipt-row"><span>Customer:</span><span>${agreement.customer_name}</span></div>` : ''}
+            ${agreement.cancelled_by_name ? `<div class="receipt-row"><span>Cancelled By:</span><span>${agreement.cancelled_by_name}</span></div>` : ''}
+            ${agreement.cancellation_reason ? `<div class="receipt-row"><span>Reason:</span><span>${agreement.cancellation_reason}</span></div>` : ''}
+            <hr>
+            ${items.map(i => `<div class="receipt-row"><span>${i.product_name}</span><span>x${i.quantity}</span></div>`).join('')}
+            <hr>
+            ${wasBilled ? `
+            <div class="receipt-row"><span>Original Payment</span><span>${(agreement.checkout_payment_method||'').replace('_',' ').toUpperCase()}</span></div>
+            <div class="receipt-row receipt-total" style="color:var(--danger)"><span>AMOUNT VOIDED</span><span>${this.fmt(agreement.checkout_total)}</span></div>
+            ` : `<div style="text-align:center;font-size:11px;color:#666;margin:6px 0">This rental was on hold — no payment had been collected, so nothing was charged or refunded.</div>`}
+            <hr>
+          </div>
+        </div>
+        <div class="modal-footer no-print">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+          <button class="btn btn-secondary" onclick="App.emailCancellationReceipt(${agreement.id},'${(agreement.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email</button>
+          <button class="btn btn-primary" onclick="window.print()">🖨️ Print</button>
+        </div>
+      </div>`);
+  },
+
+  emailCancellationReceipt(agreementId, customerEmail) {
+    this.showEmailModal('Email Cancellation Receipt', customerEmail, async (to) => {
+      this.closeModal();
+      try {
+        await this.api('POST', `/email/send-cancellation-receipt/${agreementId}`, { to });
+        this.alert(`Cancellation receipt sent to ${to}`);
+      } catch(e) { this.alert(e.message, 'error'); }
+    });
   },
 
   async showRentalCheckoutModal() {
@@ -5100,6 +5170,9 @@ const App = {
               style="letter-spacing:4px;font-size:18px;text-align:center"
               onkeydown="if(event.key==='Enter')App.submitVoid(${id})">
           </div>
+          <div class="form-group"><label>Reason (optional)</label>
+            <input type="text" id="void-reason-input" placeholder="e.g. Customer changed mind, entry error...">
+          </div>
           <div id="void-pin-err" style="color:var(--danger);font-size:13px;min-height:16px;text-align:center"></div>
         </div>
         <div class="modal-footer">
@@ -5113,19 +5186,70 @@ const App = {
 
   async submitVoid(id) {
     const pin = document.getElementById('void-pin-input')?.value;
+    const reason = document.getElementById('void-reason-input')?.value.trim() || null;
     const errEl = document.getElementById('void-pin-err');
     if (!pin) { if (errEl) errEl.textContent = 'PIN is required.'; return; }
     try {
-      const result = await this.api('PATCH', `/transactions/${id}/void`, { pin });
+      const result = await this.api('PATCH', `/transactions/${id}/void`, { pin, reason });
       document.getElementById('void-override-overlay')?.remove();
       this.closeModal();
       this.alert(`Transaction voided — authorised by ${result.voided_by}`);
       this.loadTransactions();
+      const tx = await this.api('GET', `/transactions/${id}`);
+      this.showVoidReceipt(tx);
     } catch(e) {
       if (errEl) errEl.textContent = e.message;
       document.getElementById('void-pin-input').value = '';
       document.getElementById('void-pin-input').focus();
     }
+  },
+
+  showVoidReceipt(tx) {
+    const items = (tx.items || []).filter(i => i.product_id);
+    const storeName = this.settings.store_name || 'My Store';
+    const footer = 'This document confirms the transaction was voided and no charge stands.';
+    this.showModal(`
+      <div class="modal" style="max-width:400px">
+        <div class="modal-header">
+          <span class="modal-title">Void Receipt</span>
+          <button class="modal-close" onclick="App.closeModal()">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="receipt">
+            <div class="receipt-title" style="color:var(--danger)">VOID RECEIPT</div>
+            <div style="text-align:center;font-size:12px;color:#444;font-weight:600">${storeName}</div>
+            ${tx.branch_name ? `<div style="text-align:center;font-size:11px;color:#666">${tx.branch_name}</div>` : ''}
+            <hr>
+            <div class="receipt-row"><span>Transaction #:</span><span>${tx.transaction_number}</span></div>
+            <div class="receipt-row"><span>Voided:</span><span>${this.fmtDateTime(tx.voided_at)}</span></div>
+            ${tx.customer_name ? `<div class="receipt-row"><span>Customer:</span><span>${tx.customer_name}</span></div>` : ''}
+            ${tx.voided_by_name ? `<div class="receipt-row"><span>Authorized By:</span><span>${tx.voided_by_name}</span></div>` : ''}
+            ${tx.void_reason ? `<div class="receipt-row"><span>Reason:</span><span>${tx.void_reason}</span></div>` : ''}
+            <hr>
+            ${items.map(i => `<div class="receipt-row"><span>${i.product_name}</span><span>${this.fmt(i.total)}</span></div>${i.quantity > 1 ? `<div style="color:#666;font-size:11px;padding-left:4px">${i.quantity} x ${this.fmt(i.unit_price)}</div>` : ''}`).join('')}
+            <hr>
+            <div class="receipt-row"><span>Original Payment</span><span>${(tx.payment_method||'').replace('_',' ').toUpperCase()}</span></div>
+            <div class="receipt-row receipt-total" style="color:var(--danger)"><span>AMOUNT VOIDED</span><span>${this.fmt(tx.total)}</span></div>
+            <hr>
+            <div style="text-align:center;margin-top:4px;font-size:11px">${footer}</div>
+          </div>
+        </div>
+        <div class="modal-footer no-print">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+          <button class="btn btn-secondary" onclick="App.emailVoidReceipt(${tx.id},'${(tx.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email</button>
+          <button class="btn btn-primary" onclick="window.print()">🖨️ Print</button>
+        </div>
+      </div>`);
+  },
+
+  emailVoidReceipt(txId, customerEmail) {
+    this.showEmailModal('Email Void Receipt', customerEmail, async (to) => {
+      this.closeModal();
+      try {
+        await this.api('POST', `/email/send-void-receipt/${txId}`, { to });
+        this.alert(`Void receipt sent to ${to}`);
+      } catch(e) { this.alert(e.message, 'error'); }
+    });
   },
 
   async updateFulfillment(txId) {
@@ -5299,11 +5423,63 @@ const App = {
         const resLabel = resolution === 'credit_note' ? 'Credit note issued' : 'Refund processed';
         this.alert(`${resLabel} — ${ret.return_number} · ${this.fmt(ret.total)}`, 'success');
         this.loadTransactions();
+        const fullRet = await this.api('GET', `/transactions/returns/${ret.id}`);
+        this.showReturnReceipt(fullRet);
       }
     } catch(e) {
       if (btn) { btn.disabled = false; btn.textContent = 'Process Return'; }
       this.alert(e.message, 'error');
     }
+  },
+
+  showReturnReceipt(ret) {
+    const items = ret.items || [];
+    const storeName = this.settings.store_name || 'My Store';
+    const resolutionLabel = { refund: 'Refund', credit_note: 'Credit Note', replacement: 'Replacement / Exchange' }[ret.resolution] || ret.resolution;
+    this.showModal(`
+      <div class="modal" style="max-width:400px">
+        <div class="modal-header">
+          <span class="modal-title">Return Receipt</span>
+          <button class="modal-close" onclick="App.closeModal()">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="receipt">
+            <div class="receipt-title" style="color:var(--danger)">RETURN RECEIPT</div>
+            <div style="text-align:center;font-size:12px;color:#444;font-weight:600">${storeName}</div>
+            ${ret.branch_name ? `<div style="text-align:center;font-size:11px;color:#666">${ret.branch_name}</div>` : ''}
+            <hr>
+            <div class="receipt-row"><span>Return #:</span><span>${ret.return_number}</span></div>
+            <div class="receipt-row"><span>Date:</span><span>${this.fmtDateTime(ret.created_at)}</span></div>
+            ${ret.original_transaction_number ? `<div class="receipt-row"><span>Original Tx:</span><span>${ret.original_transaction_number}</span></div>` : ''}
+            ${ret.customer_name ? `<div class="receipt-row"><span>Customer:</span><span>${ret.customer_name}</span></div>` : ''}
+            <div class="receipt-row"><span>Resolution:</span><span>${resolutionLabel}</span></div>
+            ${ret.employee_name ? `<div class="receipt-row"><span>Processed By:</span><span>${ret.employee_name}</span></div>` : ''}
+            ${ret.notes ? `<div class="receipt-row"><span>Reason:</span><span>${ret.notes}</span></div>` : ''}
+            <hr>
+            ${items.map(i => `<div class="receipt-row"><span>${i.product_name}</span><span>${this.fmt(i.total)}</span></div>${i.quantity > 1 ? `<div style="color:#666;font-size:11px;padding-left:4px">${i.quantity} x ${this.fmt(i.unit_price)}</div>` : ''}`).join('')}
+            <hr>
+            <div class="receipt-row"><span>Subtotal</span><span>${this.fmt(ret.subtotal)}</span></div>
+            <div class="receipt-row"><span>Tax</span><span>${this.fmt(ret.tax_amount)}</span></div>
+            <div class="receipt-row receipt-total" style="color:var(--danger)"><span>${resolutionLabel.toUpperCase()} TOTAL</span><span>${this.fmt(ret.total)}</span></div>
+            <hr>
+          </div>
+        </div>
+        <div class="modal-footer no-print">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+          <button class="btn btn-secondary" onclick="App.emailReturnReceipt(${ret.id},'${(ret.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email</button>
+          <button class="btn btn-primary" onclick="window.print()">🖨️ Print</button>
+        </div>
+      </div>`);
+  },
+
+  emailReturnReceipt(retId, customerEmail) {
+    this.showEmailModal('Email Return Receipt', customerEmail, async (to) => {
+      this.closeModal();
+      try {
+        await this.api('POST', `/email/send-return-receipt/${retId}`, { to });
+        this.alert(`Return receipt sent to ${to}`);
+      } catch(e) { this.alert(e.message, 'error'); }
+    });
   },
 
   voidCartLine(idx) {
