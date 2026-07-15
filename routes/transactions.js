@@ -285,6 +285,15 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
     if (tx.status !== 'completed') return res.status(400).json({ error: 'Only completed transactions can be returned' });
     if (resolution === 'credit_note' && !tx.customer_id) return res.status(400).json({ error: 'Credit note requires a customer on the original transaction' });
 
+    // Same reasoning as the void guard below: a rental's checkout/settlement
+    // transaction never decremented stock, so "returning" it here would
+    // incorrectly inflate stock — use the Rentals screen's Process Return
+    // instead, which correctly handles duration/damage/deposit accounting.
+    const { rows: [linkedAgreement] } = await db.execute({ sql: 'SELECT agreement_number FROM rental_agreements WHERE checkout_transaction_id = ? OR settlement_transaction_id = ?', args: [req.params.id, req.params.id] });
+    if (linkedAgreement) {
+      return res.status(400).json({ error: `This transaction belongs to rental agreement ${linkedAgreement.agreement_number} — process the return from the Rentals screen instead.` });
+    }
+
     const { rows: txItems } = await db.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [req.params.id] });
 
     const { rows: alreadyReturned } = await db.execute({ sql: `SELECT ri.transaction_item_id, SUM(ri.quantity) as returned_qty FROM return_items ri JOIN returns r ON ri.return_id = r.id WHERE r.original_transaction_id = ? AND r.status != 'cancelled' GROUP BY ri.transaction_item_id`, args: [req.params.id] });
@@ -369,6 +378,19 @@ router.patch('/:id/void', requireAuth, async (req, res) => {
     const { rows: [tx] } = await db.execute({ sql: 'SELECT * FROM transactions WHERE id = ?', args: [req.params.id] });
     if (!tx) return res.status(404).json({ error: 'Not found' });
     if (tx.status === 'voided') return res.status(400).json({ error: 'Already voided' });
+
+    // Rental checkout/settlement transactions don't fit this endpoint's
+    // assumptions: their transaction_items include synthetic lines with no
+    // product_id (deposit, duration adjustment, damage fee — would crash the
+    // branch_inventory restore below), and rental checkout never decremented
+    // stock to begin with (see routes/rentals.js), so "restoring" it here
+    // would inflate stock that was never actually removed. Cancelling a
+    // rental agreement already correctly voids its checkout transaction and
+    // reverses loyalty/credit without touching stock — use that instead.
+    const { rows: [linkedAgreement] } = await db.execute({ sql: 'SELECT agreement_number FROM rental_agreements WHERE checkout_transaction_id = ? OR settlement_transaction_id = ?', args: [req.params.id, req.params.id] });
+    if (linkedAgreement) {
+      return res.status(400).json({ error: `This transaction belongs to rental agreement ${linkedAgreement.agreement_number} — cancel it from the Rentals screen instead (View agreement → Cancel Agreement), which correctly reverses the rental's own records.` });
+    }
 
     const voidTxn = await db.transaction('write');
     try {

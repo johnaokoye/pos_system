@@ -4879,7 +4879,7 @@ const App = {
         <div class="modal-footer" style="gap:6px;flex-wrap:wrap">
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
           <button class="btn btn-secondary" onclick="App.emailReceipt(${tx.id},'${(tx.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email</button>
-          ${tx.status==='completed'&&this.can('transactions_returns')?`<button class="btn btn-sm" style="background:#f59e0b;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer" onclick="App.closeModal();App.processReturn(${tx.id})">↩ Return</button>`:''}
+          ${tx.status==='completed'&&!tx.rental_agreement_number&&this.can('transactions_returns')?`<button class="btn btn-sm" style="background:#f59e0b;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer" onclick="App.closeModal();App.processReturn(${tx.id})">↩ Return</button>`:''}
           <button class="btn btn-sm" style="background:#0ea5e9;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer" onclick="App.printLabel(${tx.id},'pickup')">🏪 Pickup Label</button>
           <button class="btn btn-sm" style="background:#6366f1;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer" onclick="App.printLabel(${tx.id},'shipping')">📦 Shipping Label</button>
         </div>
@@ -4989,7 +4989,7 @@ const App = {
         <td><span class="badge-pill ${tx.status==='completed'?'badge-success':'badge-danger'}">${tx.status}</span></td>
         <td style="white-space:nowrap">
           <button class="btn btn-secondary btn-sm" onclick="App.viewTransaction(${tx.id})">View</button>
-          ${tx.status==='completed'?`${this.can('transactions_returns')?`<button class="btn btn-warning btn-sm" onclick="App.processReturn(${tx.id})" style="background:#f59e0b;color:#fff;border:none">Return</button>`:''}${`<button class="btn btn-danger btn-sm" onclick="App.voidTransaction(${tx.id})">Void</button>`}`:''}
+          ${tx.status==='completed'&&!tx.rental_agreement_number?`${this.can('transactions_returns')?`<button class="btn btn-warning btn-sm" onclick="App.processReturn(${tx.id})" style="background:#f59e0b;color:#fff;border:none">Return</button>`:''}${`<button class="btn btn-danger btn-sm" onclick="App.voidTransaction(${tx.id})">Void</button>`}`:''}
         </td>
       </tr>`).join('')}</tbody>
     </table>`;
@@ -5072,7 +5072,7 @@ const App = {
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
-          ${tx.status==='completed'&&this.can('transactions_returns')?`<button class="btn btn-sm" style="background:#f59e0b;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer" onclick="App.closeModal();App.processReturn(${tx.id})">↩ Return</button>`:''}
+          ${tx.status==='completed'&&!tx.rental_agreement_number&&this.can('transactions_returns')?`<button class="btn btn-sm" style="background:#f59e0b;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer" onclick="App.closeModal();App.processReturn(${tx.id})">↩ Return</button>`:''}
           <button class="btn btn-secondary" onclick="App.emailReceipt(${tx.id},'${(tx.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email Receipt</button>
           <button class="btn btn-primary" onclick="App.closeModal();App.showReceipt(App._viewTx,App._viewTx.change_amount||0)">🖨️ Print Receipt</button>
         </div>
