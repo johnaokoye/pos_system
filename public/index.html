@@ -3349,14 +3349,11 @@ const App = {
         </div>
         <div class="modal-body">
           <div class="input-row">
-            <div class="form-group"><label>Customer *</label>
-              <select id="rc-customer">
-                <option value="">Select customer…</option>
-                ${customers.map(c=>{
-                  const tag = c.customer_type === 'credit' ? (c.account_blocked ? ' — Credit (Blocked)' : ' — Credit') : '';
-                  return `<option value="${c.id}">${c.first_name} ${c.last_name}${tag}</option>`;
-                }).join('')}
-              </select>
+            <div class="form-group" style="position:relative"><label>Customer *</label>
+              <input type="text" id="rc-customer-search" placeholder="Search customer…" autocomplete="off"
+                oninput="App._filterRentalCustomers(this.value)" onfocus="App._filterRentalCustomers(this.value)">
+              <input type="hidden" id="rc-customer" value="">
+              <div id="rc-customer-dd" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
             </div>
             <div class="form-group"><label>Branch / Location *</label>
               <select id="rc-branch" onchange="App._refreshRentalCheckoutBranch()">
@@ -3391,6 +3388,58 @@ const App = {
         </div>
       </div>`);
     this.addRentalCheckoutLine();
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('#rc-customer-search') && !e.target.closest('#rc-customer-dd')) {
+        const dd = document.getElementById('rc-customer-dd');
+        if (dd) dd.style.display = 'none';
+      }
+    });
+  },
+
+  // Mirrors the main POS customer picker (App.selectCustomer/setCartCustomer)
+  // — same Credit/Blocked/Tax Exempt badges, and a blocked account can be seen
+  // but not selected (click shows the same alert instead of picking it).
+  _filterRentalCustomers(q) {
+    const dd = document.getElementById('rc-customer-dd');
+    if (!dd) return;
+    const query = (q || '').toLowerCase();
+    const matches = (this._rentalCustomers || []).filter(c =>
+      !query || `${c.first_name} ${c.last_name} ${c.customer_number || ''}`.toLowerCase().includes(query));
+    if (!matches.length) {
+      dd.innerHTML = '<div style="padding:10px;color:var(--text-muted);font-size:13px">No customers found</div>';
+      dd.style.display = '';
+      return;
+    }
+    dd.innerHTML = matches.map(c => {
+      const blocked = c.customer_type === 'credit' && c.account_blocked;
+      const typeTag = c.customer_type === 'credit'
+        ? `<span style="font-size:10px;padding:1px 5px;border-radius:4px;background:#e3f2fd;color:#1565c0;margin-left:4px">Credit</span>`
+        : '';
+      const blockedTag = blocked
+        ? `<span style="font-size:10px;padding:1px 5px;border-radius:4px;background:#ffebee;color:#c62828;margin-left:4px">BLOCKED</span>`
+        : '';
+      const taxExemptTag = c.tax_exempt
+        ? `<span style="font-size:10px;padding:1px 5px;border-radius:4px;background:#e8f5e9;color:#2e7d32;margin-left:4px">Tax Exempt</span>`
+        : '';
+      const clickHandler = blocked
+        ? `App.alert('Account blocked: overdue balance must be settled before making purchases.','error')`
+        : `App._selectRentalCustomer(${c.id})`;
+      return `<div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text);${blocked?'opacity:0.6':''}" onclick="${clickHandler}">
+        <div><strong>${c.first_name} ${c.last_name}</strong><span style="color:var(--text-muted);font-size:12px;margin-left:4px">${c.customer_number||''}</span>${typeTag}${blockedTag}${taxExemptTag}</div>
+      </div>`;
+    }).join('');
+    dd.style.display = '';
+  },
+
+  _selectRentalCustomer(id) {
+    const c = (this._rentalCustomers || []).find(x => x.id === id);
+    if (!c) return;
+    const idEl = document.getElementById('rc-customer');
+    const searchEl = document.getElementById('rc-customer-search');
+    const dd = document.getElementById('rc-customer-dd');
+    if (idEl) idEl.value = id;
+    if (searchEl) searchEl.value = `${c.first_name} ${c.last_name}`;
+    if (dd) dd.style.display = 'none';
   },
 
   addRentalCheckoutLine() {
