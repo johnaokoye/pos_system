@@ -3,7 +3,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { getOutstandingQty } = require('../lib/rentalAvailability');
 const { calculateRentalFee } = require('../lib/rentalPricing');
-const { requirePermission } = require('../lib/permissions');
+const { requirePermission, requireAnyPermission } = require('../lib/permissions');
 const { runCreditCheck } = require('./customers');
 
 // ─── Agreements list/detail ───────────────────────────────────────────────
@@ -25,7 +25,7 @@ router.get('/agreements', requirePermission('rentals'), async (req, res) => {
     if (branch_id) { sql += ' AND ra.branch_id = ?'; params.push(branch_id); }
     if (view === 'overdue') { sql += " AND ra.status = 'active' AND ra.due_date < date('now')"; }
     else if (view === 'active') { sql += " AND ra.status = 'active'"; }
-    else if (view === 'returned' || view === 'cancelled') { sql += ' AND ra.status = ?'; params.push(view); }
+    else if (view === 'returned' || view === 'cancelled' || view === 'pending') { sql += ' AND ra.status = ?'; params.push(view); }
     sql += ' ORDER BY ra.created_at DESC LIMIT 200';
     const { rows } = await db.execute({ sql, args: params });
     res.json(rows);
@@ -89,34 +89,21 @@ function feeFor(product, qty, startDateTime, endDateTime) {
   return parseFloat((fee * qty).toFixed(2));
 }
 
-// ─── Checkout ───────────────────────────────────────────────────────────────
+// ─── Hold (configure a rental, no payment yet) ─────────────────────────────
 
+// Rental checkout is a two-step flow: this endpoint only sets aside items for
+// a customer (status='pending') — no transaction, no charge, no loyalty/credit
+// effects yet. A cashier later recalls it (it shows up alongside regular POS
+// held orders — see GET /transactions?status=hold on the frontend, merged
+// with GET /agreements?view=pending) and finalizes payment via
+// PATCH /agreements/:id/checkout below, which is where money actually moves.
 router.post('/agreements', requirePermission('rentals_checkout'), async (req, res) => {
   try {
-    const { customer_id, employee_id, branch_id, drawer_session_id, due_date, items, payment_method, amount_tendered, notes } = req.body;
+    const { customer_id, employee_id, branch_id, due_date, items, notes } = req.body;
     if (!customer_id) return res.status(400).json({ error: 'A customer is required for rental checkout' });
     if (!branch_id) return res.status(400).json({ error: 'A branch/location is required for rental checkout' });
     if (!due_date) return res.status(400).json({ error: 'Due date is required' });
     if (!items || !items.length) return res.status(400).json({ error: 'At least one rental item is required' });
-
-    // Same validation the regular POS applies to a 'credit' sale (routes/transactions.js) —
-    // the customer must actually have a credit account and not be blocked for overdue payment.
-    const method = payment_method || 'cash';
-    const isCredit = method === 'credit';
-    let creditCustomer = null;
-    if (isCredit) {
-      const { rows: [cust] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [customer_id] });
-      if (!cust) return res.status(400).json({ error: 'Customer not found' });
-      if (cust.customer_type !== 'credit') return res.status(400).json({ error: 'Customer does not have a credit account' });
-      if (cust.account_blocked) return res.status(400).json({ error: 'Customer account is blocked due to overdue payment. Please settle the outstanding balance first.' });
-      creditCustomer = cust;
-    }
-
-    const checkoutDateTime = new Date();
-    // Due back by the same time-of-day as checkout, on the chosen due date —
-    // needed so hour-level proration has a real instant to measure against,
-    // not just a bare calendar date.
-    const dueDateTime = new Date(`${due_date}T${checkoutDateTime.toISOString().slice(11, 19)}.000Z`);
 
     const lines = []; // flat list of { product, quantity, isMandatory, parentIndex (or null) }
     for (const item of items) {
@@ -147,24 +134,101 @@ router.post('/agreements', requirePermission('rentals_checkout'), async (req, re
       }
     }
 
+    const { rows: [agCount] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM rental_agreements', args: [] });
+    const agreement_number = `RA-${String(Number(agCount.c) + 1).padStart(6, '0')}`;
+
+    const tx = await db.transaction('write');
+    try {
+      // checkout_date/checkout_datetime are left at their column defaults
+      // (today/now) here — meaningless until finalized, and overwritten with
+      // the real values at that point (see PATCH .../checkout below).
+      const agResult = await tx.execute({ sql: `INSERT INTO rental_agreements (agreement_number,customer_id,employee_id,branch_id,status,due_date,deposit_total,notes) VALUES (?,?,?,?,?,?,?,?)`, args: [agreement_number, customer_id, employee_id || null, branch_id || null, 'pending', due_date, 0, notes || null] });
+      const agreementId = Number(agResult.lastInsertRowid);
+
+      // Rates/classification/tax are snapshotted now (at item-selection time);
+      // rental_fee/deposit_amount are computed at finalize time instead, since
+      // they depend on the actual checkout instant, which isn't known yet.
+      for (const line of lines) {
+        const p = line.product;
+        await tx.execute({ sql: `INSERT INTO rental_agreement_items
+          (agreement_id,parent_item_id,product_id,product_name,sku,quantity,rate_type,rate_amount,rental_classification,daily_rate,weekly_rate,monthly_rate,hourly_rate,tax_rate,is_mandatory,rental_fee,deposit_amount,replacement_value,condition_out)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          args: [agreementId, null, p.id, p.name, p.sku, line.quantity, 'daily', p.rental_rate || 0, p.rental_classification || 'tool', p.rental_rate || 0, p.rental_weekly_rate || 0, p.rental_monthly_rate || 0, p.rental_hourly_rate || 0, p.tax_rate || 0, line.isMandatory ? 1 : 0, 0, 0, p.replacement_value || 0, line.condition_out] });
+      }
+      // parent_item_id needs the real row ids, which only exist after the
+      // insert above — set them in a second pass rather than threading
+      // lastInsertRowid through the accessory-grouping logic.
+      const { rows: insertedItems } = await tx.execute({ sql: 'SELECT id FROM rental_agreement_items WHERE agreement_id = ? ORDER BY id', args: [agreementId] });
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].parentIndex != null) {
+          await tx.execute({ sql: 'UPDATE rental_agreement_items SET parent_item_id = ? WHERE id = ?', args: [insertedItems[lines[i].parentIndex].id, insertedItems[i].id] });
+        }
+      }
+
+      await tx.commit();
+      const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [agreementId] });
+      const { rows: agItems } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [agreementId] });
+      agreement.items = agItems;
+      res.status(201).json(agreement);
+    } catch(e) {
+      await tx.rollback();
+      res.status(400).json({ error: e.message });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Finalize checkout (collect payment on a held rental) ─────────────────
+
+// Reachable by whoever is at the register, not just whoever configured the
+// hold — a cashier with only `pos` (no `rentals_checkout`) can still finalize
+// one, matching how it's surfaced in the POS's Recall list alongside regular
+// held orders.
+router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout', 'pos'), async (req, res) => {
+  try {
+    const { payment_method, amount_tendered, drawer_session_id, employee_id } = req.body;
+    const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    if (!agreement) return res.status(404).json({ error: 'Not found' });
+    if (agreement.status !== 'pending') return res.status(400).json({ error: `This agreement is ${agreement.status}, not awaiting checkout` });
+
+    const { rows: existingItems } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
+    if (!existingItems.length) return res.status(400).json({ error: 'This agreement has no items' });
+
+    const method = payment_method || 'cash';
+    const isCredit = method === 'credit';
+    let creditCustomer = null;
+    if (isCredit) {
+      const { rows: [cust] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [agreement.customer_id] });
+      if (!cust) return res.status(400).json({ error: 'Customer not found' });
+      if (cust.customer_type !== 'credit') return res.status(400).json({ error: 'Customer does not have a credit account' });
+      if (cust.account_blocked) return res.status(400).json({ error: 'Customer account is blocked due to overdue payment. Please settle the outstanding balance first.' });
+      creditCustomer = cust;
+    }
+
+    // The rental clock starts NOW — when the customer actually takes the item
+    // and payment is collected — not when the hold was originally configured.
+    const checkoutDateTime = new Date();
+    const dueDateTime = new Date(`${agreement.due_date}T${checkoutDateTime.toISOString().slice(11, 19)}.000Z`);
+
     let rentalSubtotal = 0, taxAmount = 0, depositTotal = 0;
-    for (const line of lines) {
-      line.rentalFee = line.isMandatory ? 0 : feeFor(line.product, line.quantity, checkoutDateTime, dueDateTime);
-      line.depositAmount = line.rentalFee; // deposit == fee (double-charge model)
-      line.lineTax = parseFloat((line.rentalFee * (line.product.tax_rate || 0) / 100).toFixed(2));
-      rentalSubtotal += line.rentalFee;
-      taxAmount += line.lineTax;
-      depositTotal += line.depositAmount;
+    for (const item of existingItems) {
+      item.rentalFee = item.is_mandatory ? 0 : feeFor({
+        rental_classification: item.rental_classification,
+        rental_rate: item.daily_rate,
+        rental_weekly_rate: item.weekly_rate,
+        rental_monthly_rate: item.monthly_rate,
+        rental_hourly_rate: item.hourly_rate,
+      }, item.quantity, checkoutDateTime, dueDateTime);
+      item.depositAmount = item.rentalFee; // deposit == fee (double-charge model)
+      item.lineTax = parseFloat((item.rentalFee * (item.tax_rate || 0) / 100).toFixed(2));
+      rentalSubtotal += item.rentalFee;
+      taxAmount += item.lineTax;
+      depositTotal += item.depositAmount;
     }
     rentalSubtotal = parseFloat(rentalSubtotal.toFixed(2));
     taxAmount = parseFloat(taxAmount.toFixed(2));
     depositTotal = parseFloat(depositTotal.toFixed(2));
     const total = parseFloat((rentalSubtotal + taxAmount + depositTotal).toFixed(2));
 
-    // Credit limit is enforced here (checkout time) — the one point in the app where
-    // a NEW credit charge is created, matching where routes/transactions.js validates
-    // customer_type/account_blocked (though that route doesn't check credit_limit at all;
-    // rentals does, since the deposit+fee here can be a much larger one-off charge).
     if (isCredit && creditCustomer.credit_limit > 0 && parseFloat((creditCustomer.account_balance + total).toFixed(2)) > creditCustomer.credit_limit) {
       const available = Math.max(0, parseFloat((creditCustomer.credit_limit - creditCustomer.account_balance).toFixed(2)));
       return res.status(400).json({ error: `This rental (${total.toFixed(2)}) would exceed the customer's credit limit. Available credit: ${available.toFixed(2)}` });
@@ -173,59 +237,40 @@ router.post('/agreements', requirePermission('rentals_checkout'), async (req, re
     const tendered = isCredit ? 0 : parseFloat(amount_tendered || total);
     const changeAmt = isCredit ? 0 : Math.max(0, parseFloat((tendered - total).toFixed(2)));
 
-    const { rows: [agCount] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM rental_agreements', args: [] });
-    const agreement_number = `RA-${String(Number(agCount.c) + 1).padStart(6, '0')}`;
     const { rows: [txCount] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM transactions', args: [] });
     const transaction_number = `TXN-${String(Number(txCount.c) + 1).padStart(6, '0')}`;
     const today = checkoutDateTime.toISOString().slice(0, 10);
+    const finalizeEmployeeId = employee_id || agreement.employee_id;
 
     const tx = await db.transaction('write');
     try {
-      const agResult = await tx.execute({ sql: `INSERT INTO rental_agreements (agreement_number,customer_id,employee_id,branch_id,status,checkout_date,checkout_datetime,due_date,deposit_total,notes) VALUES (?,?,?,?,?,?,?,?,?,?)`, args: [agreement_number, customer_id, employee_id || null, branch_id || null, 'active', today, checkoutDateTime.toISOString(), due_date, depositTotal, notes || null] });
-      const agreementId = Number(agResult.lastInsertRowid);
-
-      // Rental checkout never touches products.stock_qty/branch_inventory — the
-      // physical fleet count stays constant; availability is computed live from
-      // rental_agreement_items instead (see lib/rentalAvailability.js).
-      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id, employee_id || null, branch_id || null, drawer_session_id || null, rentalSubtotal + depositTotal, taxAmount, total, method, tendered, changeAmt, `Rental checkout ${agreement_number}`, 'pos'] });
+      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, agreement.customer_id, finalizeEmployeeId || null, agreement.branch_id, drawer_session_id || null, rentalSubtotal + depositTotal, taxAmount, total, method, tendered, changeAmt, `Rental checkout ${agreement.agreement_number}`, 'pos'] });
       const checkoutTxId = Number(txResult.lastInsertRowid);
 
-      const insertedIds = [];
-      for (const line of lines) {
-        const p = line.product;
-        const result = await tx.execute({ sql: `INSERT INTO rental_agreement_items
-          (agreement_id,parent_item_id,product_id,product_name,sku,quantity,rate_type,rate_amount,rental_classification,daily_rate,weekly_rate,monthly_rate,hourly_rate,tax_rate,is_mandatory,rental_fee,deposit_amount,replacement_value,condition_out)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          args: [agreementId, line.parentIndex != null ? insertedIds[line.parentIndex] : null, p.id, p.name, p.sku, line.quantity, 'daily', p.rental_rate || 0, p.rental_classification || 'tool', p.rental_rate || 0, p.rental_weekly_rate || 0, p.rental_monthly_rate || 0, p.rental_hourly_rate || 0, p.tax_rate || 0, line.isMandatory ? 1 : 0, line.rentalFee, line.depositAmount, p.replacement_value || 0, line.condition_out] });
-        insertedIds.push(Number(result.lastInsertRowid));
-        const itemLabel = line.parentIndex != null ? `${p.name}${line.isMandatory ? ' (included)' : ' (accessory)'}` : p.name;
-        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?,?)`, args: [checkoutTxId, p.id, itemLabel, p.sku, line.quantity, line.isMandatory ? 0 : (line.rentalFee / line.quantity), line.lineTax, line.rentalFee] });
+      for (const item of existingItems) {
+        await tx.execute({ sql: 'UPDATE rental_agreement_items SET rental_fee = ?, deposit_amount = ? WHERE id = ?', args: [item.rentalFee, item.depositAmount, item.id] });
+        const itemLabel = item.parent_item_id != null ? `${item.product_name}${item.is_mandatory ? ' (included)' : ' (accessory)'}` : item.product_name;
+        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?,?)`, args: [checkoutTxId, item.product_id, itemLabel, item.sku, item.quantity, item.is_mandatory ? 0 : (item.rentalFee / item.quantity), item.lineTax, item.rentalFee] });
       }
       if (depositTotal > 0) {
         await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?,?)`, args: [checkoutTxId, null, 'Refundable Deposit', 'DEPOSIT', 1, depositTotal, 0, depositTotal] });
       }
 
-      // Loyalty accrues on the rental-fee portion only, not the deposit — same
-      // shape as the regular POS checkout's customer loyalty update.
       const loyaltyPts = Math.floor(rentalSubtotal * 0.5);
-      await tx.execute({ sql: 'UPDATE customers SET loyalty_points = loyalty_points + ?, total_spent = total_spent + ? WHERE id = ?', args: [loyaltyPts, rentalSubtotal, customer_id] });
+      await tx.execute({ sql: 'UPDATE customers SET loyalty_points = loyalty_points + ?, total_spent = total_spent + ? WHERE id = ?', args: [loyaltyPts, rentalSubtotal, agreement.customer_id] });
 
-      // Bill the full checkout total (fee + tax + deposit) to the customer's account —
-      // same shape as a regular POS 'credit' sale (routes/transactions.js). This is what
-      // makes the charge show up in Accounts Receivable (payment_method='credit' + status
-      // defaults to 'completed', which is exactly what routes/accounts.js filters on).
       if (isCredit) {
-        await tx.execute({ sql: 'UPDATE customers SET account_balance = account_balance + ? WHERE id = ?', args: [total, customer_id] });
+        await tx.execute({ sql: 'UPDATE customers SET account_balance = account_balance + ? WHERE id = ?', args: [total, agreement.customer_id] });
       }
 
-      await tx.execute({ sql: 'UPDATE rental_agreements SET checkout_transaction_id = ? WHERE id = ?', args: [checkoutTxId, agreementId] });
+      await tx.execute({ sql: `UPDATE rental_agreements SET checkout_transaction_id = ?, checkout_date = ?, checkout_datetime = ?, deposit_total = ?, status = 'active', employee_id = ? WHERE id = ?`, args: [checkoutTxId, today, checkoutDateTime.toISOString(), depositTotal, finalizeEmployeeId || null, req.params.id] });
       await tx.commit();
-      if (isCredit) { try { await runCreditCheck(customer_id); } catch(e) {} }
+      if (isCredit) { try { await runCreditCheck(agreement.customer_id); } catch(e) {} }
 
-      const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [agreementId] });
-      const { rows: agItems } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [agreementId] });
-      agreement.items = agItems;
-      res.status(201).json(agreement);
+      const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+      const { rows: agItems } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
+      updated.items = agItems;
+      res.json(updated);
     } catch(e) {
       await tx.rollback();
       res.status(400).json({ error: e.message });
@@ -239,7 +284,10 @@ router.patch('/agreements/:id/cancel', requirePermission('rentals_returns'), asy
   try {
     const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
     if (!agreement) return res.status(404).json({ error: 'Not found' });
-    if (agreement.status !== 'active') return res.status(400).json({ error: `Cannot cancel a ${agreement.status} agreement` });
+    // 'pending' (held, not yet paid) agreements have no checkout_transaction_id
+    // yet, so the void/loyalty-reversal/credit-reversal block below naturally
+    // no-ops for them — this guard just needs to allow that status through too.
+    if (agreement.status !== 'active' && agreement.status !== 'pending') return res.status(400).json({ error: `Cannot cancel a ${agreement.status} agreement` });
     const { rows: items } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
     if (items.some(i => i.quantity_returned > 0)) return res.status(400).json({ error: 'Cannot cancel an agreement that already has items returned — process a return instead' });
 

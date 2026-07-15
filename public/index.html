@@ -1854,13 +1854,21 @@ const App = {
 
   async recallOrder() {
     const customerId = this.cartCustomer?.id;
-    const url = customerId ? `/transactions?status=hold&customer_id=${customerId}` : '/transactions?status=hold&limit=50';
+    const ordersUrl = customerId ? `/transactions?status=hold&customer_id=${customerId}` : '/transactions?status=hold&limit=50';
+    const rentalsUrl = customerId ? `/rentals/agreements?view=pending&customer_id=${customerId}` : '/rentals/agreements?view=pending';
     try {
-      const held = await this.api('GET', url);
-      if (!held.length) {
+      const [held, pendingRentals] = await Promise.all([
+        this.api('GET', ordersUrl),
+        this.can('rentals') ? this.api('GET', rentalsUrl).catch(() => []) : Promise.resolve([]),
+      ]);
+      if (!held.length && !pendingRentals.length) {
         this.alert(customerId ? `No held orders for ${this.cartCustomer.first_name} ${this.cartCustomer.last_name}` : 'No held orders', 'info');
         return;
       }
+      const combined = [
+        ...held.map(h => ({ type: 'order', created_at: h.created_at, data: h })),
+        ...pendingRentals.map(r => ({ type: 'rental', created_at: r.created_at, data: r })),
+      ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
       this.showModal(`
         <div class="modal">
           <div class="modal-header">
@@ -1869,7 +1877,7 @@ const App = {
           </div>
           <div class="modal-body" style="padding:0">
             <div style="max-height:420px;overflow-y:auto;padding:14px">
-              ${held.map(h => `
+              ${combined.map(entry => entry.type === 'order' ? (h => `
                 <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px;cursor:pointer;transition:background 0.15s" onmouseover="this.style.background='#f0f4ff'" onmouseout="this.style.background=''" onclick="App.loadHeldOrder(${h.id})">
                   <div style="display:flex;justify-content:space-between;align-items:center">
                     <strong style="font-size:14px">${h.customer_name || 'Walk-in Customer'}</strong>
@@ -1879,7 +1887,16 @@ const App = {
                     Total: <strong>${this.fmt(h.total)}</strong> &bull; ${new Date(h.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}
                     ${h.notes ? `&bull; ${h.notes}` : ''}
                   </div>
-                </div>`).join('')}
+                </div>`)(entry.data) : (r => `
+                <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px;cursor:pointer;transition:background 0.15s" onmouseover="this.style.background='#f0f4ff'" onmouseout="this.style.background=''" onclick="App.closeModal();App.showFinalizeRentalModal(${r.id})">
+                  <div style="display:flex;justify-content:space-between;align-items:center">
+                    <strong style="font-size:14px">${r.customer_name || '—'} <span class="badge-pill badge-warning" style="font-size:10px;margin-left:4px">RENTAL</span></strong>
+                    <span style="font-size:12px;color:var(--text-muted);font-family:monospace">${r.agreement_number}</span>
+                  </div>
+                  <div style="font-size:13px;color:var(--text-muted);margin-top:3px">
+                    ${r.item_count} item${r.item_count===1?'':'s'} &bull; Due ${this.fmtDate(r.due_date)} &bull; ${new Date(r.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}
+                  </div>
+                </div>`)(entry.data)).join('')}
             </div>
           </div>
         </div>`);
@@ -1938,11 +1955,15 @@ const App = {
 
   async updateHoldBadge() {
     try {
-      const held = await this.api('GET', '/transactions?status=hold&limit=50');
+      const [held, pendingRentals] = await Promise.all([
+        this.api('GET', '/transactions?status=hold&limit=50'),
+        this.can('rentals') ? this.api('GET', '/rentals/agreements?view=pending').catch(() => []) : Promise.resolve([]),
+      ]);
+      const count = held.length + pendingRentals.length;
       const badge = document.getElementById('hold-count-badge');
       if (!badge) return;
-      if (held.length > 0) {
-        badge.textContent = held.length;
+      if (count > 0) {
+        badge.textContent = count;
         badge.style.display = 'inline';
       } else {
         badge.style.display = 'none';
@@ -2942,6 +2963,7 @@ const App = {
 
   _rentalTabs: [
     { key: 'items',     label: 'Rental Items' },
+    { key: 'pending',   label: 'Held' },
     { key: 'active',    label: 'Active' },
     { key: 'overdue',   label: 'Overdue' },
     { key: 'all',       label: 'All Agreements' },
@@ -3249,7 +3271,7 @@ const App = {
     const view = this.rentalTab === 'all' ? '' : this.rentalTab;
     const agreements = await this.api('GET', `/rentals/agreements${view ? '?view='+view : ''}`);
     if (!document.getElementById('rental-content')) return;
-    const sc = { active:'badge-info', overdue:'badge-danger', returned:'badge-success', cancelled:'badge-secondary' };
+    const sc = { pending:'badge-warning', active:'badge-info', overdue:'badge-danger', returned:'badge-success', cancelled:'badge-secondary' };
     document.getElementById('rental-content').innerHTML = !agreements.length ? '<div class="empty-state"><p>No rental agreements found.</p></div>' : `
       <table class="table">
         <thead><tr><th>Agreement #</th><th>Customer</th><th>Branch</th><th>Checkout</th><th>Due</th><th>Items</th><th>Status</th><th></th></tr></thead>
@@ -3257,7 +3279,7 @@ const App = {
           <td class="fw-600">${a.agreement_number}</td>
           <td>${a.customer_name||'—'}</td>
           <td>${a.branch_name||'—'}</td>
-          <td>${this.fmtDate(a.checkout_date)}</td>
+          <td>${a.status==='pending' ? '—' : this.fmtDate(a.checkout_date)}</td>
           <td>${this.fmtDate(a.due_date)}</td>
           <td><span class="badge badge-info">${a.item_count}</span></td>
           <td><span class="badge-pill ${sc[a.display_status]||'badge-secondary'}">${a.display_status}</span></td>
@@ -3270,7 +3292,7 @@ const App = {
 
   async viewRentalAgreement(id) {
     const a = await this.api('GET', `/rentals/agreements/${id}`);
-    const sc = { active:'badge-info', overdue:'badge-danger', returned:'badge-success', cancelled:'badge-secondary' };
+    const sc = { pending:'badge-warning', active:'badge-info', overdue:'badge-danger', returned:'badge-success', cancelled:'badge-secondary' };
     this.showModal(`
       <div class="modal" style="max-width:640px">
         <div class="modal-header">
@@ -3287,9 +3309,10 @@ const App = {
           <div class="input-row" style="margin-bottom:10px">
             <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Customer</label><div>${a.customer_name||'—'}</div></div>
             <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Branch</label><div>${a.branch_name||'—'}</div></div>
-            <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Checkout Date</label><div>${this.fmtDate(a.checkout_date)}</div></div>
+            <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Checkout Date</label><div>${a.status==='pending' ? '<span style="color:var(--text-muted)">Awaiting checkout</span>' : this.fmtDate(a.checkout_date)}</div></div>
             <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Due Date</label><div>${this.fmtDate(a.due_date)}</div></div>
           </div>
+          ${a.status==='pending' ? `<div style="padding:8px 12px;background:rgba(245,158,11,0.08);border-left:3px solid #d97706;border-radius:4px;font-size:12px;color:#d97706;margin-bottom:12px">Held — no payment collected yet. Fees and deposit are calculated when a cashier processes payment, based on the rental period starting at that moment.</div>` : ''}
           <table class="table" style="margin-bottom:12px">
             <thead><tr><th>Product</th><th>Class</th><th>Qty</th><th>Returned</th><th>Est. Fee</th><th>Actual Fee</th><th>Deposit</th><th>Condition</th></tr></thead>
             <tbody>${a.items.map(i=>{
@@ -3299,9 +3322,9 @@ const App = {
               <td>${i.rental_classification==='equipment'?'Equipment':'Tool'}</td>
               <td>${i.quantity}</td>
               <td>${i.quantity_returned}</td>
-              <td>${this.fmt(i.rental_fee)}</td>
+              <td>${a.status==='pending' ? '—' : this.fmt(i.rental_fee)}</td>
               <td>${i.quantity_returned>0 ? this.fmt(i.final_rental_fee) : '—'}</td>
-              <td>${this.fmt(i.deposit_amount)}</td>
+              <td>${a.status==='pending' ? '—' : this.fmt(i.deposit_amount)}</td>
               <td style="color:var(--text-muted);font-size:12px">${i.condition_out||'—'} → ${i.condition_in||'—'}${i.damage_notes?`<br><span class="color-danger">${i.damage_notes}</span>`:''}</td>
             </tr>`;}).join('')}</tbody>
           </table>
@@ -3313,15 +3336,16 @@ const App = {
           </div>
         </div>
         <div class="modal-footer">
+          ${a.status==='pending' && this.can('pos') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showFinalizeRentalModal(${a.id})">Process Payment</button>` : ''}
           ${a.status==='active' && this.can('rentals_returns') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showRentalReturnModal(${a.id})">Process Return</button>` : ''}
-          ${a.status==='active' && !a.items.some(i=>i.quantity_returned>0) && this.can('rentals_returns') ? `<button class="btn btn-danger" onclick="App.cancelRentalAgreement(${a.id})">Cancel Agreement</button>` : ''}
+          ${(a.status==='active'||a.status==='pending') && !a.items.some(i=>i.quantity_returned>0) && this.can('rentals_returns') ? `<button class="btn btn-danger" onclick="App.cancelRentalAgreement(${a.id})">${a.status==='pending'?'Cancel Hold':'Cancel Agreement'}</button>` : ''}
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
   },
 
   async cancelRentalAgreement(id) {
-    if (!confirm('Cancel this rental agreement? The checkout charge will be voided.')) return;
+    if (!confirm('Cancel this rental agreement? Any checkout charge already collected will be voided.')) return;
     try {
       await this.api('PATCH', `/rentals/agreements/${id}/cancel`);
       this.closeModal();
@@ -3344,7 +3368,7 @@ const App = {
     this.showModal(`
       <div class="modal" style="max-width:640px">
         <div class="modal-header">
-          <span class="modal-title">New Rental Checkout</span>
+          <span class="modal-title">New Rental</span>
           <button class="modal-close">✕</button>
         </div>
         <div class="modal-body">
@@ -3370,21 +3394,11 @@ const App = {
             <button class="btn btn-sm btn-outline" onclick="App.addRentalCheckoutLine()">+ Add Item</button>
           </div>
           <div id="rental-checkout-lines"></div>
-          <hr style="margin:12px 0">
-          <div class="input-row">
-            <div class="form-group"><label>Payment Method</label>
-              <select id="rc-paymethod">
-                <option value="cash">Cash</option>
-                <option value="credit_card">Card</option>
-                <option value="check">Check</option>
-                <option value="credit">Charge Account (Credit)</option>
-              </select>
-            </div>
-          </div>
+          <p style="font-size:11px;color:var(--text-muted);margin-top:8px">This places the rental on hold — a cashier will collect payment (cash or credit) and the rental period begins when it's finalized at the register.</p>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-          <button class="btn btn-primary" onclick="App.saveRentalCheckout()">Check Out</button>
+          <button class="btn btn-primary" onclick="App.holdRentalCheckout()">Place on Hold</button>
         </div>
       </div>`);
     this.addRentalCheckoutLine();
@@ -3519,19 +3533,13 @@ const App = {
     });
   },
 
-  async saveRentalCheckout() {
+  async holdRentalCheckout() {
     const customer_id = document.getElementById('rc-customer').value;
     const branch_id = document.getElementById('rc-branch').value || null;
     const due_date = document.getElementById('rc-duedate').value;
-    const payment_method = document.getElementById('rc-paymethod').value;
     if (!customer_id) { this.alert('Please select a customer', 'error'); return; }
     if (!branch_id) { this.alert('Please select a branch/location', 'error'); return; }
     if (!due_date) { this.alert('Please select a due date', 'error'); return; }
-    if (payment_method === 'credit') {
-      const cust = (this._rentalCustomers||[]).find(c => String(c.id) === String(customer_id));
-      if (!cust || cust.customer_type !== 'credit') { this.alert('Selected customer does not have a credit account. Edit the customer and set type to Credit.', 'error'); return; }
-      if (cust.account_blocked) { this.alert('This customer\'s account is blocked due to overdue payment. Please settle the outstanding balance before making new credit purchases.', 'error'); return; }
-    }
     const items = [];
     document.querySelectorAll('#rental-checkout-lines [id^="rental-line-"]').forEach(line => {
       const idx = line.id.replace('rental-line-','');
@@ -3543,10 +3551,66 @@ const App = {
     });
     if (!items.length) { this.alert('Add at least one rental item', 'error'); return; }
     try {
-      const agreement = await this.api('POST', '/rentals/agreements', { customer_id, branch_id, employee_id: this.currentUser.id, due_date, items, payment_method, drawer_session_id: this.currentDrawerSession?.id || null });
+      const agreement = await this.api('POST', '/rentals/agreements', { customer_id, branch_id, employee_id: this.currentUser.id, due_date, items });
+      this.closeModal();
+      this.alert(`Rental ${agreement.agreement_number} placed on hold — a cashier can recall it from Held Orders in the POS to collect payment`);
+      this.renderRentals();
+      this.updateHoldBadge();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // ─── Finalize a held rental (collect payment) ────────────────────────────
+
+  async showFinalizeRentalModal(id) {
+    const a = await this.api('GET', `/rentals/agreements/${id}`);
+    if (a.status !== 'pending') { this.alert('This rental is not awaiting checkout', 'warning'); return; }
+    this.showModal(`
+      <div class="modal" style="max-width:480px">
+        <div class="modal-header">
+          <span class="modal-title">Process Payment — ${a.agreement_number}</span>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="input-row" style="margin-bottom:10px">
+            <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Customer</label><div>${a.customer_name||'—'}</div></div>
+            <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Due Date</label><div>${this.fmtDate(a.due_date)}</div></div>
+          </div>
+          <div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:12px">
+            ${a.items.filter(i=>!i.parent_item_id).map(i => {
+              const accs = a.items.filter(x => x.parent_item_id === i.id);
+              return `<div style="font-size:13px;margin-bottom:4px"><strong>${i.product_name}</strong> × ${i.quantity}
+                ${accs.length ? `<div style="font-size:11px;color:var(--text-muted)">+ ${accs.map(x=>x.product_name).join(', ')}</div>` : ''}</div>`;
+            }).join('')}
+          </div>
+          <p style="font-size:11px;color:var(--text-muted);margin-top:-6px">Fees and deposit are calculated now, based on the rental period starting today.</p>
+          <div class="form-group"><label>Payment Method</label>
+            <select id="rf-paymethod">
+              <option value="cash">Cash</option>
+              <option value="credit_card">Card</option>
+              <option value="check">Check</option>
+              <option value="credit">Charge Account (Credit)</option>
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.finalizeRentalCheckout(${id})">Complete Checkout</button>
+        </div>
+      </div>`);
+  },
+
+  async finalizeRentalCheckout(id) {
+    const payment_method = document.getElementById('rf-paymethod').value;
+    try {
+      const agreement = await this.api('PATCH', `/rentals/agreements/${id}/checkout`, {
+        payment_method,
+        employee_id: this.currentUser.id,
+        drawer_session_id: this.currentDrawerSession?.id || null,
+      });
       this.closeModal();
       this.alert(`Rental ${agreement.agreement_number} checked out`);
       this.renderRentals();
+      this.updateHoldBadge();
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
