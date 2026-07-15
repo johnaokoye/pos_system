@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { requireAuth, requirePermission } = require('../lib/permissions');
+const { nextNumber } = require('../lib/nextNumber');
 
 // Check if a credit customer has exceeded their payment terms and block/unblock accordingly
 async function runCreditCheck(customerId) {
@@ -75,8 +76,7 @@ router.post('/', requirePermission('customers'), async (req, res) => {
   const { first_name, last_name, email, phone, address, city, state, zip, notes, customer_type, credit_terms_days, credit_limit, tax_exempt, tax_exemption_number } = req.body;
   if (!first_name || !last_name) return res.status(400).json({ error: 'First and last name required' });
   try {
-    const { rows: [num] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM customers', args: [] });
-    const customer_number = `CUST-${String(Number(num.c) + 1).padStart(4, '0')}`;
+    const customer_number = await nextNumber(db, 'customers', 'customer_number', 'CUST-', 4);
     const type = customer_type || 'cash';
     const creditEnabled = type === 'credit' ? 1 : 0;
     const terms = parseInt(credit_terms_days) || 30;

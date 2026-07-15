@@ -3,6 +3,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { runCreditCheck } = require('./customers');
 const { requirePermission } = require('../lib/permissions');
+const { nextNumber } = require('../lib/nextNumber');
 
 // Every endpoint in this file is specific to the Accounts Receivable
 // screen (unlike e.g. employees.js, nothing here is used as a cross-feature
@@ -129,8 +130,7 @@ router.post('/payments', async (req, res) => {
     const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [customer_id] });
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
-    const { rows: [count] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM account_payments', args: [] });
-    const payment_number = `PMT-${String(Number(count.c) + 1).padStart(6, '0')}`;
+    const payment_number = await nextNumber(db, 'account_payments', 'payment_number', 'PMT-', 6);
     const amt = parseFloat(parseFloat(amount).toFixed(2));
 
     // Build allocations: use provided or auto-FIFO oldest-first

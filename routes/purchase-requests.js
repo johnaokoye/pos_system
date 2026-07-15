@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { requirePermission } = require('../lib/permissions');
+const { nextNumber } = require('../lib/nextNumber');
 
 // Self-contained feature, not used as a cross-section lookup elsewhere —
 // module-level gate for all of it, matching the frontend's own section gate.
@@ -89,8 +90,7 @@ router.post('/', async (req, res) => {
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in purchase request' });
     if (!['sale_items', 'internal_use'].includes(request_type)) return res.status(400).json({ error: 'Invalid request_type' });
 
-    const { rows: [count] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM purchase_requests', args: [] });
-    const pr_number = `PR-${String(Number(count.c) + 1).padStart(6, '0')}`;
+    const pr_number = await nextNumber(db, 'purchase_requests', 'pr_number', 'PR-', 6);
     const processedItems = await processPRItems(items, request_type);
 
     const tx = await db.transaction('write');
@@ -206,8 +206,7 @@ router.post('/:id/convert', async (req, res) => {
 
     const tx = await db.transaction('write');
     try {
-      const { rows: [count] } = await tx.execute({ sql: 'SELECT COUNT(*) as c FROM purchase_orders', args: [] });
-      const po_number = `PO-${String(Number(count.c) + 1).padStart(6, '0')}`;
+      const po_number = await nextNumber(tx, 'purchase_orders', 'po_number', 'PO-', 6);
       let subtotal = 0;
       prItems.forEach(item => { subtotal += item.total || 0; });
       subtotal = parseFloat(subtotal.toFixed(2));

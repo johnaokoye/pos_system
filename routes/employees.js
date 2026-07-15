@@ -4,6 +4,7 @@ const bcrypt = require('bcryptjs');
 const { db } = require('../database');
 const { createSession, destroySession, setSessionCookie, clearSessionCookie, readCookie } = require('../lib/sessionAuth');
 const { requireAuth, requirePermission } = require('../lib/permissions');
+const { nextNumber } = require('../lib/nextNumber');
 
 // True once a password has been migrated to a bcrypt hash (bcryptjs always
 // produces $2a$/$2b$-prefixed output). Plaintext legacy passwords never
@@ -41,8 +42,7 @@ router.post('/', requirePermission('employees'), async (req, res) => {
   const { first_name, last_name, username, pin, password, must_change_password, security_group_id, default_branch_id } = req.body;
   if (!first_name || !last_name || !username || !pin) return res.status(400).json({ error: 'Required fields missing' });
   try {
-    const { rows: [num] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM employees', args: [] });
-    const employee_number = `EMP-${String(Number(num.c) + 1).padStart(4, '0')}`;
+    const employee_number = await nextNumber(db, 'employees', 'employee_number', 'EMP-', 4);
     const passwordHash = password ? await bcrypt.hash(password, 10) : null;
     const result = await db.execute({ sql: 'INSERT INTO employees (employee_number,first_name,last_name,username,pin,password,must_change_password,security_group_id,default_branch_id) VALUES (?,?,?,?,?,?,?,?,?)', args: [employee_number, first_name, last_name, username, pin, passwordHash, must_change_password ? 1 : 0, security_group_id || null, default_branch_id || null] });
     const newId = Number(result.lastInsertRowid);

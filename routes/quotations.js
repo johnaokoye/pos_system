@@ -3,6 +3,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { calcCommission } = require('./commissions');
 const { requirePermission } = require('../lib/permissions');
+const { nextNumber } = require('../lib/nextNumber');
 
 router.use(requirePermission('quotations'));
 
@@ -96,8 +97,7 @@ async function flagQItemsForPurchasing(quote) {
     let prId = existingLink ? existingLink.purchase_request_id : null;
 
     if (!prId) {
-      const { rows: [count] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM purchase_requests', args: [] });
-      const pr_number = `PR-${String(Number(count.c) + 1).padStart(6, '0')}`;
+      const pr_number = await nextNumber(db, 'purchase_requests', 'pr_number', 'PR-', 6);
       const result = await db.execute({
         sql: 'INSERT INTO purchase_requests (pr_number, branch_id, employee_id, notes, required_date, request_type) VALUES (?,?,?,?,?,?)',
         args: [pr_number, quote.branch_id || null, quote.employee_id || null, `Auto-created from accepted quotation ${quote.quote_number} — customer PO received for its "Q" custom items`, quote.valid_until || null, 'sale_items']
@@ -124,8 +124,7 @@ router.post('/', async (req, res) => {
     const { customer_id, employee_id, branch_id, items, discount_amount, notes, valid_until } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in quotation' });
 
-    const { rows: [count] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM quotations', args: [] });
-    const quote_number = `QT-${String(Number(count.c) + 1).padStart(6, '0')}`;
+    const quote_number = await nextNumber(db, 'quotations', 'quote_number', 'QT-', 6);
 
     let subtotal, tax_amount, processedItems;
     try {
@@ -235,8 +234,7 @@ router.post('/:id/convert', async (req, res) => {
 
     const convTx = await db.transaction('write');
     try {
-      const { rows: [txCount] } = await convTx.execute({ sql: 'SELECT COUNT(*) as c FROM transactions', args: [] });
-      const transaction_number = `TXN-${String(Number(txCount.c) + 1).padStart(6, '0')}`;
+      const transaction_number = await nextNumber(convTx, 'transactions', 'transaction_number', 'TXN-', 6);
 
       const result = await convTx.execute({ sql: 'INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,subtotal,tax_amount,discount_amount,total,payment_method,amount_tendered,change_amount,is_credit,notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [transaction_number, quote.customer_id, employee_id||quote.employee_id||1, branch_id||quote.branch_id||null, quote.subtotal, quote.tax_amount, quote.discount_amount, quote.total, method, tendered, change > 0 ? change : 0, isCredit ? 1 : 0, `Converted from quotation ${quote.quote_number}`] });
       const txId = Number(result.lastInsertRowid);

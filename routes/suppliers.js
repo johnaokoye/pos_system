@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { requireAuth, requirePermission } = require('../lib/permissions');
+const { nextNumber } = require('../lib/nextNumber');
 
 // requireAuth only — used as a dropdown lookup in Inventory/PO forms, not
 // just the Suppliers management screen.
@@ -41,8 +42,7 @@ router.post('/', requirePermission('suppliers'), async (req, res) => {
   const { name, contact_name, email, phone, address, city, state, zip, payment_terms, notes, is_local } = req.body;
   if (!name) return res.status(400).json({ error: 'Name required' });
   try {
-    const { rows: [count] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM suppliers', args: [] });
-    const supplier_number = `SUP-${String(Number(count.c) + 1).padStart(4, '0')}`;
+    const supplier_number = await nextNumber(db, 'suppliers', 'supplier_number', 'SUP-', 4);
     const result = await db.execute({ sql: 'INSERT INTO suppliers (supplier_number,name,contact_name,email,phone,address,city,state,zip,payment_terms,notes,is_local) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', args: [supplier_number, name, contact_name||null, email||null, phone||null, address||null, city||null, state||null, zip||null, payment_terms||'Net 30', notes||null, is_local?1:0] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM suppliers WHERE id = ?', args: [Number(result.lastInsertRowid)] });
     res.status(201).json(row);

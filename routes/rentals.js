@@ -5,6 +5,7 @@ const { getOutstandingQty } = require('../lib/rentalAvailability');
 const { calculateRentalFee } = require('../lib/rentalPricing');
 const { requirePermission, requireAnyPermission } = require('../lib/permissions');
 const { runCreditCheck } = require('./customers');
+const { nextNumber } = require('../lib/nextNumber');
 
 // ─── Agreements list/detail ───────────────────────────────────────────────
 
@@ -134,8 +135,7 @@ router.post('/agreements', requirePermission('rentals_checkout'), async (req, re
       }
     }
 
-    const { rows: [agCount] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM rental_agreements', args: [] });
-    const agreement_number = `RA-${String(Number(agCount.c) + 1).padStart(6, '0')}`;
+    const agreement_number = await nextNumber(db, 'rental_agreements', 'agreement_number', 'RA-', 6);
 
     const tx = await db.transaction('write');
     try {
@@ -237,8 +237,7 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
     const tendered = isCredit ? 0 : parseFloat(amount_tendered || total);
     const changeAmt = isCredit ? 0 : Math.max(0, parseFloat((tendered - total).toFixed(2)));
 
-    const { rows: [txCount] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM transactions', args: [] });
-    const transaction_number = `TXN-${String(Number(txCount.c) + 1).padStart(6, '0')}`;
+    const transaction_number = await nextNumber(db, 'transactions', 'transaction_number', 'TXN-', 6);
     const today = checkoutDateTime.toISOString().slice(0, 10);
     const finalizeEmployeeId = employee_id || agreement.employee_id;
 
@@ -446,8 +445,7 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
       const settlementAmount = parseFloat((settlementSubtotal + taxAdjustmentTotal).toFixed(2));
       const depositRefunded = Math.max(0, agreement.deposit_total - (damageFeeTotal + durationAdjustmentTotal + taxAdjustmentTotal));
 
-      const { rows: [txCount] } = await tx.execute({ sql: 'SELECT COUNT(*) as c FROM transactions', args: [] });
-      const transaction_number = `TXN-${String(Number(txCount.c) + 1).padStart(6, '0')}`;
+      const transaction_number = await nextNumber(tx, 'transactions', 'transaction_number', 'TXN-', 6);
       const method = checkoutIsCredit ? 'credit' : (settlementAmount >= 0 ? (payment_method || 'cash') : 'refund');
       const settleResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, agreement.customer_id, agreement.employee_id, agreement.branch_id, drawer_session_id || null, settlementSubtotal, taxAdjustmentTotal, settlementAmount, method, 0, 0, `Rental settlement ${agreement.agreement_number}`, 'pos'] });
       const settlementTxId = Number(settleResult.lastInsertRowid);

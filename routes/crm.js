@@ -3,6 +3,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { calcCommission } = require('./commissions');
 const { requirePermission } = require('../lib/permissions');
+const { nextNumber } = require('../lib/nextNumber');
 
 router.use(requirePermission('crm'));
 
@@ -59,8 +60,7 @@ router.post('/leads', async (req, res) => {
   const { first_name, last_name, company, email, phone, source, status, estimated_value, assigned_to, notes } = req.body;
   if (!first_name || !last_name) return res.status(400).json({ error: 'First and last name required' });
   try {
-    const { rows: [countRow] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM crm_leads', args: [] });
-    const lead_number = `LEAD-${String(Number(countRow.c) + 1).padStart(5, '0')}`;
+    const lead_number = await nextNumber(db, 'crm_leads', 'lead_number', 'LEAD-', 5);
     const result = await db.execute({ sql: `INSERT INTO crm_leads (lead_number,first_name,last_name,company,email,phone,source,status,estimated_value,assigned_to,notes) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, args: [lead_number, first_name, last_name, company||null, email||null, phone||null, source||'other', status||'new', parseFloat(estimated_value||0), assigned_to||null, notes||null] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM crm_leads WHERE id = ?', args: [Number(result.lastInsertRowid)] });
     res.status(201).json(row);
@@ -97,8 +97,7 @@ router.post('/leads/:id/convert', async (req, res) => {
 
     const convTx = await db.transaction('write');
     try {
-      const { rows: [countRow] } = await convTx.execute({ sql: 'SELECT COUNT(*) as c FROM customers', args: [] });
-      const customer_number = `CUST-${String(Number(countRow.c) + 1).padStart(4, '0')}`;
+      const customer_number = await nextNumber(convTx, 'customers', 'customer_number', 'CUST-', 4);
       const result = await convTx.execute({ sql: `INSERT INTO customers (customer_number,first_name,last_name,email,phone,notes) VALUES (?,?,?,?,?,?)`, args: [customer_number, lead.first_name, lead.last_name, lead.email, lead.phone, lead.notes] });
       const custId = Number(result.lastInsertRowid);
       await convTx.execute({ sql: "UPDATE crm_leads SET customer_id=?,status='won',updated_at=datetime('now') WHERE id=?", args: [custId, lead.id] });
@@ -150,8 +149,7 @@ router.post('/opportunities', async (req, res) => {
   const { title, lead_id, customer_id, employee_id, stage, probability, value, expected_close, notes } = req.body;
   if (!title) return res.status(400).json({ error: 'Title required' });
   try {
-    const { rows: [countRow] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM crm_opportunities', args: [] });
-    const opp_number = `OPP-${String(Number(countRow.c) + 1).padStart(5, '0')}`;
+    const opp_number = await nextNumber(db, 'crm_opportunities', 'opp_number', 'OPP-', 5);
     const result = await db.execute({ sql: `INSERT INTO crm_opportunities (opp_number,title,lead_id,customer_id,employee_id,stage,probability,value,expected_close,notes) VALUES (?,?,?,?,?,?,?,?,?,?)`, args: [opp_number, title, lead_id||null, customer_id||null, employee_id||null, stage||'qualification', parseInt(probability||50), parseFloat(value||0), expected_close||null, notes||null] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM crm_opportunities WHERE id = ?', args: [Number(result.lastInsertRowid)] });
     res.status(201).json(row);

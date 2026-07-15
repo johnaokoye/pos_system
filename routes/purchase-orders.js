@@ -7,6 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 const { requirePermission } = require('../lib/permissions');
+const { nextNumber } = require('../lib/nextNumber');
 
 router.use(requirePermission('purchasing'));
 
@@ -56,8 +57,7 @@ router.post('/', async (req, res) => {
     const { supplier_id, branch_id, employee_id, items, notes, expected_date } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in PO' });
 
-    const { rows: [count] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM purchase_orders', args: [] });
-    const po_number = `PO-${String(Number(count.c) + 1).padStart(6, '0')}`;
+    const po_number = await nextNumber(db, 'purchase_orders', 'po_number', 'PO-', 6);
 
     let subtotal = 0;
     const processedItems = [];

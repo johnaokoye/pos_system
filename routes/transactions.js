@@ -5,6 +5,7 @@ const { calcCommission } = require('./commissions');
 const { getWcSettings, wcRequest } = require('./woocommerce');
 const { syncBinQty } = require('../lib/binSync');
 const { requireAuth, requirePermission } = require('../lib/permissions');
+const { nextNumber } = require('../lib/nextNumber');
 
 // Put order on hold (no stock updates, no payment processing)
 router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
@@ -125,8 +126,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       if (setting?.value) branch_id = setting.value;
     }
 
-    const { rows: [txCount] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM transactions', args: [] });
-    const transaction_number = `TXN-${String(Number(txCount.c) + 1).padStart(6, '0')}`;
+    const transaction_number = await nextNumber(db, 'transactions', 'transaction_number', 'TXN-', 6);
 
     const isTaxExempt = tax_exempt ? 1 : 0;
     let subtotal = 0, tax_amount = 0;
@@ -344,8 +344,7 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
     returnTax = parseFloat(returnTax.toFixed(2));
     const returnTotal = parseFloat((returnSubtotal + returnTax).toFixed(2));
 
-    const { rows: [retCount] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM returns', args: [] });
-    const return_number = `RET-${String(Number(retCount.c) + 1).padStart(6, '0')}`;
+    const return_number = await nextNumber(db, 'returns', 'return_number', 'RET-', 6);
 
     const retTx = await db.transaction('write');
     try {

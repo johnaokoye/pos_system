@@ -4,6 +4,7 @@ const { db } = require('../database');
 const { syncBinQty } = require('../lib/binSync');
 const { updateFulfillmentStatus } = require('./transactions');
 const { requireAuth, requirePermission, requireAnyPermission } = require('../lib/permissions');
+const { nextNumber } = require('../lib/nextNumber');
 
 // ─── ZONES ────────────────────────────────────────────────────────────────────
 
@@ -177,8 +178,7 @@ router.post('/shipments', requireAnyPermission('shipping', 'transactions'), asyn
     const { from_branch_id, customer_id, carrier, tracking_number, ship_date, estimated_delivery, notes, items } = req.body;
     if (!items || !items.length) return res.status(400).json({ error: 'At least one item required' });
 
-    const { rows: [countRow] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM shipments', args: [] });
-    const shipment_number = `SHP-${String(Number(countRow.c) + 1).padStart(6, '0')}`;
+    const shipment_number = await nextNumber(db, 'shipments', 'shipment_number', 'SHP-', 6);
 
     const tx = await db.transaction('write');
     try {
@@ -212,8 +212,7 @@ router.post('/shipments/from-order/:txId', requireAnyPermission('shipping', 'tra
     if (!items.length) return res.status(400).json({ error: 'Order has no items' });
 
     const { carrier, tracking_number, ship_date, estimated_delivery } = req.body;
-    const { rows: [countRow] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM shipments', args: [] });
-    const shipment_number = `SHP-${String(Number(countRow.c) + 1).padStart(6, '0')}`;
+    const shipment_number = await nextNumber(db, 'shipments', 'shipment_number', 'SHP-', 6);
 
     const tx = await db.transaction('write');
     try {
@@ -365,8 +364,7 @@ router.post('/cycle-counts', requirePermission('cycle-counts'), async (req, res)
   try {
     const { branch_id, employee_id, scope_type = 'all', scope_id, notes } = req.body;
 
-    const { rows: [countRow] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM cycle_count_sessions', args: [] });
-    const session_number = `CC-${String(Number(countRow.c) + 1).padStart(6, '0')}`;
+    const session_number = await nextNumber(db, 'cycle_count_sessions', 'session_number', 'CC-', 6);
 
     const tx = await db.transaction('write');
     try {

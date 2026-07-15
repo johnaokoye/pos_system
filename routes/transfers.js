@@ -3,6 +3,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { syncBinQty } = require('../lib/binSync');
 const { requirePermission } = require('../lib/permissions');
+const { nextNumber } = require('../lib/nextNumber');
 
 router.use(requirePermission('transfers'));
 
@@ -41,8 +42,7 @@ router.post('/', async (req, res) => {
     if (parseInt(from_branch_id) === parseInt(to_branch_id)) return res.status(400).json({ error: 'From and to branches must be different' });
     if (!items || !items.length) return res.status(400).json({ error: 'No items in transfer' });
 
-    const { rows: [count] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM branch_transfers', args: [] });
-    const transfer_number = `TRF-${String(Number(count.c) + 1).padStart(6, '0')}`;
+    const transfer_number = await nextNumber(db, 'branch_transfers', 'transfer_number', 'TRF-', 6);
 
     const tx = await db.transaction('write');
     try {
