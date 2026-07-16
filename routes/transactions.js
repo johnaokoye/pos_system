@@ -58,6 +58,10 @@ router.delete('/:id/hold', requirePermission('pos_hold'), async (req, res) => {
   try {
     const { rows: [held] } = await db.execute({ sql: `SELECT id FROM transactions WHERE id = ? AND status = 'hold'`, args: [req.params.id] });
     if (!held) return res.status(404).json({ error: 'Held order not found' });
+    // A hold created by converting a quotation points quotations.converted_to_tx
+    // back at it — if the hold is cancelled instead of recalled and finalized,
+    // revert the quote so it isn't left stranded pointing at a deleted transaction.
+    await db.execute({ sql: `UPDATE quotations SET status = 'accepted', converted_to_tx = NULL WHERE converted_to_tx = ?`, args: [req.params.id] });
     await db.execute({ sql: 'DELETE FROM transaction_items WHERE transaction_id = ?', args: [req.params.id] });
     await db.execute({ sql: 'DELETE FROM transactions WHERE id = ?', args: [req.params.id] });
     res.json({ success: true });
@@ -68,10 +72,11 @@ router.get('/', requirePermission('transactions'), async (req, res) => {
   try {
     const { start, end, customer_id, customer_name, status, branch_id, payment_method, transaction_number, source, fulfillment_status, limit = 100 } = req.query;
     let sql = `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name,
-      ra.agreement_number as rental_agreement_number,
+      ra.agreement_number as rental_agreement_number, q.quote_number as source_quote_number,
       CASE WHEN ra.checkout_transaction_id = t.id THEN 'checkout' WHEN ra.settlement_transaction_id = t.id THEN 'settlement' END as rental_role
       FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN branches b ON t.branch_id = b.id
       LEFT JOIN rental_agreements ra ON ra.checkout_transaction_id = t.id OR ra.settlement_transaction_id = t.id
+      LEFT JOIN quotations q ON q.converted_to_tx = t.id
       WHERE 1=1`;
     const params = [];
     if (transaction_number) { sql += ' AND t.transaction_number LIKE ?'; params.push(`%${transaction_number}%`); }

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { syncBinQty } = require('../lib/binSync');
+const { createTransfer } = require('../lib/transfers');
 const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 
@@ -46,32 +47,7 @@ router.post('/', async (req, res) => {
 
     const tx = await db.transaction('write');
     try {
-      for (const item of items) {
-        const { rows: [product] } = await tx.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] });
-        if (!product) throw new Error(`Product ${item.product_id} not found`);
-        const qty = parseInt(item.quantity);
-        if (!qty || qty <= 0) throw new Error(`Invalid quantity for ${product.name}`);
-
-        const { rows: [srcInv] } = await tx.execute({ sql: 'SELECT * FROM branch_inventory WHERE product_id = ? AND branch_id = ?', args: [item.product_id, from_branch_id] });
-        const srcQty = srcInv ? srcInv.stock_qty : product.stock_qty;
-        if (srcQty < qty) throw new Error(`Insufficient stock for ${product.name} at source branch (available: ${srcQty})`);
-
-        if (srcInv) {
-          await tx.execute({ sql: 'UPDATE branch_inventory SET stock_qty = stock_qty - ?, updated_at = CURRENT_TIMESTAMP WHERE product_id = ? AND branch_id = ?', args: [qty, item.product_id, from_branch_id] });
-        } else {
-          await tx.execute({ sql: 'INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)', args: [item.product_id, from_branch_id, srcQty - qty, product.min_stock] });
-        }
-        await syncBinQty(tx, item.product_id, from_branch_id, -qty);
-        await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty - ? WHERE id = ?', args: [qty, item.product_id] });
-      }
-
-      const result = await tx.execute({ sql: 'INSERT INTO branch_transfers (transfer_number, from_branch_id, to_branch_id, employee_id, notes) VALUES (?, ?, ?, ?, ?)', args: [transfer_number, from_branch_id, to_branch_id, employee_id || null, notes || null] });
-      const transferId = Number(result.lastInsertRowid);
-
-      for (const item of items) {
-        const { rows: [product] } = await tx.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] });
-        await tx.execute({ sql: 'INSERT INTO branch_transfer_items (transfer_id, product_id, product_name, sku, quantity_requested) VALUES (?, ?, ?, ?, ?)', args: [transferId, item.product_id, product.name, product.sku, parseInt(item.quantity)] });
-      }
+      const transferId = await createTransfer(tx, { transfer_number, from_branch_id, to_branch_id, employee_id, items, notes, quote_id: null });
 
       await tx.commit();
 

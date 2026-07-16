@@ -270,6 +270,15 @@ async function _init() {
       quantity_requested INTEGER NOT NULL DEFAULT 1,
       quantity_received INTEGER DEFAULT 0
     )` },
+    { sql: `CREATE TABLE IF NOT EXISTS quotation_item_sources (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      quotation_item_id INTEGER NOT NULL REFERENCES quotation_items(id) ON DELETE CASCADE,
+      branch_id INTEGER REFERENCES branches(id),
+      quantity INTEGER NOT NULL,
+      transfer_id INTEGER REFERENCES branch_transfers(id),
+      purchase_request_item_id INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS crm_leads (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       lead_number TEXT UNIQUE NOT NULL,
@@ -782,10 +791,104 @@ async function _init() {
     'ALTER TABLE rental_agreements ADD COLUMN cancellation_reason TEXT',
     'ALTER TABLE rental_agreements ADD COLUMN cancelled_by INTEGER REFERENCES employees(id)',
     'ALTER TABLE rental_agreements ADD COLUMN cancelled_at DATETIME',
+    'ALTER TABLE branch_transfers ADD COLUMN quote_id INTEGER REFERENCES quotations(id)',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
   }
+
+  // quotation_item_sources.purchase_request_item_id originally declared a
+  // plain (no ON DELETE action) FK to purchase_request_items — on a DB that
+  // enforces foreign keys, that reference blocks the DROP TABLE below from
+  // ever rebuilding purchase_request_items. It's just an internal bookkeeping
+  // link the app already manages correctly, so it's rebuilt here without a
+  // formal FK constraint (must run before the purchase_request_items rebuild).
+  try {
+    const { rows: [qis] } = await db.execute({ sql: "SELECT sql FROM sqlite_master WHERE type='table' AND name='quotation_item_sources'", args: [] });
+    if (qis && /purchase_request_item_id INTEGER REFERENCES purchase_request_items/.test(qis.sql)) {
+      const tx = await db.transaction('write');
+      try {
+        await tx.execute({ sql: `CREATE TABLE quotation_item_sources_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          quotation_item_id INTEGER NOT NULL REFERENCES quotation_items(id) ON DELETE CASCADE,
+          branch_id INTEGER REFERENCES branches(id),
+          quantity INTEGER NOT NULL,
+          transfer_id INTEGER REFERENCES branch_transfers(id),
+          purchase_request_item_id INTEGER,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`, args: [] });
+        await tx.execute({ sql: `INSERT INTO quotation_item_sources_new (id, quotation_item_id, branch_id, quantity, transfer_id, purchase_request_item_id, created_at)
+          SELECT id, quotation_item_id, branch_id, quantity, transfer_id, purchase_request_item_id, created_at FROM quotation_item_sources`, args: [] });
+        await tx.execute({ sql: 'DROP TABLE quotation_item_sources', args: [] });
+        await tx.execute({ sql: 'ALTER TABLE quotation_item_sources_new RENAME TO quotation_item_sources', args: [] });
+        await tx.commit();
+      } catch(e) { await tx.rollback(); throw e; }
+    }
+  } catch(e) {}
+
+  // One-time fix: purchase_request_items.quotation_item_id and
+  // purchase_order_items.quotation_item_id were added (above) with no ON
+  // DELETE action, so on a DB that enforces foreign keys (e.g. Turso),
+  // deleting a quotation_item — which PUT /quotations/:id does on every edit
+  // — throws a FK constraint error once that item has been flagged into a
+  // PR/PO. SQLite can't alter a column's FK action in place, so both tables
+  // are rebuilt with ON DELETE SET NULL instead. Guarded by inspecting the
+  // live table SQL so this only runs once.
+  try {
+    const { rows: [pri] } = await db.execute({ sql: "SELECT sql FROM sqlite_master WHERE type='table' AND name='purchase_request_items'", args: [] });
+    if (pri && !/quotation_item_id INTEGER REFERENCES quotation_items\(id\) ON DELETE SET NULL/.test(pri.sql)) {
+      const tx = await db.transaction('write');
+      try {
+        await tx.execute({ sql: `CREATE TABLE purchase_request_items_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          pr_id INTEGER NOT NULL REFERENCES purchase_requests(id) ON DELETE CASCADE,
+          product_id INTEGER REFERENCES products(id),
+          product_name TEXT NOT NULL,
+          sku TEXT,
+          quantity INTEGER NOT NULL DEFAULT 1,
+          unit_cost REAL DEFAULT 0,
+          notes TEXT,
+          total REAL DEFAULT 0,
+          item_type TEXT DEFAULT 'sale',
+          product_url TEXT,
+          quotation_item_id INTEGER REFERENCES quotation_items(id) ON DELETE SET NULL
+        )`, args: [] });
+        await tx.execute({ sql: `INSERT INTO purchase_request_items_new (id, pr_id, product_id, product_name, sku, quantity, unit_cost, notes, total, item_type, product_url, quotation_item_id)
+          SELECT id, pr_id, product_id, product_name, sku, quantity, unit_cost, notes, total, item_type, product_url, quotation_item_id FROM purchase_request_items`, args: [] });
+        await tx.execute({ sql: 'DROP TABLE purchase_request_items', args: [] });
+        await tx.execute({ sql: 'ALTER TABLE purchase_request_items_new RENAME TO purchase_request_items', args: [] });
+        await tx.commit();
+      } catch(e) { await tx.rollback(); throw e; }
+    }
+  } catch(e) {}
+
+  try {
+    const { rows: [poi] } = await db.execute({ sql: "SELECT sql FROM sqlite_master WHERE type='table' AND name='purchase_order_items'", args: [] });
+    if (poi && !/quotation_item_id INTEGER REFERENCES quotation_items\(id\) ON DELETE SET NULL/.test(poi.sql)) {
+      const tx = await db.transaction('write');
+      try {
+        await tx.execute({ sql: `CREATE TABLE purchase_order_items_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          po_id INTEGER NOT NULL REFERENCES purchase_orders(id),
+          product_id INTEGER REFERENCES products(id),
+          product_name TEXT NOT NULL,
+          sku TEXT,
+          quantity_ordered INTEGER NOT NULL DEFAULT 1,
+          quantity_received INTEGER DEFAULT 0,
+          unit_cost REAL NOT NULL,
+          total REAL NOT NULL,
+          quantity_damaged INTEGER DEFAULT 0,
+          damage_notes TEXT,
+          quotation_item_id INTEGER REFERENCES quotation_items(id) ON DELETE SET NULL
+        )`, args: [] });
+        await tx.execute({ sql: `INSERT INTO purchase_order_items_new (id, po_id, product_id, product_name, sku, quantity_ordered, quantity_received, unit_cost, total, quantity_damaged, damage_notes, quotation_item_id)
+          SELECT id, po_id, product_id, product_name, sku, quantity_ordered, quantity_received, unit_cost, total, quantity_damaged, damage_notes, quotation_item_id FROM purchase_order_items`, args: [] });
+        await tx.execute({ sql: 'DROP TABLE purchase_order_items', args: [] });
+        await tx.execute({ sql: 'ALTER TABLE purchase_order_items_new RENAME TO purchase_order_items', args: [] });
+        await tx.commit();
+      } catch(e) { await tx.rollback(); throw e; }
+    }
+  } catch(e) {}
 
   // Backfill source for WooCommerce-imported transactions
   try {

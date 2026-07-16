@@ -1880,8 +1880,8 @@ const App = {
               ${combined.map(entry => entry.type === 'order' ? (h => `
                 <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px;cursor:pointer;transition:background 0.15s" onmouseover="this.style.background='#f0f4ff'" onmouseout="this.style.background=''" onclick="App.loadHeldOrder(${h.id})">
                   <div style="display:flex;justify-content:space-between;align-items:center">
-                    <strong style="font-size:14px">${h.customer_name || 'Walk-in Customer'}</strong>
-                    <span style="font-size:12px;color:var(--text-muted);font-family:monospace">${h.transaction_number}</span>
+                    <strong style="font-size:14px">${h.customer_name || 'Walk-in Customer'}${h.source_quote_number ? ` <span class="badge-pill badge-info" style="font-size:10px;margin-left:4px">QUOTE</span>` : ''}</strong>
+                    <span style="font-size:12px;color:var(--text-muted);font-family:monospace">${h.source_quote_number || h.transaction_number}</span>
                   </div>
                   <div style="font-size:13px;color:var(--text-muted);margin-top:3px">
                     Total: <strong>${this.fmt(h.total)}</strong> &bull; ${new Date(h.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}
@@ -1929,6 +1929,11 @@ const App = {
       this._storeCreditApplied = 0;
       this.appliedPromoCode = null;
       this._returnCredit = null;
+      // A hold created by converting a quotation carries that link through
+      // (via the existing quotations.converted_to_tx join on GET /transactions/:id)
+      // — restoring it here is what makes checkout finalize the quote correctly,
+      // exactly like loadQuoteToCart does for its own "Load Quote" pull flow.
+      this._activeQuoteId = held.source_quote_id || null;
       if (held.customer_id) {
         const customer = await this.api('GET', `/customers/${held.customer_id}`);
         this.cartCustomer = customer;
@@ -1942,6 +1947,15 @@ const App = {
         if (this.section !== 'pos') return;
         document.getElementById('cart-customer-name').textContent = 'Walk-in Customer';
         document.getElementById('remove-customer-btn').style.display = 'none';
+      }
+      const aqBar = document.getElementById('active-quote-bar');
+      if (aqBar) {
+        if (held.source_quote_number) {
+          document.getElementById('active-quote-number').textContent = held.source_quote_number;
+          aqBar.style.display = 'flex';
+        } else {
+          aqBar.style.display = 'none';
+        }
       }
       await this.api('DELETE', `/transactions/${id}/hold`);
       this.closeModal();
@@ -7962,6 +7976,8 @@ const App = {
     const branches = this.currentUser.branches || [];
     this._quoteProducts = products;
     this._quoteItems = [];
+    this._quoteBranches = branches;
+    this._quoteStockCache = {};
     this._editingQuoteId = editId || null;
     const q = editId ? await this.api('GET', `/quotations/${editId}`) : null;
     this.showModal(`
@@ -7976,7 +7992,7 @@ const App = {
               </select>
             </div>
             <div class="form-group"><label>Branch</label>
-              <select id="qt-branch">
+              <select id="qt-branch" onchange="App.onQuoteBranchChange()">
                 <option value="">-- Select Branch --</option>
                 ${branches.map(b => `<option value="${b.id}" ${q&&q.branch_id===b.id?'selected':''}>${b.name}</option>`).join('')}
               </select>
@@ -8024,11 +8040,15 @@ const App = {
         <option value="">-- Select Product --</option>
         ${products.map(p => `<option value="${p.id}" data-price="${p.price}" ${prefill&&prefill.product_id===p.id?'selected':''}>${p.name} (${this.fmt(p.price)})</option>`).join('')}
       </select>
-      <input id="qti-qty-${idx}" type="number" min="1" value="${prefill?prefill.quantity:1}" style="width:70px" placeholder="Qty" oninput="App.calcQuoteTotal()">
+      <input id="qti-qty-${idx}" type="number" min="1" value="${prefill?prefill.quantity:1}" style="width:70px" placeholder="Qty" oninput="App.calcQuoteTotal();App.checkQuoteItemStock(${idx})">
       <input id="qti-price-${idx}" type="number" step="0.01" value="${prefill?prefill.unit_price:''}" style="width:90px" placeholder="Price" oninput="App.calcQuoteTotal()">
-      <button class="btn btn-sm btn-danger" onclick="document.getElementById('qt-item-${idx}').remove();App.calcQuoteTotal()">✕</button>`;
+      <button class="btn btn-sm btn-danger" onclick="document.getElementById('qt-item-${idx}').remove();const a=document.getElementById('qt-alloc-${idx}');if(a)a.remove();App.calcQuoteTotal()">✕</button>`;
     container.appendChild(div);
+    const allocDiv = document.createElement('div');
+    allocDiv.id = `qt-alloc-${idx}`;
+    container.appendChild(allocDiv);
     this.calcQuoteTotal();
+    if (prefill && prefill.product_id) this.checkQuoteItemStock(idx);
   },
 
   // Temporary line item: no product_id, just a free-text description and a
@@ -8059,6 +8079,112 @@ const App = {
     const opt = sel.options[sel.selectedIndex];
     document.getElementById(`qti-price-${idx}`).value = opt.dataset.price || '';
     this.calcQuoteTotal();
+    this.checkQuoteItemStock(idx);
+  },
+
+  // Cached per-branch stock lookup — reuses the same branch-scoped
+  // /products?branch_id= call the Transfers UI's onTransferFromChange makes,
+  // so no new endpoint is needed. Returns {productId: stock_qty}.
+  async getBranchStock(branchId) {
+    if (!branchId) return {};
+    this._quoteStockCache = this._quoteStockCache || {};
+    if (!this._quoteStockCache[branchId]) {
+      const all = await this.api('GET', `/products?branch_id=${branchId}`);
+      const map = {};
+      all.forEach(p => { map[p.id] = p.stock_qty; });
+      this._quoteStockCache[branchId] = map;
+    }
+    return this._quoteStockCache[branchId];
+  },
+
+  // Quote's branch changed — cached stock no longer applies, re-check every row.
+  async onQuoteBranchChange() {
+    this._quoteStockCache = {};
+    const rows = document.querySelectorAll('#qt-items > [id^="qt-item-"]');
+    for (const row of rows) {
+      const idx = row.id.split('-').pop();
+      if (document.getElementById(`qti-prod-${idx}`)) await this.checkQuoteItemStock(idx);
+    }
+  },
+
+  // Compares the requested qty against the quote branch's available stock for
+  // this row's product. If short, renders an allocator panel listing every
+  // other branch's available qty so the shortfall can be split across them,
+  // with any unallocated remainder auto-labeled for Purchasing.
+  async checkQuoteItemStock(idx) {
+    const prodSel = document.getElementById(`qti-prod-${idx}`);
+    const allocDiv = document.getElementById(`qt-alloc-${idx}`);
+    if (!prodSel || !allocDiv) return; // custom item row — no stock concept
+    const branchId = document.getElementById('qt-branch')?.value;
+    const productId = parseInt(prodSel.value);
+    const qty = parseInt(document.getElementById(`qti-qty-${idx}`)?.value) || 0;
+
+    // Rapid edits (pick a product, then immediately change qty) fire
+    // overlapping calls here; each does async network lookups, so they can
+    // resolve out of order. Stamp this call and bail before touching the DOM
+    // if a newer call has since started — otherwise a stale response can
+    // clobber a fresher one.
+    const myToken = (allocDiv.dataset.reqToken = String((parseInt(allocDiv.dataset.reqToken) || 0) + 1));
+    const stillCurrent = () => allocDiv.dataset.reqToken === myToken;
+
+    if (!branchId || !productId || !qty) { allocDiv.innerHTML = ''; return; }
+
+    const stockMap = await this.getBranchStock(branchId);
+    if (!stillCurrent()) return;
+    const available = stockMap[productId] || 0;
+    if (qty <= available) { allocDiv.innerHTML = ''; delete allocDiv.dataset.productId; delete allocDiv.dataset.branchId; return; }
+
+    const shortfall = qty - available;
+
+    // Already showing the allocator for this exact product/branch — the
+    // per-branch availability numbers don't change, only qty did, so just
+    // update the shortfall figures and keep the user's existing branch splits.
+    if (allocDiv.dataset.productId === String(productId) && allocDiv.dataset.branchId === String(branchId)) {
+      const shortfallEl = document.getElementById(`qt-alloc-${idx}-shortfall`);
+      if (shortfallEl) shortfallEl.textContent = shortfall;
+      this.recalcQuoteAllocation(idx);
+      return;
+    }
+
+    const otherBranches = (this._quoteBranches || []).filter(b => String(b.id) !== String(branchId));
+    await Promise.all(otherBranches.map(b => this.getBranchStock(b.id)));
+    if (!stillCurrent()) return;
+    const rowsHtml = otherBranches.map(b => {
+      const avail = (this._quoteStockCache[b.id] || {})[productId] || 0;
+      return `<div style="display:flex;align-items:center;gap:8px;font-size:12px;margin-top:4px">
+        <span style="flex:1">${b.name} <span style="color:var(--text-muted)">(avail: ${avail})</span></span>
+        <input type="number" min="0" max="${avail}" value="0" style="width:70px" id="qt-alloc-${idx}-b${b.id}" data-branch="${b.id}" data-max="${avail}" oninput="App.recalcQuoteAllocation(${idx})">
+      </div>`;
+    }).join('');
+    allocDiv.dataset.productId = productId;
+    allocDiv.dataset.branchId = branchId;
+    allocDiv.innerHTML = `
+      <div style="background:var(--bg-card);border:1px solid var(--warning,#f59e0b);border-radius:6px;padding:8px 10px;margin:2px 0 8px">
+        <div style="font-size:12px;color:var(--warning,#f59e0b);font-weight:600;margin-bottom:4px">⚠ Only ${available} available at this branch — source the remaining <span id="qt-alloc-${idx}-shortfall">${shortfall}</span> from elsewhere:</div>
+        ${rowsHtml}
+        <div style="font-size:12px;margin-top:6px;font-weight:600">To purchase (no stock available): <span id="qt-alloc-${idx}-remainder">${shortfall}</span></div>
+      </div>`;
+  },
+
+  recalcQuoteAllocation(idx) {
+    const branchId = document.getElementById('qt-branch')?.value;
+    const prodSel = document.getElementById(`qti-prod-${idx}`);
+    const productId = parseInt(prodSel?.value);
+    const qty = parseInt(document.getElementById(`qti-qty-${idx}`)?.value) || 0;
+    const stockMap = (this._quoteStockCache || {})[branchId] || {};
+    const available = stockMap[productId] || 0;
+    const shortfall = Math.max(0, qty - available);
+    let allocated = 0;
+    document.querySelectorAll(`[id^="qt-alloc-${idx}-b"]`).forEach(inp => {
+      let v = parseInt(inp.value) || 0;
+      const max = parseInt(inp.dataset.max) || 0;
+      if (v > max) v = max;
+      if (v < 0) v = 0;
+      inp.value = v;
+      allocated += v;
+    });
+    const remEl = document.getElementById(`qt-alloc-${idx}-remainder`);
+    if (remEl) remEl.textContent = Math.max(0, shortfall - allocated);
   },
 
   calcQuoteTotal() {
@@ -8088,7 +8214,29 @@ const App = {
       const prodSel = document.getElementById(`qti-prod-${idx}`);
       if (prodSel) {
         if (!prodSel.value) return;
-        items.push({ product_id: prodSel.value, quantity, unit_price });
+        const item = { product_id: prodSel.value, quantity, unit_price };
+        const allocInputs = document.querySelectorAll(`[id^="qt-alloc-${idx}-b"]`);
+        if (allocInputs.length && branch_id) {
+          // Rebuild the split deterministically so it always sums exactly to
+          // `quantity`, regardless of what's currently shown on screen: home
+          // branch first (up to its available stock), then each other
+          // branch's input (capped at what's actually left to cover), then
+          // whatever's still unassigned goes to Purchasing (branch_id: null).
+          const stockMap = (this._quoteStockCache || {})[branch_id] || {};
+          const available = stockMap[prodSel.value] || 0;
+          const homeQty = Math.min(quantity, available);
+          let remaining = quantity - homeQty;
+          const sources = [];
+          if (homeQty > 0) sources.push({ branch_id: parseInt(branch_id), quantity: homeQty });
+          allocInputs.forEach(inp => {
+            if (remaining <= 0) return;
+            const v = Math.min(parseInt(inp.value) || 0, remaining);
+            if (v > 0) { sources.push({ branch_id: parseInt(inp.dataset.branch), quantity: v }); remaining -= v; }
+          });
+          if (remaining > 0) sources.push({ branch_id: null, quantity: remaining });
+          item.sources = sources;
+        }
+        items.push(item);
         return;
       }
       const descInp = document.getElementById(`qti-desc-${idx}`);
@@ -8110,6 +8258,27 @@ const App = {
       this.closeModal();
       this.renderQuotations();
     } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // Per-item branch-sourcing breakdown for viewQuote — how much of the line
+  // came from the quote's own branch (no note needed), how much was
+  // transferred in from elsewhere (linked to the auto-created transfer), and
+  // how much had no stock anywhere and is on order (linked to the quote's PR).
+  renderQuoteItemSources(item, quote) {
+    if (!item.sources || !item.sources.length) return '';
+    const parts = item.sources.map(s => {
+      if (s.branch_id === quote.branch_id) return null; // already at the point of sale, nothing to call out
+      if (s.branch_id === null) {
+        return s.purchase_request_number
+          ? `${s.quantity} on order <a href="#" style="color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${s.purchase_request_id})">${s.purchase_request_number}</a>`
+          : `${s.quantity} on order (pending)`;
+      }
+      return s.transfer_number
+        ? `${s.quantity} from ${s.branch_name} <a href="#" style="color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewTransfer(${s.transfer_id})">${s.transfer_number}</a>`
+        : `${s.quantity} from ${s.branch_name} (pending)`;
+    }).filter(Boolean);
+    if (!parts.length) return '';
+    return `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">${parts.join(', ')}</div>`;
   },
 
   async viewQuote(id) {
@@ -8136,7 +8305,7 @@ const App = {
             <table>
               <thead><tr><th>Product</th><th>Qty</th><th>Price</th><th>Tax</th><th>Total</th></tr></thead>
               <tbody>
-                ${q.items.map(i => `<tr><td>${i.product_name}${i.is_temp_item ? ` <span class="badge-pill badge-warning" style="font-size:10px" title="Flagged for Purchasing to order">Q</span>${i.purchase_request_number ? ` <a href="#" style="font-size:11px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${i.purchase_request_id})">${i.purchase_request_number}</a>` : ''}` : ''}</td><td>${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td>${this.fmt(i.tax_amount)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}
+                ${q.items.map(i => `<tr><td>${i.product_name}${i.is_temp_item ? ` <span class="badge-pill badge-warning" style="font-size:10px" title="Flagged for Purchasing to order">Q</span>${i.purchase_request_number ? ` <a href="#" style="font-size:11px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${i.purchase_request_id})">${i.purchase_request_number}</a>` : ''}` : ''}${this.renderQuoteItemSources(i, q)}</td><td>${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td>${this.fmt(i.tax_amount)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}
               </tbody>
             </table>
           </div>
@@ -8178,31 +8347,21 @@ const App = {
       <div class="modal" style="max-width:440px">
         <div class="modal-header"><span class="modal-title">Convert to Invoice</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
-          <p style="font-size:13px;margin-bottom:14px">Converting quotation <strong>${q.quote_number}</strong> — Total: <strong>${this.fmt(q.total)}</strong></p>
-          <div class="form-group"><label>Payment Method</label>
-            <select id="conv-method">
-              <option value="cash">Cash</option>
-              <option value="credit_card">Credit Card</option>
-              <option value="check">Check</option>
-              <option value="credit">Charge Account (Credit)</option>
-            </select>
-          </div>
-          <div class="form-group"><label>Amount Tendered</label><input id="conv-tendered" type="number" step="0.01" value="${q.total}"></div>
+          <p style="font-size:13px">Converting quotation <strong>${q.quote_number}</strong> — Total: <strong>${this.fmt(q.total)}</strong></p>
+          <p style="font-size:13px;color:var(--text-muted);margin-top:8px">This creates an invoice and sends it to the POS as a held order — a cashier will pick it up from Recall Held Order to collect payment.</p>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-          <button class="btn btn-success" onclick="App.convertQuote(${id})">Convert &rarr; Invoice</button>
+          <button class="btn btn-success" onclick="App.convertQuote(${id})">Send to Cashier</button>
         </div>
       </div>`);
   },
 
   async convertQuote(id) {
-    const payment_method = document.getElementById('conv-method').value;
-    const amount_tendered = parseFloat(document.getElementById('conv-tendered').value) || 0;
     try {
-      const tx = await this.api('POST', `/quotations/${id}/convert`, { payment_method, amount_tendered });
+      const tx = await this.api('POST', `/quotations/${id}/convert`, {});
       this.closeModal();
-      this.alert(`Invoice created: ${tx.transaction_number}`);
+      this.alert(`Sent to cashier as held order ${tx.transaction_number} — ready for checkout at POS`);
       this.renderQuotations();
     } catch(e) { this.alert(e.message, 'error'); }
   },
