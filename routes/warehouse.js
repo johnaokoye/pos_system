@@ -181,6 +181,7 @@ router.post('/shipments', requireAnyPermission('shipping', 'transactions'), asyn
     const shipment_number = await nextNumber(db, 'shipments', 'shipment_number', 'SHP-', 6);
 
     const tx = await db.transaction('write');
+    let committed = false;
     try {
       const result = await tx.execute({ sql: 'INSERT INTO shipments (shipment_number,from_branch_id,customer_id,carrier,tracking_number,ship_date,estimated_delivery,notes) VALUES (?,?,?,?,?,?,?,?)', args: [shipment_number, from_branch_id || null, customer_id || null, carrier || null, tracking_number || null, ship_date || null, estimated_delivery || null, notes || null] });
       const shipId = Number(result.lastInsertRowid);
@@ -190,11 +191,15 @@ router.post('/shipments', requireAnyPermission('shipping', 'transactions'), asyn
         await tx.execute({ sql: 'INSERT INTO shipment_items (shipment_id,product_id,product_name,sku,quantity,bin_id) VALUES (?,?,?,?,?,?)', args: [shipId, prod.id, prod.name, prod.sku, parseInt(item.quantity) || 1, item.bin_id || null] });
       }
       await tx.commit();
+      committed = true;
       const { rows: [shipRow] } = await db.execute({ sql: 'SELECT * FROM shipments WHERE id = ?', args: [shipId] });
       res.status(201).json(shipRow);
     } catch(e) {
-      await tx.rollback();
-      res.status(400).json({ error: e.message });
+      // Once committed, the shipment is saved — rolling back a closed transaction
+      // throws and would crash the process (unhandled rejection), so only
+      // roll back if the commit itself never happened.
+      if (!committed) await tx.rollback();
+      res.status(committed ? 500 : 400).json({ error: e.message });
     }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -215,6 +220,7 @@ router.post('/shipments/from-order/:txId', requireAnyPermission('shipping', 'tra
     const shipment_number = await nextNumber(db, 'shipments', 'shipment_number', 'SHP-', 6);
 
     const tx = await db.transaction('write');
+    let committed = false;
     try {
       const result = await tx.execute({ sql: 'INSERT INTO shipments (shipment_number,from_branch_id,customer_id,transaction_id,carrier,tracking_number,ship_date,estimated_delivery,notes) VALUES (?,?,?,?,?,?,?,?,?)', args: [shipment_number, txn.branch_id || null, txn.customer_id || null, txn.id, carrier || null, tracking_number || null, ship_date || null, estimated_delivery || null, `Order ${txn.transaction_number}`] });
       const shipId = Number(result.lastInsertRowid);
@@ -223,11 +229,15 @@ router.post('/shipments/from-order/:txId', requireAnyPermission('shipping', 'tra
         await tx.execute({ sql: 'INSERT INTO shipment_items (shipment_id,product_id,product_name,sku,quantity) VALUES (?,?,?,?,?)', args: [shipId, item.product_id, item.product_name, item.sku, item.quantity] });
       }
       await tx.commit();
+      committed = true;
       const { rows: [shipRow] } = await db.execute({ sql: 'SELECT * FROM shipments WHERE id = ?', args: [shipId] });
       res.status(201).json(shipRow);
     } catch(e) {
-      await tx.rollback();
-      res.status(400).json({ error: e.message });
+      // Once committed, the shipment is saved — rolling back a closed transaction
+      // throws and would crash the process (unhandled rejection), so only
+      // roll back if the commit itself never happened.
+      if (!committed) await tx.rollback();
+      res.status(committed ? 500 : 400).json({ error: e.message });
     }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -367,6 +377,7 @@ router.post('/cycle-counts', requirePermission('cycle-counts'), async (req, res)
     const session_number = await nextNumber(db, 'cycle_count_sessions', 'session_number', 'CC-', 6);
 
     const tx = await db.transaction('write');
+    let committed = false;
     try {
       const result = await tx.execute({ sql: 'INSERT INTO cycle_count_sessions (session_number,branch_id,employee_id,scope_type,scope_id,notes) VALUES (?,?,?,?,?,?)', args: [session_number, branch_id || null, employee_id || null, scope_type, scope_id || null, notes || null] });
       const sessionId = Number(result.lastInsertRowid);
@@ -416,11 +427,15 @@ router.post('/cycle-counts', requirePermission('cycle-counts'), async (req, res)
       }
 
       await tx.commit();
+      committed = true;
       const { rows: [session] } = await db.execute({ sql: 'SELECT * FROM cycle_count_sessions WHERE id = ?', args: [sessionId] });
       res.status(201).json(session);
     } catch(e) {
-      await tx.rollback();
-      res.status(400).json({ error: e.message });
+      // Once committed, the session is saved — rolling back a closed transaction
+      // throws and would crash the process (unhandled rejection), so only
+      // roll back if the commit itself never happened.
+      if (!committed) await tx.rollback();
+      res.status(committed ? 500 : 400).json({ error: e.message });
     }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

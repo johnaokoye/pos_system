@@ -72,6 +72,7 @@ router.post('/', async (req, res) => {
     subtotal = parseFloat(subtotal.toFixed(2));
 
     const tx = await db.transaction('write');
+    let committed = false;
     try {
       const result = await tx.execute({ sql: 'INSERT INTO purchase_orders (po_number,supplier_id,branch_id,employee_id,subtotal,total,notes,expected_date) VALUES (?,?,?,?,?,?,?,?)', args: [po_number, supplier_id||null, branch_id||null, employee_id||null, subtotal, subtotal, notes||null, expected_date||null] });
       const poId = Number(result.lastInsertRowid);
@@ -79,14 +80,18 @@ router.post('/', async (req, res) => {
         await tx.execute({ sql: 'INSERT INTO purchase_order_items (po_id,product_id,product_name,sku,quantity_ordered,unit_cost,total) VALUES (?,?,?,?,?,?,?)', args: [poId, item.product_id, item.product_name, item.sku, item.quantity_ordered, item.unit_cost, item.total] });
       }
       await tx.commit();
+      committed = true;
 
       const { rows: [po] } = await db.execute({ sql: `SELECT po.*, s.name as supplier_name FROM purchase_orders po LEFT JOIN suppliers s ON po.supplier_id = s.id WHERE po.id = ?`, args: [poId] });
       const { rows: poItems } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ?', args: [poId] });
       po.items = poItems;
       res.status(201).json(po);
     } catch(e) {
-      await tx.rollback();
-      res.status(400).json({ error: e.message });
+      // Once committed, the PO is saved — rolling back a closed transaction
+      // throws and would crash the process (unhandled rejection), so only
+      // roll back if the commit itself never happened.
+      if (!committed) await tx.rollback();
+      res.status(committed ? 500 : 400).json({ error: e.message });
     }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -171,6 +176,7 @@ router.post('/:id/items/:itemId/link-product', async (req, res) => {
     const { product_id, sku, name, category_id, price, cost, tax_rate } = req.body;
 
     const tx = await db.transaction('write');
+    let committed = false;
     try {
       let productId;
       if (product_id) {
@@ -223,11 +229,15 @@ router.post('/:id/items/:itemId/link-product', async (req, res) => {
       }
 
       await tx.commit();
+      committed = true;
       const { rows: [updatedItem] } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE id = ?', args: [item.id] });
       res.json({ item: updatedItem, quotation_updated: quotationUpdated });
     } catch(e) {
-      await tx.rollback();
-      res.status(400).json({ error: e.message });
+      // Once committed, the link is saved — rolling back a closed transaction
+      // throws and would crash the process (unhandled rejection), so only
+      // roll back if the commit itself never happened.
+      if (!committed) await tx.rollback();
+      res.status(committed ? 500 : 400).json({ error: e.message });
     }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

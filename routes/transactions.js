@@ -27,6 +27,7 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
     const total = parseFloat((subtotal + tax_amount - disc).toFixed(2));
 
     const txn = await db.transaction('write');
+    let committed = false;
     try {
       const result = await txn.execute({
         sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,subtotal,tax_amount,discount_amount,total,payment_method,status,notes,amount_tendered,change_amount) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,0)`,
@@ -42,13 +43,17 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
         });
       }
       await txn.commit();
+      committed = true;
       const { rows: [savedTx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id WHERE t.id = ?`, args: [txId] });
       const { rows: savedItems } = await db.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [txId] });
       savedTx.items = savedItems;
       res.status(201).json(savedTx);
     } catch(e) {
-      await txn.rollback();
-      res.status(400).json({ error: e.message });
+      // Once committed, the hold is saved — rolling back a closed transaction
+      // throws and would crash the process (unhandled rejection), so only
+      // roll back if the commit itself never happened.
+      if (!committed) await txn.rollback();
+      res.status(committed ? 500 : 400).json({ error: e.message });
     }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -172,6 +177,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
     const change = isCredit ? 0 : parseFloat((tendered - total).toFixed(2));
 
     const tx = await db.transaction('write');
+    let committed = false;
     try {
       const txSource = req.apiKey ? 'online' : 'pos';
       const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,promotion_code,promotion_name,total,payment_method,amount_tendered,change_amount,is_credit,notes,source_return_id,store_credit_applied,tax_exempt,tax_exemption_number,approval_code,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id || null, employee_id || 1, branch_id || null, drawer_session_id || null, subtotal, tax_amount, disc, promotion_code || null, promotion_name || null, total, method, tendered, change > 0 ? change : 0, isCredit ? 1 : 0, notes || null, source_return_id || null, storeCredit > 0 ? storeCredit : 0, isTaxExempt, tax_exemption_number || null, approval_code || null, txSource] });
@@ -214,6 +220,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       }
 
       await tx.commit();
+      committed = true;
 
       const { rows: [savedTx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id LEFT JOIN branches b ON t.branch_id = b.id WHERE t.id = ?`, args: [txId] });
       const { rows: txItems } = await db.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [txId] });
@@ -222,8 +229,11 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       try { await calcCommission(savedTx.employee_id, savedTx.total, 'transaction', txId, savedTx.transaction_number); } catch(e) {}
       res.status(201).json(savedTx);
     } catch(e) {
-      await tx.rollback();
-      res.status(400).json({ error: e.message });
+      // Once committed, the sale is saved — rolling back a closed transaction
+      // throws and would crash the process (unhandled rejection), so only
+      // roll back if the commit itself never happened.
+      if (!committed) await tx.rollback();
+      res.status(committed ? 500 : 400).json({ error: e.message });
     }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -352,6 +362,7 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
     const return_number = await nextNumber(db, 'returns', 'return_number', 'RET-', 6);
 
     const retTx = await db.transaction('write');
+    let committed = false;
     try {
       const retResult = await retTx.execute({ sql: `INSERT INTO returns (return_number,original_transaction_id,customer_id,employee_id,branch_id,resolution,subtotal,tax_amount,total,notes) VALUES (?,?,?,?,?,?,?,?,?,?)`, args: [return_number, tx.id, tx.customer_id, employee_id || tx.employee_id, tx.branch_id, resolution, returnSubtotal, returnTax, returnTotal, notes || null] });
       const retId = Number(retResult.lastInsertRowid);
@@ -374,13 +385,17 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
       }
 
       await retTx.commit();
+      committed = true;
       const { rows: [ret] } = await db.execute({ sql: 'SELECT * FROM returns WHERE id = ?', args: [retId] });
       const { rows: retItems } = await db.execute({ sql: 'SELECT * FROM return_items WHERE return_id = ?', args: [retId] });
       ret.items = retItems;
       res.status(201).json(ret);
     } catch(e) {
-      await retTx.rollback();
-      res.status(400).json({ error: e.message });
+      // Once committed, the return is saved — rolling back a closed transaction
+      // throws and would crash the process (unhandled rejection), so only
+      // roll back if the commit itself never happened.
+      if (!committed) await retTx.rollback();
+      res.status(committed ? 500 : 400).json({ error: e.message });
     }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
