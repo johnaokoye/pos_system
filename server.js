@@ -9,6 +9,18 @@ const { router: woocommerceRouter, runSyncAll: wooSyncAll } = require('./routes/
 const { apiKeyAuth } = require('./lib/apiKeyAuth');
 const { sessionAuth } = require('./lib/sessionAuth');
 
+// Without these, any unhandled rejection (e.g. a bug in one request's async
+// code) crashes the entire Node process per Node's default behavior since
+// v15 — taking down every other in-flight request and, with no supervisor
+// restarting `npm start`, leaving the app looking "frozen" until someone
+// notices and manually restarts it. Log and keep serving instead.
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled promise rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err);
+});
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 

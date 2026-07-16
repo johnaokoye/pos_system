@@ -211,6 +211,7 @@ async function processQuoteTransfers(quote) {
 
     for (const [branchId, rows] of Object.entries(byBranch)) {
       const tx = await db.transaction('write');
+      let committed = false;
       try {
         const transfer_number = await nextNumber(tx, 'branch_transfers', 'transfer_number', 'TRF-', 6);
         const items = rows.map(r => ({ product_id: r.product_id, quantity: r.quantity }));
@@ -223,7 +224,12 @@ async function processQuoteTransfers(quote) {
           await tx.execute({ sql: 'UPDATE quotation_item_sources SET transfer_id = ? WHERE id = ?', args: [transferId, r.source_id] });
         }
         await tx.commit();
+        committed = true;
       } catch(e) {
+        // Only fall back to purchasing if the transfer itself never committed —
+        // rolling back an already-committed tx throws, and would otherwise
+        // wrongly reroute a successfully-transferred item into the PR bucket.
+        if (committed) throw e;
         await tx.rollback();
         // Source branch can no longer cover it — fall back to purchasing.
         for (const r of rows) {
@@ -254,6 +260,7 @@ router.post('/', async (req, res) => {
     const total = parseFloat((subtotal + tax_amount - disc).toFixed(2));
 
     const tx = await db.transaction('write');
+    let committed = false;
     try {
       const result = await tx.execute({ sql: 'INSERT INTO quotations (quote_number,customer_id,employee_id,branch_id,subtotal,tax_amount,discount_amount,total,notes,valid_until) VALUES (?,?,?,?,?,?,?,?,?,?)', args: [quote_number, customer_id||null, employee_id||null, branch_id||null, subtotal, tax_amount, disc, total, notes||null, valid_until||null] });
       const quoteId = Number(result.lastInsertRowid);
@@ -268,13 +275,17 @@ router.post('/', async (req, res) => {
         }
       }
       await tx.commit();
+      committed = true;
       const { rows: [quote] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id WHERE q.id = ?`, args: [quoteId] });
       const { rows: quoteItems } = await db.execute({ sql: QUOTE_ITEMS_SELECT, args: [quoteId] });
       quote.items = await attachQuoteItemSources(quoteItems);
       res.status(201).json(quote);
     } catch(e) {
-      await tx.rollback();
-      res.status(400).json({ error: e.message });
+      // Once committed, the quote is saved — rolling back a closed transaction
+      // throws and would crash the process (unhandled rejection), so only
+      // roll back if the commit itself never happened.
+      if (!committed) await tx.rollback();
+      res.status(committed ? 500 : 400).json({ error: e.message });
     }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -297,6 +308,7 @@ router.put('/:id', async (req, res) => {
     const total = parseFloat((subtotal + tax_amount - disc).toFixed(2));
 
     const tx = await db.transaction('write');
+    let committed = false;
     try {
       await tx.execute({ sql: 'UPDATE quotations SET customer_id=?, employee_id=?, branch_id=?, subtotal=?, tax_amount=?, discount_amount=?, total=?, notes=?, valid_until=? WHERE id=?', args: [customer_id||null, employee_id||quote.employee_id||null, branch_id||null, subtotal, tax_amount, disc, total, notes||null, valid_until||null, quote.id] });
       await tx.execute({ sql: 'DELETE FROM quotation_items WHERE quote_id = ?', args: [quote.id] });
@@ -311,6 +323,7 @@ router.put('/:id', async (req, res) => {
         }
       }
       await tx.commit();
+      committed = true;
       const { rows: [updated] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id WHERE q.id = ?`, args: [quote.id] });
       // Quote was already accepted before this edit — any newly-added Q items
       // and shortfall sources still need to reach Purchasing/Transfers, so
@@ -324,8 +337,11 @@ router.put('/:id', async (req, res) => {
       updated.items = await attachQuoteItemSources(quoteItems);
       res.json(updated);
     } catch(e) {
-      await tx.rollback();
-      res.status(400).json({ error: e.message });
+      // Once committed, the edit is saved — rolling back a closed transaction
+      // throws and would crash the process (unhandled rejection), so only
+      // roll back if the commit itself never happened.
+      if (!committed) await tx.rollback();
+      res.status(committed ? 500 : 400).json({ error: e.message });
     }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -371,6 +387,7 @@ router.post('/:id/convert', async (req, res) => {
     const hold_number = 'HOLD-' + Date.now();
 
     const convTx = await db.transaction('write');
+    let committed = false;
     try {
       const result = await convTx.execute({ sql: 'INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,subtotal,tax_amount,discount_amount,total,payment_method,status,amount_tendered,change_amount,notes) VALUES (?,?,?,?,?,?,?,?,?,?,0,0,?)', args: [hold_number, quote.customer_id, employee_id||quote.employee_id||1, branch_id||quote.branch_id||null, quote.subtotal, quote.tax_amount, quote.discount_amount, quote.total, 'hold', 'hold', `Converted from quotation ${quote.quote_number}`] });
       const txId = Number(result.lastInsertRowid);
@@ -381,6 +398,7 @@ router.post('/:id/convert', async (req, res) => {
 
       await convTx.execute({ sql: 'UPDATE quotations SET status = ?, converted_to_tx = ? WHERE id = ?', args: ['converted', txId, quote.id] });
       await convTx.commit();
+      committed = true;
 
       const { rows: [savedTx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id WHERE t.id = ?`, args: [txId] });
       const { rows: txItems } = await db.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [txId] });
@@ -391,8 +409,11 @@ router.post('/:id/convert', async (req, res) => {
       await processQuoteAcceptance(quote);
       res.status(201).json(savedTx);
     } catch(e) {
-      await convTx.rollback();
-      res.status(400).json({ error: e.message });
+      // Once committed, the hold is saved — rolling back a closed transaction
+      // throws and would crash the process (unhandled rejection), so only
+      // roll back if the commit itself never happened.
+      if (!committed) await convTx.rollback();
+      res.status(committed ? 500 : 400).json({ error: e.message });
     }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
