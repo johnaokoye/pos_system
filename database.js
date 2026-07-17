@@ -29,7 +29,25 @@ async function ensureReady() {
   return initPromise;
 }
 
+// Local-file SQLite only (not Turso remote, which manages this server-side
+// and doesn't support changing it per-connection). Without these, every
+// write briefly locks the whole file against readers on this app's single
+// shared connection, and any contention (e.g. a request landing mid-write,
+// or the WooCommerce auto-sync in server.js touching the DB concurrently)
+// throws SQLITE_BUSY immediately instead of waiting — this is what the
+// rollback-after-commit hardening earlier had to work around defensively;
+// this fixes the underlying contention instead. WAL also lets reads proceed
+// concurrently with a write, rather than blocking behind it.
+async function _tuneLocalSqlite() {
+  if (process.env.TURSO_DATABASE_URL) return;
+  try {
+    await db.execute({ sql: 'PRAGMA journal_mode=WAL', args: [] });
+    await db.execute({ sql: 'PRAGMA busy_timeout=5000', args: [] });
+  } catch(e) {}
+}
+
 async function _init() {
+  await _tuneLocalSqlite();
   // Create all tables
   await db.batch([
     { sql: `CREATE TABLE IF NOT EXISTS categories (
@@ -792,6 +810,32 @@ async function _init() {
     'ALTER TABLE rental_agreements ADD COLUMN cancelled_by INTEGER REFERENCES employees(id)',
     'ALTER TABLE rental_agreements ADD COLUMN cancelled_at DATETIME',
     'ALTER TABLE branch_transfers ADD COLUMN quote_id INTEGER REFERENCES quotations(id)',
+    // Rental quotes: quote_type distinguishes a rental quote from a retail
+    // one; due_date is the rental period end (distinct from valid_until,
+    // which is the quote's price-expiry date); converted_to_agreement_id
+    // mirrors converted_to_tx but points at the pending rental_agreements
+    // row created on convert (rentals never repoint this after convert,
+    // since the agreement's row id never changes across its lifecycle).
+    "ALTER TABLE quotations ADD COLUMN quote_type TEXT DEFAULT 'retail'",
+    'ALTER TABLE quotations ADD COLUMN due_date DATE',
+    'ALTER TABLE quotations ADD COLUMN converted_to_agreement_id INTEGER REFERENCES rental_agreements(id)',
+    // Rental-quote item structure — mirrors rental_agreement_items' grouping
+    // (parent_item_id links an accessory to its parent line) and condition
+    // tracking, without the rate-snapshot columns since real rates are
+    // always re-read fresh from products at both estimate and convert time.
+    'ALTER TABLE quotation_items ADD COLUMN parent_item_id INTEGER REFERENCES quotation_items(id)',
+    'ALTER TABLE quotation_items ADD COLUMN is_mandatory INTEGER DEFAULT 0',
+    'ALTER TABLE quotation_items ADD COLUMN condition_out TEXT',
+    // Deposits & Credit Notes tab: when a return leaves a refund due (the
+    // deposit exceeded actual fees+damage — see routes/rentals.js's return
+    // handler) and the rental wasn't billed to a credit account (those
+    // already settle automatically via account_balance), staff can issue
+    // that amount as a credit note instead of a cash/card refund. Recorded
+    // here rather than inferred, since it's a one-time deliberate action —
+    // not something to re-derive from the settlement transaction each time.
+    'ALTER TABLE rental_agreements ADD COLUMN credit_note_amount REAL DEFAULT 0',
+    'ALTER TABLE rental_agreements ADD COLUMN credit_note_issued_at DATETIME',
+    'ALTER TABLE rental_agreements ADD COLUMN credit_note_issued_by INTEGER REFERENCES employees(id)',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
@@ -1302,6 +1346,46 @@ async function _init() {
       await db.execute({ sql: "UPDATE employees SET security_group_id = ? WHERE username = 'bsmith' AND security_group_id IS NULL", args: [managerGroup.id] });
     }
   } catch(e) {}
+
+  // Indexes on the FK/filter columns routes actually query by — the schema
+  // above had none (SQLite only auto-indexes PRIMARY KEY/UNIQUE columns),
+  // so every WHERE/JOIN on these was a full table scan, getting linearly
+  // worse as each table grows. CREATE INDEX IF NOT EXISTS is idempotent on
+  // its own; wrapped in a try/catch purely for consistency/defensiveness
+  // across local SQLite vs Turso. Placed at the very end of _init(), after
+  // the purchase_order_items/purchase_request_items rebuild blocks above —
+  // those DROP and recreate those two tables, which would silently wipe out
+  // any index created on them earlier in this function.
+  const indexes = [
+    'CREATE INDEX IF NOT EXISTS idx_transactions_customer_id ON transactions(customer_id)',
+    'CREATE INDEX IF NOT EXISTS idx_transactions_branch_id ON transactions(branch_id)',
+    'CREATE INDEX IF NOT EXISTS idx_transactions_status ON transactions(status)',
+    'CREATE INDEX IF NOT EXISTS idx_transactions_created_at ON transactions(created_at)',
+    'CREATE INDEX IF NOT EXISTS idx_transaction_items_transaction_id ON transaction_items(transaction_id)',
+    'CREATE INDEX IF NOT EXISTS idx_transaction_items_product_id ON transaction_items(product_id)',
+    'CREATE INDEX IF NOT EXISTS idx_quotation_items_quote_id ON quotation_items(quote_id)',
+    'CREATE INDEX IF NOT EXISTS idx_quotation_item_sources_quotation_item_id ON quotation_item_sources(quotation_item_id)',
+    'CREATE INDEX IF NOT EXISTS idx_rental_agreements_customer_id ON rental_agreements(customer_id)',
+    'CREATE INDEX IF NOT EXISTS idx_rental_agreements_status ON rental_agreements(status)',
+    'CREATE INDEX IF NOT EXISTS idx_rental_agreement_items_agreement_id ON rental_agreement_items(agreement_id)',
+    'CREATE INDEX IF NOT EXISTS idx_rental_agreement_items_product_id ON rental_agreement_items(product_id)',
+    'CREATE INDEX IF NOT EXISTS idx_products_category_id ON products(category_id)',
+    'CREATE INDEX IF NOT EXISTS idx_purchase_order_items_po_id ON purchase_order_items(po_id)',
+    'CREATE INDEX IF NOT EXISTS idx_purchase_request_items_pr_id ON purchase_request_items(pr_id)',
+    'CREATE INDEX IF NOT EXISTS idx_account_payments_customer_id ON account_payments(customer_id)',
+    'CREATE INDEX IF NOT EXISTS idx_commission_records_employee_id ON commission_records(employee_id)',
+    'CREATE INDEX IF NOT EXISTS idx_returns_original_transaction_id ON returns(original_transaction_id)',
+    'CREATE INDEX IF NOT EXISTS idx_return_items_return_id ON return_items(return_id)',
+    'CREATE INDEX IF NOT EXISTS idx_employee_branches_employee_id ON employee_branches(employee_id)',
+    'CREATE INDEX IF NOT EXISTS idx_employee_branches_branch_id ON employee_branches(branch_id)',
+    'CREATE INDEX IF NOT EXISTS idx_product_variations_product_id ON product_variations(product_id)',
+    'CREATE INDEX IF NOT EXISTS idx_stock_movements_product_id ON stock_movements(product_id)',
+    'CREATE INDEX IF NOT EXISTS idx_crm_activities_lead_id ON crm_activities(lead_id)',
+    'CREATE INDEX IF NOT EXISTS idx_crm_opportunities_lead_id ON crm_opportunities(lead_id)',
+  ];
+  for (const sql of indexes) {
+    try { await db.execute({ sql, args: [] }); } catch(e) {}
+  }
 }
 
 module.exports = { db, ensureReady };

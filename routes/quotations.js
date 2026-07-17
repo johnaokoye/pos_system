@@ -4,15 +4,17 @@ const { db } = require('../database');
 const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { createTransfer } = require('../lib/transfers');
+const { feeFor, buildRentalLines, revalidateQuoteLines, insertPendingAgreement } = require('../lib/rentals');
 
 router.use(requirePermission('quotations'));
 
 router.get('/', async (req, res) => {
   try {
-    const { status, customer_id, quote_number, start, end, limit = 100 } = req.query;
-    let sql = `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name, t.transaction_number as converted_tx_number FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id WHERE 1=1`;
+    const { status, customer_id, quote_number, quote_type, start, end, limit = 100 } = req.query;
+    let sql = `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name, t.transaction_number as converted_tx_number, ra.agreement_number as converted_agreement_number, ra.status as converted_agreement_status FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id LEFT JOIN rental_agreements ra ON q.converted_to_agreement_id = ra.id WHERE 1=1`;
     const params = [];
     if (status) { sql += ' AND q.status = ?'; params.push(status); }
+    if (quote_type) { sql += ' AND q.quote_type = ?'; params.push(quote_type); }
     if (customer_id) { sql += ' AND q.customer_id = ?'; params.push(customer_id); }
     if (quote_number) { sql += ' AND q.quote_number LIKE ?'; params.push(`%${quote_number}%`); }
     if (start) { sql += ' AND date(q.created_at) >= ?'; params.push(start); }
@@ -55,7 +57,7 @@ async function attachQuoteItemSources(items) {
 
 router.get('/:id', async (req, res) => {
   try {
-    const { rows: [quote] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, c.phone as customer_phone, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name, t.transaction_number as converted_tx_number FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id WHERE q.id = ?`, args: [req.params.id] });
+    const { rows: [quote] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, c.phone as customer_phone, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name, t.transaction_number as converted_tx_number, ra.agreement_number as converted_agreement_number, ra.status as converted_agreement_status FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id LEFT JOIN rental_agreements ra ON q.converted_to_agreement_id = ra.id WHERE q.id = ?`, args: [req.params.id] });
     if (!quote) return res.status(404).json({ error: 'Not found' });
     const { rows: items } = await db.execute({ sql: QUOTE_ITEMS_SELECT, args: [req.params.id] });
     quote.items = await attachQuoteItemSources(items);
@@ -113,6 +115,52 @@ async function processQuoteItems(items) {
       qty, unit_price, lineTotal, lineTax, lineDisc,
     });
   }
+  return {
+    subtotal: parseFloat(subtotal.toFixed(2)),
+    tax_amount: parseFloat(tax_amount.toFixed(2)),
+    processedItems,
+  };
+}
+
+// Rental-quote counterpart to processQuoteItems above. `items` here are raw
+// picks ({product_id, quantity, condition_out, accessory_ids}), validated
+// and accessory-expanded by lib/rentals.js's buildRentalLines (shared with
+// the direct rental-hold flow in routes/rentals.js POST /agreements) — same
+// availability rules, same mandatory/optional accessory handling. No
+// `sources`/branch-split concept exists for rentals: a rental quote only
+// ever checks stock at its own single branch, same as a direct rental hold.
+//
+// The per-line total here is a NON-BINDING ESTIMATE only, computed via
+// feeFor() over [now, due_date] — the real charge is always recomputed
+// fresh at actual rental checkout finalize time (PATCH
+// /rentals/agreements/:id/checkout), from live product rates over the
+// actual [checkout-instant, due_date] window, exactly like a direct rental
+// hold already works. Because rental billing is nonlinear (month/week/day/
+// hour blocks), `unit_price` (the product's daily rate) deliberately does
+// NOT satisfy `unit_price * quantity === total` here, unlike every retail
+// quotation_items row — it's informational only.
+async function processRentalQuoteItems(items, branch_id, due_date) {
+  if (!branch_id) throw new Error('A branch/location is required for a rental quote');
+  if (!due_date) throw new Error('Due date is required for a rental quote');
+
+  const lines = await buildRentalLines(db, { branch_id, items });
+  const now = new Date();
+  const due = new Date(`${due_date}T23:59:59.000Z`);
+
+  let subtotal = 0, tax_amount = 0;
+  const processedItems = lines.map(line => {
+    const p = line.product;
+    const estFee = line.isMandatory ? 0 : feeFor(p, line.quantity, now, due);
+    const lineTax = parseFloat((estFee * (p.tax_rate || 0) / 100).toFixed(2));
+    subtotal += estFee;
+    tax_amount += lineTax;
+    return {
+      product_id: p.id, product_name: p.name, sku: p.sku,
+      quantity: line.quantity, unit_price: p.rental_rate || 0,
+      lineTotal: estFee, lineTax, is_mandatory: line.isMandatory ? 1 : 0,
+      condition_out: line.condition_out, parentIndex: line.parentIndex,
+    };
+  });
   return {
     subtotal: parseFloat(subtotal.toFixed(2)),
     tax_amount: parseFloat(tax_amount.toFixed(2)),
@@ -247,14 +295,17 @@ async function processQuoteAcceptance(quote) {
 
 router.post('/', async (req, res) => {
   try {
-    const { customer_id, employee_id, branch_id, items, discount_amount, notes, valid_until } = req.body;
+    const { customer_id, employee_id, branch_id, items, discount_amount, notes, valid_until, quote_type, due_date } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in quotation' });
+    const isRental = quote_type === 'rental';
 
     const quote_number = await nextNumber(db, 'quotations', 'quote_number', 'QT-', 6);
 
     let subtotal, tax_amount, processedItems;
     try {
-      ({ subtotal, tax_amount, processedItems } = await processQuoteItems(items));
+      ({ subtotal, tax_amount, processedItems } = isRental
+        ? await processRentalQuoteItems(items, branch_id, due_date)
+        : await processQuoteItems(items));
     } catch(e) { return res.status(400).json({ error: e.message }); }
     const disc = parseFloat(discount_amount || 0);
     const total = parseFloat((subtotal + tax_amount - disc).toFixed(2));
@@ -262,15 +313,32 @@ router.post('/', async (req, res) => {
     const tx = await db.transaction('write');
     let committed = false;
     try {
-      const result = await tx.execute({ sql: 'INSERT INTO quotations (quote_number,customer_id,employee_id,branch_id,subtotal,tax_amount,discount_amount,total,notes,valid_until) VALUES (?,?,?,?,?,?,?,?,?,?)', args: [quote_number, customer_id||null, employee_id||null, branch_id||null, subtotal, tax_amount, disc, total, notes||null, valid_until||null] });
+      const result = await tx.execute({ sql: 'INSERT INTO quotations (quote_number,customer_id,employee_id,branch_id,subtotal,tax_amount,discount_amount,total,notes,valid_until,quote_type,due_date) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', args: [quote_number, customer_id||null, employee_id||null, branch_id||null, subtotal, tax_amount, disc, total, notes||null, valid_until||null, isRental ? 'rental' : 'retail', isRental ? due_date : null] });
       const quoteId = Number(result.lastInsertRowid);
-      for (const item of processedItems) {
-        const { product_id, product_name, sku, is_temp_item, purchase_request_id, sources, qty, unit_price, lineTotal, lineTax, lineDisc } = item;
-        const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,is_temp_item,purchase_request_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)', args: [quoteId, product_id, product_name, sku, qty, unit_price, lineDisc, lineTax, lineTotal, is_temp_item, purchase_request_id] });
-        item.id = Number(itemResult.lastInsertRowid);
-        if (sources) {
-          for (const src of sources) {
-            await tx.execute({ sql: 'INSERT INTO quotation_item_sources (quotation_item_id, branch_id, quantity) VALUES (?,?,?)', args: [item.id, src.branch_id, src.quantity] });
+      if (isRental) {
+        // No sources/branch-split concept for rentals — a rental quote only
+        // ever checks stock at its own branch (see processRentalQuoteItems).
+        // parent_item_id needs real row ids, which only exist post-insert —
+        // set it in a second pass, same as lib/rentals.js's insertPendingAgreement.
+        for (const item of processedItems) {
+          const { product_id, product_name, sku, quantity, unit_price, lineTotal, lineTax, is_mandatory, condition_out } = item;
+          const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,is_temp_item,is_mandatory,condition_out) VALUES (?,?,?,?,?,?,0,?,?,0,?,?)', args: [quoteId, product_id, product_name, sku, quantity, unit_price, lineTax, lineTotal, is_mandatory, condition_out] });
+          item.id = Number(itemResult.lastInsertRowid);
+        }
+        for (const item of processedItems) {
+          if (item.parentIndex != null) {
+            await tx.execute({ sql: 'UPDATE quotation_items SET parent_item_id = ? WHERE id = ?', args: [processedItems[item.parentIndex].id, item.id] });
+          }
+        }
+      } else {
+        for (const item of processedItems) {
+          const { product_id, product_name, sku, is_temp_item, purchase_request_id, sources, qty, unit_price, lineTotal, lineTax, lineDisc } = item;
+          const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,is_temp_item,purchase_request_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)', args: [quoteId, product_id, product_name, sku, qty, unit_price, lineDisc, lineTax, lineTotal, is_temp_item, purchase_request_id] });
+          item.id = Number(itemResult.lastInsertRowid);
+          if (sources) {
+            for (const src of sources) {
+              await tx.execute({ sql: 'INSERT INTO quotation_item_sources (quotation_item_id, branch_id, quantity) VALUES (?,?,?)', args: [item.id, src.branch_id, src.quantity] });
+            }
           }
         }
       }
@@ -278,7 +346,7 @@ router.post('/', async (req, res) => {
       committed = true;
       const { rows: [quote] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id WHERE q.id = ?`, args: [quoteId] });
       const { rows: quoteItems } = await db.execute({ sql: QUOTE_ITEMS_SELECT, args: [quoteId] });
-      quote.items = await attachQuoteItemSources(quoteItems);
+      quote.items = isRental ? quoteItems : await attachQuoteItemSources(quoteItems);
       res.status(201).json(quote);
     } catch(e) {
       // Once committed, the quote is saved — rolling back a closed transaction
@@ -297,12 +365,15 @@ router.put('/:id', async (req, res) => {
     if (!quote) return res.status(404).json({ error: 'Not found' });
     if (quote.status === 'converted') return res.status(400).json({ error: 'Cannot edit a quotation already converted to an invoice' });
 
-    const { customer_id, employee_id, branch_id, items, discount_amount, notes, valid_until } = req.body;
+    const { customer_id, employee_id, branch_id, items, discount_amount, notes, valid_until, due_date } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in quotation' });
+    const isRental = quote.quote_type === 'rental'; // quote_type is fixed at creation — never taken from req.body here
 
     let subtotal, tax_amount, processedItems;
     try {
-      ({ subtotal, tax_amount, processedItems } = await processQuoteItems(items));
+      ({ subtotal, tax_amount, processedItems } = isRental
+        ? await processRentalQuoteItems(items, branch_id, due_date || quote.due_date)
+        : await processQuoteItems(items));
     } catch(e) { return res.status(400).json({ error: e.message }); }
     const disc = parseFloat(discount_amount || 0);
     const total = parseFloat((subtotal + tax_amount - disc).toFixed(2));
@@ -310,15 +381,28 @@ router.put('/:id', async (req, res) => {
     const tx = await db.transaction('write');
     let committed = false;
     try {
-      await tx.execute({ sql: 'UPDATE quotations SET customer_id=?, employee_id=?, branch_id=?, subtotal=?, tax_amount=?, discount_amount=?, total=?, notes=?, valid_until=? WHERE id=?', args: [customer_id||null, employee_id||quote.employee_id||null, branch_id||null, subtotal, tax_amount, disc, total, notes||null, valid_until||null, quote.id] });
+      await tx.execute({ sql: 'UPDATE quotations SET customer_id=?, employee_id=?, branch_id=?, subtotal=?, tax_amount=?, discount_amount=?, total=?, notes=?, valid_until=?, due_date=? WHERE id=?', args: [customer_id||null, employee_id||quote.employee_id||null, branch_id||null, subtotal, tax_amount, disc, total, notes||null, valid_until||null, isRental ? (due_date || quote.due_date) : null, quote.id] });
       await tx.execute({ sql: 'DELETE FROM quotation_items WHERE quote_id = ?', args: [quote.id] });
-      for (const item of processedItems) {
-        const { product_id, product_name, sku, is_temp_item, purchase_request_id, sources, qty, unit_price, lineTotal, lineTax, lineDisc } = item;
-        const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,is_temp_item,purchase_request_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)', args: [quote.id, product_id, product_name, sku, qty, unit_price, lineDisc, lineTax, lineTotal, is_temp_item, purchase_request_id] });
-        item.id = Number(itemResult.lastInsertRowid);
-        if (sources) {
-          for (const src of sources) {
-            await tx.execute({ sql: 'INSERT INTO quotation_item_sources (quotation_item_id, branch_id, quantity) VALUES (?,?,?)', args: [item.id, src.branch_id, src.quantity] });
+      if (isRental) {
+        for (const item of processedItems) {
+          const { product_id, product_name, sku, quantity, unit_price, lineTotal, lineTax, is_mandatory, condition_out } = item;
+          const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,is_temp_item,is_mandatory,condition_out) VALUES (?,?,?,?,?,?,0,?,?,0,?,?)', args: [quote.id, product_id, product_name, sku, quantity, unit_price, lineTax, lineTotal, is_mandatory, condition_out] });
+          item.id = Number(itemResult.lastInsertRowid);
+        }
+        for (const item of processedItems) {
+          if (item.parentIndex != null) {
+            await tx.execute({ sql: 'UPDATE quotation_items SET parent_item_id = ? WHERE id = ?', args: [processedItems[item.parentIndex].id, item.id] });
+          }
+        }
+      } else {
+        for (const item of processedItems) {
+          const { product_id, product_name, sku, is_temp_item, purchase_request_id, sources, qty, unit_price, lineTotal, lineTax, lineDisc } = item;
+          const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,is_temp_item,purchase_request_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)', args: [quote.id, product_id, product_name, sku, qty, unit_price, lineDisc, lineTax, lineTotal, is_temp_item, purchase_request_id] });
+          item.id = Number(itemResult.lastInsertRowid);
+          if (sources) {
+            for (const src of sources) {
+              await tx.execute({ sql: 'INSERT INTO quotation_item_sources (quotation_item_id, branch_id, quantity) VALUES (?,?,?)', args: [item.id, src.branch_id, src.quantity] });
+            }
           }
         }
       }
@@ -331,10 +415,11 @@ router.put('/:id', async (req, res) => {
       // cascade quotation_item_sources) are deleted and re-inserted on every
       // edit, sources that were already turned into a transfer/PR before this
       // edit lose that link and get reprocessed, which can create duplicates.
-      // Not fixed in v1; see plan notes.
-      if (quote.status === 'accepted') await processQuoteAcceptance(updated);
+      // Not fixed in v1; see plan notes. Rentals have no PR/transfer concept
+      // at all, so this reprocessing is retail-only.
+      if (quote.status === 'accepted' && !isRental) await processQuoteAcceptance(updated);
       const { rows: quoteItems } = await db.execute({ sql: QUOTE_ITEMS_SELECT, args: [quote.id] });
-      updated.items = await attachQuoteItemSources(quoteItems);
+      updated.items = isRental ? quoteItems : await attachQuoteItemSources(quoteItems);
       res.json(updated);
     } catch(e) {
       // Once committed, the edit is saved — rolling back a closed transaction
@@ -358,8 +443,9 @@ router.patch('/:id/status', async (req, res) => {
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM quotations WHERE id = ?', args: [req.params.id] });
     // Customer has accepted the quote (their PO is in hand) — this is the
     // point custom "Q" items actually get submitted to Purchasing, grouped
-    // into one PR for the whole quote rather than one per item.
-    if (status === 'accepted') await processQuoteAcceptance(row);
+    // into one PR for the whole quote rather than one per item. Rentals have
+    // no Q-item/branch-transfer concept, so this is retail-only.
+    if (status === 'accepted' && q.quote_type !== 'rental') await processQuoteAcceptance(row);
     res.json(row);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -381,8 +467,50 @@ router.post('/:id/convert', async (req, res) => {
     if (quote.status === 'declined') return res.status(400).json({ error: 'Cannot convert declined quotation' });
     if (quote.status === 'cancelled') return res.status(400).json({ error: 'Cannot convert cancelled quotation' });
 
-    const { rows: items } = await db.execute({ sql: 'SELECT * FROM quotation_items WHERE quote_id = ?', args: [quote.id] });
+    // ORDER BY id so parent lines precede their accessory children — required
+    // for revalidateQuoteLines' parent_item_id -> lines-index remap below.
+    const { rows: items } = await db.execute({ sql: 'SELECT * FROM quotation_items WHERE quote_id = ? ORDER BY id', args: [quote.id] });
     if (!items.length) return res.status(400).json({ error: 'No items in quotation' });
+
+    if (quote.quote_type === 'rental') {
+      const targetBranchId = branch_id || quote.branch_id;
+      if (!targetBranchId) return res.status(400).json({ error: 'A branch/location is required to convert this rental quote' });
+      if (!quote.due_date) return res.status(400).json({ error: 'This rental quote has no due date set' });
+      if (!quote.customer_id) return res.status(400).json({ error: 'A customer is required to convert this rental quote' });
+
+      // Stock may have shifted since the quote was drafted — re-check now.
+      // Unlike retail, rentals have no PR/purchase fallback for an
+      // uncoverable shortfall, so a stock conflict here is a hard failure.
+      let lines;
+      try {
+        lines = await revalidateQuoteLines(db, { branch_id: targetBranchId, quotationItems: items });
+      } catch(e) { return res.status(400).json({ error: e.message }); }
+
+      const agreement_number = await nextNumber(db, 'rental_agreements', 'agreement_number', 'RA-', 6);
+      const tx = await db.transaction('write');
+      let committed = false;
+      try {
+        const agreementId = await insertPendingAgreement(tx, {
+          agreement_number, customer_id: quote.customer_id, employee_id: employee_id || quote.employee_id || null,
+          branch_id: targetBranchId, due_date: quote.due_date,
+          notes: `Converted from quotation ${quote.quote_number}`, lines,
+        });
+        await tx.execute({ sql: 'UPDATE quotations SET status = ?, converted_to_agreement_id = ? WHERE id = ?', args: ['converted', agreementId, quote.id] });
+        await tx.commit();
+        committed = true;
+
+        const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [agreementId] });
+        const { rows: agItems } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [agreementId] });
+        agreement.items = agItems;
+        return res.status(201).json(agreement);
+      } catch(e) {
+        // Once committed, the pending agreement is saved — rolling back a
+        // closed transaction throws and would crash the process (unhandled
+        // rejection), so only roll back if the commit itself never happened.
+        if (!committed) await tx.rollback();
+        return res.status(committed ? 500 : 400).json({ error: e.message });
+      }
+    }
 
     const hold_number = 'HOLD-' + Date.now();
 

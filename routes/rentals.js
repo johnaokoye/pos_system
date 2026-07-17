@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { getOutstandingQty } = require('../lib/rentalAvailability');
-const { calculateRentalFee } = require('../lib/rentalPricing');
+const { getBranchStock, feeFor, buildRentalLines, insertPendingAgreement } = require('../lib/rentals');
 const { requirePermission, requireAnyPermission } = require('../lib/permissions');
 const { runCreditCheck } = require('./customers');
 const { nextNumber } = require('../lib/nextNumber');
@@ -14,12 +14,18 @@ router.get('/agreements', requirePermission('rentals'), async (req, res) => {
     const { customer_id, branch_id, view } = req.query;
     let sql = `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name,
       b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name,
+      q.quote_number as source_quote_number,
+      co.payment_method as checkout_payment_method,
+      se.total as settlement_total,
       (SELECT COUNT(*) FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_count,
       CASE WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' ELSE ra.status END as display_status
       FROM rental_agreements ra
       LEFT JOIN customers c ON ra.customer_id = c.id
       LEFT JOIN branches b ON ra.branch_id = b.id
       LEFT JOIN employees e ON ra.employee_id = e.id
+      LEFT JOIN quotations q ON q.converted_to_agreement_id = ra.id
+      LEFT JOIN transactions co ON ra.checkout_transaction_id = co.id
+      LEFT JOIN transactions se ON ra.settlement_transaction_id = se.id
       WHERE 1=1`;
     const params = [];
     if (customer_id) { sql += ' AND ra.customer_id = ?'; params.push(customer_id); }
@@ -40,6 +46,7 @@ router.get('/agreements/:id', requirePermission('rentals'), async (req, res) => 
       b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name,
       co.transaction_number as checkout_transaction_number, co.payment_method as checkout_payment_method,
       se.transaction_number as settlement_transaction_number,
+      q.id as source_quote_id, q.quote_number as source_quote_number, qe.first_name || ' ' || qe.last_name as quote_created_by,
       CASE WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' ELSE ra.status END as display_status
       FROM rental_agreements ra
       LEFT JOIN customers c ON ra.customer_id = c.id
@@ -47,6 +54,8 @@ router.get('/agreements/:id', requirePermission('rentals'), async (req, res) => 
       LEFT JOIN employees e ON ra.employee_id = e.id
       LEFT JOIN transactions co ON ra.checkout_transaction_id = co.id
       LEFT JOIN transactions se ON ra.settlement_transaction_id = se.id
+      LEFT JOIN quotations q ON q.converted_to_agreement_id = ra.id
+      LEFT JOIN employees qe ON q.employee_id = qe.id
       WHERE ra.id = ?`, args: [req.params.id] });
     if (!agreement) return res.status(404).json({ error: 'Not found' });
     const { rows: items } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
@@ -56,15 +65,6 @@ router.get('/agreements/:id', requirePermission('rentals'), async (req, res) => 
 });
 
 // ─── Availability ───────────────────────────────────────────────────────────
-
-// A rental item's "stock" is location-scoped once a branch is given — falls
-// back to the global products.stock_qty when no branch is specified (e.g. the
-// catalog-wide view), matching how branch_inventory works everywhere else.
-async function getBranchStock(executor, productId, branchId, globalStockQty) {
-  if (!branchId) return globalStockQty;
-  const { rows: [bi] } = await executor.execute({ sql: 'SELECT stock_qty FROM branch_inventory WHERE product_id = ? AND branch_id = ?', args: [productId, branchId] });
-  return bi ? bi.stock_qty : 0;
-}
 
 router.get('/availability', requirePermission('rentals'), async (req, res) => {
   try {
@@ -77,18 +77,6 @@ router.get('/availability', requirePermission('rentals'), async (req, res) => {
     res.json({ product_id: product.id, stock_qty: stockQty, outstanding_qty: outstanding, available_qty: Math.max(0, stockQty - outstanding) });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
-function feeFor(product, qty, startDateTime, endDateTime) {
-  const { fee } = calculateRentalFee({
-    classification: product.rental_classification || 'tool',
-    dailyRate: product.rental_rate,
-    weeklyRate: product.rental_weekly_rate,
-    monthlyRate: product.rental_monthly_rate,
-    hourlyRate: product.rental_hourly_rate,
-    startDateTime, endDateTime,
-  });
-  return parseFloat((fee * qty).toFixed(2));
-}
 
 // ─── Hold (configure a rental, no payment yet) ─────────────────────────────
 
@@ -106,34 +94,10 @@ router.post('/agreements', requirePermission('rentals_checkout'), async (req, re
     if (!due_date) return res.status(400).json({ error: 'Due date is required' });
     if (!items || !items.length) return res.status(400).json({ error: 'At least one rental item is required' });
 
-    const lines = []; // flat list of { product, quantity, isMandatory, parentIndex (or null) }
-    for (const item of items) {
-      const { rows: [product] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] });
-      if (!product) return res.status(400).json({ error: `Product ${item.product_id} not found` });
-      if (!product.is_rental) return res.status(400).json({ error: `"${product.name}" is not a rental item` });
-      const qty = parseInt(item.quantity) || 1;
-      const branchStock = await getBranchStock(db, product.id, branch_id, product.stock_qty);
-      const outstanding = await getOutstandingQty(db, product.id, branch_id);
-      const available = branchStock - outstanding;
-      if (qty > available) return res.status(400).json({ error: `Cannot check out ${qty} of "${product.name}" at this location — only ${available} available` });
-
-      const parentIndex = lines.length;
-      lines.push({ product, quantity: qty, isMandatory: false, parentIndex: null, condition_out: item.condition_out || null });
-
-      const { rows: accessories } = await db.execute({ sql: 'SELECT * FROM product_accessories WHERE product_id = ?', args: [item.product_id] });
-      const selectedOptionalIds = (item.accessory_ids || []).map(Number);
-      for (const acc of accessories) {
-        const isMandatory = !!acc.is_mandatory;
-        if (!isMandatory && !selectedOptionalIds.includes(acc.accessory_product_id)) continue;
-        const { rows: [accProduct] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [acc.accessory_product_id] });
-        if (!accProduct || !accProduct.is_rental) continue;
-        const accBranchStock = await getBranchStock(db, accProduct.id, branch_id, accProduct.stock_qty);
-        const accOutstanding = await getOutstandingQty(db, accProduct.id, branch_id);
-        const accAvailable = accBranchStock - accOutstanding;
-        if (qty > accAvailable) return res.status(400).json({ error: `Cannot include accessory "${accProduct.name}" — only ${accAvailable} available at this location` });
-        lines.push({ product: accProduct, quantity: qty, isMandatory, parentIndex, condition_out: null });
-      }
-    }
+    let lines;
+    try {
+      lines = await buildRentalLines(db, { branch_id, items });
+    } catch(e) { return res.status(400).json({ error: e.message }); }
 
     const agreement_number = await nextNumber(db, 'rental_agreements', 'agreement_number', 'RA-', 6);
 
@@ -143,28 +107,7 @@ router.post('/agreements', requirePermission('rentals_checkout'), async (req, re
       // checkout_date/checkout_datetime are left at their column defaults
       // (today/now) here — meaningless until finalized, and overwritten with
       // the real values at that point (see PATCH .../checkout below).
-      const agResult = await tx.execute({ sql: `INSERT INTO rental_agreements (agreement_number,customer_id,employee_id,branch_id,status,due_date,deposit_total,notes) VALUES (?,?,?,?,?,?,?,?)`, args: [agreement_number, customer_id, employee_id || null, branch_id || null, 'pending', due_date, 0, notes || null] });
-      const agreementId = Number(agResult.lastInsertRowid);
-
-      // Rates/classification/tax are snapshotted now (at item-selection time);
-      // rental_fee/deposit_amount are computed at finalize time instead, since
-      // they depend on the actual checkout instant, which isn't known yet.
-      for (const line of lines) {
-        const p = line.product;
-        await tx.execute({ sql: `INSERT INTO rental_agreement_items
-          (agreement_id,parent_item_id,product_id,product_name,sku,quantity,rate_type,rate_amount,rental_classification,daily_rate,weekly_rate,monthly_rate,hourly_rate,tax_rate,is_mandatory,rental_fee,deposit_amount,replacement_value,condition_out)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          args: [agreementId, null, p.id, p.name, p.sku, line.quantity, 'daily', p.rental_rate || 0, p.rental_classification || 'tool', p.rental_rate || 0, p.rental_weekly_rate || 0, p.rental_monthly_rate || 0, p.rental_hourly_rate || 0, p.tax_rate || 0, line.isMandatory ? 1 : 0, 0, 0, p.replacement_value || 0, line.condition_out] });
-      }
-      // parent_item_id needs the real row ids, which only exist after the
-      // insert above — set them in a second pass rather than threading
-      // lastInsertRowid through the accessory-grouping logic.
-      const { rows: insertedItems } = await tx.execute({ sql: 'SELECT id FROM rental_agreement_items WHERE agreement_id = ? ORDER BY id', args: [agreementId] });
-      for (let i = 0; i < lines.length; i++) {
-        if (lines[i].parentIndex != null) {
-          await tx.execute({ sql: 'UPDATE rental_agreement_items SET parent_item_id = ? WHERE id = ?', args: [insertedItems[lines[i].parentIndex].id, insertedItems[i].id] });
-        }
-      }
+      const agreementId = await insertPendingAgreement(tx, { agreement_number, customer_id, employee_id, branch_id, due_date, notes, lines });
 
       await tx.commit();
       committed = true;
@@ -325,6 +268,13 @@ router.patch('/agreements/:id/cancel', requirePermission('rentals_returns'), asy
           }
         }
       }
+      // A pending agreement created by converting a rental quote points
+      // quotations.converted_to_agreement_id back at it — if it's cancelled
+      // before ever being finalized, revert the quote to 'accepted' so it
+      // isn't left stranded in 'converted' with no way to re-convert it
+      // (mirrors DELETE /transactions/:id/hold's revert for a cancelled
+      // retail hold sourced from a quote).
+      await tx.execute({ sql: `UPDATE quotations SET status = 'accepted', converted_to_agreement_id = NULL WHERE converted_to_agreement_id = ?`, args: [req.params.id] });
       await tx.execute({ sql: "UPDATE rental_agreements SET status = 'cancelled', cancellation_reason = ?, cancelled_by = ?, cancelled_at = CURRENT_TIMESTAMP WHERE id = ?", args: [reason || null, employee_id || null, req.params.id] });
       await tx.commit();
       if (reversedCreditCustomerId) { try { await runCreditCheck(reversedCreditCustomerId); } catch(e) {} }
@@ -491,6 +441,63 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
     const { rows: updatedItems } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
     updated.items = updatedItems;
     res.json(updated);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Credit notes (Deposits & Credit Notes tab) ────────────────────────────
+
+// A return can leave a refund due (deposit exceeded actual fee + damage —
+// see the settlement math above) when the checkout wasn't billed to a
+// credit account. For a credit account, that refund already lands as an
+// account_balance reduction automatically (the `checkoutIsCredit` branch
+// above). For everyone else, the settlement transaction is recorded as a
+// 'refund' for the register to pay out in cash/card — this endpoint lets
+// staff instead issue that amount as store credit on the customer's
+// account, retroactively, without touching the settlement transaction
+// record itself (it stays as the audit trail of what was computed at
+// return time). Unlike a purchase (which increases account_balance, a
+// receivable), a credit note DECREASES it — allowed to go negative to
+// represent credit the store now owes the customer.
+router.post('/agreements/:id/credit-note', requirePermission('rentals_returns'), async (req, res) => {
+  try {
+    const { amount, employee_id } = req.body;
+    const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    if (!agreement) return res.status(404).json({ error: 'Not found' });
+    if (agreement.status !== 'returned') return res.status(400).json({ error: 'Credit notes can only be issued on a returned agreement' });
+    if (!agreement.customer_id) return res.status(400).json({ error: 'This agreement has no customer to credit' });
+    if (agreement.credit_note_amount > 0) return res.status(400).json({ error: `A credit note for ${agreement.credit_note_amount} has already been issued on this agreement` });
+
+    const { rows: [settlementTx] } = agreement.settlement_transaction_id
+      ? await db.execute({ sql: 'SELECT * FROM transactions WHERE id = ?', args: [agreement.settlement_transaction_id] })
+      : { rows: [null] };
+    if (!settlementTx || settlementTx.total >= 0) return res.status(400).json({ error: 'No refund is due on this agreement' });
+
+    const { rows: [checkoutTx] } = agreement.checkout_transaction_id
+      ? await db.execute({ sql: 'SELECT payment_method FROM transactions WHERE id = ?', args: [agreement.checkout_transaction_id] })
+      : { rows: [null] };
+    if (checkoutTx && checkoutTx.payment_method === 'credit') return res.status(400).json({ error: 'This rental was billed to a credit account — the refund already applied to account_balance automatically at return' });
+
+    const refundDue = parseFloat((-settlementTx.total).toFixed(2));
+    const amt = parseFloat(amount);
+    if (!amt || amt <= 0) return res.status(400).json({ error: 'Amount must be greater than 0' });
+    if (amt > refundDue + 0.01) return res.status(400).json({ error: `Amount cannot exceed the refund due (${refundDue})` });
+
+    const tx = await db.transaction('write');
+    let committed = false;
+    try {
+      await tx.execute({ sql: 'UPDATE customers SET account_balance = account_balance - ? WHERE id = ?', args: [amt, agreement.customer_id] });
+      await tx.execute({ sql: 'UPDATE rental_agreements SET credit_note_amount = ?, credit_note_issued_at = CURRENT_TIMESTAMP, credit_note_issued_by = ? WHERE id = ?', args: [amt, employee_id || null, agreement.id] });
+      await tx.commit();
+      committed = true;
+      const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [agreement.id] });
+      res.json(updated);
+    } catch(e) {
+      // Once committed, the credit note is saved — rolling back a closed
+      // transaction throws and would crash the process (unhandled
+      // rejection), so only roll back if the commit itself never happened.
+      if (!committed) await tx.rollback();
+      res.status(committed ? 500 : 400).json({ error: e.message });
+    }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
