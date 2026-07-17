@@ -138,6 +138,7 @@ router.post('/agreements', requirePermission('rentals_checkout'), async (req, re
     const agreement_number = await nextNumber(db, 'rental_agreements', 'agreement_number', 'RA-', 6);
 
     const tx = await db.transaction('write');
+    let committed = false;
     try {
       // checkout_date/checkout_datetime are left at their column defaults
       // (today/now) here — meaningless until finalized, and overwritten with
@@ -166,13 +167,17 @@ router.post('/agreements', requirePermission('rentals_checkout'), async (req, re
       }
 
       await tx.commit();
+      committed = true;
       const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [agreementId] });
       const { rows: agItems } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [agreementId] });
       agreement.items = agItems;
       res.status(201).json(agreement);
     } catch(e) {
-      await tx.rollback();
-      res.status(400).json({ error: e.message });
+      // Once committed, the agreement is saved — rolling back a closed transaction
+      // throws and would crash the process (unhandled rejection), so only
+      // roll back if the commit itself never happened.
+      if (!committed) await tx.rollback();
+      res.status(committed ? 500 : 400).json({ error: e.message });
     }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -242,6 +247,7 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
     const finalizeEmployeeId = employee_id || agreement.employee_id;
 
     const tx = await db.transaction('write');
+    let committed = false;
     try {
       const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, agreement.customer_id, finalizeEmployeeId || null, agreement.branch_id, drawer_session_id || null, rentalSubtotal + depositTotal, taxAmount, total, method, tendered, changeAmt, `Rental checkout ${agreement.agreement_number}`, 'pos'] });
       const checkoutTxId = Number(txResult.lastInsertRowid);
@@ -264,6 +270,7 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
 
       await tx.execute({ sql: `UPDATE rental_agreements SET checkout_transaction_id = ?, checkout_date = ?, checkout_datetime = ?, deposit_total = ?, status = 'active', employee_id = ? WHERE id = ?`, args: [checkoutTxId, today, checkoutDateTime.toISOString(), depositTotal, finalizeEmployeeId || null, req.params.id] });
       await tx.commit();
+      committed = true;
       if (isCredit) { try { await runCreditCheck(agreement.customer_id); } catch(e) {} }
 
       const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
@@ -271,8 +278,11 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
       updated.items = agItems;
       res.json(updated);
     } catch(e) {
-      await tx.rollback();
-      res.status(400).json({ error: e.message });
+      // Once committed, the checkout is saved — rolling back a closed transaction
+      // throws and would crash the process (unhandled rejection), so only
+      // roll back if the commit itself never happened.
+      if (!committed) await tx.rollback();
+      res.status(committed ? 500 : 400).json({ error: e.message });
     }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

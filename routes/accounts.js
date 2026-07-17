@@ -160,6 +160,7 @@ router.post('/payments', async (req, res) => {
     }
 
     const payTx = await db.transaction('write');
+    let committed = false;
     try {
       const result = await payTx.execute({ sql: 'INSERT INTO account_payments (payment_number,customer_id,employee_id,branch_id,amount,payment_method,notes) VALUES (?,?,?,?,?,?,?)', args: [payment_number, customer_id, employee_id||null, branch_id||null, amt, payment_method||'cash', notes||null] });
       const payId = Number(result.lastInsertRowid);
@@ -168,13 +169,17 @@ router.post('/payments', async (req, res) => {
       }
       await payTx.execute({ sql: 'UPDATE customers SET account_balance = MAX(0, account_balance - ?) WHERE id = ?', args: [amt, customer_id] });
       await payTx.commit();
+      committed = true;
 
       const { rows: [payRow] } = await db.execute({ sql: `SELECT p.*, c.first_name || ' ' || c.last_name as customer_name FROM account_payments p LEFT JOIN customers c ON p.customer_id = c.id WHERE p.id = ?`, args: [payId] });
-      await runCreditCheck(customer_id);
+      try { await runCreditCheck(customer_id); } catch(e) {}
       res.status(201).json(payRow);
     } catch(e) {
-      await payTx.rollback();
-      res.status(400).json({ error: e.message });
+      // Once committed, the payment is saved — rolling back a closed transaction
+      // throws and would crash the process (unhandled rejection), so only
+      // roll back if the commit itself never happened.
+      if (!committed) await payTx.rollback();
+      res.status(committed ? 500 : 400).json({ error: e.message });
     }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
