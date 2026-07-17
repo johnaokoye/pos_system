@@ -380,7 +380,11 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
         const loyaltyPts = Math.floor(returnTotal * 0.5);
         await retTx.execute({ sql: 'UPDATE customers SET loyalty_points = MAX(0, loyalty_points - ?), total_spent = MAX(0, total_spent - ?) WHERE id = ?', args: [loyaltyPts, returnTotal, tx.customer_id] });
         if (resolution === 'credit_note') {
-          await retTx.execute({ sql: 'UPDATE customers SET account_balance = account_balance + ? WHERE id = ?', args: [returnTotal, tx.customer_id] });
+          // account_balance is a receivable (what the customer owes — see
+          // the Accounts Receivable page). A credit note reduces that,
+          // going negative if there's nothing owed, to represent store
+          // credit the business now owes the customer — not increases it.
+          await retTx.execute({ sql: 'UPDATE customers SET account_balance = account_balance - ? WHERE id = ?', args: [returnTotal, tx.customer_id] });
         }
       }
 
