@@ -9,10 +9,12 @@ const { requireAuth, requirePermission } = require('../lib/permissions');
 router.get('/', requireAuth, async (req, res) => {
   try {
     const { rows: branches } = await db.execute({ sql: 'SELECT * FROM branches ORDER BY name', args: [] });
-    for (const b of branches) {
-      const { rows: [countRow] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM employee_branches WHERE branch_id = ?', args: [b.id] });
-      b.employee_count = Number(countRow.c);
-    }
+    // One GROUP BY instead of one COUNT(*) query per branch — this list is
+    // a lookup used across nearly every form (see comment above).
+    const { rows: counts } = await db.execute({ sql: 'SELECT branch_id, COUNT(*) as c FROM employee_branches GROUP BY branch_id', args: [] });
+    const countByBranch = {};
+    for (const row of counts) countByBranch[row.branch_id] = Number(row.c);
+    for (const b of branches) b.employee_count = countByBranch[b.id] || 0;
     res.json(branches);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

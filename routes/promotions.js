@@ -154,13 +154,23 @@ router.post('/auto-apply', requirePermission('pos'), async (req, res) => {
       args: [today, today]
     });
 
+    // One batched lookup for every scoped promo's items instead of one
+    // query per promo — this runs on the POS checkout/cart hot path.
+    const scopedPromoIds = promos.filter(p => ['specific', 'categories', 'items'].includes(p.applies_to)).map(p => p.id);
+    let itemsByPromo = {};
+    if (scopedPromoIds.length) {
+      const placeholders = scopedPromoIds.map(() => '?').join(',');
+      const { rows: allItems } = await db.execute({ sql: `SELECT * FROM promotion_items WHERE promotion_id IN (${placeholders})`, args: scopedPromoIds });
+      for (const item of allItems) { (itemsByPromo[item.promotion_id] = itemsByPromo[item.promotion_id] || []).push(item); }
+    }
+
     const results = [];
 
     for (const promo of promos) {
       if (promo.min_purchase > 0 && subtotal < promo.min_purchase) continue;
       let eligibleAmount = subtotal;
       if (['specific', 'categories', 'items'].includes(promo.applies_to)) {
-        const { rows: items } = await db.execute({ sql: 'SELECT * FROM promotion_items WHERE promotion_id = ?', args: [promo.id] });
+        const items = itemsByPromo[promo.id] || [];
         const productIds = new Set(promo.applies_to !== 'categories' ? items.filter(i => i.item_type === 'product').map(i => i.item_id) : []);
         const categoryIds = new Set(promo.applies_to !== 'items' ? items.filter(i => i.item_type === 'category').map(i => i.item_id) : []);
         eligibleAmount = cart_items.reduce((sum, ci) => {

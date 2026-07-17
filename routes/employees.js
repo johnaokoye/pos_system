@@ -25,9 +25,18 @@ router.get('/', requireAuth, async (req, res) => {
       LEFT JOIN security_groups sg ON e.security_group_id = sg.id
       LEFT JOIN branches b ON e.default_branch_id = b.id
       ORDER BY e.first_name`, args: [] });
-    for (const emp of employees) {
-      const { rows: branches } = await db.execute({ sql: `SELECT b.id, b.branch_code, b.name, eb.is_default FROM branches b JOIN employee_branches eb ON b.id = eb.branch_id WHERE eb.employee_id = ?`, args: [emp.id] });
-      emp.branches = branches;
+    // One batched query for every employee's branches instead of one query
+    // per employee — this list is a lookup used across ~13 unrelated
+    // features (see comment above), so it's hit constantly.
+    if (employees.length) {
+      const placeholders = employees.map(() => '?').join(',');
+      const { rows: allBranches } = await db.execute({
+        sql: `SELECT eb.employee_id, b.id, b.branch_code, b.name, eb.is_default FROM branches b JOIN employee_branches eb ON b.id = eb.branch_id WHERE eb.employee_id IN (${placeholders})`,
+        args: employees.map(e => e.id),
+      });
+      const byEmployee = {};
+      for (const row of allBranches) { (byEmployee[row.employee_id] = byEmployee[row.employee_id] || []).push(row); }
+      for (const emp of employees) emp.branches = byEmployee[emp.id] || [];
     }
     res.json(employees);
   } catch(e) { res.status(500).json({ error: e.message }); }

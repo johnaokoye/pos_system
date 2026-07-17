@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
+const compression = require('compression');
 const path = require('path');
 
 const { ensureReady, db } = require('./database');
@@ -30,6 +31,11 @@ const PORT = process.env.PORT || 3001;
 app.set('trust proxy', true);
 
 app.use(cors());
+// Gzips every response this app sends — API JSON, the ~750KB single-file
+// SPA (public/index.html), and static assets — before anything else so it
+// covers the whole pipeline. Cheap CPU cost, large win on the wire for the
+// SPA payload and any sizeable API response (e.g. product/transaction lists).
+app.use(compression());
 app.use(bodyParser.json());
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));

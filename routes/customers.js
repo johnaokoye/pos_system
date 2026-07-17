@@ -25,13 +25,42 @@ async function runCreditCheck(customerId) {
   } catch(e) {}
 }
 
+// Same logic as runCreditCheck above, but for a whole batch of customers in
+// a bounded number of queries (1 SELECT + up to 2 UPDATEs) instead of one
+// runCreditCheck() call per customer — GET / below runs this on every
+// request (it's used broadly: POS customer picker, CRM, accounts, not just
+// the Customers screen), so a per-customer loop here would get slower with
+// every credit customer added. Only ever called with ids that already
+// passed the `account_balance > 0` filter, so (unlike runCreditCheck) there's
+// no "already at zero balance, unblock" branch to replicate.
+async function runCreditCheckBatch(customerIds) {
+  if (!customerIds.length) return;
+  try {
+    const placeholders = customerIds.map(() => '?').join(',');
+    const { rows } = await db.execute({
+      sql: `SELECT c.id, c.credit_terms_days,
+              (SELECT MIN(created_at) FROM transactions WHERE customer_id = c.id AND payment_method = 'credit' AND status = 'completed') as oldest_date
+            FROM customers c WHERE c.id IN (${placeholders})`,
+      args: customerIds,
+    });
+    const exceededIds = [], okIds = [];
+    for (const r of rows) {
+      if (!r.oldest_date) continue;
+      const daysSince = Math.floor((Date.now() - new Date(r.oldest_date).getTime()) / 86400000);
+      (daysSince > (r.credit_terms_days || 30) ? exceededIds : okIds).push(r.id);
+    }
+    if (exceededIds.length) await db.execute({ sql: `UPDATE customers SET account_blocked = 1 WHERE id IN (${exceededIds.map(() => '?').join(',')})`, args: exceededIds });
+    if (okIds.length) await db.execute({ sql: `UPDATE customers SET account_blocked = 0 WHERE id IN (${okIds.map(() => '?').join(',')})`, args: okIds });
+  } catch(e) {}
+}
+
 // requireAuth only — used broadly (POS customer picker, CRM, accounts),
 // not just the Customers management screen itself.
 router.get('/', requireAuth, async (req, res) => {
   try {
     // Auto-block any overdue credit customers before returning list
     const { rows: overdue } = await db.execute({ sql: "SELECT id FROM customers WHERE customer_type = 'credit' AND active = 1 AND account_balance > 0", args: [] });
-    for (const c of overdue) await runCreditCheck(c.id);
+    await runCreditCheckBatch(overdue.map(c => c.id));
 
     const { search, active } = req.query;
     let sql = 'SELECT * FROM customers WHERE 1=1';
