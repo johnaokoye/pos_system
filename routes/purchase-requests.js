@@ -94,6 +94,7 @@ router.post('/', async (req, res) => {
     const processedItems = await processPRItems(items, request_type);
 
     const tx = await db.transaction('write');
+    let committed = false;
     try {
       const result = await tx.execute({
         sql: 'INSERT INTO purchase_requests (pr_number, branch_id, employee_id, department, notes, required_date, request_type, supplier_id, currency, is_online_purchase, tax_rate, tax_amount) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
@@ -109,13 +110,17 @@ router.post('/', async (req, res) => {
         });
       }
       await tx.commit();
+      committed = true;
       const { rows: [pr] } = await db.execute({ sql: PR_SELECT + ' WHERE pr.id = ?', args: [prId] });
       const { rows: prItems } = await db.execute({ sql: 'SELECT * FROM purchase_request_items WHERE pr_id = ?', args: [prId] });
       pr.items = prItems;
       res.status(201).json(pr);
     } catch(e) {
-      await tx.rollback();
-      res.status(400).json({ error: e.message });
+      // Once committed, the PR is saved — rolling back a closed transaction
+      // throws and would crash the process (unhandled rejection), so only
+      // roll back if the commit itself never happened.
+      if (!committed) await tx.rollback();
+      res.status(committed ? 500 : 400).json({ error: e.message });
     }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -138,6 +143,7 @@ router.put('/:id', async (req, res) => {
     const processedItems = await processPRItems(items, request_type);
 
     const tx = await db.transaction('write');
+    let committed = false;
     try {
       await tx.execute({
         sql: 'UPDATE purchase_requests SET branch_id=?, employee_id=?, department=?, notes=?, required_date=?, request_type=?, supplier_id=?, currency=?, is_online_purchase=?, tax_rate=?, tax_amount=? WHERE id=?',
@@ -153,13 +159,17 @@ router.put('/:id', async (req, res) => {
         });
       }
       await tx.commit();
+      committed = true;
       const { rows: [updated] } = await db.execute({ sql: PR_SELECT + ' WHERE pr.id = ?', args: [pr.id] });
       const { rows: prItems } = await db.execute({ sql: 'SELECT * FROM purchase_request_items WHERE pr_id = ?', args: [pr.id] });
       updated.items = prItems;
       res.json(updated);
     } catch(e) {
-      await tx.rollback();
-      res.status(400).json({ error: e.message });
+      // Once committed, the edit is saved — rolling back a closed transaction
+      // throws and would crash the process (unhandled rejection), so only
+      // roll back if the commit itself never happened.
+      if (!committed) await tx.rollback();
+      res.status(committed ? 500 : 400).json({ error: e.message });
     }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -205,6 +215,7 @@ router.post('/:id/convert', async (req, res) => {
     if (!prItems.length) return res.status(400).json({ error: 'PR has no items' });
 
     const tx = await db.transaction('write');
+    let committed = false;
     try {
       const po_number = await nextNumber(tx, 'purchase_orders', 'po_number', 'PO-', 6);
       let subtotal = 0;
@@ -228,14 +239,18 @@ router.post('/:id/convert', async (req, res) => {
 
       await tx.execute({ sql: 'UPDATE purchase_requests SET status = ?, converted_to_po_id = ? WHERE id = ?', args: ['converted', poId, pr.id] });
       await tx.commit();
+      committed = true;
 
       const { rows: [po] } = await db.execute({ sql: `SELECT po.*, s.name as supplier_name FROM purchase_orders po LEFT JOIN suppliers s ON po.supplier_id = s.id WHERE po.id = ?`, args: [poId] });
       const { rows: poItemsResult } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ?', args: [poId] });
       po.items = poItemsResult;
       res.status(201).json(po);
     } catch(e) {
-      await tx.rollback();
-      res.status(400).json({ error: e.message });
+      // Once committed, the PO is saved — rolling back a closed transaction
+      // throws and would crash the process (unhandled rejection), so only
+      // roll back if the commit itself never happened.
+      if (!committed) await tx.rollback();
+      res.status(committed ? 500 : 400).json({ error: e.message });
     }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

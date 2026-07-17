@@ -96,17 +96,22 @@ router.post('/leads/:id/convert', async (req, res) => {
     if (lead.customer_id) return res.status(400).json({ error: 'Already converted to customer' });
 
     const convTx = await db.transaction('write');
+    let committed = false;
     try {
       const customer_number = await nextNumber(convTx, 'customers', 'customer_number', 'CUST-', 4);
       const result = await convTx.execute({ sql: `INSERT INTO customers (customer_number,first_name,last_name,email,phone,notes) VALUES (?,?,?,?,?,?)`, args: [customer_number, lead.first_name, lead.last_name, lead.email, lead.phone, lead.notes] });
       const custId = Number(result.lastInsertRowid);
       await convTx.execute({ sql: "UPDATE crm_leads SET customer_id=?,status='won',updated_at=datetime('now') WHERE id=?", args: [custId, lead.id] });
       await convTx.commit();
+      committed = true;
       const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [custId] });
       res.json({ customer, message: 'Lead converted to customer' });
     } catch(e) {
-      await convTx.rollback();
-      res.status(400).json({ error: e.message });
+      // Once committed, the customer is saved — rolling back a closed transaction
+      // throws and would crash the process (unhandled rejection), so only
+      // roll back if the commit itself never happened.
+      if (!committed) await convTx.rollback();
+      res.status(committed ? 500 : 400).json({ error: e.message });
     }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
