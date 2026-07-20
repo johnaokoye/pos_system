@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ quiet: true });
 const { createClient } = require('@libsql/client');
 
 const local = createClient({ url: 'file:pos.db' });

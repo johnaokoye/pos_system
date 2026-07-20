@@ -15,7 +15,7 @@
 //
 // Does not touch any existing local pos.db or any running deployment —
 // it only ever writes to the output path given (or the default above).
-require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
+require('dotenv').config({ path: require('path').join(__dirname, '..', '.env'), quiet: true });
 const path = require('path');
 const { createClient } = require('@libsql/client');
 
