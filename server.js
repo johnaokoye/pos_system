@@ -81,6 +81,7 @@ app.use('/api/denominations',   require('./routes/denominations'));
 app.use('/api/woocommerce',    woocommerceRouter);
 app.use('/api/api-keys',       require('./routes/api-keys'));
 app.use('/api/rentals',        require('./routes/rentals'));
+app.use('/api/layaway',        require('./routes/layaway'));
 
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));

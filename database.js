@@ -495,6 +495,56 @@ async function _init() {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(product_id, accessory_product_id)
     )` },
+    { sql: `CREATE TABLE IF NOT EXISTS layaway_plans (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      plan_number TEXT UNIQUE NOT NULL,
+      customer_id INTEGER NOT NULL REFERENCES customers(id),
+      employee_id INTEGER REFERENCES employees(id),
+      branch_id INTEGER REFERENCES branches(id),
+      status TEXT NOT NULL DEFAULT 'active',
+      subtotal REAL NOT NULL DEFAULT 0,
+      tax_amount REAL NOT NULL DEFAULT 0,
+      total REAL NOT NULL DEFAULT 0,
+      deposit_required REAL NOT NULL DEFAULT 0,
+      deposit_percent REAL NOT NULL DEFAULT 0,
+      amount_paid REAL NOT NULL DEFAULT 0,
+      payment_frequency TEXT NOT NULL DEFAULT 'monthly',
+      next_due_date DATE,
+      deposit_transaction_id INTEGER REFERENCES transactions(id),
+      completion_transaction_id INTEGER REFERENCES transactions(id),
+      cancellation_reason TEXT,
+      cancelled_by INTEGER REFERENCES employees(id),
+      cancelled_at DATETIME,
+      forfeited_amount REAL NOT NULL DEFAULT 0,
+      refunded_amount REAL NOT NULL DEFAULT 0,
+      notes TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      completed_at DATETIME
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS layaway_plan_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      plan_id INTEGER NOT NULL REFERENCES layaway_plans(id),
+      product_id INTEGER REFERENCES products(id),
+      product_name TEXT NOT NULL,
+      sku TEXT,
+      quantity INTEGER NOT NULL DEFAULT 1,
+      unit_price REAL NOT NULL DEFAULT 0,
+      tax_rate REAL NOT NULL DEFAULT 0,
+      line_total REAL NOT NULL DEFAULT 0
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS layaway_payments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      plan_id INTEGER NOT NULL REFERENCES layaway_plans(id),
+      payment_number TEXT UNIQUE NOT NULL,
+      employee_id INTEGER REFERENCES employees(id),
+      branch_id INTEGER REFERENCES branches(id),
+      amount REAL NOT NULL,
+      payment_method TEXT NOT NULL DEFAULT 'cash',
+      transaction_id INTEGER REFERENCES transactions(id),
+      is_deposit INTEGER NOT NULL DEFAULT 0,
+      notes TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS cycle_count_sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_number TEXT UNIQUE NOT NULL,
@@ -836,6 +886,7 @@ async function _init() {
     'ALTER TABLE rental_agreements ADD COLUMN credit_note_amount REAL DEFAULT 0',
     'ALTER TABLE rental_agreements ADD COLUMN credit_note_issued_at DATETIME',
     'ALTER TABLE rental_agreements ADD COLUMN credit_note_issued_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE products ADD COLUMN is_layaway_eligible INTEGER DEFAULT 0',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
@@ -1040,6 +1091,25 @@ async function _init() {
     }
   } catch(e) {}
 
+  // Add layaway permission to existing security groups — the module flag
+  // (view-only) defaults on for everyone like rentals above, but the
+  // create/payments/cancel sub-permissions do NOT default on for most users:
+  // per the store's policy, only Administrator/Manager get them out of the
+  // box, everyone else needs an explicit grant via Security Groups.
+  try {
+    const { rows: groups } = await db.execute({ sql: 'SELECT id, name, permissions FROM security_groups', args: [] });
+    for (const g of groups) {
+      const perms = JSON.parse(g.permissions || '{}');
+      let changed = false;
+      const isAdminOrManager = g.name === 'Administrator' || g.name === 'Manager';
+      if (!('layaway' in perms)) { perms.layaway = true; changed = true; }
+      if (!('layaway_create' in perms)) { perms.layaway_create = isAdminOrManager; changed = true; }
+      if (!('layaway_payments' in perms)) { perms.layaway_payments = isAdminOrManager; changed = true; }
+      if (!('layaway_cancel' in perms)) { perms.layaway_cancel = isAdminOrManager; changed = true; }
+      if (changed) await db.execute({ sql: 'UPDATE security_groups SET permissions = ? WHERE id = ?', args: [JSON.stringify(perms), g.id] });
+    }
+  } catch(e) {}
+
   // Ensure admin always has a password — runs unconditionally on every boot
   {
     const { rows: [adminEmp] } = await db.execute({ sql: 'SELECT id, password FROM employees WHERE username = ?', args: ['admin'] });
@@ -1073,9 +1143,9 @@ async function _init() {
   // Seed security groups
   const { rows: [sgCount] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM security_groups', args: [] });
   if (Number(sgCount.c) === 0) {
-    await db.execute({ sql: 'INSERT INTO security_groups (name, description, permissions) VALUES (?,?,?)', args: ['Administrator','Full system access',JSON.stringify({dashboard:true,pos:true,inventory:true,customers:true,transactions:true,reports:true,employees:true,settings:true,purchasing:true,branches:true,security:true,accounts:true,quotations:true,suppliers:true,transfers:true,crm:true,commissions:true,multi_branch_access:true,warehouse:true,shipping:true,'cycle-counts':true,drawers:true,void_transactions:true,promotions:true,process_returns:true,purchase_requests:true,services:true,rentals:true})] });
-    await db.execute({ sql: 'INSERT INTO security_groups (name, description, permissions) VALUES (?,?,?)', args: ['Cashier','POS and basic operations',JSON.stringify({dashboard:true,pos:true,inventory:false,customers:true,transactions:true,reports:false,employees:false,settings:false,purchasing:false,branches:false,security:false,accounts:false,quotations:true,suppliers:false,transfers:false,crm:false,commissions:false,multi_branch_access:false,warehouse:false,shipping:false,'cycle-counts':false,drawers:false,void_transactions:false,promotions:false,process_returns:false,purchase_requests:false,services:false,rentals:true})] });
-    await db.execute({ sql: 'INSERT INTO security_groups (name, description, permissions) VALUES (?,?,?)', args: ['Manager','Store management without admin',JSON.stringify({dashboard:true,pos:true,inventory:true,customers:true,transactions:true,reports:true,employees:true,settings:false,purchasing:true,branches:false,security:false,accounts:true,quotations:true,suppliers:true,transfers:true,crm:true,commissions:true,multi_branch_access:true,warehouse:true,shipping:true,'cycle-counts':true,drawers:true,void_transactions:true,promotions:true,process_returns:true,purchase_requests:true,services:true,rentals:true})] });
+    await db.execute({ sql: 'INSERT INTO security_groups (name, description, permissions) VALUES (?,?,?)', args: ['Administrator','Full system access',JSON.stringify({dashboard:true,pos:true,inventory:true,customers:true,transactions:true,reports:true,employees:true,settings:true,purchasing:true,branches:true,security:true,accounts:true,quotations:true,suppliers:true,transfers:true,crm:true,commissions:true,multi_branch_access:true,warehouse:true,shipping:true,'cycle-counts':true,drawers:true,void_transactions:true,promotions:true,process_returns:true,purchase_requests:true,services:true,rentals:true,layaway:true,layaway_create:true,layaway_payments:true,layaway_cancel:true})] });
+    await db.execute({ sql: 'INSERT INTO security_groups (name, description, permissions) VALUES (?,?,?)', args: ['Cashier','POS and basic operations',JSON.stringify({dashboard:true,pos:true,inventory:false,customers:true,transactions:true,reports:false,employees:false,settings:false,purchasing:false,branches:false,security:false,accounts:false,quotations:true,suppliers:false,transfers:false,crm:false,commissions:false,multi_branch_access:false,warehouse:false,shipping:false,'cycle-counts':false,drawers:false,void_transactions:false,promotions:false,process_returns:false,purchase_requests:false,services:false,rentals:true,layaway:true,layaway_create:false,layaway_payments:false,layaway_cancel:false})] });
+    await db.execute({ sql: 'INSERT INTO security_groups (name, description, permissions) VALUES (?,?,?)', args: ['Manager','Store management without admin',JSON.stringify({dashboard:true,pos:true,inventory:true,customers:true,transactions:true,reports:true,employees:true,settings:false,purchasing:true,branches:false,security:false,accounts:true,quotations:true,suppliers:true,transfers:true,crm:true,commissions:true,multi_branch_access:true,warehouse:true,shipping:true,'cycle-counts':true,drawers:true,void_transactions:true,promotions:true,process_returns:true,purchase_requests:true,services:true,rentals:true,layaway:true,layaway_create:true,layaway_payments:true,layaway_cancel:true})] });
 
     // Assign to existing employees
     try {
@@ -1369,6 +1439,10 @@ async function _init() {
     'CREATE INDEX IF NOT EXISTS idx_rental_agreements_status ON rental_agreements(status)',
     'CREATE INDEX IF NOT EXISTS idx_rental_agreement_items_agreement_id ON rental_agreement_items(agreement_id)',
     'CREATE INDEX IF NOT EXISTS idx_rental_agreement_items_product_id ON rental_agreement_items(product_id)',
+    'CREATE INDEX IF NOT EXISTS idx_layaway_plans_customer_id ON layaway_plans(customer_id)',
+    'CREATE INDEX IF NOT EXISTS idx_layaway_plans_status ON layaway_plans(status)',
+    'CREATE INDEX IF NOT EXISTS idx_layaway_plan_items_plan_id ON layaway_plan_items(plan_id)',
+    'CREATE INDEX IF NOT EXISTS idx_layaway_payments_plan_id ON layaway_payments(plan_id)',
     'CREATE INDEX IF NOT EXISTS idx_products_category_id ON products(category_id)',
     'CREATE INDEX IF NOT EXISTS idx_purchase_order_items_po_id ON purchase_order_items(po_id)',
     'CREATE INDEX IF NOT EXISTS idx_purchase_request_items_pr_id ON purchase_request_items(pr_id)',

@@ -749,6 +749,7 @@ const App = {
       { section: 'customers', label: 'Customers', color: '#00897B', icon: '<path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/>' },
       { section: 'quotations', label: 'Quotations', color: '#4CAF50', icon: '<path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/>' },
       { section: 'rentals', label: 'Rentals', color: '#FF9800', icon: '<path d="M22.7 19l-9.1-9.1c.9-2.3.4-5-1.5-6.9-2-2-5-2.4-7.4-1.3L9 6l-3 3-4.3-4.3C.6 7.1 1 10.1 3 12.1c1.9 1.9 4.6 2.4 6.9 1.5l9.1 9.1c.4.4 1 .4 1.4 0l2.3-2.3c.4-.4.4-1 0-1.4z"/>' },
+      { section: 'layaway', label: 'Layaway', color: '#8d6e63', icon: '<path d="M20 6h-2.18c.11-.31.18-.65.18-1a2.996 2.996 0 0 0-5.5-1.65l-.5.67-.5-.68C10.96 2.54 10.05 2 9 2 7.34 2 6 3.34 6 5c0 .35.07.69.18 1H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-5-2c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zM9 4c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm11 15H4v-2h16v2zm0-5H4V8h5.08L7 10.83 8.62 12 11 8.76l1-1.36 1 1.36L15.38 12 17 10.83 14.92 8H20v6z"/>' },
       { section: 'transactions', label: 'Transactions', color: '#9c27b0', icon: '<path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 14l-5-5 1.41-1.41L12 14.17l7.59-7.59L21 8l-9 9z"/>' },
       { section: 'online-orders', label: 'Online Orders', color: '#3b6bc4', icon: '<path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zm4.24 16L12 15.45 7.77 18l1.12-4.81-3.73-3.23 4.92-.42L12 5l1.92 4.53 4.92.42-3.73 3.23L16.23 18z"/>' },
       { section: 'shipping', label: 'Shipping', color: '#607d8b', icon: '<path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-1 13.93l-3.5-3.5 1.41-1.41L11 12.1l5.59-5.59L18 7.93l-7 7z"/>' },
@@ -841,13 +842,13 @@ const App = {
       const hub = this._hubGroups[ds];
       el.classList.toggle('active', ds === name || !!(hub && hub.children.some(c => c.section === name)));
     });
-    const titles = { dashboard: 'Dashboard', pos: 'Point of Sale', inventory: 'Inventory Management', services: 'Services & Non-Inventory Items', rentals: 'Rentals', customers: 'Customers', transactions: 'Transactions', 'online-orders': 'Online Orders', reports: 'Reports & Analytics', employees: 'Employees', settings: 'Settings', suppliers: 'Suppliers', purchasing: 'Purchasing', quotations: 'Quotations', accounts: 'Accounts Receivable', branches: 'Branch Management', security: 'Security Groups', transfers: 'Branch Transfers', crm: 'CRM & Sales', commissions: 'Commission Tracking', warehouse: 'Warehouse Management', shipping: 'Shipping', 'cycle-counts': 'Cycle Counts', drawers: 'Cash Drawers', promotions: 'Promotions', 'purchasing-hub': 'Purchasing', 'sales-hub': 'Sales', 'accounts-hub': 'Accounts', 'warehouse-hub': 'Warehouse', 'admin-hub': 'Admin' };
+    const titles = { dashboard: 'Dashboard', pos: 'Point of Sale', inventory: 'Inventory Management', services: 'Services & Non-Inventory Items', rentals: 'Rentals', layaway: 'Layaway', customers: 'Customers', transactions: 'Transactions', 'online-orders': 'Online Orders', reports: 'Reports & Analytics', employees: 'Employees', settings: 'Settings', suppliers: 'Suppliers', purchasing: 'Purchasing', quotations: 'Quotations', accounts: 'Accounts Receivable', branches: 'Branch Management', security: 'Security Groups', transfers: 'Branch Transfers', crm: 'CRM & Sales', commissions: 'Commission Tracking', warehouse: 'Warehouse Management', shipping: 'Shipping', 'cycle-counts': 'Cycle Counts', drawers: 'Cash Drawers', promotions: 'Promotions', 'purchasing-hub': 'Purchasing', 'sales-hub': 'Sales', 'accounts-hub': 'Accounts', 'warehouse-hub': 'Warehouse', 'admin-hub': 'Admin' };
     document.getElementById('topbar-title').textContent = titles[name] || name;
     const content = document.getElementById('content');
     content.style.padding = name === 'pos' ? '0' : '20px';
     content.style.overflow = name === 'pos' ? 'hidden' : 'auto';
     content.style.height = name === 'pos' ? '100%' : 'auto';
-    const renders = { dashboard: () => this.renderDashboard(), pos: () => this.renderPOS(), inventory: () => this.renderInventory(), services: () => this.renderServices(), rentals: () => this.renderRentals(), customers: () => this.renderCustomers(), transactions: () => this.renderTransactions(), 'online-orders': () => this.renderOnlineOrders(), reports: () => this.renderReports(), employees: () => this.renderEmployees(), settings: () => this.renderSettings(), suppliers: () => this.renderSuppliers(), purchasing: () => this.renderPurchasing(), quotations: () => this.renderQuotations(), accounts: () => this.renderAccounts(), branches: () => this.renderBranches(), security: () => this.renderSecurity(), transfers: () => this.renderTransfers(), crm: () => this.renderCRM(), commissions: () => this.renderCommissions(), warehouse: () => this.renderWarehouse(), shipping: () => this.renderShipping(), 'cycle-counts': () => this.renderCycleCounts(), drawers: () => this.renderDrawers(), promotions: () => this.renderPromotions(), 'purchasing-hub': () => this.renderHub('purchasing-hub'), 'sales-hub': () => this.renderHub('sales-hub'), 'accounts-hub': () => this.renderHub('accounts-hub'), 'warehouse-hub': () => this.renderHub('warehouse-hub'), 'admin-hub': () => this.renderHub('admin-hub') };
+    const renders = { dashboard: () => this.renderDashboard(), pos: () => this.renderPOS(), inventory: () => this.renderInventory(), services: () => this.renderServices(), rentals: () => this.renderRentals(), layaway: () => this.renderLayaway(), customers: () => this.renderCustomers(), transactions: () => this.renderTransactions(), 'online-orders': () => this.renderOnlineOrders(), reports: () => this.renderReports(), employees: () => this.renderEmployees(), settings: () => this.renderSettings(), suppliers: () => this.renderSuppliers(), purchasing: () => this.renderPurchasing(), quotations: () => this.renderQuotations(), accounts: () => this.renderAccounts(), branches: () => this.renderBranches(), security: () => this.renderSecurity(), transfers: () => this.renderTransfers(), crm: () => this.renderCRM(), commissions: () => this.renderCommissions(), warehouse: () => this.renderWarehouse(), shipping: () => this.renderShipping(), 'cycle-counts': () => this.renderCycleCounts(), drawers: () => this.renderDrawers(), promotions: () => this.renderPromotions(), 'purchasing-hub': () => this.renderHub('purchasing-hub'), 'sales-hub': () => this.renderHub('sales-hub'), 'accounts-hub': () => this.renderHub('accounts-hub'), 'warehouse-hub': () => this.renderHub('warehouse-hub'), 'admin-hub': () => this.renderHub('admin-hub') };
     if (renders[name]) await renders[name]();
   },
 
@@ -2513,6 +2514,12 @@ const App = {
           </div>
         </div>
       </div>
+      <div style="border:1px solid var(--border);border-radius:6px;padding:12px;margin-top:8px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <input type="checkbox" id="pf-layaway" ${p.is_layaway_eligible?'checked':''} style="width:auto;margin:0">
+          <label for="pf-layaway" style="margin:0;font-weight:500;cursor:pointer">Eligible for Layaway</label>
+        </div>
+      </div>
       ${id ? `<div class="form-group" style="margin-top:4px"><label>Product Image</label>
         <div style="display:flex;align-items:center;gap:10px;margin-top:4px">
           ${p.image_path ? `<img src="${p.image_path}" class="prod-img-thumb" id="pf-img-preview" alt="">` : `<div class="prod-img-placeholder" id="pf-img-preview" onclick="document.getElementById('pf-img-input').click()">📷</div>`}
@@ -2598,6 +2605,7 @@ const App = {
       active: parseInt(document.getElementById('pf-active').value),
       online_available: document.getElementById('pf-online').checked ? 1 : 0,
       web_allotment: document.getElementById('pf-web-allotment').value !== '' ? parseInt(document.getElementById('pf-web-allotment').value) : null,
+      is_layaway_eligible: document.getElementById('pf-layaway').checked ? 1 : 0,
     };
     let binRows = [];
     if (!id) {
@@ -3050,8 +3058,8 @@ const App = {
               <td class="${(p.stock_qty - (p.rental_outstanding_qty||0)) <= 0 ? 'color-danger fw-600' : ''}">${p.stock_qty - (p.rental_outstanding_qty||0)}</td>
               <td><span class="badge-pill ${p.active ? 'badge-success' : 'badge-danger'}">${p.active ? 'Active' : 'Inactive'}</span></td>
               <td style="white-space:nowrap">
-                <button class="btn btn-sm btn-secondary" onclick="App.showRentalItemForm(${p.id})">Edit</button>
-                <button class="btn btn-sm btn-outline" onclick="App.showRentalAccessoriesModal(${p.id}, '${p.name.replace(/'/g,"\\'")}')">Accessories</button>
+                ${this.can('rentals_manage_items') ? `<button class="btn btn-sm btn-secondary" onclick="App.showRentalItemForm(${p.id})">Edit</button>
+                <button class="btn btn-sm btn-outline" onclick="App.showRentalAccessoriesModal(${p.id}, '${p.name.replace(/'/g,"\\'")}')">Accessories</button>` : ''}
               </td>
             </tr>`).join('')}</tbody>
           </table>
@@ -3849,6 +3857,381 @@ const App = {
       this.closeModal();
       this.alert(`Return processed — settlement ${updated.settlement_transaction_id ? 'recorded' : ''}`);
       this.renderRentals();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // ─── Layaway ──────────────────────────────────────────────────────────────
+
+  _layawayTabs: [
+    { key: 'active',    label: 'Active' },
+    { key: 'overdue',   label: 'Overdue' },
+    { key: 'completed', label: 'Completed' },
+    { key: 'cancelled', label: 'Cancelled' },
+    { key: 'all',       label: 'All' },
+  ],
+
+  async renderLayaway() {
+    this.layawayTab = this.layawayTab || 'active';
+    document.getElementById('content').innerHTML = `
+      <div class="section-header">
+        <h2>Layaway</h2>
+        <div id="layaway-header-actions">${this.can('layaway_create') ? `<button class="btn btn-primary btn-sm" onclick="App.showLayawayCheckoutModal()">+ New Layaway</button>` : ''}</div>
+      </div>
+      <div class="crm-tabs" id="layaway-tabs-nav">
+        ${this._layawayTabs.map(t=>`<button class="crm-tab ${this.layawayTab===t.key?'active':''}" onclick="App.filterLayaway('${t.key}')">${t.label}</button>`).join('')}
+      </div>
+      <div id="layaway-content"></div>`;
+    await this.loadLayawayTab();
+  },
+
+  async filterLayaway(tab) {
+    this.layawayTab = tab;
+    document.querySelectorAll('#layaway-tabs-nav .crm-tab').forEach((btn,i) => {
+      btn.classList.toggle('active', this._layawayTabs[i].key === tab);
+    });
+    await this.loadLayawayTab();
+  },
+
+  async loadLayawayTab() {
+    const el = document.getElementById('layaway-content');
+    if (!el) return;
+    const view = this.layawayTab === 'all' ? '' : this.layawayTab;
+    const plans = await this.api('GET', `/layaway/plans${view ? '?view='+view : ''}`);
+    if (!document.getElementById('layaway-content')) return;
+    const sc = { active:'badge-info', overdue:'badge-danger', completed:'badge-success', cancelled:'badge-secondary' };
+    document.getElementById('layaway-content').innerHTML = !plans.length ? '<div class="empty-state"><p>No layaway plans found.</p></div>' : `
+      <table class="table">
+        <thead><tr><th>Plan #</th><th>Customer</th><th>Total</th><th>Paid</th><th>Remaining</th><th>Next Due</th><th>Status</th><th></th></tr></thead>
+        <tbody>${plans.map(p => {
+          const displayStatus = p.status === 'active' && p.is_overdue ? 'overdue' : p.status;
+          const remaining = Math.max(0, p.total - p.amount_paid);
+          return `<tr>
+          <td class="fw-600">${p.plan_number}</td>
+          <td>${p.customer_name||'—'}</td>
+          <td>${this.fmt(p.total)}</td>
+          <td>${this.fmt(p.amount_paid)}</td>
+          <td>${this.fmt(remaining)}</td>
+          <td>${p.next_due_date ? this.fmtDate(p.next_due_date) : '—'}</td>
+          <td><span class="badge-pill ${sc[displayStatus]||'badge-secondary'}">${displayStatus}</span></td>
+          <td style="text-align:right"><button class="btn btn-sm btn-outline" onclick="App.viewLayawayPlan(${p.id})">View</button></td>
+        </tr>`;
+        }).join('')}</tbody>
+      </table>`;
+  },
+
+  // ─── New Layaway (customer + items + deposit) ──────────────────────────────
+
+  async showLayawayCheckoutModal() {
+    const branches = this.currentUser.branches || [];
+    const defaultBranch = branches.find(b => b.is_default) || branches[0] || null;
+    const [customers, products] = await Promise.all([
+      this.api('GET', '/customers?active=1'),
+      this.api('GET', `/products?is_layaway_eligible=1&active=1${defaultBranch ? '&branch_id='+defaultBranch.id : ''}`),
+    ]);
+    this._layawayProducts = products;
+    this._layawayCustomers = customers;
+    this._layawayLineIdx = 0;
+    const depositPct = this.settings?.layaway_deposit_percent || 20;
+    this.showModal(`
+      <div class="modal" style="max-width:640px">
+        <div class="modal-header">
+          <span class="modal-title">New Layaway</span>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="input-row">
+            <div class="form-group" style="position:relative"><label>Customer *</label>
+              <input type="text" id="lc-customer-search" placeholder="Search customer…" autocomplete="off"
+                oninput="App._filterLayawayCustomers(this.value)" onfocus="App._filterLayawayCustomers(this.value)">
+              <input type="hidden" id="lc-customer" value="">
+              <div id="lc-customer-dd" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
+            </div>
+            <div class="form-group"><label>Branch / Location *</label>
+              <select id="lc-branch" onchange="App._refreshLayawayCheckoutBranch()">
+                <option value="">Select location…</option>
+                ${branches.map(b=>`<option value="${b.id}" ${defaultBranch && b.id===defaultBranch.id?'selected':''}>${b.name}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+          <div class="form-group"><label>Payment Frequency</label>
+            <select id="lc-frequency">
+              <option value="weekly">Weekly</option>
+              <option value="biweekly">Biweekly</option>
+              <option value="monthly" selected>Monthly</option>
+            </select>
+          </div>
+          <hr style="margin:12px 0">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <strong>Items</strong>
+            <button class="btn btn-sm btn-outline" onclick="App.addLayawayLine()">+ Add Item</button>
+          </div>
+          <div id="layaway-checkout-lines"></div>
+          <div id="layaway-totals" style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px;font-size:13px"></div>
+          <div class="input-row" style="margin-top:8px">
+            <div class="form-group"><label>Payment Method</label>
+              <select id="lc-paymethod">
+                <option value="cash">Cash</option>
+                <option value="credit_card">Card</option>
+                <option value="check">Check</option>
+              </select>
+            </div>
+            <div class="form-group"><label>Deposit Collected (min ${depositPct}%)</label><input type="number" id="lc-tendered" step="0.01" min="0" oninput="this.dataset.touched='1'"></div>
+          </div>
+          <div class="form-group"><label>Notes</label><input id="lc-notes" placeholder="Optional"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.createLayawayPlan()">Create Layaway</button>
+        </div>
+      </div>`);
+    this.addLayawayLine();
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('#lc-customer-search') && !e.target.closest('#lc-customer-dd')) {
+        const dd = document.getElementById('lc-customer-dd');
+        if (dd) dd.style.display = 'none';
+      }
+    });
+  },
+
+  _filterLayawayCustomers(q) {
+    const dd = document.getElementById('lc-customer-dd');
+    if (!dd) return;
+    const query = (q || '').toLowerCase();
+    const matches = (this._layawayCustomers || []).filter(c =>
+      !query || `${c.first_name} ${c.last_name} ${c.customer_number || ''}`.toLowerCase().includes(query));
+    if (!matches.length) {
+      dd.innerHTML = '<div style="padding:10px;color:var(--text-muted);font-size:13px">No customers found</div>';
+      dd.style.display = '';
+      return;
+    }
+    dd.innerHTML = matches.map(c => `<div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text)" onclick="App._selectLayawayCustomer(${c.id})">
+        <div><strong>${c.first_name} ${c.last_name}</strong><span style="color:var(--text-muted);font-size:12px;margin-left:4px">${c.customer_number||''}</span></div>
+      </div>`).join('');
+    dd.style.display = '';
+  },
+
+  _selectLayawayCustomer(id) {
+    const c = (this._layawayCustomers || []).find(x => x.id === id);
+    if (!c) return;
+    const idEl = document.getElementById('lc-customer');
+    const searchEl = document.getElementById('lc-customer-search');
+    const dd = document.getElementById('lc-customer-dd');
+    if (idEl) idEl.value = id;
+    if (searchEl) searchEl.value = `${c.first_name} ${c.last_name}`;
+    if (dd) dd.style.display = 'none';
+  },
+
+  addLayawayLine() {
+    const container = document.getElementById('layaway-checkout-lines');
+    if (!container) return;
+    const idx = this._layawayLineIdx++;
+    const products = this._layawayProducts || [];
+    const wrap = document.createElement('div');
+    wrap.id = `layaway-line-${idx}`;
+    wrap.style.cssText = 'display:flex;gap:6px;align-items:flex-start;border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:8px';
+    wrap.innerHTML = `
+      <select id="ll-prod-${idx}" style="flex:2;padding:6px;border:1px solid var(--border);border-radius:4px;font-size:13px" onchange="App._recalcLayawayTotals()">
+        <option value="">Select item…</option>
+        ${products.map(p=>`<option value="${p.id}" data-price="${p.price}" data-tax="${p.tax_rate||0}" data-avail="${p.stock_qty}">${p.name} (${p.stock_qty} available)</option>`).join('')}
+      </select>
+      <input type="number" id="ll-qty-${idx}" value="1" min="1" style="width:70px;padding:6px;border:1px solid var(--border);border-radius:4px" onchange="App._recalcLayawayTotals()">
+      <span id="ll-warn-${idx}" style="font-size:11px;color:var(--danger);align-self:center"></span>
+      <button class="btn btn-sm btn-outline" onclick="document.getElementById('layaway-line-${idx}').remove();App._recalcLayawayTotals()">✕</button>`;
+    container.appendChild(wrap);
+    this._recalcLayawayTotals();
+  },
+
+  async _refreshLayawayCheckoutBranch() {
+    const branchId = document.getElementById('lc-branch')?.value;
+    this._layawayProducts = branchId ? await this.api('GET', `/products?is_layaway_eligible=1&active=1&branch_id=${branchId}`) : [];
+    if (!document.getElementById('lc-branch')) return;
+    document.querySelectorAll('#layaway-checkout-lines [id^="layaway-line-"]').forEach(line => {
+      const idx = line.id.replace('layaway-line-','');
+      const sel = document.getElementById(`ll-prod-${idx}`);
+      if (!sel) return;
+      const currentVal = sel.value;
+      sel.innerHTML = `<option value="">Select item…</option>${this._layawayProducts.map(p=>`<option value="${p.id}" data-price="${p.price}" data-tax="${p.tax_rate||0}" data-avail="${p.stock_qty}" ${String(p.id)===currentVal?'selected':''}>${p.name} (${p.stock_qty} available)</option>`).join('')}`;
+    });
+    this._recalcLayawayTotals();
+  },
+
+  _recalcLayawayTotals() {
+    let subtotal = 0, taxAmount = 0;
+    document.querySelectorAll('#layaway-checkout-lines [id^="layaway-line-"]').forEach(line => {
+      const idx = line.id.replace('layaway-line-','');
+      const sel = document.getElementById(`ll-prod-${idx}`);
+      const qtyEl = document.getElementById(`ll-qty-${idx}`);
+      const warnEl = document.getElementById(`ll-warn-${idx}`);
+      if (!sel || !qtyEl) return;
+      const opt = sel.selectedOptions[0];
+      const avail = parseInt(opt?.dataset.avail) || 0;
+      const qty = parseInt(qtyEl.value) || 0;
+      if (warnEl) warnEl.textContent = (sel.value && qty > avail) ? `Only ${avail} available` : '';
+      if (!sel.value) return;
+      const price = parseFloat(opt?.dataset.price) || 0;
+      const taxRate = parseFloat(opt?.dataset.tax) || 0;
+      const lineTotal = price * qty;
+      subtotal += lineTotal;
+      taxAmount += lineTotal * taxRate / 100;
+    });
+    const total = subtotal + taxAmount;
+    const depositPct = this.settings?.layaway_deposit_percent || 20;
+    const depositRequired = parseFloat((total * depositPct / 100).toFixed(2));
+    const totalsEl = document.getElementById('layaway-totals');
+    if (totalsEl) totalsEl.innerHTML = `
+      <div style="display:flex;justify-content:space-between"><span>Subtotal</span><span>${this.fmt(subtotal)}</span></div>
+      <div style="display:flex;justify-content:space-between"><span>Tax</span><span>${this.fmt(taxAmount)}</span></div>
+      <div style="display:flex;justify-content:space-between;font-weight:600"><span>Total</span><span>${this.fmt(total)}</span></div>
+      <div style="display:flex;justify-content:space-between;font-weight:600;color:var(--primary)"><span>Required Deposit (${depositPct}%)</span><span>${this.fmt(depositRequired)}</span></div>`;
+    const tenderedEl = document.getElementById('lc-tendered');
+    if (tenderedEl && !tenderedEl.dataset.touched) tenderedEl.value = depositRequired.toFixed(2);
+  },
+
+  async createLayawayPlan() {
+    const customer_id = document.getElementById('lc-customer').value;
+    const branch_id = document.getElementById('lc-branch').value || null;
+    const payment_frequency = document.getElementById('lc-frequency').value;
+    const payment_method = document.getElementById('lc-paymethod').value;
+    const amount_tendered = parseFloat(document.getElementById('lc-tendered').value) || 0;
+    const notes = document.getElementById('lc-notes').value.trim() || null;
+    if (!customer_id) { this.alert('Please select a customer', 'error'); return; }
+    if (!branch_id) { this.alert('Please select a branch/location', 'error'); return; }
+    const items = [];
+    document.querySelectorAll('#layaway-checkout-lines [id^="layaway-line-"]').forEach(line => {
+      const idx = line.id.replace('layaway-line-','');
+      const product_id = document.getElementById(`ll-prod-${idx}`)?.value;
+      const quantity = parseInt(document.getElementById(`ll-qty-${idx}`)?.value) || 0;
+      if (product_id && quantity > 0) items.push({ product_id, quantity });
+    });
+    if (!items.length) { this.alert('Add at least one item', 'error'); return; }
+    try {
+      const plan = await this.api('POST', '/layaway/plans', {
+        customer_id, branch_id, employee_id: this.currentUser.id, items,
+        payment_method, amount_tendered, payment_frequency, notes,
+        drawer_session_id: this.currentDrawerSession?.id || null,
+      });
+      this.closeModal();
+      this.alert(`Layaway ${plan.plan_number} created — deposit collected`);
+      this.renderLayaway();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // ─── Detail / payments / cancellation ──────────────────────────────────────
+
+  async viewLayawayPlan(id) {
+    const p = await this.api('GET', `/layaway/plans/${id}`);
+    const sc = { active:'badge-info', overdue:'badge-danger', completed:'badge-success', cancelled:'badge-secondary' };
+    const displayStatus = p.status === 'active' && p.is_overdue ? 'overdue' : p.status;
+    const remaining = Math.max(0, p.total - p.amount_paid);
+    this.showModal(`
+      <div class="modal" style="max-width:640px">
+        <div class="modal-header">
+          <span class="modal-title">Layaway ${p.plan_number}</span>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="input-row" style="margin-bottom:10px">
+            <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Customer</label><div>${p.customer_name||'—'}</div></div>
+            <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Branch</label><div>${p.branch_name||'—'}</div></div>
+            <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Status</label><div><span class="badge-pill ${sc[displayStatus]||'badge-secondary'}">${displayStatus}</span></div></div>
+          </div>
+          <table class="table" style="margin-bottom:12px">
+            <thead><tr><th>Item</th><th>Qty</th><th>Unit Price</th><th>Line Total</th></tr></thead>
+            <tbody>${p.items.map(i => `<tr><td>${i.product_name}</td><td>${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td>${this.fmt(i.line_total)}</td></tr>`).join('')}</tbody>
+          </table>
+          <div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:12px;display:flex;flex-wrap:wrap;gap:14px;font-size:13px">
+            <span>Total: <strong>${this.fmt(p.total)}</strong></span>
+            <span>Paid: <strong>${this.fmt(p.amount_paid)}</strong></span>
+            <span>Remaining: <strong>${this.fmt(remaining)}</strong></span>
+            ${p.next_due_date ? `<span>Next Due: <strong>${this.fmtDate(p.next_due_date)}</strong></span>` : ''}
+            ${p.status==='cancelled' ? `<span>Forfeited: <strong>${this.fmt(p.forfeited_amount)}</strong></span><span>Refunded: <strong>${this.fmt(p.refunded_amount)}</strong></span>` : ''}
+          </div>
+          <strong>Payment History</strong>
+          <table class="table">
+            <thead><tr><th>Payment #</th><th>Date</th><th>Amount</th><th>Method</th><th>Type</th></tr></thead>
+            <tbody>${p.payments.map(pay => `<tr><td>${pay.payment_number}</td><td>${this.fmtDateTime(pay.created_at)}</td><td>${this.fmt(pay.amount)}</td><td>${(pay.payment_method||'').replace('_',' ')}</td><td>${pay.is_deposit ? 'Deposit' : 'Installment'}</td></tr>`).join('')}</tbody>
+          </table>
+        </div>
+        <div class="modal-footer">
+          ${p.status==='active' && this.can('layaway_payments') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showLayawayPaymentModal(${p.id})">Record Payment</button>` : ''}
+          ${p.status==='active' && this.can('layaway_cancel') ? `<button class="btn btn-danger" onclick="App.closeModal();App.cancelLayawayPlan(${p.id})">Cancel Plan</button>` : ''}
+          <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+        </div>
+      </div>`);
+  },
+
+  async showLayawayPaymentModal(id) {
+    const p = await this.api('GET', `/layaway/plans/${id}`);
+    if (p.status !== 'active') { this.alert('This plan is not active', 'warning'); return; }
+    const remaining = Math.max(0, p.total - p.amount_paid);
+    this.showModal(`
+      <div class="modal" style="max-width:420px">
+        <div class="modal-header">
+          <span class="modal-title">Record Payment — ${p.plan_number}</span>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">Remaining balance: <strong>${this.fmt(remaining)}</strong></p>
+          <div class="form-group"><label>Amount</label><input type="number" id="lp-amount" step="0.01" min="0.01" max="${remaining}" value="${remaining.toFixed(2)}"></div>
+          <div class="form-group"><label>Payment Method</label>
+            <select id="lp-paymethod">
+              <option value="cash">Cash</option>
+              <option value="credit_card">Card</option>
+              <option value="check">Check</option>
+            </select>
+          </div>
+          <div class="form-group"><label>Notes</label><input id="lp-notes" placeholder="Optional"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.saveLayawayPayment(${id})">Record Payment</button>
+        </div>
+      </div>`);
+  },
+
+  async saveLayawayPayment(id) {
+    const amount = parseFloat(document.getElementById('lp-amount').value);
+    const payment_method = document.getElementById('lp-paymethod').value;
+    const notes = document.getElementById('lp-notes').value.trim() || null;
+    if (!amount || amount <= 0) { this.alert('Enter a valid amount', 'error'); return; }
+    try {
+      const plan = await this.api('PATCH', `/layaway/plans/${id}/payments`, {
+        amount, payment_method, notes, employee_id: this.currentUser.id,
+        drawer_session_id: this.currentDrawerSession?.id || null,
+      });
+      this.closeModal();
+      this.alert(plan.status === 'completed' ? `Layaway ${plan.plan_number} fully paid — ready for pickup!` : 'Payment recorded');
+      this.renderLayaway();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  cancelLayawayPlan(id) {
+    this.showModal(`
+      <div class="modal" style="max-width:400px">
+        <div class="modal-header">
+          <span class="modal-title">Cancel Layaway Plan</span>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px">Items will be restocked. Any cancellation fee configured in Settings → Layaway will be forfeited from what's already been paid; the rest is refunded automatically.</p>
+          <div class="form-group"><label>Reason (optional)</label>
+            <input type="text" id="cancel-layaway-reason" placeholder="e.g. Customer no longer wants the item...">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Back</button>
+          <button class="btn btn-danger" onclick="App._confirmCancelLayawayPlan(${id})">Cancel Plan</button>
+        </div>
+      </div>`);
+  },
+
+  async _confirmCancelLayawayPlan(id) {
+    const reason = document.getElementById('cancel-layaway-reason')?.value.trim() || null;
+    try {
+      const plan = await this.api('PATCH', `/layaway/plans/${id}/cancel`, { reason, employee_id: this.currentUser?.id || null });
+      this.closeModal();
+      this.alert(`Layaway cancelled — forfeited ${this.fmt(plan.forfeited_amount)}, refunded ${this.fmt(plan.refunded_amount)}`);
+      this.renderLayaway();
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
@@ -5999,6 +6382,22 @@ const App = {
             <button class="btn btn-primary" onclick="App.saveSettings()">Save Settings</button>
           </div>
           <div class="card" style="margin-bottom:16px">
+            <div class="card-header"><span class="card-title">Layaway</span></div>
+            <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">Applies to every layaway-eligible item storewide.</p>
+            <div class="form-group"><label>Required Deposit (% of item total)</label><input type="number" id="s-layaway-deposit" value="${s.layaway_deposit_percent||20}" min="0" max="100" step="0.1"></div>
+            <div class="input-row">
+              <div class="form-group"><label>Cancellation Fee Type</label>
+                <select id="s-layaway-fee-type">
+                  <option value="percent" ${(s.layaway_cancellation_fee_type||'percent')==='percent'?'selected':''}>% of amount paid</option>
+                  <option value="fixed" ${s.layaway_cancellation_fee_type==='fixed'?'selected':''}>Fixed amount</option>
+                </select>
+              </div>
+              <div class="form-group"><label>Cancellation Fee Value</label><input type="number" id="s-layaway-fee-value" value="${s.layaway_cancellation_fee_value||0}" min="0" step="0.01"></div>
+            </div>
+            <p style="font-size:11px;color:var(--text-muted);margin:0 0 8px">This amount is forfeited from what the customer already paid when a plan is cancelled; the rest is refunded automatically.</p>
+            <button class="btn btn-primary" onclick="App.saveSettings()">Save Settings</button>
+          </div>
+          <div class="card" style="margin-bottom:16px">
             <div class="card-header"><span class="card-title">Alternate Currencies</span></div>
             <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">Define currencies accepted at the POS with their exchange rate relative to <strong>${s.currency||'USD'}</strong>. Cashiers can select these when processing cash payments.</p>
             <div id="alt-currencies-table">${this._renderAltCurrenciesTable()}</div>
@@ -6269,6 +6668,9 @@ const App = {
       loyalty_rate: document.getElementById('s-loyalty').value,
       low_stock_threshold: document.getElementById('s-lowstock').value,
       max_discount_pct: document.getElementById('s-max-discount').value,
+      layaway_deposit_percent: document.getElementById('s-layaway-deposit').value,
+      layaway_cancellation_fee_type: document.getElementById('s-layaway-fee-type').value,
+      layaway_cancellation_fee_value: document.getElementById('s-layaway-fee-value').value,
       email_smtp_host: document.getElementById('s-smtp-host').value,
       email_smtp_port: document.getElementById('s-smtp-port').value,
       email_smtp_user: document.getElementById('s-smtp-user').value,
@@ -9415,6 +9817,11 @@ const App = {
       { key: 'rentals_checkout', label: 'Check Out Rentals' },
       { key: 'rentals_returns', label: 'Process Returns & Cancellations' },
     ]},
+    { key: 'layaway', label: 'Layaway', subs: [
+      { key: 'layaway_create', label: 'Create Layaway Plans' },
+      { key: 'layaway_payments', label: 'Record Payments' },
+      { key: 'layaway_cancel', label: 'Cancel Plans' },
+    ]},
     { key: 'purchase_requests', label: 'Purchase Requests', subs: [
       { key: 'pr_create', label: 'Create Requests' },
       { key: 'pr_approve', label: 'Approve Requests' },
@@ -9481,6 +9888,11 @@ const App = {
     ]},
   ],
 
+  // Sub-key resolution: an explicit value on the sub-key (true or false)
+  // always wins over the parent module flag — checking the module but
+  // unchecking one specific sub-permission must deny just that feature.
+  // The parent is only used as a fallback when the sub-key was never
+  // configured at all (see lib/permissions.js's can(), which this mirrors).
   can(key) {
     const perms = this.currentUser?.permissions;
     if (!perms) return true;
@@ -9489,7 +9901,10 @@ const App = {
       return !!perms[key] || mod.subs.some(s => !!perms[s.key]);
     }
     const parent = this._permissionTree.find(m => m.subs.some(s => s.key === key));
-    if (parent) return !!perms[key] || !!perms[parent.key];
+    if (parent) {
+      if (Object.prototype.hasOwnProperty.call(perms, key)) return !!perms[key];
+      return !!perms[parent.key];
+    }
     return !!perms[key];
   },
 

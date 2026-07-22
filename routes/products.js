@@ -6,7 +6,33 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
-const { requireAuth, requirePermission, requireAnyPermission } = require('../lib/permissions');
+const { requireAuth, requirePermission, can } = require('../lib/permissions');
+
+// POST/PUT/DELETE on /products are shared by three frontend forms (Inventory,
+// Services, Rentals), but a product's *type* determines the one permission
+// that should actually govern it — a Manager with general `inventory` access
+// must NOT be able to edit rental items via this shared endpoint just because
+// `rentals_manage_items` is unchecked for their group. `isRental`/`isService`
+// reflect the row as it will exist after the write (existing DB state OR'd
+// with the incoming payload, so toggling a plain item into a rental item is
+// still gated by rentals_manage_items).
+function requiredProductPermission(isRental, isService) {
+  if (isRental) return 'rentals_manage_items';
+  if (isService) return 'services';
+  return 'inventory';
+}
+
+function requireProductPermission(isRental, isService) {
+  return (req, res, next) => {
+    if (req.apiKey) return next();
+    if (!req.employee) return res.status(401).json({ error: 'Authentication required' });
+    const key = requiredProductPermission(isRental, isService);
+    if (!can(req.employee.permissions, key)) {
+      return res.status(403).json({ error: `Missing permission: ${key}` });
+    }
+    next();
+  };
+}
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -20,7 +46,7 @@ const upload = multer({
 // GET all products
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const { search, category, active, low_stock, branch_id, supplier_id, is_service, is_rental, is_accessory, online } = req.query;
+    const { search, category, active, low_stock, branch_id, supplier_id, is_service, is_rental, is_accessory, is_layaway_eligible, online } = req.query;
     const params = [];
     let sql;
 
@@ -62,7 +88,7 @@ router.get('/', requireAuth, async (req, res) => {
     if (branch_id) {
       sql = `SELECT p.id, p.sku, p.barcode, p.name, p.description, p.category_id, p.price, p.cost, p.tax_rate, p.active, p.created_at, p.supplier_id, p.image_path, p.is_service, p.unit,
         p.is_rental, p.rental_rate_type, p.rental_rate, p.rental_deposit, p.rental_late_fee_rate, p.replacement_value,
-        p.rental_classification, p.rental_weekly_rate, p.rental_monthly_rate, p.rental_hourly_rate, p.is_accessory,
+        p.rental_classification, p.rental_weekly_rate, p.rental_monthly_rate, p.rental_hourly_rate, p.is_accessory, p.is_layaway_eligible,
         COALESCE(bi.stock_qty, 0) as stock_qty,
         COALESCE(bi.min_stock, p.min_stock) as min_stock,
         p.stock_qty as global_stock_qty,
@@ -89,6 +115,7 @@ router.get('/', requireAuth, async (req, res) => {
     if (is_service !== undefined) { sql += ` AND p.is_service = ?`; params.push(is_service); }
     if (is_rental !== undefined) { sql += ` AND p.is_rental = ?`; params.push(is_rental); }
     if (is_accessory !== undefined) { sql += ` AND p.is_accessory = ?`; params.push(is_accessory); }
+    if (is_layaway_eligible !== undefined) { sql += ` AND p.is_layaway_eligible = ?`; params.push(is_layaway_eligible); }
     if (low_stock === 'true') {
       if (branch_id) {
         sql += ` AND COALESCE(bi.stock_qty, p.stock_qty) <= COALESCE(bi.min_stock, p.min_stock)`;
@@ -330,17 +357,19 @@ router.get('/:id', requireAuth, async (req, res) => {
 });
 
 // POST create product
-// Create/edit/delete are shared by three different frontend forms —
-// Inventory, Services, and Rentals items all go through this same endpoint —
-// so any one of those permissions is sufficient, matching each form's own gate.
-router.post('/', requireAnyPermission('inventory', 'services', 'rentals_manage_items'), async (req, res) => {
-  const { sku, barcode, name, description, category_id, price, cost, tax_rate, stock_qty, min_stock, active, branch_id, supplier_id, is_service, unit, online_available, web_allotment, is_rental, rental_rate_type, rental_rate, rental_deposit, rental_late_fee_rate, replacement_value, rental_classification, rental_weekly_rate, rental_monthly_rate, rental_hourly_rate, is_accessory } = req.body;
+// Create/edit/delete are shared by three different frontend forms — Inventory,
+// Services, and Rentals items all go through this same endpoint — so the
+// permission required is chosen per-request based on the product's own type
+// (see requireProductPermission above), not any-of-the-three statically.
+router.post('/', (req, res, next) => requireProductPermission(!!req.body.is_rental, !!req.body.is_service)(req, res, next), async (req, res) => {
+  const { sku, barcode, name, description, category_id, price, cost, tax_rate, stock_qty, min_stock, active, branch_id, supplier_id, is_service, unit, online_available, web_allotment, is_rental, rental_rate_type, rental_rate, rental_deposit, rental_late_fee_rate, replacement_value, rental_classification, rental_weekly_rate, rental_monthly_rate, rental_hourly_rate, is_accessory, is_layaway_eligible } = req.body;
   if (!sku || !name) return res.status(400).json({ error: 'SKU and name are required' });
   try {
     const svc = is_service ? 1 : 0;
     const rnt = is_rental ? 1 : 0;
     const acc = is_accessory ? 1 : 0;
-    const result = await db.execute({ sql: `INSERT INTO products (sku,barcode,name,description,category_id,price,cost,tax_rate,stock_qty,min_stock,active,supplier_id,is_service,unit,online_available,web_allotment,is_rental,rental_rate_type,rental_rate,rental_deposit,rental_late_fee_rate,replacement_value,rental_classification,rental_weekly_rate,rental_monthly_rate,rental_hourly_rate,is_accessory) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, tax_rate??8.5, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null, rnt, rental_rate_type||'daily', rental_rate||0, rental_deposit||0, rental_late_fee_rate||0, replacement_value||0, rental_classification||'tool', rental_weekly_rate||0, rental_monthly_rate||0, rental_hourly_rate||0, acc] });
+    const lay = is_layaway_eligible ? 1 : 0;
+    const result = await db.execute({ sql: `INSERT INTO products (sku,barcode,name,description,category_id,price,cost,tax_rate,stock_qty,min_stock,active,supplier_id,is_service,unit,online_available,web_allotment,is_rental,rental_rate_type,rental_rate,rental_deposit,rental_late_fee_rate,replacement_value,rental_classification,rental_weekly_rate,rental_monthly_rate,rental_hourly_rate,is_accessory,is_layaway_eligible) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, tax_rate??8.5, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null, rnt, rental_rate_type||'daily', rental_rate||0, rental_deposit||0, rental_late_fee_rate||0, replacement_value||0, rental_classification||'tool', rental_weekly_rate||0, rental_monthly_rate||0, rental_hourly_rate||0, acc, lay] });
     const productId = Number(result.lastInsertRowid);
     if (!svc && branch_id && (parseInt(stock_qty) || 0) > 0) {
       await db.execute({ sql: 'INSERT OR IGNORE INTO branch_inventory (product_id, branch_id, stock_qty, min_stock) VALUES (?, ?, ?, ?)', args: [productId, branch_id, parseInt(stock_qty) || 0, parseInt(min_stock) || 5] });
@@ -353,13 +382,26 @@ router.post('/', requireAnyPermission('inventory', 'services', 'rentals_manage_i
 });
 
 // PUT update product
-router.put('/:id', requireAnyPermission('inventory', 'services', 'rentals_manage_items'), async (req, res) => {
-  const { sku, barcode, name, description, category_id, price, cost, tax_rate, stock_qty, min_stock, active, supplier_id, is_service, unit, online_available, web_allotment, is_rental, rental_rate_type, rental_rate, rental_deposit, rental_late_fee_rate, replacement_value, rental_classification, rental_weekly_rate, rental_monthly_rate, rental_hourly_rate, is_accessory } = req.body;
+router.put('/:id', async (req, res, next) => {
+  // Gate by the row's type after this write (existing DB state OR'd with the
+  // incoming payload) — not just the payload alone — so a rental item can't
+  // be edited by someone lacking rentals_manage_items merely by omitting
+  // is_rental from the request body.
+  if (req.apiKey) return next();
+  if (!req.employee) return res.status(401).json({ error: 'Authentication required' });
+  const { rows: [existing] } = await db.execute({ sql: 'SELECT is_rental, is_service FROM products WHERE id = ?', args: [req.params.id] });
+  if (!existing) return res.status(404).json({ error: 'Product not found' });
+  const key = requiredProductPermission(!!existing.is_rental || !!req.body.is_rental, !!existing.is_service || !!req.body.is_service);
+  if (!can(req.employee.permissions, key)) return res.status(403).json({ error: `Missing permission: ${key}` });
+  next();
+}, async (req, res) => {
+  const { sku, barcode, name, description, category_id, price, cost, tax_rate, stock_qty, min_stock, active, supplier_id, is_service, unit, online_available, web_allotment, is_rental, rental_rate_type, rental_rate, rental_deposit, rental_late_fee_rate, replacement_value, rental_classification, rental_weekly_rate, rental_monthly_rate, rental_hourly_rate, is_accessory, is_layaway_eligible } = req.body;
   try {
     const svc = is_service ? 1 : 0;
     const rnt = is_rental ? 1 : 0;
     const acc = is_accessory ? 1 : 0;
-    await db.execute({ sql: `UPDATE products SET sku=?,barcode=?,name=?,description=?,category_id=?,price=?,cost=?,tax_rate=?,stock_qty=?,min_stock=?,active=?,supplier_id=?,is_service=?,unit=?,online_available=?,web_allotment=?,is_rental=?,rental_rate_type=?,rental_rate=?,rental_deposit=?,rental_late_fee_rate=?,replacement_value=?,rental_classification=?,rental_weekly_rate=?,rental_monthly_rate=?,rental_hourly_rate=?,is_accessory=? WHERE id=?`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, tax_rate??8.5, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null, rnt, rental_rate_type||'daily', rental_rate||0, rental_deposit||0, rental_late_fee_rate||0, replacement_value||0, rental_classification||'tool', rental_weekly_rate||0, rental_monthly_rate||0, rental_hourly_rate||0, acc, req.params.id] });
+    const lay = is_layaway_eligible ? 1 : 0;
+    await db.execute({ sql: `UPDATE products SET sku=?,barcode=?,name=?,description=?,category_id=?,price=?,cost=?,tax_rate=?,stock_qty=?,min_stock=?,active=?,supplier_id=?,is_service=?,unit=?,online_available=?,web_allotment=?,is_rental=?,rental_rate_type=?,rental_rate=?,rental_deposit=?,rental_late_fee_rate=?,replacement_value=?,rental_classification=?,rental_weekly_rate=?,rental_monthly_rate=?,rental_hourly_rate=?,is_accessory=?,is_layaway_eligible=? WHERE id=?`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, tax_rate??8.5, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null, rnt, rental_rate_type||'daily', rental_rate||0, rental_deposit||0, rental_late_fee_rate||0, replacement_value||0, rental_classification||'tool', rental_weekly_rate||0, rental_monthly_rate||0, rental_hourly_rate||0, acc, lay, req.params.id] });
     const { rows: [prod] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [req.params.id] });
     res.json(prod);
   } catch (e) {
@@ -397,7 +439,15 @@ router.patch('/:id/stock', requirePermission('inventory'), async (req, res) => {
 });
 
 // DELETE product
-router.delete('/:id', requireAnyPermission('inventory', 'services', 'rentals_manage_items'), async (req, res) => {
+router.delete('/:id', async (req, res, next) => {
+  if (req.apiKey) return next();
+  if (!req.employee) return res.status(401).json({ error: 'Authentication required' });
+  const { rows: [existing] } = await db.execute({ sql: 'SELECT is_rental, is_service FROM products WHERE id = ?', args: [req.params.id] });
+  if (!existing) return res.status(404).json({ error: 'Product not found' });
+  const key = requiredProductPermission(!!existing.is_rental, !!existing.is_service);
+  if (!can(req.employee.permissions, key)) return res.status(403).json({ error: `Missing permission: ${key}` });
+  next();
+}, async (req, res) => {
   try {
     await db.execute({ sql: 'UPDATE products SET active = 0 WHERE id = ?', args: [req.params.id] });
     res.json({ success: true });
