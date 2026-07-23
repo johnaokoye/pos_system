@@ -6,7 +6,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
-const { requirePermission } = require('../lib/permissions');
+const { requirePermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 
 router.use(requirePermission('purchasing'));
@@ -96,11 +96,16 @@ router.post('/', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Update PO status (send, cancel)
+// Update PO status (send, cancel) — approving specifically requires
+// purchasing_approve, on top of the router-level `purchasing` gate above;
+// sending/cancelling stay governed by the general permission.
 router.patch('/:id/status', async (req, res) => {
   try {
     const { status } = req.body;
     if (!['draft', 'sent', 'approved', 'cancelled'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
+    if (status === 'approved' && !req.apiKey && !can(req.employee.permissions, 'purchasing_approve')) {
+      return res.status(403).json({ error: 'Missing permission: purchasing_approve' });
+    }
     const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });
     if (!po) return res.status(404).json({ error: 'Not found' });
     if (po.status === 'received') return res.status(400).json({ error: 'Cannot change status of received PO' });
@@ -111,7 +116,7 @@ router.patch('/:id/status', async (req, res) => {
 });
 
 // Receive PO - updates stock quantities
-router.patch('/:id/receive', async (req, res) => {
+router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req, res) => {
   try {
     const { items } = req.body;
     const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });
@@ -243,7 +248,7 @@ router.post('/:id/items/:itemId/link-product', async (req, res) => {
 });
 
 // Process items received damaged - reverses stock added by /receive and logs a stock movement
-router.patch('/:id/damage', async (req, res) => {
+router.patch('/:id/damage', requirePermission('purchasing_receive'), async (req, res) => {
   try {
     const { items } = req.body;
     const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });

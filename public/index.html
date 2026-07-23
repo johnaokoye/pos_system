@@ -329,6 +329,72 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .login-box input { padding: 10px 12px; font-size: 14px; }
 .login-btn { width: 100%; padding: 12px; font-size: 15px; font-weight: 600; margin-top: 8px; justify-content: center; }
 .login-error { color: var(--danger); font-size: 13px; text-align: center; margin-top: 12px; min-height: 18px; }
+
+/* ─── Mobile / responsive ─────────────────────────────────────────────── */
+#hamburger-btn { display: none; }
+.sidebar-backdrop { display: none; }
+
+@media (max-width: 880px) {
+  /* Sidebar becomes an off-canvas drawer instead of a permanent flex column */
+  #sidebar {
+    position: fixed; left: 0; top: 0; height: 100%; z-index: 500;
+    transform: translateX(-100%); transition: transform .2s ease;
+    box-shadow: 4px 0 24px rgba(0,0,0,.25);
+  }
+  #sidebar.sidebar-open { transform: translateX(0); }
+  .sidebar-backdrop {
+    display: block; position: fixed; inset: 0; background: rgba(0,0,0,.45);
+    z-index: 499; opacity: 0; pointer-events: none; transition: opacity .2s ease;
+  }
+  .sidebar-backdrop.sidebar-backdrop-open { opacity: 1; pointer-events: auto; }
+
+  /* Hamburger toggle in the topbar */
+  #hamburger-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 38px; height: 38px; flex-shrink: 0; margin-right: 4px;
+    background: none; border: none; cursor: pointer; color: var(--text); border-radius: 6px;
+  }
+  #hamburger-btn:hover { background: var(--bg); }
+  #hamburger-btn svg { width: 22px; height: 22px; }
+
+  /* Topbar: keep it from overflowing on narrow screens */
+  #topbar { padding: 0 10px; gap: 8px; }
+  #topbar-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+  #topbar-right { gap: 8px; }
+  #clock, #topbar-user { display: none; }
+  /* Forms: every module's forms are built from these three classes, so this
+     one rule collapses them to a single column app-wide with no per-form edits. */
+  .input-row, .input-row-3, .two-col, .three-col { grid-template-columns: 1fr; }
+
+  /* KPI stat grids: 5-across is unreadable on a phone */
+  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+
+  /* Tables: keep horizontal-scroll as the mechanism, just tighten it up */
+  .table-wrap { -webkit-overflow-scrolling: touch; }
+  th, td { padding: 8px 8px; }
+
+  /* Modals: use the available width instead of being letterboxed */
+  .modal-overlay { padding: 8px; }
+  .modal { max-width: none; }
+  .modal-footer { flex-wrap: wrap; }
+
+  /* POS: stack the cart under the product grid instead of a fixed side panel */
+  .pos-body { flex-direction: column; overflow-y: auto !important; }
+  .pos-left { border-right: none !important; border-bottom: 1px solid var(--border); }
+  .pos-right { width: 100%; }
+  .cart-items { max-height: 45vh; }
+
+  /* Touch targets */
+  .btn { min-height: 38px; }
+  .btn-sm { min-height: 32px; }
+  .cat-btn { padding: 8px 16px; }
+  .nav-item { padding: 15px 16px; }
+}
+
+@media (max-width: 480px) {
+  .stats-grid { grid-template-columns: 1fr; }
+  .hub-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 12px; }
+}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
 </head>
@@ -391,10 +457,14 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
     <span id="cashier-role" style="display:block;font-size:11px;opacity:.6;margin-top:2px"></span>
   </div>
 </nav>
+<div class="sidebar-backdrop" onclick="App.closeSidebar()"></div>
 
 <!-- Main -->
 <div id="main" style="display:none">
   <header id="topbar">
+    <button id="hamburger-btn" onclick="App.toggleSidebar()" aria-label="Menu">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>
+    </button>
     <div id="topbar-title">Dashboard</div>
     <div id="topbar-right">
       <span id="clock"></span>
@@ -837,6 +907,7 @@ const App = {
     if (perms && !sectionAllowed) return;
     this.section = name;
     this.closeModal();
+    this.closeSidebar();
     document.querySelectorAll('.nav-item').forEach(el => {
       const ds = el.dataset.section;
       const hub = this._hubGroups[ds];
@@ -850,6 +921,18 @@ const App = {
     content.style.height = name === 'pos' ? '100%' : 'auto';
     const renders = { dashboard: () => this.renderDashboard(), pos: () => this.renderPOS(), inventory: () => this.renderInventory(), services: () => this.renderServices(), rentals: () => this.renderRentals(), layaway: () => this.renderLayaway(), customers: () => this.renderCustomers(), transactions: () => this.renderTransactions(), 'online-orders': () => this.renderOnlineOrders(), reports: () => this.renderReports(), employees: () => this.renderEmployees(), settings: () => this.renderSettings(), suppliers: () => this.renderSuppliers(), purchasing: () => this.renderPurchasing(), quotations: () => this.renderQuotations(), accounts: () => this.renderAccounts(), branches: () => this.renderBranches(), security: () => this.renderSecurity(), transfers: () => this.renderTransfers(), crm: () => this.renderCRM(), commissions: () => this.renderCommissions(), warehouse: () => this.renderWarehouse(), shipping: () => this.renderShipping(), 'cycle-counts': () => this.renderCycleCounts(), drawers: () => this.renderDrawers(), promotions: () => this.renderPromotions(), 'purchasing-hub': () => this.renderHub('purchasing-hub'), 'sales-hub': () => this.renderHub('sales-hub'), 'accounts-hub': () => this.renderHub('accounts-hub'), 'warehouse-hub': () => this.renderHub('warehouse-hub'), 'admin-hub': () => this.renderHub('admin-hub') };
     if (renders[name]) await renders[name]();
+  },
+
+  // Mobile off-canvas sidebar — no-ops harmlessly above the 880px breakpoint
+  // since #sidebar/.sidebar-backdrop have no fixed positioning there.
+  toggleSidebar() {
+    document.getElementById('sidebar')?.classList.toggle('sidebar-open');
+    document.querySelector('.sidebar-backdrop')?.classList.toggle('sidebar-backdrop-open');
+  },
+
+  closeSidebar() {
+    document.getElementById('sidebar')?.classList.remove('sidebar-open');
+    document.querySelector('.sidebar-backdrop')?.classList.remove('sidebar-backdrop-open');
   },
 
   // ─── API ──────────────────────────────────────────────────
@@ -1387,7 +1470,7 @@ const App = {
           <span style="font-size:14px;font-weight:500;color:#7c5c00">No cash drawer is open for this session.</span>
           <button class="btn btn-sm" style="background:#f59e0b;color:#fff;font-weight:600;border:none;padding:5px 14px" onclick="App.checkPOSDrawer()">Open Drawer</button>
         </div>
-        <div style="flex:1;display:flex;overflow:hidden;">
+        <div class="pos-body" style="flex:1;display:flex;overflow:hidden;">
         <div class="pos-left" style="padding:14px;border-right:1px solid var(--border);background:#f8f9fb;">
           <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;">
             <div class="search-bar" style="flex:1">
@@ -7084,8 +7167,8 @@ const App = {
                     <td style="color:var(--text-muted)">${this.fmtDate(po.created_at)}</td>
                     <td>
                       <button class="btn btn-sm btn-secondary" onclick="App.viewPO(${po.id})">View</button>
-                      ${po.status==='draft'||po.status==='sent' ? `<button class="btn btn-sm btn-primary" onclick="App.updatePOStatus(${po.id},'approved')">Approve</button>` : ''}
-                      ${po.status==='draft'||po.status==='sent'||po.status==='approved'||po.status==='partial' ? `<button class="btn btn-sm btn-success" onclick="App.showReceivePO(${po.id})">Receive</button>` : ''}
+                      ${(po.status==='draft'||po.status==='sent') && this.can('purchasing_approve') ? `<button class="btn btn-sm btn-primary" onclick="App.updatePOStatus(${po.id},'approved')">Approve</button>` : ''}
+                      ${(po.status==='draft'||po.status==='sent'||po.status==='approved'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-sm btn-success" onclick="App.showReceivePO(${po.id})">Receive</button>` : ''}
                     </td>
                   </tr>`).join('') : '<tr><td colspan="8" class="empty-state">No purchase orders yet</td></tr>'}
               </tbody>
@@ -7905,9 +7988,9 @@ const App = {
         </div>
         <div class="modal-footer">
           ${po.status==='draft' ? `<button class="btn btn-secondary" onclick="App.updatePOStatus(${po.id},'sent')">Mark as Sent</button>` : ''}
-          ${po.status==='draft'||po.status==='sent' ? `<button class="btn btn-primary" onclick="App.updatePOStatus(${po.id},'approved')">Approve PO</button>` : ''}
+          ${(po.status==='draft'||po.status==='sent') && this.can('purchasing_approve') ? `<button class="btn btn-primary" onclick="App.updatePOStatus(${po.id},'approved')">Approve PO</button>` : ''}
           ${po.status!=='cancelled'&&po.status!=='received' ? `<button class="btn btn-danger" onclick="App.updatePOStatus(${po.id},'cancelled')">Cancel PO</button>` : ''}
-          ${po.status==='draft'||po.status==='sent'||po.status==='approved'||po.status==='partial' ? `<button class="btn btn-success" onclick="App.closeModal();App.showReceivePO(${po.id})">Receive Items</button>` : ''}
+          ${(po.status==='draft'||po.status==='sent'||po.status==='approved'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-success" onclick="App.closeModal();App.showReceivePO(${po.id})">Receive Items</button>` : ''}
           ${(po.status==='received'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn" style="background:#f59e0b;color:#fff;border:none" onclick="App.closeModal();App.showProcessDamaged(${po.id})">⚠️ Process Damaged</button>` : ''}
           ${(po.status==='received'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-secondary" onclick="App.emailGRN(${po.id},'${(po.supplier_email||'').replace(/'/g,"\\'")}')">✉️ Email GRN</button>` : ''}
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
