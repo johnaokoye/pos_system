@@ -5,8 +5,10 @@ pos.db-wal
 pos-turso-snapshot.db*
 uploads/products/*
 uploads/po-attachments/*
+uploads/branding/*
 !uploads/products/.gitkeep
 !uploads/po-attachments/.gitkeep
+!uploads/branding/.gitkeep
 .env
 .vercel
 test-results/

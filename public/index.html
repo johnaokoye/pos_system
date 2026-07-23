@@ -6,10 +6,10 @@
 <title>POS System</title>
 <style>
 :root {
-  --primary: #1a3a5c;
-  --primary-light: #254d7a;
-  --accent: #2196F3;
-  --accent-hover: #1976D2;
+  --primary: #10703a;
+  --primary-light: #1c8a4d;
+  --accent: #10703a;
+  --accent-hover: #0d5c2f;
   --success: #4CAF50;
   --danger: #f44336;
   --warning: #FF9800;
@@ -28,10 +28,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .sidebar-logo { padding: 18px 16px 14px; border-bottom: 1px solid rgba(255,255,255,0.1); }
 .sidebar-logo h1 { font-size: 15px; font-weight: 700; letter-spacing: .5px; color: #fff; }
 .sidebar-logo p { font-size: 11px; color: rgba(255,255,255,0.5); margin-top: 2px; }
+.sidebar-logo img { display: block; max-height: 36px; max-width: 100%; object-fit: contain; }
 .sidebar-nav { flex: 1; padding: 8px 0; overflow-y: auto; }
-.nav-item { display: flex; align-items: center; gap: 12px; padding: 13px 16px; cursor: pointer; transition: background .15s; color: rgba(255,255,255,0.75); font-size: 14px; border-left: 3px solid transparent; }
+.nav-item { display: flex; align-items: center; gap: 12px; padding: 13px 16px; cursor: pointer; transition: background .15s; color: rgba(255,255,255,0.75); font-size: 14px; font-weight: 700; border-left: 3px solid transparent; }
 .nav-item:hover { background: rgba(255,255,255,0.08); color: #fff; }
-.nav-item.active { background: rgba(255,255,255,0.12); color: #fff; border-left-color: #64b5f6; }
+.nav-item.active { background: rgba(255,255,255,0.12); color: #fff; border-left-color: #4ade80; }
 .nav-item svg { width: 20px; height: 20px; flex-shrink: 0; }
 .sidebar-footer { padding: 12px 16px; border-top: 1px solid rgba(255,255,255,0.1); font-size: 12px; color: rgba(255,255,255,0.5); }
 .sidebar-footer strong { display: block; color: rgba(255,255,255,0.8); }
@@ -326,6 +327,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .login-logo { text-align: center; margin-bottom: 28px; }
 .login-logo h1 { font-size: 22px; font-weight: 700; color: var(--primary); margin-bottom: 4px; }
 .login-logo p { font-size: 13px; color: var(--text-muted); }
+.login-logo img { display: block; margin: 0 auto; max-height: 64px; max-width: 100%; object-fit: contain; }
 .login-box input { padding: 10px 12px; font-size: 14px; }
 .login-btn { width: 100%; padding: 12px; font-size: 15px; font-weight: 600; margin-top: 8px; justify-content: center; }
 .login-error { color: var(--danger); font-size: 13px; text-align: center; margin-top: 12px; min-height: 18px; }
@@ -403,7 +405,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 <!-- Login Screen -->
 <div id="login-screen">
   <div class="login-box">
-    <div class="login-logo">
+    <div class="login-logo" id="login-logo-content">
       <h1>&#9673; RetailPOS</h1>
       <p>Point of Sale System</p>
     </div>
@@ -422,7 +424,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 
 <!-- Sidebar -->
 <nav id="sidebar" style="display:none">
-  <div class="sidebar-logo">
+  <div class="sidebar-logo" id="sidebar-logo-content">
     <h1>&#9673; RetailPOS</h1>
     <p>Point of Sale System</p>
   </div>
@@ -542,11 +544,30 @@ const App = {
   async init() {
     this.updateClock();
     setInterval(() => this.updateClock(), 1000);
-    // Show the login form (and bind its handlers) before the settings fetch,
+    // Show the login form (and bind its handlers) before the branding fetch,
     // not after — otherwise showLoginScreen()'s field-clearing/focus setup
     // races anyone who starts typing while that request is still in flight.
     this.showLoginScreen();
-    try { await this.loadSettings(); } catch(e) {}
+    // GET /settings is authenticated (tax rate, SMTP creds, etc. live there
+    // too) so it 401s before login — /settings/public exposes just the
+    // store name/logo so the login screen can show real branding.
+    try {
+      const pub = await this.api('GET', '/settings/public');
+      this.applyBranding(pub.company_logo_url, pub.store_name);
+    } catch(e) {}
+  },
+
+  // Swaps the "RetailPOS" wordmark for an uploaded logo image, both on the
+  // pre-login screen and the sidebar — called on init() (public branding)
+  // and again after enterApp()/saveSettings() load the full settings object.
+  applyBranding(logoUrl, storeName) {
+    const html = logoUrl
+      ? `<img src="${logoUrl}" alt="${(storeName || 'Company logo').replace(/"/g,'&quot;')}">`
+      : `<h1>&#9673; RetailPOS</h1><p>Point of Sale System</p>`;
+    const loginEl = document.getElementById('login-logo-content');
+    const sidebarEl = document.getElementById('sidebar-logo-content');
+    if (loginEl) loginEl.innerHTML = html;
+    if (sidebarEl) sidebarEl.innerHTML = html;
   },
 
   updateClock() {
@@ -635,6 +656,10 @@ const App = {
     document.getElementById('login-screen').style.display = 'none';
     document.getElementById('sidebar').style.display = '';
     document.getElementById('main').style.display = '';
+    // Non-blocking — the pre-login /settings/public fetch in init() already
+    // painted a best-effort logo; this replaces it with the authenticated
+    // GET /settings response (needed since /settings/public never runs again).
+    this.loadSettings().catch(() => {});
     const name = this.currentUser.first_name + ' ' + this.currentUser.last_name;
     const defaultBranch = (this.currentUser.branches || []).find(b => b.is_default) || (this.currentUser.branches || [])[0];
     this.activeCurrency = defaultBranch?.currency || null;
@@ -812,7 +837,6 @@ const App = {
       { section: 'suppliers', label: 'Suppliers', color: '#2196F3', icon: '<path d="M20 8h-3V4H3c-1.1 0-2 .9-2 2v11h2c0 1.66 1.34 3 3 3s3-1.34 3-3h6c0 1.66 1.34 3 3 3s3-1.34 3-3h2v-5l-3-4zM6 18.5c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm13.5-9l1.96 2.5H17V9.5h2.5zm-1.5 9c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/>' },
       { section: 'purchasing', label: 'Purchase Orders', color: '#00897B', icon: '<path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 3c1.93 0 3.5 1.57 3.5 3.5S13.93 13 12 13s-3.5-1.57-3.5-3.5S10.07 6 12 6zm7 13H5v-.23c0-.62.28-1.2.76-1.58C7.47 15.82 9.64 15 12 15s4.53.82 6.24 2.19c.48.38.76.97.76 1.58V19z"/>' },
       { section: 'services', label: 'Services', color: '#4CAF50', icon: '<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/>' },
-      { section: 'transfers', label: 'Branch Transfers', color: '#FF9800', icon: '<path d="M6.99 11L3 15l3.99 4v-3H14v-2H6.99v-3zM21 9l-3.99-4v3H10v2h7.01v3L21 9z"/>' },
     ]},
     'sales-hub': { title: 'Sales', children: [
       { section: 'pos', label: 'Point of Sale', color: '#2196F3', icon: '<path d="M17 12h-5v5h5v-5zM16 1v2H8V1H6v2H5c-1.11 0-1.99.9-1.99 2L3 19c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2h-1V1h-2zm3 18H5V8h14v11z"/>' },
@@ -836,6 +860,7 @@ const App = {
       { section: 'inventory', label: 'Inventory', color: '#2196F3', icon: '<path d="M20 4H4v2h16V4zm1 10v-2l-1-5H4l-1 5v2h1v6h10v-6h4v6h2v-6h1zm-9 4H6v-4h6v4z"/>' },
       { section: 'warehouse', label: 'Warehouse Mgmt', color: '#00897B', icon: '<path d="M20 8h-3V4H3c-1.1 0-2 .9-2 2v11h2c0 1.66 1.34 3 3 3s3-1.34 3-3h6c0 1.66 1.34 3 3 3s3-1.34 3-3h2v-5l-3-4zM3 7h12v7H3V7zm3 9.5c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm13.5-9l1.96 2.5H17V7.5h2.5zm-1.5 9c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/>' },
       { section: 'cycle-counts', label: 'Cycle Counts', color: '#4CAF50', icon: '<path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 3c1.93 0 3.5 1.57 3.5 3.5S13.93 13 12 13s-3.5-1.57-3.5-3.5S10.07 6 12 6zm7 13H5v-.23c0-.62.28-1.2.76-1.58C7.47 15.82 9.64 15 12 15s4.53.82 6.24 2.19c.48.38.76.97.76 1.58V19z"/>' },
+      { section: 'transfers', label: 'Branch Transfers', color: '#FF9800', icon: '<path d="M6.99 11L3 15l3.99 4v-3H14v-2H6.99v-3zM21 9l-3.99-4v3H10v2h7.01v3L21 9z"/>' },
     ]},
     'admin-hub': { title: 'Admin', children: [
       { section: 'employees', label: 'Employees', color: '#2196F3', icon: '<path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>' },
@@ -959,6 +984,7 @@ const App = {
   async loadSettings() {
     this.settings = await this.api('GET', '/settings');
     if (this.settings.store_name) document.title = this.settings.store_name + ' - POS';
+    this.applyBranding(this.settings.company_logo_url, this.settings.store_name);
     try { this.altCurrencies = this.settings.alt_currencies ? JSON.parse(this.settings.alt_currencies) : []; } catch(e) { this.altCurrencies = []; }
   },
 
@@ -981,6 +1007,42 @@ const App = {
   fmt(n) { return new Intl.NumberFormat('en-US', { style: 'currency', currency: this.activeCurrency || this.settings.currency || 'USD' }).format(n || 0); },
   fmtDate(d) { return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); },
   fmtDateTime(d) { return new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); },
+
+  // Calendar-day difference, normalized to UTC midnight so a checkout/due
+  // pair on the same two dates always reads as a whole number of days
+  // regardless of the time-of-day component on datetime values.
+  _daysBetween(a, b) {
+    // Must read UTC calendar-day components, not local ones: a date-only
+    // value ("2026-07-25") parses as UTC midnight, so in any timezone behind
+    // UTC the local getters roll it back to the previous calendar day —
+    // while a full datetime value (checkout_datetime) mostly doesn't shift
+    // the same way, since it carries a real time-of-day. Mixing local
+    // getters across a date-only value and a datetime value (exactly what
+    // happens comparing a rental_agreements row's due_date against a linked
+    // transaction's rental_checkout_datetime) silently produced different
+    // day counts for the same rental depending on which pair was compared.
+    // Staying in UTC throughout matches how the backend derives these
+    // fields to begin with (SQLite's date('now') / Date#toISOString() are
+    // both UTC), so it's consistent everywhere this helper is used.
+    const da = new Date(a), db = new Date(b);
+    const utcA = Date.UTC(da.getUTCFullYear(), da.getUTCMonth(), da.getUTCDate());
+    const utcB = Date.UTC(db.getUTCFullYear(), db.getUTCMonth(), db.getUTCDate());
+    return Math.round((utcB - utcA) / 86400000);
+  },
+
+  // Shared by the rental agreements list/detail and the linked transaction's
+  // detail view — planned duration is checkout→due; once returned, shows the
+  // actual checkout→return span too, flagging any variance from the plan.
+  rentalDurationLabel(checkout, dueDate, returnedAt) {
+    if (!checkout || !dueDate) return '—';
+    const planned = this._daysBetween(checkout, dueDate);
+    const plannedLabel = `${planned} day${planned === 1 ? '' : 's'}`;
+    if (!returnedAt) return plannedLabel;
+    const actual = this._daysBetween(checkout, returnedAt);
+    if (actual === planned) return `${plannedLabel} <span style="color:var(--success)">(returned on time)</span>`;
+    const diff = actual - planned;
+    return `${actual} day${actual === 1 ? '' : 's'} <span style="color:${diff > 0 ? 'var(--danger)' : 'var(--success)'}">(planned ${plannedLabel}, ${diff > 0 ? '+' : ''}${diff}d)</span>`;
+  },
 
   alert(msg, type = 'success') {
     const el = document.createElement('div');
@@ -3377,13 +3439,14 @@ const App = {
     const sc = { pending:'badge-warning', active:'badge-info', overdue:'badge-danger', returned:'badge-success', cancelled:'badge-secondary' };
     document.getElementById('rental-content').innerHTML = !agreements.length ? '<div class="empty-state"><p>No rental agreements found.</p></div>' : `
       <table class="table">
-        <thead><tr><th>Agreement #</th><th>Customer</th><th>Branch</th><th>Checkout</th><th>Due</th><th>Items</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>Agreement #</th><th>Customer</th><th>Branch</th><th>Checkout</th><th>Due</th><th>Duration</th><th>Items</th><th>Status</th><th></th></tr></thead>
         <tbody>${agreements.map(a => `<tr>
           <td class="fw-600">${a.agreement_number}</td>
           <td>${a.customer_name||'—'}</td>
           <td>${a.branch_name||'—'}</td>
           <td>${a.status==='pending' ? '—' : this.fmtDate(a.checkout_date)}</td>
           <td>${this.fmtDate(a.due_date)}</td>
+          <td>${a.status==='pending' ? '—' : this.rentalDurationLabel(a.checkout_date, a.due_date, a.returned_at)}</td>
           <td><span class="badge badge-info">${a.item_count}</span></td>
           <td><span class="badge-pill ${sc[a.display_status]||'badge-secondary'}">${a.display_status}</span></td>
           <td style="text-align:right;white-space:nowrap">
@@ -3517,6 +3580,7 @@ const App = {
             <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Branch</label><div>${a.branch_name||'—'}</div></div>
             <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Checkout Date</label><div>${a.status==='pending' ? '<span style="color:var(--text-muted)">Awaiting checkout</span>' : this.fmtDate(a.checkout_date)}</div></div>
             <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Due Date</label><div>${this.fmtDate(a.due_date)}</div></div>
+            <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Duration</label><div>${a.status==='pending' ? '<span style="color:var(--text-muted)">TBD at checkout</span>' : this.rentalDurationLabel(a.checkout_date, a.due_date, a.returned_at)}</div></div>
           </div>
           ${a.status==='pending' ? `<div style="padding:8px 12px;background:rgba(245,158,11,0.08);border-left:3px solid #d97706;border-radius:4px;font-size:12px;color:#d97706;margin-bottom:12px">Held — no payment collected yet. Fees and deposit are calculated when a cashier processes payment, based on the rental period starting at that moment.</div>` : ''}
           <table class="table" style="margin-bottom:12px">
@@ -5004,7 +5068,7 @@ const App = {
     win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8">
 <title>Labels \u2014 ${p.name}</title>
 <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"><\/script>
-<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:Arial,sans-serif;background:#e0e0e0;padding:20px}.toolbar{background:#fff;padding:10px 16px;margin-bottom:16px;border-radius:6px;display:flex;align-items:center;gap:10px;font-size:13px;box-shadow:0 1px 4px rgba(0,0,0,.1)}.toolbar button{padding:6px 16px;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:500}.pbtn{background:#2196F3;color:#fff}.cbtn{background:#e0e0e0;color:#333}.labels-wrap{display:flex;flex-wrap:wrap;gap:4px;background:#fff;padding:12px;border-radius:4px}@media print{body{background:#fff;padding:0}.toolbar{display:none!important}.labels-wrap{padding:0;gap:2mm}}</style>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:Arial,sans-serif;background:#e0e0e0;padding:20px}.toolbar{background:#fff;padding:10px 16px;margin-bottom:16px;border-radius:6px;display:flex;align-items:center;gap:10px;font-size:13px;box-shadow:0 1px 4px rgba(0,0,0,.1)}.toolbar button{padding:6px 16px;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:500}.pbtn{background:#10703a;color:#fff}.cbtn{background:#e0e0e0;color:#333}.labels-wrap{display:flex;flex-wrap:wrap;gap:4px;background:#fff;padding:12px;border-radius:4px}@media print{body{background:#fff;padding:0}.toolbar{display:none!important}.labels-wrap{padding:0;gap:2mm}}</style>
 </head><body>
 <div class="toolbar">
   <strong>${p.name}</strong>
@@ -5689,6 +5753,7 @@ const App = {
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;color:#166534">
               <div>Checked out: ${this.fmtDateTime(tx.rental_checkout_datetime)}</div>
               <div>Due back: ${this.fmtDate(tx.rental_due_date)}</div>
+              <div>Duration: ${this.rentalDurationLabel(tx.rental_checkout_datetime, tx.rental_due_date, tx.rental_returned_at)}</div>
               <div>Deposit: ${this.fmt(tx.rental_deposit_total)}${tx.rental_deposit_refunded > 0 ? ` (${this.fmt(tx.rental_deposit_refunded)} refunded)` : ''}</div>
               <div>${tx.rental_returned_at ? `Returned: ${this.fmtDateTime(tx.rental_returned_at)}` : 'Not yet returned'}</div>
             </div>
@@ -6443,6 +6508,16 @@ const App = {
         <div>
           <div class="card" style="margin-bottom:16px">
             <div class="card-header"><span class="card-title">Store Information</span></div>
+            <div class="form-group"><label>Company Logo</label>
+              <div style="display:flex;align-items:center;gap:10px;margin-top:4px">
+                ${s.company_logo_url ? `<img src="${s.company_logo_url}" alt="Company logo" style="max-height:48px;max-width:160px;object-fit:contain;border:1px solid var(--border);border-radius:6px;padding:4px" id="s-logo-preview">` : `<div style="width:48px;height:48px;border:1px dashed var(--border);border-radius:6px;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:20px" id="s-logo-preview">🖼</div>`}
+                <div>
+                  <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0">Upload Logo<input type="file" id="s-logo-input" accept="image/*" style="display:none" onchange="App.uploadCompanyLogo(this)"></label>
+                  ${s.company_logo_url ? `<button class="btn btn-danger btn-sm" style="margin-left:6px" onclick="App.removeCompanyLogo()">Remove</button>` : ''}
+                </div>
+              </div>
+              <p style="font-size:11px;color:var(--text-muted);margin-top:6px">Replaces the RetailPOS wordmark on the login screen and sidebar.</p>
+            </div>
             <div class="form-group"><label>Store Name</label><input id="s-name" value="${s.store_name||''}"></div>
             <div class="form-group"><label>Address</label><input id="s-addr" value="${s.store_address||''}"></div>
             <div class="input-row">
@@ -6736,6 +6811,31 @@ const App = {
       await this.api('DELETE', `/api-keys/${id}`);
       this.alert('API key revoked', 'success');
       this.loadApiKeys();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async uploadCompanyLogo(input) {
+    const file = input.files[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append('logo', file);
+    try {
+      const res = await fetch('/api/settings/logo', { method: 'POST', body: fd });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Upload failed');
+      this.alert('Logo uploaded');
+      this.applyBranding(json.logo_url, this.settings?.store_name);
+      this.renderSettings();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async removeCompanyLogo() {
+    if (!confirm('Remove the company logo?')) return;
+    try {
+      await this.api('DELETE', '/settings/logo');
+      this.alert('Logo removed');
+      this.applyBranding(null, this.settings?.store_name);
+      this.renderSettings();
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
