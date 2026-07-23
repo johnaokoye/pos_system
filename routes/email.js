@@ -25,6 +25,19 @@ function fmt(n) {
   return '$' + parseFloat(n || 0).toFixed(2);
 }
 
+// Statement is the only document built here that's also used for actual
+// printing (routes/email.js's statement-preview endpoint, opened directly in
+// a browser tab), so it needs an absolute logo URL either way — a relative
+// /uploads/... path won't resolve in an email client, and origin isn't
+// reliably known once the HTML leaves this request. `origin` is derived by
+// each caller from its own req (`${req.protocol}://${req.get('host')}`).
+function logoImgTag(s, origin, maxHeight = 40) {
+  if (!s.company_logo_url) return '';
+  const src = /^https?:\/\//.test(s.company_logo_url) ? s.company_logo_url : `${origin}${s.company_logo_url}`;
+  const alt = (s.store_name || 'Logo').replace(/"/g, '&quot;');
+  return `<img src="${src}" alt="${alt}" style="display:block;max-height:${maxHeight}px;max-width:200px;object-fit:contain;margin-bottom:8px">`;
+}
+
 function buildReceiptHtml(tx, s) {
   const storeName = s.store_name || 'My Store';
   const storeAddr = tx.branch_address
@@ -588,7 +601,7 @@ router.post('/send-grn/:id', requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-function buildStatementHtml(data, s) {
+function buildStatementHtml(data, s, origin) {
   const { customer, payments, period } = data;
   const storeName = s.store_name || 'My Store';
   const storeAddr = s.store_address || '';
@@ -628,6 +641,7 @@ function buildStatementHtml(data, s) {
 <tr><td align="center">
   <table width="640" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
     <tr><td style="background:#1a56db;padding:24px;text-align:center">
+      ${origin ? `<div style="text-align:left;margin-bottom:8px">${logoImgTag(s, origin)}</div>` : ''}
       <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
       ${storeAddr ? `<div style="color:#bcd4ff;font-size:12px;margin-top:4px">${storeAddr}</div>` : ''}
       ${storePhone ? `<div style="color:#bcd4ff;font-size:12px">${storePhone}</div>` : ''}
@@ -693,7 +707,8 @@ router.get('/statement-preview/:customer_id', requireAuth, async (req, res) => {
       p.allocations = allocs;
     }
     const s = await getSettings();
-    const html = buildStatementHtml({ customer, payments, period: { start: start||null, end: end||null } }, s);
+    const origin = `${req.protocol}://${req.get('host')}`;
+    const html = buildStatementHtml({ customer, payments, period: { start: start||null, end: end||null } }, s, origin);
     res.setHeader('Content-Type', 'text/html');
     res.send(html);
   } catch(e) { res.status(500).send(`<p>Error: ${e.message}</p>`); }
@@ -717,7 +732,8 @@ router.post('/send-statement/:customer_id', requireAuth, async (req, res) => {
       p.allocations = allocs;
     }
     const s = await getSettings();
-    const html = buildStatementHtml({ customer, payments, period: { start: start||null, end: end||null } }, s);
+    const origin = `${req.protocol}://${req.get('host')}`;
+    const html = buildStatementHtml({ customer, payments, period: { start: start||null, end: end||null } }, s, origin);
     const customerName = `${customer.first_name} ${customer.last_name}`;
     try {
       const transporter = createTransporter(s);

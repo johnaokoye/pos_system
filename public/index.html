@@ -29,6 +29,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .sidebar-logo h1 { font-size: 15px; font-weight: 700; letter-spacing: .5px; color: #fff; }
 .sidebar-logo p { font-size: 11px; color: rgba(255,255,255,0.5); margin-top: 2px; }
 .sidebar-logo img { display: block; max-height: 36px; max-width: 100%; object-fit: contain; }
+.sidebar-logo .brand-logo-wrap { display: inline-block; max-width: 100%; }
+.sidebar-logo .brand-logo-wrap p { white-space: nowrap; text-align: left; margin-top: 2px; }
 .sidebar-nav { flex: 1; padding: 8px 0; overflow-y: auto; }
 .nav-item { display: flex; align-items: center; gap: 12px; padding: 13px 16px; cursor: pointer; transition: background .15s; color: rgba(255,255,255,0.75); font-size: 14px; font-weight: 700; border-left: 3px solid transparent; }
 .nav-item:hover { background: rgba(255,255,255,0.08); color: #fff; }
@@ -328,6 +330,8 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .login-logo h1 { font-size: 22px; font-weight: 700; color: var(--primary); margin-bottom: 4px; }
 .login-logo p { font-size: 13px; color: var(--text-muted); }
 .login-logo img { display: block; margin: 0 auto; max-height: 64px; max-width: 100%; object-fit: contain; }
+.login-logo .brand-logo-wrap { display: inline-block; max-width: 100%; }
+.login-logo .brand-logo-wrap p { white-space: nowrap; text-align: left; }
 .login-box input { padding: 10px 12px; font-size: 14px; }
 .login-btn { width: 100%; padding: 12px; font-size: 15px; font-weight: 600; margin-top: 8px; justify-content: center; }
 .login-error { color: var(--danger); font-size: 13px; text-align: center; margin-top: 12px; min-height: 18px; }
@@ -562,12 +566,47 @@ const App = {
   // and again after enterApp()/saveSettings() load the full settings object.
   applyBranding(logoUrl, storeName) {
     const html = logoUrl
-      ? `<img src="${logoUrl}" alt="${(storeName || 'Company logo').replace(/"/g,'&quot;')}">`
+      ? `<div class="brand-logo-wrap"><img src="${logoUrl}" alt="${(storeName || 'Company logo').replace(/"/g,'&quot;')}"><p>Business Hub</p></div>`
       : `<h1>&#9673; RetailPOS</h1><p>Point of Sale System</p>`;
     const loginEl = document.getElementById('login-logo-content');
     const sidebarEl = document.getElementById('sidebar-logo-content');
-    if (loginEl) loginEl.innerHTML = html;
-    if (sidebarEl) sidebarEl.innerHTML = html;
+    if (loginEl) { loginEl.innerHTML = html; if (logoUrl) this._fitBrandCaption(loginEl); }
+    if (sidebarEl) { sidebarEl.innerHTML = html; if (logoUrl) this._fitBrandCaption(sidebarEl); }
+  },
+
+  // Scales the "Business Hub" caption's font-size so the left-aligned text
+  // spans exactly as wide as the logo image above it (rather than justify's
+  // spread-the-words trick) — measured against the image's actual rendered
+  // width, which varies per uploaded logo, so this has to happen in JS
+  // after the image has loaded rather than as a fixed CSS value.
+  _fitBrandCaption(container) {
+    const img = container.querySelector('img');
+    const p = container.querySelector('p');
+    if (!img || !p) return;
+    const fit = () => {
+      const targetWidth = img.offsetWidth;
+      p.style.fontSize = '';
+      const naturalWidth = p.offsetWidth;
+      if (!targetWidth || !naturalWidth) return;
+      const baseSize = parseFloat(getComputedStyle(p).fontSize);
+      p.style.fontSize = `${(baseSize * (targetWidth / naturalWidth)).toFixed(2)}px`;
+    };
+    if (img.complete) fit(); else img.addEventListener('load', fit, { once: true });
+  },
+
+  // Shared by every printable document (sale/void/return/cancellation
+  // receipts, customer history, pick lists, drawer reports) — always emits
+  // an absolute URL since several of these render inside a separate blank
+  // popup window (window.open('') + document.write()) with no base URL of
+  // its own to resolve a relative /uploads/... path against. Left-aligned
+  // by default (no centering) since none of these templates set text-align
+  // on their container, so it lands top-left without extra styling.
+  _printLogoTag(maxHeight = 40) {
+    const url = this.settings?.company_logo_url;
+    if (!url) return '';
+    const src = /^https?:\/\//.test(url) ? url : `${location.origin}${url}`;
+    const alt = (this.settings.store_name || 'Logo').replace(/"/g, '&quot;');
+    return `<img src="${src}" alt="${alt}" style="display:block;max-height:${maxHeight}px;max-width:220px;object-fit:contain;margin-bottom:8px">`;
   },
 
   updateClock() {
@@ -2264,6 +2303,12 @@ const App = {
     const items = tx.items || [];
     const storeName = this.settings.store_name || 'My Store';
     const footer = this.settings.receipt_footer || 'Thank you!';
+    // Stashed for printReceiptLetter(), which can't take these as onclick
+    // arguments (tx/cashResult are objects) — same pattern as App._viewTx
+    // used elsewhere to hand a full record across an onclick boundary.
+    this._lastReceiptTx = tx;
+    this._lastReceiptChange = change;
+    this._lastReceiptCash = cashResult;
 
     const overlay = this.showModal(`
       <div class="modal" style="max-width:400px">
@@ -2273,8 +2318,9 @@ const App = {
         </div>
         <div class="modal-body">
           <div class="receipt">
-            <div class="receipt-title">${storeName}</div>
-            ${tx.branch_name ? `<div style="text-align:center;font-size:12px;color:#444;font-weight:600">${tx.branch_name}</div>` : ''}
+            <div style="text-align:center;font-weight:700;font-size:15px;margin-bottom:6px">${storeName}</div>
+            ${this._printLogoTag(36)}
+            ${tx.branch_name ? `<div class="receipt-title">${tx.branch_name}</div>` : ''}
             ${tx.branch_address ? `<div style="text-align:center;font-size:11px;color:#666">${tx.branch_address}${tx.branch_city ? ', ' + tx.branch_city : ''}${tx.branch_state ? ' ' + tx.branch_state : ''}${tx.branch_zip ? ' ' + tx.branch_zip : ''}</div>` : `<div style="text-align:center;font-size:11px;color:#666">${this.settings.store_address || ''}</div>`}
             <div style="text-align:center;font-size:11px;color:#666">${tx.branch_phone || this.settings.store_phone || ''}</div>
             <hr>
@@ -2299,9 +2345,109 @@ const App = {
         <div class="modal-footer no-print">
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
           <button class="btn btn-secondary" onclick="App.emailReceipt(${tx.id},'${(tx.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email</button>
-          <button class="btn btn-primary" onclick="window.print()">🖨️ Print</button>
+          ${tx.rental_agreement_number
+            ? `<button class="btn btn-primary" onclick="App.printReceiptLetter()">🖨️ Print</button>`
+            : `<button class="btn btn-secondary" onclick="window.print()">🖨️ Normal</button><button class="btn btn-primary" onclick="App.printReceiptLetter()">🖨️ Letter</button>`}
         </div>
       </div>`);
+  },
+
+  // Rental-linked transactions always print letter-size (routed here
+  // directly by showReceipt's Print button); other transactions get this as
+  // an alternative to the default narrow thermal-receipt print. A separate
+  // full-page popup document — same window.open('')+document.write()+
+  // auto-print pattern as printCustomerHistory/printPickList/
+  // printDrawerReport — rather than trying to conditionally swap @page size
+  // on the existing thermal .receipt modal, which isn't reliably scriptable
+  // across browsers.
+  printReceiptLetter() {
+    const tx = this._lastReceiptTx;
+    if (!tx) return;
+    const change = this._lastReceiptChange || 0;
+    const cashResult = this._lastReceiptCash;
+    const items = tx.items || [];
+    const storeName = this.settings.store_name || 'My Store';
+    const footer = this.settings.receipt_footer || 'Thank you!';
+    const addressLine = tx.branch_address || this.settings.store_address || '';
+    const cityLine = tx.branch_address ? `${tx.branch_city ? ', ' + tx.branch_city : ''}${tx.branch_state ? ' ' + tx.branch_state : ''}${tx.branch_zip ? ' ' + tx.branch_zip : ''}` : '';
+    const phoneLine = tx.branch_phone || this.settings.store_phone || '';
+
+    const itemRows = items.map(i => `<tr>
+        <td style="padding:8px;border-bottom:1px solid #e8e8e8">${i.product_name}</td>
+        <td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:center">${i.quantity}</td>
+        <td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:right">${this.fmt(i.unit_price)}</td>
+        <td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:right;font-weight:600">${this.fmt(i.total)}</td>
+      </tr>`).join('');
+
+    const summaryRows = [
+      ['Subtotal', this.fmt(tx.subtotal)],
+      tx.tax_exempt ? [`Tax Exempt${tx.tax_exemption_number ? ` — Ref: ${tx.tax_exemption_number}` : ''}`, '—'] : ['Tax', this.fmt(tx.tax_amount)],
+      tx.discount_amount > 0 ? [`Discount${tx.promotion_code ? ` (${tx.promotion_code})` : ''}`, `-${this.fmt(tx.discount_amount)}`] : null,
+    ].filter(Boolean);
+
+    const tenderRows = [];
+    if (tx.amount_tendered > tx.total) {
+      if (cashResult?.rate > 1) {
+        tenderRows.push([`Tendered (${cashResult.currency})`, `${cashResult.currency} ${cashResult.tenderedAlt.toFixed(2)}`], ['Equivalent', this.fmt(tx.amount_tendered)], ['Change', this.fmt(change)]);
+      } else {
+        tenderRows.push(['Tendered', this.fmt(tx.amount_tendered)], ['Change', this.fmt(change)]);
+      }
+    }
+    if (tx.approval_code) {
+      const label = tx.payment_method === 'direct_deposit' ? 'Deposit Ref #' : tx.payment_method === 'gift_card' ? 'Gift Card #' : 'Approval Code';
+      tenderRows.push([label, tx.approval_code]);
+    }
+
+    const win = window.open('', '_blank', 'width=850,height=1000');
+    win.document.write(`<!DOCTYPE html><html><head><title>Receipt – ${tx.transaction_number}</title>
+    <style>
+      body{font-family:Arial,sans-serif;font-size:13px;margin:0;padding:48px;color:#111}
+      .header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px}
+      .store h1{font-size:20px;margin:0 0 2px}
+      .store div{font-size:12px;color:#555}
+      .doc-title{font-size:22px;font-weight:700;text-align:right;color:#333}
+      .meta{display:flex;gap:32px;margin-bottom:20px;font-size:12px}
+      .meta div{line-height:1.6}
+      .meta label{font-weight:bold;text-transform:uppercase;font-size:10px;color:#555;display:block}
+      table{width:100%;border-collapse:collapse}
+      th{background:#f0f0f0;text-align:left;padding:8px;font-size:11px;text-transform:uppercase;color:#555}
+      .totals{width:280px;margin-left:auto;margin-top:16px;font-size:13px}
+      .totals tr td{padding:4px 0;border:none}
+      .totals .total-row td{border-top:2px solid #111;font-size:16px;font-weight:700;padding-top:8px}
+      .footer{margin-top:32px;font-size:11px;color:#777;border-top:1px solid #ddd;padding-top:10px;text-align:center}
+      @page { size: letter; margin: 0.75in; }
+      @media print{body{padding:0}}
+    </style></head><body>
+    <div style="text-align:center;font-weight:700;font-size:20px;margin-bottom:16px">${storeName}</div>
+    <div class="header">
+      <div class="store">
+        ${this._printLogoTag(50)}
+        ${tx.branch_name ? `<h1>${tx.branch_name}</h1>` : ''}
+        ${addressLine ? `<div>${addressLine}${cityLine}</div>` : ''}
+        ${phoneLine ? `<div>${phoneLine}</div>` : ''}
+      </div>
+      <div class="doc-title">RECEIPT</div>
+    </div>
+    <div class="meta">
+      <div><label>Transaction #</label>${tx.transaction_number}</div>
+      <div><label>Date</label>${this.fmtDateTime(tx.created_at)}</div>
+      ${tx.customer_name ? `<div><label>Customer</label>${tx.customer_name}</div>` : ''}
+      ${tx.rental_agreement_number ? `<div><label>Rental Agreement</label>${tx.rental_agreement_number}</div>` : ''}
+    </div>
+    <table>
+      <thead><tr><th>Item</th><th style="text-align:center">Qty</th><th style="text-align:right">Unit Price</th><th style="text-align:right">Total</th></tr></thead>
+      <tbody>${itemRows}</tbody>
+    </table>
+    <table class="totals">
+      ${summaryRows.map(([l,v]) => `<tr><td>${l}</td><td style="text-align:right">${v}</td></tr>`).join('')}
+      <tr class="total-row"><td>TOTAL</td><td style="text-align:right">${this.fmt(tx.total)}</td></tr>
+      <tr><td>Payment</td><td style="text-align:right">${tx.payment_method.replace('_',' ').toUpperCase()}</td></tr>
+      ${tenderRows.map(([l,v]) => `<tr><td>${l}</td><td style="text-align:right">${v}</td></tr>`).join('')}
+    </table>
+    <div class="footer">${footer}</div>
+    <script>window.onload=()=>{window.print()}<\/script>
+    </body></html>`);
+    win.document.close();
   },
 
   selectCustomer() {
@@ -3657,9 +3803,10 @@ const App = {
         </div>
         <div class="modal-body">
           <div class="receipt">
+            <div style="text-align:center;font-weight:700;font-size:15px;margin-bottom:6px">${storeName}</div>
+            ${this._printLogoTag(36)}
             <div class="receipt-title" style="color:var(--danger)">RENTAL CANCELLATION</div>
-            <div style="text-align:center;font-size:12px;color:#444;font-weight:600">${storeName}</div>
-            ${agreement.branch_name ? `<div style="text-align:center;font-size:11px;color:#666">${agreement.branch_name}</div>` : ''}
+            ${agreement.branch_name ? `<div style="text-align:center;font-size:12px;color:#444;font-weight:600">${agreement.branch_name}</div>` : ''}
             <hr>
             <div class="receipt-row"><span>Agreement #:</span><span>${agreement.agreement_number}</span></div>
             <div class="receipt-row"><span>Cancelled:</span><span>${agreement.cancelled_at ? this.fmtDateTime(agreement.cancelled_at) : '—'}</span></div>
@@ -5384,6 +5531,7 @@ const App = {
       .footer{margin-top:24px;font-size:11px;color:#777;border-top:1px solid #ddd;padding-top:8px}
       @media print{body{margin:16px}}
     </style></head><body>
+    ${this._printLogoTag(50)}
     <h1>${store.store_name || 'Customer History'}</h1>
     <div class="sub">Customer History Report</div>
     <div class="meta">
@@ -5862,9 +6010,10 @@ const App = {
         </div>
         <div class="modal-body">
           <div class="receipt">
+            <div style="text-align:center;font-weight:700;font-size:15px;margin-bottom:6px">${storeName}</div>
+            ${this._printLogoTag(36)}
             <div class="receipt-title" style="color:var(--danger)">VOID RECEIPT</div>
-            <div style="text-align:center;font-size:12px;color:#444;font-weight:600">${storeName}</div>
-            ${tx.branch_name ? `<div style="text-align:center;font-size:11px;color:#666">${tx.branch_name}</div>` : ''}
+            ${tx.branch_name ? `<div style="text-align:center;font-size:12px;color:#444;font-weight:600">${tx.branch_name}</div>` : ''}
             <hr>
             <div class="receipt-row"><span>Transaction #:</span><span>${tx.transaction_number}</span></div>
             <div class="receipt-row"><span>Voided:</span><span>${this.fmtDateTime(tx.voided_at)}</span></div>
@@ -6092,9 +6241,10 @@ const App = {
         </div>
         <div class="modal-body">
           <div class="receipt">
+            <div style="text-align:center;font-weight:700;font-size:15px;margin-bottom:6px">${storeName}</div>
+            ${this._printLogoTag(36)}
             <div class="receipt-title" style="color:var(--danger)">RETURN RECEIPT</div>
-            <div style="text-align:center;font-size:12px;color:#444;font-weight:600">${storeName}</div>
-            ${ret.branch_name ? `<div style="text-align:center;font-size:11px;color:#666">${ret.branch_name}</div>` : ''}
+            ${ret.branch_name ? `<div style="text-align:center;font-size:12px;color:#444;font-weight:600">${ret.branch_name}</div>` : ''}
             <hr>
             <div class="receipt-row"><span>Return #:</span><span>${ret.return_number}</span></div>
             <div class="receipt-row"><span>Date:</span><span>${this.fmtDateTime(ret.created_at)}</span></div>
@@ -12388,6 +12538,7 @@ const App = {
       .footer{margin-top:24px;font-size:11px;color:#777;border-top:1px solid #ddd;padding-top:8px}
       @media print{body{margin:16px}}
     </style></head><body>
+    ${this._printLogoTag(50)}
     <h1>${store.store_name || 'Pick List'}</h1>
     <h2>PICK LIST</h2>
     <div class="meta">
@@ -12975,6 +13126,7 @@ const App = {
     win.document.write(`<!DOCTYPE html><html><head><title>Drawer Report</title>
     <style>body{font-family:Arial,sans-serif;font-size:13px;margin:28px;color:#111}h2{margin:0 0 4px}h3{margin:0}p{margin:2px 0;font-size:12px;color:#555}table{width:100%;border-collapse:collapse;margin-top:14px}th{background:#eee;text-align:left;padding:6px 8px;font-size:11px;text-transform:uppercase;border:1px solid #ccc}td{padding:6px 8px;border:1px solid #ddd}tr:nth-child(even) td{background:#fafafa}.footer{margin-top:16px;font-size:11px;color:#999;border-top:1px solid #ddd;padding-top:8px}@media print{body{margin:12px}}</style>
     </head><body>
+    ${this._printLogoTag(40)}
     <h2>${store.store_name||'Drawer Report'}</h2>
     <p><strong>Drawer:</strong> ${s.drawer_name||'—'} &nbsp; <strong>Branch:</strong> ${s.branch_name||'—'}</p>
     <p><strong>Cashier:</strong> ${s.employee_name||'—'} &nbsp; <strong>Opening Float:</strong> $${parseFloat(s.opening_float||0).toFixed(2)}</p>
