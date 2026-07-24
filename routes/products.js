@@ -83,7 +83,7 @@ router.get('/', requireAuth, async (req, res) => {
     // keep this in sync with lib/rentalAvailability.js's getOutstandingQty().
     const rentalOutstandingExpr = (branchScoped) => `(SELECT COALESCE(SUM(rai.quantity - rai.quantity_returned),0)
         FROM rental_agreement_items rai JOIN rental_agreements ra ON rai.agreement_id = ra.id
-        WHERE rai.product_id = p.id AND ra.status = 'active'${branchScoped ? ' AND ra.branch_id = ?' : ''}) as rental_outstanding_qty`;
+        WHERE rai.product_id = p.id AND ra.status IN ('active', 'awaiting_issue')${branchScoped ? ' AND ra.branch_id = ?' : ''}) as rental_outstanding_qty`;
 
     if (branch_id) {
       sql = `SELECT p.id, p.sku, p.barcode, p.name, p.description, p.category_id, p.price, p.cost, p.tax_rate, p.active, p.created_at, p.supplier_id, p.image_path, p.is_service, p.unit,
@@ -343,7 +343,9 @@ router.get('/:id', requireAuth, async (req, res) => {
       if (!product) return res.status(404).json({ error: 'Product not found' });
       return res.json(product);
     }
-    const { rows: [product] } = await db.execute({ sql: `SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE p.id = ?`, args: [req.params.id] });
+    const { rows: [product] } = await db.execute({ sql: `SELECT p.*, c.name as category_name,
+      (SELECT branch_id FROM branch_inventory WHERE product_id = p.id LIMIT 1) as assigned_branch_id
+      FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE p.id = ?`, args: [req.params.id] });
     if (!product) return res.status(404).json({ error: 'Product not found' });
     // Additive fields only — used by the product form's Bin Locations panel to show
     // the branch-scoped stock figure that bin quantities must split accurately against.
@@ -395,13 +397,26 @@ router.put('/:id', async (req, res, next) => {
   if (!can(req.employee.permissions, key)) return res.status(403).json({ error: `Missing permission: ${key}` });
   next();
 }, async (req, res) => {
-  const { sku, barcode, name, description, category_id, price, cost, tax_rate, stock_qty, min_stock, active, supplier_id, is_service, unit, online_available, web_allotment, is_rental, rental_rate_type, rental_rate, rental_deposit, rental_late_fee_rate, replacement_value, rental_classification, rental_weekly_rate, rental_monthly_rate, rental_hourly_rate, is_accessory, is_layaway_eligible } = req.body;
+  const { sku, barcode, name, description, category_id, price, cost, tax_rate, stock_qty, min_stock, active, branch_id, supplier_id, is_service, unit, online_available, web_allotment, is_rental, rental_rate_type, rental_rate, rental_deposit, rental_late_fee_rate, replacement_value, rental_classification, rental_weekly_rate, rental_monthly_rate, rental_hourly_rate, is_accessory, is_layaway_eligible } = req.body;
   try {
     const svc = is_service ? 1 : 0;
     const rnt = is_rental ? 1 : 0;
     const acc = is_accessory ? 1 : 0;
     const lay = is_layaway_eligible ? 1 : 0;
     await db.execute({ sql: `UPDATE products SET sku=?,barcode=?,name=?,description=?,category_id=?,price=?,cost=?,tax_rate=?,stock_qty=?,min_stock=?,active=?,supplier_id=?,is_service=?,unit=?,online_available=?,web_allotment=?,is_rental=?,rental_rate_type=?,rental_rate=?,rental_deposit=?,rental_late_fee_rate=?,replacement_value=?,rental_classification=?,rental_weekly_rate=?,rental_monthly_rate=?,rental_hourly_rate=?,is_accessory=?,is_layaway_eligible=? WHERE id=?`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, tax_rate??8.5, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null, rnt, rental_rate_type||'daily', rental_rate||0, rental_deposit||0, rental_late_fee_rate||0, replacement_value||0, rental_classification||'tool', rental_weekly_rate||0, rental_monthly_rate||0, rental_hourly_rate||0, acc, lay, req.params.id] });
+    // Rental items live at a single branch — reassigning the dropdown moves
+    // the stock there; clearing it drops back to unassigned/global-only
+    // (matches the "Unassigned (global stock only)" option in the form).
+    if (rnt && branch_id !== undefined) {
+      await db.execute({ sql: 'DELETE FROM branch_inventory WHERE product_id = ? AND branch_id != ?', args: [req.params.id, branch_id || 0] });
+      if (branch_id) {
+        await db.execute({
+          sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock) VALUES (?, ?, ?, ?)
+                ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = ?, min_stock = ?, updated_at = CURRENT_TIMESTAMP`,
+          args: [req.params.id, branch_id, stock_qty||0, min_stock||5, stock_qty||0, min_stock||5],
+        });
+      }
+    }
     const { rows: [prod] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [req.params.id] });
     res.json(prod);
   } catch (e) {

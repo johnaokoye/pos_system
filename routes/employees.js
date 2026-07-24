@@ -20,7 +20,7 @@ function isBcryptHash(value) {
 // every one of those pickers for roles that don't manage employees.
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const { rows: employees } = await db.execute({ sql: `SELECT e.id, e.employee_number, e.first_name, e.last_name, e.username, e.role, e.active, e.created_at, e.security_group_id, e.default_branch_id, e.must_change_password, sg.name as security_group_name, b.name as default_branch_name
+    const { rows: employees } = await db.execute({ sql: `SELECT e.id, e.employee_number, e.first_name, e.last_name, e.username, e.role, e.active, e.created_at, e.security_group_id, e.default_branch_id, e.must_change_password, e.is_driver, e.is_operator, sg.name as security_group_name, b.name as default_branch_name
       FROM employees e
       LEFT JOIN security_groups sg ON e.security_group_id = sg.id
       LEFT JOIN branches b ON e.default_branch_id = b.id
@@ -48,17 +48,17 @@ router.get('/', requireAuth, async (req, res) => {
 // them individually), so enforcing a sub-key here would 403 users the UI
 // itself let through.
 router.post('/', requirePermission('employees'), async (req, res) => {
-  const { first_name, last_name, username, pin, password, must_change_password, security_group_id, default_branch_id } = req.body;
+  const { first_name, last_name, username, pin, password, must_change_password, security_group_id, default_branch_id, is_driver, is_operator } = req.body;
   if (!first_name || !last_name || !username || !pin) return res.status(400).json({ error: 'Required fields missing' });
   try {
     const employee_number = await nextNumber(db, 'employees', 'employee_number', 'EMP-', 4);
     const passwordHash = password ? await bcrypt.hash(password, 10) : null;
-    const result = await db.execute({ sql: 'INSERT INTO employees (employee_number,first_name,last_name,username,pin,password,must_change_password,security_group_id,default_branch_id) VALUES (?,?,?,?,?,?,?,?,?)', args: [employee_number, first_name, last_name, username, pin, passwordHash, must_change_password ? 1 : 0, security_group_id || null, default_branch_id || null] });
+    const result = await db.execute({ sql: 'INSERT INTO employees (employee_number,first_name,last_name,username,pin,password,must_change_password,security_group_id,default_branch_id,is_driver,is_operator) VALUES (?,?,?,?,?,?,?,?,?,?,?)', args: [employee_number, first_name, last_name, username, pin, passwordHash, must_change_password ? 1 : 0, security_group_id || null, default_branch_id || null, is_driver ? 1 : 0, is_operator ? 1 : 0] });
     const newId = Number(result.lastInsertRowid);
     if (default_branch_id) {
       await db.execute({ sql: 'INSERT OR IGNORE INTO employee_branches (employee_id, branch_id, is_default) VALUES (?,?,1)', args: [newId, default_branch_id] });
     }
-    const { rows: [emp] } = await db.execute({ sql: `SELECT e.id,e.employee_number,e.first_name,e.last_name,e.username,e.role,e.active,e.security_group_id,e.default_branch_id,sg.name as security_group_name,b.name as default_branch_name FROM employees e LEFT JOIN security_groups sg ON e.security_group_id=sg.id LEFT JOIN branches b ON e.default_branch_id=b.id WHERE e.id=?`, args: [newId] });
+    const { rows: [emp] } = await db.execute({ sql: `SELECT e.id,e.employee_number,e.first_name,e.last_name,e.username,e.role,e.active,e.security_group_id,e.default_branch_id,e.is_driver,e.is_operator,sg.name as security_group_name,b.name as default_branch_name FROM employees e LEFT JOIN security_groups sg ON e.security_group_id=sg.id LEFT JOIN branches b ON e.default_branch_id=b.id WHERE e.id=?`, args: [newId] });
     res.status(201).json(emp);
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -85,7 +85,7 @@ router.put('/:id/change-password', requireAuth, async (req, res) => {
 
 // Same reasoning as POST / above — matches the "Edit" button's actual gate.
 router.put('/:id', requirePermission('employees'), async (req, res) => {
-  const { first_name, last_name, username, pin, password, must_change_password, active, security_group_id, default_branch_id } = req.body;
+  const { first_name, last_name, username, pin, password, must_change_password, active, security_group_id, default_branch_id, is_driver, is_operator } = req.body;
   try {
     // The edit form omits `password` entirely when left blank ("leave blank
     // to keep") — preserve the existing (already-hashed) value in that case
@@ -98,15 +98,15 @@ router.put('/:id', requirePermission('employees'), async (req, res) => {
       passwordToStore = existing ? existing.password : null;
     }
     if (pin) {
-      await db.execute({ sql: 'UPDATE employees SET first_name=?,last_name=?,username=?,pin=?,password=?,must_change_password=?,active=?,security_group_id=?,default_branch_id=? WHERE id=?', args: [first_name, last_name, username, pin, passwordToStore, must_change_password?1:0, active??1, security_group_id||null, default_branch_id||null, req.params.id] });
+      await db.execute({ sql: 'UPDATE employees SET first_name=?,last_name=?,username=?,pin=?,password=?,must_change_password=?,active=?,security_group_id=?,default_branch_id=?,is_driver=?,is_operator=? WHERE id=?', args: [first_name, last_name, username, pin, passwordToStore, must_change_password?1:0, active??1, security_group_id||null, default_branch_id||null, is_driver?1:0, is_operator?1:0, req.params.id] });
     } else {
-      await db.execute({ sql: 'UPDATE employees SET first_name=?,last_name=?,username=?,password=?,must_change_password=?,active=?,security_group_id=?,default_branch_id=? WHERE id=?', args: [first_name, last_name, username, passwordToStore, must_change_password?1:0, active??1, security_group_id||null, default_branch_id||null, req.params.id] });
+      await db.execute({ sql: 'UPDATE employees SET first_name=?,last_name=?,username=?,password=?,must_change_password=?,active=?,security_group_id=?,default_branch_id=?,is_driver=?,is_operator=? WHERE id=?', args: [first_name, last_name, username, passwordToStore, must_change_password?1:0, active??1, security_group_id||null, default_branch_id||null, is_driver?1:0, is_operator?1:0, req.params.id] });
     }
     if (default_branch_id) {
       await db.execute({ sql: 'INSERT OR IGNORE INTO employee_branches (employee_id, branch_id, is_default) VALUES (?,?,1)', args: [req.params.id, default_branch_id] });
       await db.execute({ sql: 'UPDATE employee_branches SET is_default = CASE WHEN branch_id = ? THEN 1 ELSE 0 END WHERE employee_id = ?', args: [default_branch_id, req.params.id] });
     }
-    const { rows: [emp] } = await db.execute({ sql: `SELECT e.id,e.employee_number,e.first_name,e.last_name,e.username,e.role,e.active,e.security_group_id,e.default_branch_id,sg.name as security_group_name,b.name as default_branch_name FROM employees e LEFT JOIN security_groups sg ON e.security_group_id=sg.id LEFT JOIN branches b ON e.default_branch_id=b.id WHERE e.id=?`, args: [req.params.id] });
+    const { rows: [emp] } = await db.execute({ sql: `SELECT e.id,e.employee_number,e.first_name,e.last_name,e.username,e.role,e.active,e.security_group_id,e.default_branch_id,e.is_driver,e.is_operator,sg.name as security_group_name,b.name as default_branch_name FROM employees e LEFT JOIN security_groups sg ON e.security_group_id=sg.id LEFT JOIN branches b ON e.default_branch_id=b.id WHERE e.id=?`, args: [req.params.id] });
     res.json(emp);
   } catch (e) {
     res.status(400).json({ error: e.message });

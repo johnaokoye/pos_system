@@ -32,7 +32,7 @@ router.get('/agreements', requirePermission('rentals'), async (req, res) => {
     if (branch_id) { sql += ' AND ra.branch_id = ?'; params.push(branch_id); }
     if (view === 'overdue') { sql += " AND ra.status = 'active' AND ra.due_date < date('now')"; }
     else if (view === 'active') { sql += " AND ra.status = 'active'"; }
-    else if (view === 'returned' || view === 'cancelled' || view === 'pending') { sql += ' AND ra.status = ?'; params.push(view); }
+    else if (view === 'returned' || view === 'cancelled' || view === 'pending' || view === 'awaiting_issue') { sql += ' AND ra.status = ?'; params.push(view); }
     sql += ' ORDER BY ra.created_at DESC LIMIT 200';
     const { rows } = await db.execute({ sql, args: params });
     res.json(rows);
@@ -43,10 +43,15 @@ router.get('/agreements/:id', requirePermission('rentals'), async (req, res) => 
   try {
     const { rows: [agreement] } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name,
       c.phone as customer_phone, c.email as customer_email,
-      b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name,
+      c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
+      b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone,
+      e.first_name || ' ' || e.last_name as employee_name,
       co.transaction_number as checkout_transaction_number, co.payment_method as checkout_payment_method,
       se.transaction_number as settlement_transaction_number,
       q.id as source_quote_id, q.quote_number as source_quote_number, qe.first_name || ' ' || qe.last_name as quote_created_by,
+      dd.first_name || ' ' || dd.last_name as delivery_driver_name,
+      pd.first_name || ' ' || pd.last_name as pickup_driver_name,
+      op.first_name || ' ' || op.last_name as operator_name,
       CASE WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' ELSE ra.status END as display_status
       FROM rental_agreements ra
       LEFT JOIN customers c ON ra.customer_id = c.id
@@ -56,6 +61,9 @@ router.get('/agreements/:id', requirePermission('rentals'), async (req, res) => 
       LEFT JOIN transactions se ON ra.settlement_transaction_id = se.id
       LEFT JOIN quotations q ON q.converted_to_agreement_id = ra.id
       LEFT JOIN employees qe ON q.employee_id = qe.id
+      LEFT JOIN employees dd ON ra.delivery_driver_id = dd.id
+      LEFT JOIN employees pd ON ra.pickup_driver_id = pd.id
+      LEFT JOIN employees op ON ra.operator_id = op.id
       WHERE ra.id = ?`, args: [req.params.id] });
     if (!agreement) return res.status(404).json({ error: 'Not found' });
     const { rows: items } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
@@ -88,7 +96,11 @@ router.get('/availability', requirePermission('rentals'), async (req, res) => {
 // PATCH /agreements/:id/checkout below, which is where money actually moves.
 router.post('/agreements', requirePermission('rentals_checkout'), async (req, res) => {
   try {
-    const { customer_id, employee_id, branch_id, due_date, items, notes } = req.body;
+    const {
+      customer_id, employee_id, branch_id, due_date, items, notes,
+      delivery_required, delivery_cost, delivery_address, pickup_required, pickup_cost,
+      operator_required, operator_fee,
+    } = req.body;
     if (!customer_id) return res.status(400).json({ error: 'A customer is required for rental checkout' });
     if (!branch_id) return res.status(400).json({ error: 'A branch/location is required for rental checkout' });
     if (!due_date) return res.status(400).json({ error: 'Due date is required' });
@@ -106,8 +118,17 @@ router.post('/agreements', requirePermission('rentals_checkout'), async (req, re
     try {
       // checkout_date/checkout_datetime are left at their column defaults
       // (today/now) here — meaningless until finalized, and overwritten with
-      // the real values at that point (see PATCH .../checkout below).
-      const agreementId = await insertPendingAgreement(tx, { agreement_number, customer_id, employee_id, branch_id, due_date, notes, lines });
+      // the real values at that point (see PATCH .../checkout below). Delivery/
+      // pickup/operator requirement + cost are decided now (up front, so the
+      // cashier charges for them at checkout) — only WHO does the delivery/
+      // operating (driver_id/operator_id) is deferred, to issue/return time.
+      const agreementId = await insertPendingAgreement(tx, {
+        agreement_number, customer_id, employee_id, branch_id, due_date, notes, lines,
+        delivery_required: delivery_required ? 1 : 0, delivery_cost: delivery_required ? parseFloat(delivery_cost || 0) : 0,
+        delivery_address: delivery_required ? (delivery_address || null) : null,
+        pickup_required: pickup_required ? 1 : 0, pickup_cost: pickup_required ? parseFloat(pickup_cost || 0) : 0,
+        operator_required: operator_required ? 1 : 0, operator_fee: operator_required ? parseFloat(operator_fee || 0) : 0,
+      });
 
       await tx.commit();
       committed = true;
@@ -175,7 +196,16 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
     rentalSubtotal = parseFloat(rentalSubtotal.toFixed(2));
     taxAmount = parseFloat(taxAmount.toFixed(2));
     depositTotal = parseFloat(depositTotal.toFixed(2));
-    const total = parseFloat((rentalSubtotal + taxAmount + depositTotal).toFixed(2));
+
+    // Delivery/pickup/operator requirement + cost were decided up front when
+    // the rental was created (not here) — charged now, alongside the rental
+    // fee and deposit, rather than trued up later at issue/return.
+    const deliveryCost = agreement.delivery_required ? parseFloat(agreement.delivery_cost || 0) : 0;
+    const pickupCost = agreement.pickup_required ? parseFloat(agreement.pickup_cost || 0) : 0;
+    const operatorFee = agreement.operator_required ? parseFloat(agreement.operator_fee || 0) : 0;
+    const serviceFeesTotal = parseFloat((deliveryCost + pickupCost + operatorFee).toFixed(2));
+
+    const total = parseFloat((rentalSubtotal + taxAmount + depositTotal + serviceFeesTotal).toFixed(2));
 
     if (isCredit && creditCustomer.credit_limit > 0 && parseFloat((creditCustomer.account_balance + total).toFixed(2)) > creditCustomer.credit_limit) {
       const available = Math.max(0, parseFloat((creditCustomer.credit_limit - creditCustomer.account_balance).toFixed(2)));
@@ -186,13 +216,12 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
     const changeAmt = isCredit ? 0 : Math.max(0, parseFloat((tendered - total).toFixed(2)));
 
     const transaction_number = await nextNumber(db, 'transactions', 'transaction_number', 'TXN-', 6);
-    const today = checkoutDateTime.toISOString().slice(0, 10);
     const finalizeEmployeeId = employee_id || agreement.employee_id;
 
     const tx = await db.transaction('write');
     let committed = false;
     try {
-      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, agreement.customer_id, finalizeEmployeeId || null, agreement.branch_id, drawer_session_id || null, rentalSubtotal + depositTotal, taxAmount, total, method, tendered, changeAmt, `Rental checkout ${agreement.agreement_number}`, 'pos'] });
+      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, agreement.customer_id, finalizeEmployeeId || null, agreement.branch_id, drawer_session_id || null, rentalSubtotal + depositTotal + serviceFeesTotal, taxAmount, total, method, tendered, changeAmt, `Rental checkout ${agreement.agreement_number}`, 'pos'] });
       const checkoutTxId = Number(txResult.lastInsertRowid);
 
       for (const item of existingItems) {
@@ -203,6 +232,15 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
       if (depositTotal > 0) {
         await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?,?)`, args: [checkoutTxId, null, 'Refundable Deposit', 'DEPOSIT', 1, depositTotal, 0, depositTotal] });
       }
+      if (deliveryCost > 0) {
+        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?)`, args: [checkoutTxId, 'Delivery Fee', 'DELIVERY', 1, deliveryCost, 0, deliveryCost] });
+      }
+      if (pickupCost > 0) {
+        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?)`, args: [checkoutTxId, 'Pickup Fee', 'PICKUP', 1, pickupCost, 0, pickupCost] });
+      }
+      if (operatorFee > 0) {
+        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?)`, args: [checkoutTxId, 'Operator Fee', 'OPERATOR', 1, operatorFee, 0, operatorFee] });
+      }
 
       const loyaltyPts = Math.floor(rentalSubtotal * 0.5);
       await tx.execute({ sql: 'UPDATE customers SET loyalty_points = loyalty_points + ?, total_spent = total_spent + ? WHERE id = ?', args: [loyaltyPts, rentalSubtotal, agreement.customer_id] });
@@ -211,7 +249,10 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
         await tx.execute({ sql: 'UPDATE customers SET account_balance = account_balance + ? WHERE id = ?', args: [total, agreement.customer_id] });
       }
 
-      await tx.execute({ sql: `UPDATE rental_agreements SET checkout_transaction_id = ?, checkout_date = ?, checkout_datetime = ?, deposit_total = ?, status = 'active', employee_id = ? WHERE id = ?`, args: [checkoutTxId, today, checkoutDateTime.toISOString(), depositTotal, finalizeEmployeeId || null, req.params.id] });
+      // checkout_date/checkout_datetime are NOT written here anymore — the
+      // rental clock only starts once the item is actually issued/dispatched
+      // (PATCH .../issue), which writes those same two columns for real.
+      await tx.execute({ sql: `UPDATE rental_agreements SET checkout_transaction_id = ?, deposit_total = ?, status = 'awaiting_issue', employee_id = ? WHERE id = ?`, args: [checkoutTxId, depositTotal, finalizeEmployeeId || null, req.params.id] });
       await tx.commit();
       committed = true;
       if (isCredit) { try { await runCreditCheck(agreement.customer_id); } catch(e) {} }
@@ -230,6 +271,48 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ─── Issue / dispatch (hand the item to the customer, or send it out) ──────
+
+// This is what actually starts the rental clock — checkout only collects
+// payment. Between the two, a paid agreement sits in 'awaiting_issue' as
+// something waiting to be collected/delivered (e.g. stock held off-site).
+router.patch('/agreements/:id/issue', requirePermission('rentals_issue'), async (req, res) => {
+  try {
+    // Whether delivery/an operator is needed, and what it costs, was already
+    // decided (and charged for) when the rental was created — this step only
+    // assigns WHO does it, for whichever of those the agreement already flags
+    // as required.
+    const { employee_id, delivery_driver_id, operator_id } = req.body;
+    const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    if (!agreement) return res.status(404).json({ error: 'Not found' });
+    if (agreement.status !== 'awaiting_issue') return res.status(400).json({ error: `This agreement is ${agreement.status}, not awaiting issue` });
+
+    const issuedAt = new Date();
+    const today = issuedAt.toISOString().slice(0, 10);
+
+    await db.execute({
+      sql: `UPDATE rental_agreements SET
+        status = 'active',
+        checkout_date = ?, checkout_datetime = ?,
+        issued_at = ?, issued_by = ?,
+        delivery_driver_id = ?, operator_id = ?
+        WHERE id = ?`,
+      args: [
+        today, issuedAt.toISOString(),
+        issuedAt.toISOString(), employee_id || agreement.employee_id || null,
+        agreement.delivery_required ? (delivery_driver_id || null) : null,
+        agreement.operator_required ? (operator_id || null) : null,
+        req.params.id,
+      ],
+    });
+
+    const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    const { rows: agItems } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
+    updated.items = agItems;
+    res.json(updated);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ─── Cancel ─────────────────────────────────────────────────────────────────
 
 router.patch('/agreements/:id/cancel', requirePermission('rentals_returns'), async (req, res) => {
@@ -240,7 +323,9 @@ router.patch('/agreements/:id/cancel', requirePermission('rentals_returns'), asy
     // 'pending' (held, not yet paid) agreements have no checkout_transaction_id
     // yet, so the void/loyalty-reversal/credit-reversal block below naturally
     // no-ops for them — this guard just needs to allow that status through too.
-    if (agreement.status !== 'active' && agreement.status !== 'pending') return res.status(400).json({ error: `Cannot cancel a ${agreement.status} agreement` });
+    // 'awaiting_issue' (paid but not yet issued) is treated like 'active' —
+    // it has a real checkout_transaction_id to void.
+    if (agreement.status !== 'active' && agreement.status !== 'pending' && agreement.status !== 'awaiting_issue') return res.status(400).json({ error: `Cannot cancel a ${agreement.status} agreement` });
     const { rows: items } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
     if (items.some(i => i.quantity_returned > 0)) return res.status(400).json({ error: 'Cannot cancel an agreement that already has items returned — process a return instead' });
 
@@ -306,7 +391,7 @@ router.patch('/agreements/:id/cancel', requirePermission('rentals_returns'), asy
 
 router.patch('/agreements/:id/return', requirePermission('rentals_returns'), async (req, res) => {
   try {
-    const { items, duration_adjustment_override, payment_method, drawer_session_id } = req.body;
+    const { items, duration_adjustment_override, payment_method, drawer_session_id, pickup_driver_id, returned_at } = req.body;
     if (!items || !items.length) return res.status(400).json({ error: 'At least one item is required' });
 
     const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
@@ -319,8 +404,22 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
     const missing = outstandingIds.filter(id => !coveredIds.includes(id));
     if (missing.length) return res.status(400).json({ error: 'Every outstanding item on this agreement must be included in the return' });
 
-    const now = new Date();
     const checkoutDateTime = agreement.checkout_datetime || `${agreement.checkout_date}T00:00:00.000Z`;
+    // Defaults to the moment this request is processed, but staff can back-date
+    // it to when the customer actually dropped the item off (e.g. it sat at the
+    // counter for an hour before anyone rang it up) — the fee is time-sensitive,
+    // so an unadjusted gap here would overcharge for time nobody actually used.
+    let now = new Date();
+    if (returned_at) {
+      const parsed = new Date(returned_at);
+      if (isNaN(parsed.getTime())) return res.status(400).json({ error: 'Invalid return date/time' });
+      // A few minutes of tolerance absorbs clock skew between the browser and
+      // server, plus the datetime-local input's minute-level (no seconds) precision
+      // — without it, submitting the untouched "now" default could spuriously fail.
+      if (parsed.getTime() > Date.now() + 5 * 60000) return res.status(400).json({ error: 'Return date/time cannot be in the future' });
+      if (parsed < new Date(checkoutDateTime)) return res.status(400).json({ error: 'Return date/time cannot be before checkout' });
+      now = parsed;
+    }
 
     // A rental checked out on credit must also settle on credit — the deposit was
     // never collected in cash to begin with, it just increased account_balance, so
@@ -394,6 +493,11 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
       const allReturned = refreshedItems.every(i => i.quantity_returned >= i.quantity);
       const newStatus = allReturned ? 'returned' : 'active';
 
+      // Delivery/pickup/operator requirement + cost were already decided (and
+      // charged for) when the rental was created — pickup_driver_id here just
+      // records who actually did the pickup, no fee to fold into settlement.
+      const pickupDriverId = agreement.pickup_required ? (pickup_driver_id || agreement.pickup_driver_id || null) : null;
+
       // settlement total is intentionally signed: positive = customer owes more
       // (actual rental time + damage exceed the deposit), negative = net refund
       // due back to the customer (e.g. returned early). This is the one place
@@ -429,7 +533,7 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
         await tx.execute({ sql: 'UPDATE customers SET account_balance = MAX(0, account_balance + ?) WHERE id = ?', args: [settlementAmount, agreement.customer_id] });
       }
 
-      await tx.execute({ sql: `UPDATE rental_agreements SET settlement_transaction_id = ?, deposit_refunded = ?, duration_adjustment_total = duration_adjustment_total + ?, tax_adjustment_total = tax_adjustment_total + ?, damage_fee_total = damage_fee_total + ?, status = ?, returned_at = ? WHERE id = ?`, args: [settlementTxId, depositRefunded, durationAdjustmentTotal, taxAdjustmentTotal, damageFeeTotal, newStatus, allReturned ? now.toISOString() : agreement.returned_at, req.params.id] });
+      await tx.execute({ sql: `UPDATE rental_agreements SET settlement_transaction_id = ?, deposit_refunded = ?, duration_adjustment_total = duration_adjustment_total + ?, tax_adjustment_total = tax_adjustment_total + ?, damage_fee_total = damage_fee_total + ?, pickup_driver_id = ?, status = ?, returned_at = ? WHERE id = ?`, args: [settlementTxId, depositRefunded, durationAdjustmentTotal, taxAdjustmentTotal, damageFeeTotal, pickupDriverId, newStatus, allReturned ? now.toISOString() : agreement.returned_at, req.params.id] });
       await tx.commit();
       if (checkoutIsCredit) { try { await runCreditCheck(agreement.customer_id); } catch(e) {} }
     } catch(e) {
