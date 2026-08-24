@@ -3210,6 +3210,22 @@ const App = {
     }).join('');
   },
 
+  // Rental transactions skip the on-screen thermal receipt preview — its
+  // Normal/Letter choice doesn't apply to them (there's no thermal-printer
+  // rental workflow) — and go straight to the letter-size rental tax
+  // invoice, same document printRentalInvoice() opens from the agreement.
+  printReceiptOrInvoice(tx, change = 0, cashResult = null, splitForeignCash = null) {
+    if (tx.rental_agreement_number) {
+      this._lastReceiptTx = tx;
+      this._lastReceiptChange = change;
+      this._lastReceiptCash = cashResult;
+      this._lastReceiptSplitForeign = splitForeignCash;
+      this.printReceiptLetter();
+    } else {
+      this.showReceipt(tx, change, cashResult, splitForeignCash);
+    }
+  },
+
   showReceipt(tx, change = 0, cashResult = null, splitForeignCash = null) {
     const items = tx.items || [];
     const storeName = this.settings.store_name || 'My Store';
@@ -3264,6 +3280,24 @@ const App = {
       </div>`);
   },
 
+  // Renders the Issue and Return signature checkpoints as their own labeled
+  // rows (rather than one flat row) so it's clear which signatures belong to
+  // handing the item out versus taking it back in — both can be present on
+  // the same invoice once a rental has been returned.
+  _signatureRowsHtml(issueSignatures, returnSignatures) {
+    const row = (heading, sigs) => `<div style="margin-top:32px">
+      <div style="font-size:10px;font-weight:bold;text-transform:uppercase;color:#888;margin-bottom:8px">${heading}</div>
+      <div style="display:flex;justify-content:space-between;gap:24px">
+        ${sigs.map(([label, name, src, signedAt]) => `<div style="flex:1;text-align:center">
+          <img src="${src}" style="max-height:70px;max-width:100%;border-bottom:1px solid #333;padding-bottom:4px" />
+          <div style="font-size:11px;color:#555;margin-top:4px">${label}${name ? ` — ${name}` : ''}</div>
+          ${signedAt ? `<div style="font-size:10px;color:#888;margin-top:1px">${this.fmtDateTime(signedAt)}</div>` : ''}
+        </div>`).join('')}
+      </div>
+    </div>`;
+    return `${issueSignatures.length ? row('Issued', issueSignatures) : ''}${returnSignatures.length ? row('Returned', returnSignatures) : ''}`;
+  },
+
   // Rental-linked transactions always print letter-size (routed here
   // directly by showReceipt's Print button); other transactions get this as
   // an alternative to the default narrow thermal-receipt print. A separate
@@ -3272,9 +3306,16 @@ const App = {
   // printDrawerReport — rather than trying to conditionally swap @page size
   // on the existing thermal .receipt modal, which isn't reliably scriptable
   // across browsers.
-  printReceiptLetter() {
+  async printReceiptLetter() {
     const tx = this._lastReceiptTx;
     if (!tx) return;
+    // Opened synchronously, before any await below — a window.open() that
+    // happens after an await is no longer inside the original click's user-
+    // gesture stack, so browsers silently block it as a popup. Grabbing the
+    // window handle here first, then filling it in once the async rental
+    // lookup below resolves, keeps this a direct response to the click.
+    const win = window.open('', '_blank', 'width=850,height=1000');
+    if (!win) { this.alert('Your browser blocked the print popup — allow popups for this site and try again', 'warning'); return; }
     const change = this._lastReceiptChange || 0;
     const cashResult = this._lastReceiptCash;
     const splitForeignCash = this._lastReceiptSplitForeign;
@@ -3285,9 +3326,42 @@ const App = {
     const cityLine = tx.branch_address ? `${tx.branch_city ? ', ' + tx.branch_city : ''}${tx.branch_state ? ' ' + tx.branch_state : ''}${tx.branch_zip ? ' ' + tx.branch_zip : ''}` : '';
     const phoneLine = tx.branch_phone || this.settings.store_phone || '';
 
+    const isRental = !!tx.rental_agreement_number;
+    // The line items on this specific transaction only tell the financial
+    // story (checkout = rental fee + deposit, settlement = duration
+    // adjustment + deposit applied) — neither reliably names the physical
+    // item(s) rented, so pull that straight from the agreement. The same
+    // fetch also carries the digitally-captured signatures for whichever
+    // checkpoint (issue vs return) this transaction corresponds to.
+    let rentedItemsLabel = '';
+    // Both checkpoints' signatures are shown on whichever invoice gets
+    // printed (checkout or settlement) — not just the one matching this
+    // specific transaction's role — since by the time a settlement invoice
+    // exists the issue signatures are already on file, and printing the
+    // checkout invoice after return shouldn't hide that the item came back
+    // signed-for too.
+    let issueSignatures = [];
+    let returnSignatures = [];
+    if (isRental && tx.rental_agreement_id) {
+      try {
+        const agreement = await this.api('GET', `/rentals/agreements/${tx.rental_agreement_id}`);
+        rentedItemsLabel = (agreement.items || []).filter(i => !i.parent_item_id).map(i => `${i.product_name} x${i.quantity}`).join(', ');
+        if (agreement.issue_customer_signature) issueSignatures.push(['Customer Signature', agreement.customer_name, agreement.issue_customer_signature, agreement.issued_at]);
+        if (agreement.issue_security_signature) issueSignatures.push(['Security Signature', agreement.issue_security_employee_name, agreement.issue_security_signature, agreement.issue_security_confirmed_at]);
+        if (agreement.return_security_signature) returnSignatures.push(['Security Signature', agreement.return_security_employee_name, agreement.return_security_signature, agreement.return_security_confirmed_at]);
+        if (agreement.return_driver_signature) returnSignatures.push(['Driver Signature', agreement.return_driver_employee_name, agreement.return_driver_signature, agreement.return_driver_confirmed_at]);
+      } catch(e) {}
+    }
+    const signatureBlocks = [...issueSignatures, ...returnSignatures];
+    const rentalRentedLabel = tx.rental_checkout_datetime ? this.fmtDateTime(tx.rental_checkout_datetime) : '—';
+    const rentalReturnedLabel = tx.rental_returned_at ? this.fmtDateTime(tx.rental_returned_at) : 'Not yet returned';
+    const rentalDurationCellLabel = this.rentalDurationLabel(tx.rental_checkout_datetime, tx.rental_due_date, tx.rental_returned_at);
     const itemRows = items.map(i => `<tr>
         <td style="padding:8px;border-bottom:1px solid #e8e8e8">${i.product_name}</td>
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:center">${i.quantity}</td>
+        ${isRental ? `<td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:center">${rentalRentedLabel}</td>
+        <td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:center">${rentalReturnedLabel}</td>
+        <td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:center">${rentalDurationCellLabel}</td>` : ''}
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:right">${this.fmt(i.unit_price)}</td>
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:right;font-weight:600">${this.fmt(i.total)}</td>
       </tr>`).join('');
@@ -3321,7 +3395,6 @@ const App = {
       }
     }
 
-    const win = window.open('', '_blank', 'width=850,height=1000');
     win.document.write(`<!DOCTYPE html><html><head><title>${tx.rental_agreement_number ? 'Rental Tax Invoice' : 'Retail Tax Receipt'} – ${tx.transaction_number}</title>
     <style>
       body{font-family:Arial,sans-serif;font-size:13px;margin:0;padding:48px;color:#111}
@@ -3356,11 +3429,12 @@ const App = {
       <div><label>Date</label>${this.fmtDateTime(tx.created_at)}</div>
       ${tx.customer_name ? `<div><label>Customer</label>${tx.customer_name}</div>` : ''}
       ${tx.rental_agreement_number ? `<div><label>Rental Agreement</label>${tx.rental_agreement_number}</div>` : ''}
+      ${rentedItemsLabel ? `<div><label>Item(s) Rented</label>${rentedItemsLabel}</div>` : ''}
       ${tx.rental_due_date ? `<div><label>Due Date</label>${this.fmtDate(tx.rental_due_date)}</div>` : ''}
       ${tx.rental_po_number ? `<div><label>Customer PO</label>${tx.rental_po_number}</div>` : ''}
     </div>
     <table>
-      <thead><tr><th>Item</th><th style="text-align:center">Qty</th><th style="text-align:right">Unit Price</th><th style="text-align:right">Total</th></tr></thead>
+      <thead><tr><th>Item</th><th style="text-align:center">Qty</th>${isRental ? `<th style="text-align:center">Rented</th><th style="text-align:center">Returned</th><th style="text-align:center">Duration</th>` : ''}<th style="text-align:right">Unit Price</th><th style="text-align:right">Total</th></tr></thead>
       <tbody>${itemRows}</tbody>
     </table>
     <table class="totals">
@@ -3382,12 +3456,12 @@ const App = {
         </tr>`).join('')}</tbody>
       </table>
     </div>` : ''}
-    ${tx.rental_agreement_number ? `
+    ${signatureBlocks.length ? this._signatureRowsHtml(issueSignatures, returnSignatures) : (tx.rental_agreement_number ? `
     <div style="display:flex;justify-content:space-between;margin-top:70px;gap:24px">
       <div style="flex:1;text-align:center"><div style="border-top:1px solid #333;padding-top:6px;font-size:11px;color:#555">Customer Signature</div></div>
       <div style="flex:1;text-align:center"><div style="border-top:1px solid #333;padding-top:6px;font-size:11px;color:#555">Rep Signature</div></div>
       <div style="flex:1;text-align:center"><div style="border-top:1px solid #333;padding-top:6px;font-size:11px;color:#555">Manager Signature</div></div>
-    </div>` : ''}
+    </div>` : '')}
     <div class="footer">${footer}</div>
     <script>window.onload=()=>{window.print()}<\/script>
     </body></html>`);
@@ -4956,7 +5030,7 @@ const App = {
     const returned = a.status === 'returned';
     if (!issued) return muted;
     const issueOk = a.issue_security_employee_id && a.issue_security_signature && a.issue_customer_signature;
-    const returnOk = a.return_security_employee_id && a.return_security_signature && a.return_driver_employee_id;
+    const returnOk = a.return_security_employee_id && a.return_security_signature && (!a.pickup_required || a.return_driver_employee_id);
     const parts = [];
     parts.push(issueOk ? `<span class="badge-pill badge-success" style="font-size:10px">✓ Issue</span>` : muted);
     if (returned) parts.push(returnOk ? `<span class="badge-pill badge-success" style="font-size:10px">✓ Return</span>` : muted);
@@ -6039,8 +6113,11 @@ const App = {
           <div class="form-group"><label>Payment Method</label>
             <select id="rf-paymethod" onchange="App._toggleRentalPOFields()">
               <option value="cash">Cash</option>
-              <option value="credit_card">Card</option>
+              <option value="credit_card">Credit Card</option>
+              <option value="debit_card">Debit Card</option>
               <option value="check">Check</option>
+              <option value="gift_card">Gift Card</option>
+              <option value="direct_deposit">Direct Deposit</option>
               <option value="credit">Charge Account (Credit)</option>
             </select>
           </div>
@@ -6405,25 +6482,16 @@ const App = {
               ${drivers.map(e => `<option value="${e.id}" ${a.pickup_driver_id===e.id?'selected':''}>${e.first_name} ${e.last_name}</option>`).join('')}
             </select>
             ${!drivers.length ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">No employees are flagged as a driver yet.</div>` : ''}
-          </div>` : ''}
+          </div>
+          ${this._sigPadHtml('rr-driver-sig', 'Driver Signature', 'required — the driver above signs to confirm collection')}` : ''}
 
-          <div class="input-row" style="border-top:1px solid var(--border);padding-top:12px">
-            <div class="form-group">
-              <label>Security Sign-In <span style="font-weight:400;color:var(--text-muted)">(required — item returning)</span></label>
-              <select id="rr-security-employee">
-                <option value="">-- Select --</option>
-                ${securityEmployees.map(e => `<option value="${e.id}">${e.first_name} ${e.last_name}</option>`).join('')}
-              </select>
-              ${!securityEmployees.length ? `<div style="font-size:11px;color:var(--danger);margin-top:2px">No employees are flagged as Security yet.</div>` : ''}
-            </div>
-            <div class="form-group">
-              <label>Collected By <span style="font-weight:400;color:var(--text-muted)">(required — driver confirming pickup)</span></label>
-              <select id="rr-collecting-driver">
-                <option value="">-- Select --</option>
-                ${drivers.map(e => `<option value="${e.id}">${e.first_name} ${e.last_name}</option>`).join('')}
-              </select>
-              ${!drivers.length ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">No employees are flagged as a driver yet.</div>` : ''}
-            </div>
+          <div class="form-group" style="border-top:1px solid var(--border);padding-top:12px">
+            <label>Security Sign-In <span style="font-weight:400;color:var(--text-muted)">(required — item returning)</span></label>
+            <select id="rr-security-employee">
+              <option value="">-- Select --</option>
+              ${securityEmployees.map(e => `<option value="${e.id}">${e.first_name} ${e.last_name}</option>`).join('')}
+            </select>
+            ${!securityEmployees.length ? `<div style="font-size:11px;color:var(--danger);margin-top:2px">No employees are flagged as Security yet.</div>` : ''}
           </div>
           ${this._sigPadHtml('rr-guard-sig', 'Guard Signature', 'required — the security employee above signs to confirm')}
         </div>
@@ -6433,6 +6501,7 @@ const App = {
         </div>
       </div>`);
     this._sigPadInit('rr-guard-sig');
+    if (a.pickup_required) this._sigPadInit('rr-driver-sig');
   },
 
   async saveRentalReturn(agreementId, itemIds) {
@@ -6445,11 +6514,12 @@ const App = {
     })).filter(i => i.quantity_returned > 0);
     if (!items.length) { this.alert('Enter at least one returned quantity', 'error'); return; }
     const pickupDriverEl = document.getElementById('rr-pickup-driver');
-    if (pickupDriverEl && !pickupDriverEl.value) { this.alert('Select a driver for pickup', 'error'); return; }
+    if (pickupDriverEl) {
+      if (!pickupDriverEl.value) { this.alert('Select a driver for pickup', 'error'); return; }
+      if (!this._sigPadHasDrawn('rr-driver-sig')) { this.alert("The driver's signature is required to complete this pickup return", 'error'); return; }
+    }
     const securityEl = document.getElementById('rr-security-employee');
     if (!securityEl?.value) { this.alert('Select the security employee signing this item back in', 'error'); return; }
-    const collectingDriverEl = document.getElementById('rr-collecting-driver');
-    if (!collectingDriverEl?.value) { this.alert('Select the driver confirming collection of this item', 'error'); return; }
     if (!this._sigPadHasDrawn('rr-guard-sig')) { this.alert("The security employee's signature is required to complete this return", 'error'); return; }
     const returnedAtRaw = document.getElementById('rr-returned-at').value;
     if (!returnedAtRaw) { this.alert('Enter a return date/time', 'error'); return; }
@@ -6464,8 +6534,9 @@ const App = {
         pickup_driver_id: pickupDriverEl ? parseInt(pickupDriverEl.value) || null : null,
         returned_at: returnedAt,
         return_security_employee_id: parseInt(securityEl.value),
-        return_driver_employee_id: parseInt(collectingDriverEl.value),
+        return_driver_employee_id: pickupDriverEl ? parseInt(pickupDriverEl.value) || null : null,
         security_signature: this._sigPadDataUrl('rr-guard-sig'),
+        driver_signature: pickupDriverEl ? this._sigPadDataUrl('rr-driver-sig') : null,
       });
       this.closeModal();
       if (updated.settlement_transaction_id) {
@@ -6504,7 +6575,14 @@ const App = {
               <div style="display:flex;justify-content:space-between;margin-top:4px;border-top:1px solid var(--border);padding-top:4px"><strong>Balance Due</strong><strong>${this.fmt(balance)}</strong></div>
             </div>
             <div class="form-group"><label>Payment Method</label>
-              <select id="rb-paymethod"><option value="cash">Cash</option><option value="credit_card">Card</option><option value="check">Check</option></select>
+              <select id="rb-paymethod">
+                <option value="cash">Cash</option>
+                <option value="credit_card">Credit Card</option>
+                <option value="debit_card">Debit Card</option>
+                <option value="check">Check</option>
+                <option value="gift_card">Gift Card</option>
+                <option value="direct_deposit">Direct Deposit</option>
+              </select>
             </div>
           </div>
           <div class="modal-footer">
@@ -9460,7 +9538,7 @@ const App = {
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
           ${tx.status==='completed'&&!tx.rental_agreement_number&&this.can('transactions_returns')?`<button class="btn btn-sm" style="background:#f59e0b;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer" onclick="App.closeModal();App.processReturn(${tx.id})">↩ Return</button>`:''}
           <button class="btn btn-secondary" onclick="App.emailReceipt(${tx.id},'${(tx.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email Receipt</button>
-          <button class="btn btn-primary" onclick="App.closeModal();App.showReceipt(App._viewTx,App._viewTx.change_amount||0)">🖨️ Print Receipt</button>
+          <button class="btn btn-primary" onclick="App.closeModal();App.printReceiptOrInvoice(App._viewTx,App._viewTx.change_amount||0)">🖨️ Print Receipt</button>
         </div>
       </div>`);
     this._viewTx = tx;

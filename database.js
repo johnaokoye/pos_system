@@ -1134,6 +1134,11 @@ async function _init() {
     // the two are never conflated in the UI (each has its own View button).
     'ALTER TABLE rental_agreements ADD COLUMN issue_security_signature TEXT',
     'ALTER TABLE rental_agreements ADD COLUMN return_security_signature TEXT',
+    // The driver's signature at return — only collected (and only required)
+    // when the rental actually paid for pickup service; return_driver_employee_id
+    // now doubles as that same driver (see routes/rentals.js's /return handler),
+    // so a walk-in return with no pickup shows no driver field at all.
+    'ALTER TABLE rental_agreements ADD COLUMN return_driver_signature TEXT',
     // Customer PO reference for credit-account rentals — required at
     // checkout finalize when payment_method is 'credit' (see routes/rentals.js).
     'ALTER TABLE rental_agreements ADD COLUMN customer_po_number TEXT',

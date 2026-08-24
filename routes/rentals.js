@@ -712,20 +712,25 @@ router.patch('/agreements/:id/cancel', requirePermission('rentals_returns'), asy
 
 router.patch('/agreements/:id/return', requirePermission('rentals_returns'), async (req, res) => {
   try {
-    const { items, duration_adjustment_override, payment_method, drawer_session_id, pickup_driver_id, returned_at, return_security_employee_id, return_driver_employee_id, security_signature } = req.body;
+    const { items, duration_adjustment_override, payment_method, drawer_session_id, pickup_driver_id, returned_at, return_security_employee_id, return_driver_employee_id, security_signature, driver_signature } = req.body;
     if (!items || !items.length) return res.status(400).json({ error: 'At least one item is required' });
-    // Chain-of-custody checkpoints — required on every return regardless of
-    // whether the rental paid for pickup service (that's the separate,
-    // optional pickup_driver_id below); this is the security check on the
-    // physical hand-off itself. See database.js's migration comment.
-    if (!return_security_employee_id) return res.status(400).json({ error: 'Select the security employee signing this item back in' });
-    if (!security_signature) return res.status(400).json({ error: "The security employee's signature is required to complete this return" });
-    if (!return_driver_employee_id) return res.status(400).json({ error: 'Select the driver confirming collection of this item' });
 
     const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
     if (!agreement) return res.status(404).json({ error: 'Not found' });
     if (agreement.status !== 'active') return res.status(400).json({ error: `Cannot return items on a ${agreement.status} agreement` });
     if (agreement.is_paused) return res.status(400).json({ error: 'This rental is currently paused — resume it before processing a return' });
+
+    // The security guard's sign-in is a chain-of-custody check applied to
+    // every return, regardless of pickup. The driver select/signature, on
+    // the other hand, only makes sense when a driver was actually involved
+    // — i.e. the rental paid for pickup service — so it's skipped entirely
+    // otherwise (see database.js's migration comment).
+    if (!return_security_employee_id) return res.status(400).json({ error: 'Select the security employee signing this item back in' });
+    if (!security_signature) return res.status(400).json({ error: "The security employee's signature is required to complete this return" });
+    if (agreement.pickup_required) {
+      if (!return_driver_employee_id) return res.status(400).json({ error: 'Select the driver confirming pickup' });
+      if (!driver_signature) return res.status(400).json({ error: "The driver's signature is required to complete this pickup return" });
+    }
 
     const { rows: existingItems } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
     const outstandingIds = existingItems.filter(i => i.quantity_returned < i.quantity).map(i => i.id);
@@ -766,6 +771,11 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
     // network call (Cloudinary), so it shouldn't hold a DB transaction open.
     const guardSigPath = await uploadSignature(security_signature, `rental-${req.params.id}-return-guard`);
     if (!guardSigPath) return res.status(400).json({ error: 'Invalid security signature image' });
+    let driverSigPath = null;
+    if (agreement.pickup_required) {
+      driverSigPath = await uploadSignature(driver_signature, `rental-${req.params.id}-return-driver`);
+      if (!driverSigPath) return res.status(400).json({ error: 'Invalid driver signature image' });
+    }
 
     // Time the item spent paused (maintenance/replacement/other) shouldn't be
     // billed — the customer didn't have functional use of it. Only closed
@@ -841,6 +851,12 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
       // charged for) when the rental was created — pickup_driver_id here just
       // records who actually did the pickup, no fee to fold into settlement.
       const pickupDriverId = agreement.pickup_required ? (pickup_driver_id || agreement.pickup_driver_id || null) : null;
+      // Same driver as pickupDriverId in practice (the return modal now
+      // collects one driver, used for both) — kept as its own column since
+      // it's the chain-of-custody confirmation, distinct in meaning from the
+      // dispatch-board assignment pickupDriverId represents.
+      const returnDriverId = agreement.pickup_required ? (return_driver_employee_id || null) : null;
+      const returnDriverConfirmedAt = agreement.pickup_required ? now.toISOString() : null;
 
       // settlement total is intentionally signed: positive = customer owes more
       // (actual rental time + damage exceed the deposit), negative = net refund
@@ -894,7 +910,7 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
         }
       }
 
-      await tx.execute({ sql: `UPDATE rental_agreements SET settlement_transaction_id = ?, deposit_refunded = ?, duration_adjustment_total = duration_adjustment_total + ?, tax_adjustment_total = tax_adjustment_total + ?, damage_fee_total = damage_fee_total + ?, pickup_driver_id = ?, status = ?, returned_at = ?, return_security_employee_id = ?, return_security_confirmed_at = ?, return_security_signature = ?, return_driver_employee_id = ?, return_driver_confirmed_at = ? WHERE id = ?`, args: [settlementTxId, depositRefunded, durationAdjustmentTotal, taxAdjustmentTotal, damageFeeTotal, pickupDriverId, newStatus, allReturned ? now.toISOString() : agreement.returned_at, return_security_employee_id, now.toISOString(), guardSigPath, return_driver_employee_id, now.toISOString(), req.params.id] });
+      await tx.execute({ sql: `UPDATE rental_agreements SET settlement_transaction_id = ?, deposit_refunded = ?, duration_adjustment_total = duration_adjustment_total + ?, tax_adjustment_total = tax_adjustment_total + ?, damage_fee_total = damage_fee_total + ?, pickup_driver_id = ?, status = ?, returned_at = ?, return_security_employee_id = ?, return_security_confirmed_at = ?, return_security_signature = ?, return_driver_employee_id = ?, return_driver_confirmed_at = ?, return_driver_signature = ? WHERE id = ?`, args: [settlementTxId, depositRefunded, durationAdjustmentTotal, taxAdjustmentTotal, damageFeeTotal, pickupDriverId, newStatus, allReturned ? now.toISOString() : agreement.returned_at, return_security_employee_id, now.toISOString(), guardSigPath, returnDriverId, returnDriverConfirmedAt, driverSigPath, req.params.id] });
       await tx.commit();
       if (checkoutIsCredit) { try { await runCreditCheck(agreement.customer_id); } catch(e) {} }
     } catch(e) {
