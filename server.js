@@ -10,6 +10,7 @@ const { router: woocommerceRouter, runSyncAll: wooSyncAll } = require('./routes/
 const { apiKeyAuth } = require('./lib/apiKeyAuth');
 const { sessionAuth } = require('./lib/sessionAuth');
 const { logActivity } = require('./routes/crm');
+const rentalsRouter = require('./routes/rentals');
 
 // Without these, any unhandled rejection (e.g. a bug in one request's async
 // code) crashes the entire Node process per Node's default behavior since
@@ -86,7 +87,7 @@ app.use('/api/cash-back-cards', require('./routes/cash-back-cards'));
 app.use('/api/denominations',   require('./routes/denominations'));
 app.use('/api/woocommerce',    woocommerceRouter);
 app.use('/api/api-keys',       require('./routes/api-keys'));
-app.use('/api/rentals',        require('./routes/rentals'));
+app.use('/api/rentals',        rentalsRouter);
 app.use('/api/layaway',        require('./routes/layaway'));
 app.use('/api/work-orders',    require('./routes/work-orders'));
 
@@ -149,6 +150,17 @@ if (!process.env.VERCEL) {
       }
     } catch (e) {}
   }, 30 * 60000);
+
+  // Missed-pickup auto-pause — pickup_required rentals are due down to the
+  // hour (due_date + checkout time-of-day, see lib/rentals.js's
+  // dueDateTime), not just the day, so this runs far more often than the
+  // day-granularity overdue check above. Checked every 5 minutes.
+  setInterval(async () => {
+    try {
+      await ensureReady();
+      await rentalsRouter.checkMissedPickups();
+    } catch (e) {}
+  }, 5 * 60000);
 }
 
 // Vercel serverless export

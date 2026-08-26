@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { getOutstandingQty } = require('../lib/rentalAvailability');
-const { getBranchStock, feeFor, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible } = require('../lib/rentals');
+const { getBranchStock, feeFor, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, dueDateTime } = require('../lib/rentals');
 const { requirePermission, requireAnyPermission, can } = require('../lib/permissions');
 const { runCreditCheck } = require('./customers');
 const { nextNumber } = require('../lib/nextNumber');
@@ -103,6 +103,42 @@ router.get('/agreements', requirePermission('rentals'), async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Dispatch's "about to miss a pickup" queue — every active, pickup-required,
+// not-yet-paused agreement whose due date/time (see lib/rentals.js's
+// dueDateTime — the due_date column combined with the checkout time-of-day)
+// falls within the next 24 hours, bucketed into due_24h / due_8h / overdue
+// so the UI can highlight the urgent ones. This is a live view, not a stored
+// notification — nothing here is persisted, it's recomputed on every load.
+// An 'overdue' entry should only be momentarily visible: server.js's
+// missed-pickup check auto-pauses it shortly after, which drops it out of
+// this list (is_paused=1) and into the pause-history/contact workflow below.
+router.get('/agreements/pickup-reminders', requirePermission('rentals'), async (req, res) => {
+  try {
+    const { rows } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name,
+      c.phone as customer_phone, c.email as customer_email,
+      b.name as branch_name,
+      (SELECT GROUP_CONCAT(product_name || ' x' || quantity, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_summary
+      FROM rental_agreements ra
+      LEFT JOIN customers c ON ra.customer_id = c.id
+      LEFT JOIN branches b ON ra.branch_id = b.id
+      WHERE ra.status = 'active' AND ra.pickup_required = 1 AND ra.is_paused = 0`, args: [] });
+    const now = Date.now();
+    const HOUR = 3600000;
+    const reminders = rows.map(a => {
+      const due = dueDateTime(a);
+      if (!due) return null;
+      const msUntilDue = due.getTime() - now;
+      let bucket;
+      if (msUntilDue <= 0) bucket = 'overdue';
+      else if (msUntilDue <= 8 * HOUR) bucket = 'due_8h';
+      else if (msUntilDue <= 24 * HOUR) bucket = 'due_24h';
+      else return null;
+      return { ...a, due_datetime: due.toISOString(), hours_remaining: parseFloat((msUntilDue / HOUR).toFixed(1)), bucket };
+    }).filter(Boolean).sort((x, y) => new Date(x.due_datetime) - new Date(y.due_datetime));
+    res.json(reminders);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/agreements/:id', requirePermission('rentals'), async (req, res) => {
   try {
     const { rows: [agreement] } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name,
@@ -172,11 +208,12 @@ router.get('/agreements/:id', requirePermission('rentals'), async (req, res) => 
       agreement.estimated_deposit_total = parseFloat(estDepositTotal.toFixed(2));
       agreement.estimated_total = parseFloat((estRentalSubtotal + estTax + estDepositTotal + deliveryCost + pickupCost + operatorFee).toFixed(2));
     }
-    const { rows: pauses } = await db.execute({ sql: `SELECT rp.*, pb.first_name || ' ' || pb.last_name as paused_by_name, ab.first_name || ' ' || ab.last_name as authorized_by_name, rb.first_name || ' ' || rb.last_name as resumed_by_name
+    const { rows: pauses } = await db.execute({ sql: `SELECT rp.*, pb.first_name || ' ' || pb.last_name as paused_by_name, ab.first_name || ' ' || ab.last_name as authorized_by_name, rb.first_name || ' ' || rb.last_name as resumed_by_name, cb.first_name || ' ' || cb.last_name as confirmed_by_name
       FROM rental_agreement_pauses rp
       LEFT JOIN employees pb ON rp.paused_by = pb.id
       LEFT JOIN employees ab ON rp.authorized_by = ab.id
       LEFT JOIN employees rb ON rp.resumed_by = rb.id
+      LEFT JOIN employees cb ON rp.confirmed_by = cb.id
       WHERE rp.agreement_id = ? ORDER BY rp.id`, args: [req.params.id] });
     agreement.pauses = pauses;
     res.json(agreement);
@@ -622,6 +659,97 @@ router.patch('/agreements/:id/resume', requirePermission('rentals'), async (req,
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ─── Missed pickup: contact + customer decision ─────────────────────────────
+// Both routes below operate on the currently-open pause row with
+// reason='missed_pickup' — created by checkMissedPickups() (exported at the
+// bottom of this file, called on a timer from server.js) when a
+// pickup-required agreement's due date/time passes with the item still out.
+
+async function findOpenMissedPickupPause(agreementId) {
+  const { rows: [pause] } = await db.execute({ sql: "SELECT * FROM rental_agreement_pauses WHERE agreement_id = ? AND ended_at IS NULL AND reason = 'missed_pickup' ORDER BY id DESC LIMIT 1", args: [agreementId] });
+  return pause;
+}
+
+// Logs an outreach attempt (call or email) against the open missed-pickup
+// pause — actually sending the email itself is routes/email.js's job
+// (POST /email/send-missed-pickup-contact/:id); this just records that it
+// happened, same split as the rest of the app's email-vs-state separation.
+router.patch('/agreements/:id/missed-pickup-contact', requirePermission('rentals'), async (req, res) => {
+  try {
+    const { contact_method, notes, employee_id } = req.body;
+    if (!['email', 'phone'].includes(contact_method)) return res.status(400).json({ error: 'contact_method must be "email" or "phone"' });
+    const pause = await findOpenMissedPickupPause(req.params.id);
+    if (!pause) return res.status(400).json({ error: 'No open missed-pickup pause found on this agreement' });
+    const stamp = `[${new Date().toLocaleString()}${employee_id ? ` — emp #${employee_id}` : ''}, ${contact_method}] ${(notes || '').trim() || '(no notes)'}`;
+    const combinedNotes = pause.contact_notes ? `${pause.contact_notes}\n${stamp}` : stamp;
+    await db.execute({ sql: 'UPDATE rental_agreement_pauses SET contact_method = ?, contact_notes = ? WHERE id = ?', args: [contact_method, combinedNotes, pause.id] });
+    const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    try {
+      await logActivity({
+        customerId: agreement.customer_id, employeeId: employee_id,
+        type: 'rental', subject: `Rental ${agreement.agreement_number} — missed-pickup contact attempt (${contact_method})`,
+        description: notes || null, completed: true,
+      });
+    } catch(e) {}
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Records what the customer decided once staff reached them — 'continue'
+// (resumes with a new due date staff picked while on the call/email, not the
+// usual paused-days auto-extension) or 'stop' (resumes with no extension,
+// just unblocking Process Return — see database.js's migration comment: no
+// automatic financial changes happen unattended, a human still has to
+// actually process the return once the item comes back). Either way this is
+// staff attesting to the customer's decision, not the customer's own
+// verifiable action — there's no reply-parsing or click-to-confirm link
+// infrastructure in this app.
+router.patch('/agreements/:id/missed-pickup-confirm', requirePermission('rentals'), async (req, res) => {
+  try {
+    const { decision, new_due_date, notes, employee_id } = req.body;
+    if (!['continue', 'stop'].includes(decision)) return res.status(400).json({ error: 'decision must be "continue" or "stop"' });
+    const pause = await findOpenMissedPickupPause(req.params.id);
+    if (!pause) return res.status(400).json({ error: 'No open missed-pickup pause found on this agreement' });
+    const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    if (!agreement) return res.status(404).json({ error: 'Not found' });
+
+    let newDueDate = agreement.due_date;
+    if (decision === 'continue') {
+      if (!new_due_date) return res.status(400).json({ error: 'A new pickup date is required to continue the rental' });
+      if (new_due_date < new Date().toISOString().slice(0, 10)) return res.status(400).json({ error: 'The new pickup date cannot be in the past' });
+      newDueDate = new_due_date;
+    }
+
+    const now = new Date().toISOString();
+    const stamp = notes && notes.trim() ? `[${new Date().toLocaleString()}] Customer confirmed: ${decision}${decision === 'continue' ? ` (new pickup date ${newDueDate})` : ''} — ${notes.trim()}` : `[${new Date().toLocaleString()}] Customer confirmed: ${decision}${decision === 'continue' ? ` (new pickup date ${newDueDate})` : ''}`;
+    const combinedNotes = pause.contact_notes ? `${pause.contact_notes}\n${stamp}` : stamp;
+
+    const tx = await db.transaction('write');
+    let committed = false;
+    try {
+      await tx.execute({
+        sql: 'UPDATE rental_agreement_pauses SET ended_at = ?, resumed_by = ?, due_date_before = ?, due_date_after = ?, customer_confirmation = ?, confirmed_by = ?, confirmed_at = ?, contact_notes = ? WHERE id = ?',
+        args: [now, employee_id || null, agreement.due_date, newDueDate, decision, employee_id || null, now, combinedNotes, pause.id],
+      });
+      await tx.execute({ sql: 'UPDATE rental_agreements SET is_paused = 0, due_date = ? WHERE id = ?', args: [newDueDate, req.params.id] });
+      await tx.commit();
+      committed = true;
+      try {
+        await logActivity({
+          customerId: agreement.customer_id, employeeId: employee_id,
+          type: 'rental', subject: `Rental ${agreement.agreement_number} — customer confirmed ${decision === 'continue' ? `continuation, new pickup date ${newDueDate}` : 'stop'}`,
+          description: notes || null, completed: true,
+        });
+      } catch(e) {}
+      const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+      res.json(updated);
+    } catch(e) {
+      if (!committed) await tx.rollback();
+      res.status(committed ? 500 : 400).json({ error: e.message });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ─── Cancel ─────────────────────────────────────────────────────────────────
 
 router.patch('/agreements/:id/cancel', requirePermission('rentals_returns'), async (req, res) => {
@@ -1056,4 +1184,40 @@ router.post('/agreements/:id/credit-note', requirePermission('rentals_returns'),
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Called on a timer from server.js. Finds every active, pickup-required,
+// not-already-paused agreement whose due date/time has passed and pauses it
+// — reason='missed_pickup', paused_by/authorized_by NULL since this is a
+// system action with no human present to enter the usual manager PIN
+// (contrast with the human-driven POST /agreements/:id/pause above, which
+// requires one). Naturally idempotent: once is_paused flips to 1 the
+// WHERE clause excludes it from the next run, so no separate "already
+// notified" flag is needed.
+async function checkMissedPickups() {
+  const { rows: candidates } = await db.execute({ sql: "SELECT * FROM rental_agreements WHERE status = 'active' AND pickup_required = 1 AND is_paused = 0", args: [] });
+  for (const agreement of candidates) {
+    const due = dueDateTime(agreement);
+    if (!due || due.getTime() >= Date.now()) continue;
+    try {
+      const tx = await db.transaction('write');
+      try {
+        await tx.execute({
+          sql: 'INSERT INTO rental_agreement_pauses (agreement_id, reason, notes, paused_by, authorized_by) VALUES (?,?,?,NULL,NULL)',
+          args: [agreement.id, 'missed_pickup', 'Automatically paused — the scheduled pickup was not completed by the due date/time.'],
+        });
+        await tx.execute({ sql: 'UPDATE rental_agreements SET is_paused = 1 WHERE id = ?', args: [agreement.id] });
+        await tx.commit();
+      } catch(e) { await tx.rollback(); throw e; }
+      try {
+        await logActivity({
+          customerId: agreement.customer_id, employeeId: agreement.employee_id,
+          type: 'rental', subject: `Rental ${agreement.agreement_number} auto-paused — pickup not completed by due date`,
+          description: 'Contact the customer to arrange pickup logistics, then record their decision (continue or stop) on the agreement.',
+          completed: false,
+        });
+      } catch(e) {}
+    } catch(e) {}
+  }
+}
+
 module.exports = router;
+module.exports.checkMissedPickups = checkMissedPickups;

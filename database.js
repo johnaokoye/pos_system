@@ -1076,6 +1076,7 @@ async function _init() {
     'ALTER TABLE customers ADD COLUMN rental_reference_relationship TEXT',
     'ALTER TABLE products ADD COLUMN model_number TEXT',
     'ALTER TABLE products ADD COLUMN size TEXT',
+    'ALTER TABLE products ADD COLUMN brand TEXT',
     'ALTER TABLE products ADD COLUMN taxable INTEGER DEFAULT 1',
     // Explicit "the customer will collect this themselves" flag on the New
     // Rental form — mutually exclusive with delivery_required in the UI, but
@@ -1174,6 +1175,19 @@ async function _init() {
     // Same "Q" item close-the-loop link purchase_order_items already has for
     // quotation_item_id, scoped to work_order_items instead.
     'ALTER TABLE purchase_order_items ADD COLUMN work_order_item_id INTEGER REFERENCES work_order_items(id)',
+    // Missed-pickup workflow: when a pickup-required rental's due date/time
+    // passes without the item having come back, server.js auto-pauses the
+    // agreement (reason='missed_pickup', paused_by/authorized_by NULL — no
+    // human present to enter the usual manager PIN). These columns live on
+    // the pause row itself (not the agreement) so the outreach/decision is
+    // tied to that specific missed-pickup incident, same as the rest of that
+    // row's history — a rental that misses pickup more than once keeps each
+    // incident's own record.
+    'ALTER TABLE rental_agreement_pauses ADD COLUMN contact_method TEXT',
+    'ALTER TABLE rental_agreement_pauses ADD COLUMN contact_notes TEXT',
+    'ALTER TABLE rental_agreement_pauses ADD COLUMN customer_confirmation TEXT',
+    'ALTER TABLE rental_agreement_pauses ADD COLUMN confirmed_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE rental_agreement_pauses ADD COLUMN confirmed_at DATETIME',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

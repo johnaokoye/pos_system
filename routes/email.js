@@ -245,6 +245,110 @@ function buildCancellationReceiptHtml(agreement, s) {
 </html>`;
 }
 
+// Mirrors printReceiptLetter's rental invoice in public/index.html — item(s)
+// rented pulled from the agreement (not just this transaction's line items,
+// which for a settlement are duration-adjustment/deposit lines with no
+// product name), plus both Issue and Return signature checkpoints whenever
+// they're on file, so the emailed copy matches what printing it produces.
+function daysBetweenDates(a, b) {
+  const da = new Date(a), dbb = new Date(b);
+  const utcA = Date.UTC(da.getUTCFullYear(), da.getUTCMonth(), da.getUTCDate());
+  const utcB = Date.UTC(dbb.getUTCFullYear(), dbb.getUTCMonth(), dbb.getUTCDate());
+  return Math.round((utcB - utcA) / 86400000);
+}
+
+function rentalDurationText(checkout, dueDate, returnedAt) {
+  if (!checkout || !dueDate) return '—';
+  const planned = daysBetweenDates(checkout, dueDate);
+  const plannedLabel = `${planned} day${planned === 1 ? '' : 's'}`;
+  if (!returnedAt) return plannedLabel;
+  const actual = daysBetweenDates(checkout, returnedAt);
+  if (actual === planned) return `${plannedLabel} (returned on time)`;
+  const diff = actual - planned;
+  return `${actual} day${actual === 1 ? '' : 's'} (planned ${plannedLabel}, ${diff > 0 ? '+' : ''}${diff}d)`;
+}
+
+function buildRentalInvoiceHtml(agreement, tx, s, origin) {
+  const storeName = s.store_name || 'My Store';
+  const storeAddr = tx.branch_address
+    ? `${tx.branch_address}${tx.branch_city ? ', ' + tx.branch_city : ''}${tx.branch_state ? ' ' + tx.branch_state : ''}${tx.branch_zip ? ' ' + tx.branch_zip : ''}`
+    : s.store_address || '';
+  const storePhone = tx.branch_phone || s.store_phone || '';
+  const footer = s.receipt_footer || 'Thank you for your business!';
+  const absUrl = (path) => !path ? null : (/^https?:\/\//.test(path) ? path : `${origin}${path}`);
+  const rentedItemsLabel = (agreement.items || []).filter(i => !i.parent_item_id).map(i => `${i.product_name} x${i.quantity}`).join(', ');
+  const rentedLabel = agreement.checkout_datetime ? new Date(agreement.checkout_datetime).toLocaleString() : '—';
+  const returnedLabel = agreement.returned_at ? new Date(agreement.returned_at).toLocaleString() : 'Not yet returned';
+  const durationLabel = rentalDurationText(agreement.checkout_datetime, agreement.due_date, agreement.returned_at);
+
+  const rows = (tx.items || []).map(i => `
+    <tr>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku}${i.quantity > 1 ? ` × ${i.quantity} @ ${fmt(i.unit_price)}` : ''}</span></td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(i.total)}</td>
+    </tr>`).join('');
+
+  const issueSignatures = [];
+  if (agreement.issue_customer_signature) issueSignatures.push(['Customer Signature', agreement.customer_name, agreement.issue_customer_signature, agreement.issued_at]);
+  if (agreement.issue_security_signature) issueSignatures.push(['Security Signature', agreement.issue_security_employee_name, agreement.issue_security_signature, agreement.issue_security_confirmed_at]);
+  const returnSignatures = [];
+  if (agreement.return_security_signature) returnSignatures.push(['Security Signature', agreement.return_security_employee_name, agreement.return_security_signature, agreement.return_security_confirmed_at]);
+  if (agreement.return_driver_signature) returnSignatures.push(['Driver Signature', agreement.return_driver_employee_name, agreement.return_driver_signature, agreement.return_driver_confirmed_at]);
+
+  const sigBlock = (heading, sigs) => !sigs.length ? '' : `
+    <div style="margin-top:16px;font-size:10px;font-weight:bold;text-transform:uppercase;color:#888">${heading}</div>
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:6px"><tr>
+      ${sigs.map(([label, name, src, signedAt]) => `<td style="text-align:center;padding:4px 8px">
+        <img src="${absUrl(src)}" style="max-height:60px;max-width:150px;border-bottom:1px solid #333;padding-bottom:4px" />
+        <div style="font-size:11px;color:#555;margin-top:4px">${label}${name ? ` — ${name}` : ''}</div>
+        ${signedAt ? `<div style="font-size:10px;color:#888">${new Date(signedAt).toLocaleString()}</div>` : ''}
+      </td>`).join('')}
+    </tr></table>`;
+
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Rental Tax Invoice ${tx.transaction_number}</title></head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
+<tr><td align="center">
+  <table width="520" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+    <tr><td style="background:#1a56db;padding:24px;text-align:center">
+      <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
+      ${agreement.branch_name ? `<div style="color:#bcd4ff;font-size:13px;margin-top:4px">${agreement.branch_name}</div>` : ''}
+      ${storeAddr ? `<div style="color:#bcd4ff;font-size:12px;margin-top:2px">${storeAddr}</div>` : ''}
+      ${storePhone ? `<div style="color:#bcd4ff;font-size:12px">${storePhone}</div>` : ''}
+    </td></tr>
+    <tr><td style="padding:20px 24px">
+      <div style="font-size:18px;font-weight:700;color:#111;margin-bottom:4px">Rental Tax Invoice</div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-bottom:16px">
+        <tr><td style="padding:2px 0"><strong>Transaction #:</strong> ${tx.transaction_number}</td><td style="text-align:right;padding:2px 0"><strong>Date:</strong> ${new Date(tx.created_at).toLocaleString()}</td></tr>
+        ${agreement.customer_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Customer:</strong> ${agreement.customer_name}</td></tr>` : ''}
+        <tr><td colspan="2" style="padding:2px 0"><strong>Rental Agreement:</strong> ${agreement.agreement_number}</td></tr>
+        <tr><td colspan="2" style="padding:2px 0"><strong>Item(s) Rented:</strong> ${rentedItemsLabel || '—'}</td></tr>
+        <tr><td style="padding:2px 0"><strong>Rented:</strong> ${rentedLabel}</td><td style="text-align:right;padding:2px 0"><strong>Returned:</strong> ${returnedLabel}</td></tr>
+        <tr><td colspan="2" style="padding:2px 0"><strong>Duration:</strong> ${durationLabel}</td></tr>
+      </table>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px">
+        <thead><tr style="background:#f9fafb"><th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Item</th><th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Amount</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-top:12px">
+        <tr><td style="padding:3px 0">Subtotal</td><td style="text-align:right">${fmt(tx.subtotal)}</td></tr>
+        <tr><td style="padding:3px 0">Tax</td><td style="text-align:right">${fmt(tx.tax_amount)}</td></tr>
+        <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
+        <tr><td style="font-size:16px;font-weight:700;color:#111">TOTAL</td><td style="font-size:16px;font-weight:700;color:#111;text-align:right">${fmt(tx.total)}</td></tr>
+        <tr><td style="padding:3px 0;color:#666">Payment</td><td style="text-align:right;color:#666">${(tx.payment_method || '').replace('_',' ').toUpperCase()}</td></tr>
+      </table>
+      ${sigBlock('Issued', issueSignatures)}
+      ${sigBlock('Returned', returnSignatures)}
+      <div style="text-align:center;margin-top:20px;font-size:13px;color:#666;font-style:italic">${footer}</div>
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body>
+</html>`;
+}
+
 function buildQuoteHtml(q, s) {
   const storeName = s.store_name || 'My Store';
   const storeAddr = s.store_address || '';
@@ -453,6 +557,57 @@ router.post('/send-cancellation-receipt/:id', requireAuth, async (req, res) => {
         html: buildCancellationReceiptHtml(agreement, s),
       });
       res.json({ success: true, message: `Cancellation receipt sent to ${to}` });
+    } catch (e) {
+      res.status(500).json({ error: `Failed to send email: ${e.message}` });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Send the rental tax invoice — always the checkout transaction, same as
+// printRentalInvoice() in public/index.html, so the item(s) rented and
+// pricing come from a real product line rather than a settlement's
+// duration-adjustment/deposit lines. Issue and Return signatures (whichever
+// are on file) are pulled from the agreement itself either way.
+router.post('/send-rental-invoice/:id', requireAuth, async (req, res) => {
+  const { to } = req.body;
+  if (!to) return res.status(400).json({ error: 'Recipient email is required' });
+  try {
+    const { rows: [agreement] } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name, c.email as customer_email,
+      b.name as branch_name,
+      ise.first_name || ' ' || ise.last_name as issue_security_employee_name,
+      rse.first_name || ' ' || rse.last_name as return_security_employee_name,
+      rde.first_name || ' ' || rde.last_name as return_driver_employee_name
+      FROM rental_agreements ra
+      LEFT JOIN customers c ON ra.customer_id = c.id
+      LEFT JOIN branches b ON ra.branch_id = b.id
+      LEFT JOIN employees ise ON ra.issue_security_employee_id = ise.id
+      LEFT JOIN employees rse ON ra.return_security_employee_id = rse.id
+      LEFT JOIN employees rde ON ra.return_driver_employee_id = rde.id
+      WHERE ra.id = ?`, args: [req.params.id] });
+    if (!agreement) return res.status(404).json({ error: 'Rental agreement not found' });
+    if (!agreement.checkout_transaction_id) return res.status(400).json({ error: 'This rental has not been checked out yet' });
+    const { rows: items } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
+    agreement.items = items;
+
+    const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone
+      FROM transactions t LEFT JOIN branches b ON t.branch_id = b.id WHERE t.id = ?`, args: [agreement.checkout_transaction_id] });
+    if (!tx) return res.status(404).json({ error: 'Checkout transaction not found' });
+    const { rows: txItems } = await db.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [agreement.checkout_transaction_id] });
+    tx.items = txItems;
+
+    const s = await getSettings();
+    const origin = `${req.protocol}://${req.get('host')}`;
+    try {
+      const transporter = createTransporter(s);
+      const fromName = s.email_from_name || s.store_name || 'POS System';
+      const fromAddr = s.email_smtp_user || s.store_email || '';
+      await transporter.sendMail({
+        from: `"${fromName}" <${fromAddr}>`,
+        to,
+        subject: `Rental Tax Invoice - ${agreement.agreement_number} from ${s.store_name || 'Our Store'}`,
+        html: buildRentalInvoiceHtml(agreement, tx, s, origin),
+      });
+      res.json({ success: true, message: `Rental tax invoice sent to ${to}` });
     } catch (e) {
       res.status(500).json({ error: `Failed to send email: ${e.message}` });
     }
@@ -823,6 +978,120 @@ router.post('/send-work-order-ready/:id', requireAuth, async (req, res) => {
         html: buildWorkOrderReadyHtml(wo, s),
       });
       res.json({ success: true, message: `Notification sent to ${to}` });
+    } catch (e) {
+      res.status(500).json({ error: `Failed to send email: ${e.message}` });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Missed pickup: outreach + decision confirmation ───────────────────────
+// Two distinct emails for the missed-pickup workflow (see routes/rentals.js):
+// one to actually reach the customer when dispatch can't get to them, one to
+// document — to the customer, in writing — what was agreed once staff has
+// logged their decision. Neither expects or parses a reply; the customer's
+// decision itself is recorded by staff via PATCH .../missed-pickup-confirm,
+// not by anything in this email.
+
+function buildMissedPickupContactHtml(agreement, message, s) {
+  const storeName = s.store_name || 'My Store';
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Rental Pickup Follow-Up ${agreement.agreement_number}</title></head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
+<tr><td align="center">
+  <table width="480" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+    ${docHeader(storeName, agreement.branch_name, s.store_address, s.store_phone, 'Rental Pickup Follow-Up', `Ref: ${agreement.agreement_number}`)}
+    <tr><td style="padding:0 24px 20px">
+      ${agreement.customer_name ? docRow('Customer', agreement.customer_name) : ''}
+      <div style="margin-top:14px;font-size:14px;color:#333;white-space:pre-wrap">${message}</div>
+      <div style="text-align:center;margin-top:20px;font-size:11px;color:#999">Please get in touch with us at your earliest convenience to arrange the pickup.</div>
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body>
+</html>`;
+}
+
+router.post('/send-missed-pickup-contact/:id', requireAuth, async (req, res) => {
+  const { to, message } = req.body;
+  if (!to) return res.status(400).json({ error: 'Recipient email is required' });
+  try {
+    const { rows: [agreement] } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name, b.name as branch_name
+      FROM rental_agreements ra LEFT JOIN customers c ON ra.customer_id = c.id LEFT JOIN branches b ON ra.branch_id = b.id WHERE ra.id = ?`, args: [req.params.id] });
+    if (!agreement) return res.status(404).json({ error: 'Rental agreement not found' });
+    const s = await getSettings();
+    const body = (message && message.trim()) || `We tried to pick up the item(s) on rental agreement ${agreement.agreement_number} as scheduled but weren't able to reach you. Please contact us so we can arrange the pickup.`;
+    try {
+      const transporter = createTransporter(s);
+      const fromName = s.email_from_name || s.store_name || 'POS System';
+      const fromAddr = s.email_smtp_user || s.store_email || '';
+      await transporter.sendMail({
+        from: `"${fromName}" <${fromAddr}>`,
+        to,
+        subject: `Rental Pickup Follow-Up - ${agreement.agreement_number} from ${s.store_name || 'Our Store'}`,
+        html: buildMissedPickupContactHtml(agreement, body, s),
+      });
+      res.json({ success: true, message: `Follow-up email sent to ${to}` });
+    } catch (e) {
+      res.status(500).json({ error: `Failed to send email: ${e.message}` });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+function buildMissedPickupConfirmationHtml(agreement, pause, s) {
+  const storeName = s.store_name || 'My Store';
+  const isContinue = pause.customer_confirmation === 'continue';
+  const summary = isContinue
+    ? `This confirms your rental (agreement ${agreement.agreement_number}) will continue. The new pickup date is <strong>${new Date(pause.due_date_after).toLocaleDateString()}</strong>.`
+    : `This confirms your rental (agreement ${agreement.agreement_number}) will be closed out. Our team will follow up to finalize the return.`;
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Rental Confirmation ${agreement.agreement_number}</title></head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
+<tr><td align="center">
+  <table width="480" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+    <tr><td style="background:#1a56db;padding:24px;text-align:center">
+      <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
+    </td></tr>
+    <tr><td style="padding:20px 24px">
+      <div style="font-size:18px;font-weight:700;color:#111;margin-bottom:2px">Rental ${isContinue ? 'Continuation' : 'Stop'} Confirmation</div>
+      <div style="font-size:13px;color:#888;margin-bottom:14px">Ref: ${agreement.agreement_number}</div>
+      ${agreement.customer_name ? `<div style="font-size:13px;color:#444;margin-bottom:10px"><strong>Customer:</strong> ${agreement.customer_name}</div>` : ''}
+      <div style="font-size:14px;color:#333">${summary}</div>
+      <div style="text-align:center;margin-top:20px;font-size:11px;color:#999">If this doesn't match what you agreed to with our team, please contact us right away.</div>
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body>
+</html>`;
+}
+
+router.post('/send-missed-pickup-confirmation/:id', requireAuth, async (req, res) => {
+  const { to } = req.body;
+  if (!to) return res.status(400).json({ error: 'Recipient email is required' });
+  try {
+    const { rows: [agreement] } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name, b.name as branch_name
+      FROM rental_agreements ra LEFT JOIN customers c ON ra.customer_id = c.id LEFT JOIN branches b ON ra.branch_id = b.id WHERE ra.id = ?`, args: [req.params.id] });
+    if (!agreement) return res.status(404).json({ error: 'Rental agreement not found' });
+    const { rows: [pause] } = await db.execute({ sql: "SELECT * FROM rental_agreement_pauses WHERE agreement_id = ? AND reason = 'missed_pickup' AND customer_confirmation IS NOT NULL ORDER BY id DESC LIMIT 1", args: [req.params.id] });
+    if (!pause) return res.status(400).json({ error: 'No recorded customer decision found for this agreement yet' });
+
+    const s = await getSettings();
+    try {
+      const transporter = createTransporter(s);
+      const fromName = s.email_from_name || s.store_name || 'POS System';
+      const fromAddr = s.email_smtp_user || s.store_email || '';
+      await transporter.sendMail({
+        from: `"${fromName}" <${fromAddr}>`,
+        to,
+        subject: `Rental ${pause.customer_confirmation === 'continue' ? 'Continuation' : 'Stop'} Confirmation - ${agreement.agreement_number} from ${s.store_name || 'Our Store'}`,
+        html: buildMissedPickupConfirmationHtml(agreement, pause, s),
+      });
+      res.json({ success: true, message: `Confirmation email sent to ${to}` });
     } catch (e) {
       res.status(500).json({ error: `Failed to send email: ${e.message}` });
     }

@@ -4497,9 +4497,10 @@ const App = {
   // GET /rentals/agreements?view= endpoint the Rentals screen itself uses.
 
   _dispatchTabs: [
-    { key: 'awaiting_issue', label: 'Awaiting Issue' },
-    { key: 'active',         label: 'Issued' },
-    { key: 'deliveries',     label: 'Deliveries' },
+    { key: 'awaiting_issue',    label: 'Awaiting Issue' },
+    { key: 'active',            label: 'Issued' },
+    { key: 'deliveries',        label: 'Deliveries' },
+    { key: 'pickup_reminders',  label: 'Pickup Reminders' },
   ],
 
   async renderRentalDispatch() {
@@ -4525,6 +4526,7 @@ const App = {
 
   async loadDispatchTab() {
     if (this.dispatchTab === 'deliveries') return this.loadDeliveriesTab();
+    if (this.dispatchTab === 'pickup_reminders') return this.loadPickupRemindersTab();
     const el = document.getElementById('dispatch-content');
     if (!el) return;
     const agreements = await this.api('GET', `/rentals/agreements?view=${this.dispatchTab}`);
@@ -4597,6 +4599,37 @@ const App = {
             ${a.status==='active' ? `<button class="btn btn-sm btn-outline" onclick="App.printRentalDeliveryNote(${a.id})">🖨️ Delivery Note</button>` : ''}
             <button class="btn btn-sm btn-outline" onclick="App.viewRentalAgreement(${a.id})">View</button>
           </td>
+        </tr>`).join('')}</tbody>
+      </table>
+      </div>`;
+  },
+
+  // Highlighted "about to miss a pickup" queue — GET /rentals/agreements/
+  // pickup-reminders does the bucketing (due_8h / due_24h / overdue) live off
+  // each agreement's actual due date+time, not just the day. 'overdue' should
+  // only flash briefly here before server.js's missed-pickup check auto-
+  // pauses it (which drops it out of this list into the pause/contact
+  // workflow on the agreement itself).
+  async loadPickupRemindersTab() {
+    const el = document.getElementById('dispatch-content');
+    if (!el) return;
+    const reminders = await this.api('GET', '/rentals/agreements/pickup-reminders');
+    if (!document.getElementById('dispatch-content')) return;
+    const bucketStyle = { overdue: 'background:rgba(220,38,38,0.12);color:#991b1b', due_8h: 'background:rgba(220,38,38,0.08);color:#991b1b', due_24h: 'background:rgba(217,119,6,0.08);color:#92400e' };
+    const bucketLabel = { overdue: 'OVERDUE', due_8h: 'Due within 8h', due_24h: 'Due within 24h' };
+    document.getElementById('dispatch-content').innerHTML = !reminders.length ? '<div class="empty-state"><p>No pickups due within the next 24 hours.</p></div>' : `
+      <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px">Pickup-required rentals approaching their due date/time. Overdue ones are auto-paused shortly after — contact the customer from the agreement once that happens.</p>
+      <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>Agreement #</th><th>Customer</th><th>Phone</th><th>Item(s)</th><th>Due</th><th>Status</th><th></th></tr></thead>
+        <tbody>${reminders.map(a => `<tr style="${bucketStyle[a.bucket]||''}">
+          <td class="fw-600">${a.agreement_number}</td>
+          <td>${a.customer_name||'—'}</td>
+          <td>${a.customer_phone ? `<a href="tel:${a.customer_phone}">${a.customer_phone}</a>` : '—'}</td>
+          <td style="max-width:200px">${a.item_summary||'—'}</td>
+          <td>${this.fmtDateTime(a.due_datetime)}</td>
+          <td><span class="badge-pill" style="${bucketStyle[a.bucket]||''}">${bucketLabel[a.bucket]||a.bucket}</span></td>
+          <td style="text-align:right;white-space:nowrap"><button class="btn btn-sm btn-outline" onclick="App.viewRentalAgreement(${a.id})">View</button></td>
         </tr>`).join('')}</tbody>
       </table>
       </div>`;
@@ -4769,7 +4802,8 @@ const App = {
           </div>
           <div class="form-group"><label>Name *</label><input id="rf-name" value="${p.name||''}"></div>
           <div class="form-group"><label>Description</label><input id="rf-desc" value="${p.description||''}"></div>
-          <div class="input-row">
+          <div class="input-row-3">
+            <div class="form-group"><label>Brand</label><input id="rf-brand" value="${p.brand||''}"></div>
             <div class="form-group"><label>Model Number</label><input id="rf-model" value="${p.model_number||''}"></div>
             <div class="form-group"><label>Size</label><input id="rf-size" value="${p.size||''}"></div>
           </div>
@@ -4905,6 +4939,7 @@ const App = {
       sku,
       name,
       description: document.getElementById('rf-desc').value.trim() || null,
+      brand: document.getElementById('rf-brand').value.trim() || null,
       model_number: document.getElementById('rf-model').value.trim() || null,
       size: document.getElementById('rf-size').value.trim() || null,
       taxable: document.getElementById('rf-taxable').checked ? 1 : 0,
@@ -5194,6 +5229,12 @@ const App = {
     const a = await this.api('GET', `/rentals/agreements/${id}`);
     const sc = { pending:'badge-warning', awaiting_issue:'badge-warning', active:'badge-info', overdue:'badge-danger', returned:'badge-success', cancelled:'badge-secondary' };
     const notYetIssued = a.status === 'pending' || a.status === 'awaiting_issue';
+    // A missed-pickup pause should be resolved through "Record Customer
+    // Decision" (documents what the customer said, and lets staff pick a
+    // real new pickup date) rather than the plain Resume button, which just
+    // silently extends by however long it's been paused with no record of
+    // why.
+    const openMissedPickupPause = a.is_paused ? a.pauses?.find(p => !p.ended_at && p.reason === 'missed_pickup') : null;
     this.showModal(`
       <div class="modal" style="max-width:640px">
         <div class="modal-header">
@@ -5228,13 +5269,24 @@ const App = {
             <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Customer PO</strong>
             <div>PO # ${a.customer_po_number}${a.customer_po_attachment_path ? ` <a href="/api/rentals/agreements/${a.id}/po-attachment/download" target="_blank" class="btn btn-sm btn-outline" style="padding:1px 8px;font-size:11px;margin-left:6px">Download PO</a>` : ''}</div>
           </div>` : ''}
-          ${a.is_paused ? `<div style="padding:8px 12px;background:rgba(217,119,6,0.1);border-left:3px solid #d97706;border-radius:4px;font-size:12px;color:#d97706;margin-bottom:12px">Paused — this rental is currently out for ${a.pauses?.[a.pauses.length-1]?.reason || 'maintenance'}. Resume it before processing a return.</div>` : ''}
+          ${a.is_paused ? (openMissedPickupPause ? `<div style="padding:10px 12px;background:rgba(220,38,38,0.08);border-left:3px solid #dc2626;border-radius:4px;font-size:12px;color:#991b1b;margin-bottom:12px">
+                <strong>⏸ Missed Pickup — Auto-Paused</strong>
+                <div style="margin-top:4px">The scheduled pickup wasn't completed by the due date/time. Contact the customer to arrange next steps.</div>
+                ${a.customer_phone ? `<div style="margin-top:6px">Phone: <a href="tel:${a.customer_phone}" style="color:#991b1b;font-weight:600">${a.customer_phone}</a></div>` : ''}
+                ${openMissedPickupPause.contact_notes ? `<div style="margin-top:6px;white-space:pre-wrap;color:#7c2d12"><strong>Contact log:</strong><br>${openMissedPickupPause.contact_notes}</div>` : ''}
+                <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+                  <button class="btn btn-sm btn-secondary" onclick="App.showMissedPickupContactModal(${a.id},'email')">✉️ Email Customer</button>
+                  <button class="btn btn-sm btn-secondary" onclick="App.showMissedPickupContactModal(${a.id},'phone')">📞 Log Call</button>
+                  <button class="btn btn-sm btn-primary" onclick="App.showMissedPickupConfirmModal(${a.id})">Record Customer Decision</button>
+                </div>
+              </div>` : `<div style="padding:8px 12px;background:rgba(217,119,6,0.1);border-left:3px solid #d97706;border-radius:4px;font-size:12px;color:#d97706;margin-bottom:12px">Paused — this rental is currently out for ${a.pauses?.find(p=>!p.ended_at)?.reason || 'maintenance'}. Resume it before processing a return.</div>`) : ''}
           ${a.pauses?.length ? `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:12px">
             <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Pause History</strong>
             ${a.pauses.map(p => `<div style="margin-top:4px">
-              <strong style="text-transform:capitalize">${p.reason}</strong> — ${this.fmtDateTime(p.started_at)} → ${p.ended_at ? this.fmtDateTime(p.ended_at) : '<span style="color:var(--warning)">Ongoing</span>'}
+              <strong style="text-transform:capitalize">${p.reason.replace('_',' ')}</strong> — ${this.fmtDateTime(p.started_at)} → ${p.ended_at ? this.fmtDateTime(p.ended_at) : '<span style="color:var(--warning)">Ongoing</span>'}
               ${p.notes ? `<div style="color:var(--text-muted)">${p.notes}</div>` : ''}
-              <div style="color:var(--text-muted);font-size:11px">Paused by ${p.paused_by_name||'—'}, authorized by ${p.authorized_by_name||'—'}${p.ended_at ? `, resumed by ${p.resumed_by_name||'—'}` : ''}${p.due_date_after ? ` — due date extended to ${this.fmtDate(p.due_date_after)}` : ''}</div>
+              ${p.customer_confirmation ? `<div style="color:var(--text-muted)">Customer confirmed: <strong style="text-transform:capitalize">${p.customer_confirmation}</strong>${p.confirmed_by_name ? ` (logged by ${p.confirmed_by_name})` : ''}</div>` : ''}
+              <div style="color:var(--text-muted);font-size:11px">Paused by ${p.paused_by_name || (p.reason==='missed_pickup' ? 'System (auto-pause)' : '—')}, authorized by ${p.authorized_by_name||'—'}${p.ended_at ? `, resumed by ${p.resumed_by_name||'—'}` : ''}${p.due_date_after ? ` — due date extended to ${this.fmtDate(p.due_date_after)}` : ''}</div>
             </div>`).join('')}
           </div>` : ''}
           ${!notYetIssued ? `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:12px">
@@ -5275,10 +5327,11 @@ const App = {
         <div class="modal-footer">
           ${a.status==='pending' && this.can('pos') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showFinalizeRentalModal(${a.id})">Process Payment</button>` : ''}
           ${a.status==='awaiting_issue' && this.can('rentals_issue') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showIssueRentalModal(${a.id})">Issue Rental</button>` : ''}
-          ${a.checkout_transaction_id ? `<button class="btn btn-secondary" onclick="App.printRentalInvoice(${a.id})">🖨️ Tax Invoice</button>` : ''}
+          ${a.checkout_transaction_id ? `<button class="btn btn-secondary" onclick="App.printRentalInvoice(${a.id})">🖨️ Tax Invoice</button>
+          <button class="btn btn-secondary" onclick="App.emailRentalInvoice(${a.id},'${(a.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email Invoice</button>` : ''}
           ${a.status==='active' ? `<button class="btn btn-secondary" onclick="App.printRentalDeliveryNote(${a.id})">🖨️ Delivery Note</button>` : ''}
           ${a.status==='active' && !a.is_paused ? `<button class="btn btn-secondary" onclick="App.closeModal();App.showPauseRentalModal(${a.id})">⏸ Pause Rental</button>` : ''}
-          ${a.status==='active' && a.is_paused ? `<button class="btn btn-primary" onclick="App.resumeRentalAgreement(${a.id})">▶ Resume Rental</button>` : ''}
+          ${a.status==='active' && a.is_paused && !openMissedPickupPause ? `<button class="btn btn-primary" onclick="App.resumeRentalAgreement(${a.id})">▶ Resume Rental</button>` : ''}
           ${a.status==='active' && !a.is_paused && this.can('rentals_returns') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showRentalReturnModal(${a.id})">Process Return</button>` : ''}
           ${(a.status==='active'||a.status==='pending'||a.status==='awaiting_issue') && !a.items.some(i=>i.quantity_returned>0) && this.can('rentals_returns') ? `<button class="btn btn-danger" onclick="App.cancelRentalAgreement(${a.id})">${a.status==='pending'?'Cancel Hold':'Cancel Agreement'}</button>` : ''}
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
@@ -5345,6 +5398,107 @@ const App = {
     try {
       await this.api('PATCH', `/rentals/agreements/${id}/resume`, { employee_id: this.currentUser.id });
       this.alert('Rental resumed — due date extended');
+      this.viewRentalAgreement(id);
+      this.renderRentals();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // Contacting the customer after an auto-pause (see database.js's
+  // rental_agreement_pauses migration comment / routes/rentals.js's
+  // checkMissedPickups). 'email' actually sends a message via
+  // /email/send-missed-pickup-contact, then logs it; 'phone' has nothing to
+  // send — the button just opens straight to logging the call's outcome.
+  async showMissedPickupContactModal(id, method) {
+    const a = await this.api('GET', `/rentals/agreements/${id}`);
+    const isEmail = method === 'email';
+    this.showModal(`
+      <div class="modal" style="max-width:460px">
+        <div class="modal-header">
+          <span class="modal-title">${isEmail ? '✉️ Email Customer' : '📞 Log Call'} — ${a.agreement_number}</span>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          ${isEmail ? `<div class="form-group"><label>To</label><input id="mpc-to" type="email" value="${a.customer_email||''}" placeholder="customer@example.com"></div>
+          <div class="form-group"><label>Message</label><textarea id="mpc-message" rows="5">We tried to pick up the item(s) on rental agreement ${a.agreement_number} as scheduled but weren't able to reach you. Please contact us so we can arrange the pickup.</textarea></div>`
+          : `<p style="font-size:13px;color:var(--text-muted);margin-bottom:10px">${a.customer_phone ? `Call ${a.customer_name||'the customer'} at <a href="tel:${a.customer_phone}">${a.customer_phone}</a>, then log the outcome below.` : 'Log the outcome of your call below.'}</p>
+          <div class="form-group"><label>What happened</label><textarea id="mpc-notes" rows="4" placeholder="e.g. Left voicemail, or: Spoke with customer, arranging pickup for tomorrow"></textarea></div>`}
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.submitMissedPickupContact(${id},'${method}')">${isEmail ? 'Send & Log' : 'Log Call'}</button>
+        </div>
+      </div>`);
+  },
+
+  async submitMissedPickupContact(id, method) {
+    const isEmail = method === 'email';
+    const notes = isEmail ? document.getElementById('mpc-message').value.trim() : document.getElementById('mpc-notes').value.trim();
+    if (!notes) { this.alert(isEmail ? 'Enter a message' : 'Enter what happened on the call', 'error'); return; }
+    try {
+      if (isEmail) {
+        const to = document.getElementById('mpc-to').value.trim();
+        if (!to || !to.includes('@')) { this.alert('Please enter a valid email address', 'error'); return; }
+        await this.api('POST', `/email/send-missed-pickup-contact/${id}`, { to, message: notes });
+      }
+      await this.api('PATCH', `/rentals/agreements/${id}/missed-pickup-contact`, { contact_method: method, notes, employee_id: this.currentUser.id });
+      this.closeModal();
+      this.alert(isEmail ? 'Email sent and logged' : 'Call logged');
+      this.viewRentalAgreement(id);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async showMissedPickupConfirmModal(id) {
+    const a = await this.api('GET', `/rentals/agreements/${id}`);
+    const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+    this.showModal(`
+      <div class="modal" style="max-width:460px">
+        <div class="modal-header">
+          <span class="modal-title">Record Customer Decision — ${a.agreement_number}</span>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">After reaching the customer, record what they decided. This documents the customer's confirmation on the agreement's pause history — it doesn't change any charges automatically.</p>
+          <div class="form-group"><label>Customer's Decision</label>
+            <select id="mpd-decision" onchange="App._toggleMissedPickupDueDate()">
+              <option value="continue">Continue the rental</option>
+              <option value="stop">Stop the rental</option>
+            </select>
+          </div>
+          <div class="form-group" id="mpd-due-date-group"><label>New Pickup Date</label><input type="date" id="mpd-due-date" value="${tomorrow}" min="${new Date().toISOString().slice(0,10)}"></div>
+          <div class="form-group"><label>Notes</label><textarea id="mpd-notes" rows="3" placeholder="What was discussed/agreed"></textarea></div>
+          <div class="form-group"><label style="display:flex;align-items:center;gap:6px">
+            <input type="checkbox" id="mpd-send-email" ${a.customer_email ? 'checked' : 'disabled'} style="width:auto"> Send confirmation email to customer${a.customer_email ? '' : ' (no email on file)'}
+          </label></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.confirmMissedPickupDecision(${id})">Save Decision</button>
+        </div>
+      </div>`);
+  },
+
+  _toggleMissedPickupDueDate() {
+    const decision = document.getElementById('mpd-decision')?.value;
+    const group = document.getElementById('mpd-due-date-group');
+    if (group) group.style.display = decision === 'continue' ? 'block' : 'none';
+  },
+
+  async confirmMissedPickupDecision(id) {
+    const decision = document.getElementById('mpd-decision').value;
+    const notes = document.getElementById('mpd-notes').value.trim() || null;
+    const sendEmail = document.getElementById('mpd-send-email').checked;
+    const new_due_date = decision === 'continue' ? document.getElementById('mpd-due-date').value : null;
+    if (decision === 'continue' && !new_due_date) { this.alert('Enter a new pickup date', 'error'); return; }
+    try {
+      await this.api('PATCH', `/rentals/agreements/${id}/missed-pickup-confirm`, { decision, new_due_date, notes, employee_id: this.currentUser.id });
+      if (sendEmail) {
+        try {
+          const a = await this.api('GET', `/rentals/agreements/${id}`);
+          if (a.customer_email) await this.api('POST', `/email/send-missed-pickup-confirmation/${id}`, { to: a.customer_email });
+        } catch(e) {}
+      }
+      this.closeModal();
+      this.alert(decision === 'continue' ? `Rental resumed — new pickup date ${this.fmtDate(new_due_date)}` : 'Rental stop confirmed — process the return once the item is back');
       this.viewRentalAgreement(id);
       this.renderRentals();
     } catch(e) { this.alert(e.message, 'error'); }
@@ -10686,6 +10840,16 @@ const App = {
       try {
         await this.api('POST', `/email/send-receipt/${txId}`, { to });
         this.alert(`Receipt sent to ${to}`);
+      } catch(e) { this.alert(e.message, 'error'); }
+    });
+  },
+
+  emailRentalInvoice(agreementId, customerEmail) {
+    this.showEmailModal('Email Rental Tax Invoice', customerEmail, async (to) => {
+      this.closeModal();
+      try {
+        await this.api('POST', `/email/send-rental-invoice/${agreementId}`, { to });
+        this.alert(`Rental tax invoice sent to ${to}`);
       } catch(e) { this.alert(e.message, 'error'); }
     });
   },
