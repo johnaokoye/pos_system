@@ -3,7 +3,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { getOutstandingQty } = require('../lib/rentalAvailability');
 const { getBranchStock, feeFor, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, dueDateTime } = require('../lib/rentals');
-const { requirePermission, requireAnyPermission, can } = require('../lib/permissions');
+const { requirePermission, requireAnyPermission, requireAuth, can } = require('../lib/permissions');
 const { runCreditCheck } = require('./customers');
 const { nextNumber } = require('../lib/nextNumber');
 const { calcRentalCommission } = require('./commissions');
@@ -555,6 +555,58 @@ router.patch('/agreements/:id/issue', requirePermission('rentals_issue'), async 
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ─── Pickup driver assignment + field confirmation ────────────────────────
+// Splits the pickup leg into two steps: a dispatcher assigns a driver ahead
+// of the actual pickup (this doesn't touch billing — pickup_cost was already
+// charged at checkout), then that driver confirms the physical collection
+// themselves from their own login (My Deliveries dashboard), with the
+// customer's name and signature as the sign-off. Process Return still does
+// the financial settlement afterward — see the /return handler below, which
+// picks up pickup_driver_id and skips re-collecting a driver signature once
+// pickup_confirmed_at is already set.
+router.patch('/agreements/:id/assign-pickup-driver', requirePermission('rentals_issue'), async (req, res) => {
+  try {
+    const { driver_id } = req.body;
+    if (!driver_id) return res.status(400).json({ error: 'driver_id is required' });
+    const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    if (!agreement) return res.status(404).json({ error: 'Not found' });
+    if (!agreement.pickup_required) return res.status(400).json({ error: 'This agreement does not require pickup service' });
+    if (agreement.status !== 'active') return res.status(400).json({ error: 'Only active rentals can have a pickup driver assigned' });
+    if (agreement.pickup_confirmed_at) return res.status(400).json({ error: 'Pickup has already been confirmed — cannot reassign' });
+    const { rows: [driver] } = await db.execute({ sql: 'SELECT id FROM employees WHERE id = ? AND is_driver = 1 AND active = 1', args: [driver_id] });
+    if (!driver) return res.status(400).json({ error: 'Selected employee is not flagged as a driver' });
+    await db.execute({ sql: 'UPDATE rental_agreements SET pickup_driver_id = ?, pickup_driver_assigned_at = ? WHERE id = ?', args: [driver_id, new Date().toISOString(), req.params.id] });
+    const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    res.json(updated);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Driver-only — req.employee is whoever is actually logged in on the device
+// doing the pickup, so this can't be filed against a different driver's
+// assignment or by a non-driver account. Requires login (requireAuth) rather
+// than a rentals permission, since a driver's security group may grant
+// nothing but is_driver itself (My Deliveries is gated on that flag alone,
+// not on the rentals permission tree — see enterApp()/renderDriverDashboard
+// in public/index.html).
+router.patch('/agreements/:id/confirm-pickup', requireAuth, async (req, res) => {
+  try {
+    if (!req.employee.is_driver) return res.status(403).json({ error: 'Only drivers can confirm a pickup' });
+    const { customer_name, customer_signature } = req.body;
+    if (!customer_name || !customer_name.trim()) return res.status(400).json({ error: "The customer's name is required to confirm pickup" });
+    const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    if (!agreement) return res.status(404).json({ error: 'Not found' });
+    if (!agreement.pickup_required) return res.status(400).json({ error: 'This agreement does not require pickup service' });
+    if (agreement.status !== 'active') return res.status(400).json({ error: 'Only active rentals can be confirmed for pickup' });
+    if (agreement.pickup_driver_id !== req.employee.id) return res.status(403).json({ error: 'This pickup is assigned to a different driver' });
+    if (agreement.pickup_confirmed_at) return res.status(400).json({ error: 'Pickup has already been confirmed' });
+    const sigPath = await uploadSignature(customer_signature, `rental-${req.params.id}-pickup-customer`);
+    if (!sigPath) return res.status(400).json({ error: 'Customer signature is required to confirm pickup' });
+    await db.execute({ sql: 'UPDATE rental_agreements SET pickup_confirmed_at = ?, pickup_customer_name = ?, pickup_customer_signature = ? WHERE id = ?', args: [new Date().toISOString(), customer_name.trim(), sigPath, req.params.id] });
+    const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    res.json(updated);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ─── Pause / Resume (Maintenance, replacement, or other downtime) ─────────
 
 // Same PIN-authorization lookup POST /employees/validate-pin uses (matches
@@ -857,7 +909,12 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
     if (!security_signature) return res.status(400).json({ error: "The security employee's signature is required to complete this return" });
     if (agreement.pickup_required) {
       if (!return_driver_employee_id) return res.status(400).json({ error: 'Select the driver confirming pickup' });
-      if (!driver_signature) return res.status(400).json({ error: "The driver's signature is required to complete this pickup return" });
+      // A driver signature is only required here when the pickup wasn't
+      // already confirmed in the field (PATCH .../confirm-pickup) — that
+      // confirmation already carries the customer's own signature, so
+      // making whoever processes the return draw a second one would be a
+      // redundant chain-of-custody check, not a real one.
+      if (!agreement.pickup_confirmed_at && !driver_signature) return res.status(400).json({ error: "The driver's signature is required to complete this pickup return" });
     }
 
     const { rows: existingItems } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
@@ -900,7 +957,7 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
     const guardSigPath = await uploadSignature(security_signature, `rental-${req.params.id}-return-guard`);
     if (!guardSigPath) return res.status(400).json({ error: 'Invalid security signature image' });
     let driverSigPath = null;
-    if (agreement.pickup_required) {
+    if (agreement.pickup_required && !agreement.pickup_confirmed_at) {
       driverSigPath = await uploadSignature(driver_signature, `rental-${req.params.id}-return-driver`);
       if (!driverSigPath) return res.status(400).json({ error: 'Invalid driver signature image' });
     }

@@ -1372,6 +1372,10 @@ const App = {
                 oninput="App._ctmUpdate(${total})" style="font-size:18px;font-weight:600">
             </div>
             <div id="ctm-tendered-info" style="display:none;font-size:12px;color:var(--text-muted);margin:-8px 0 8px;padding:0 2px;text-align:right"></div>
+            ${alts.length > 0 ? `<div class="form-group" id="ctm-change-currency-group" style="display:none">
+              <label>Give Change In</label>
+              <select id="ctm-change-currency" onchange="App._ctmUpdate(${total})">${currencyOpts}</select>
+            </div>` : ''}
             <div id="ctm-change" style="display:none;text-align:center;padding:12px;border-radius:8px;margin-top:4px">
               <div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Change Due</div>
               <div id="ctm-change-val" style="font-size:26px;font-weight:700"></div>
@@ -1414,6 +1418,8 @@ const App = {
     const changeEl = document.getElementById('ctm-change');
     const changeValEl = document.getElementById('ctm-change-val');
     const tenderedInfoEl = document.getElementById('ctm-tendered-info');
+    const changeCurrencyGroup = document.getElementById('ctm-change-currency-group');
+    const changeCurrencySel = document.getElementById('ctm-change-currency');
     if (!isNaN(tendered) && tendered > 0 && changeEl && changeValEl) {
       const changeAlt = parseFloat((tendered - totalAlt).toFixed(2));
       const changeBase = parseFloat((changeAlt / rate).toFixed(2));
@@ -1423,15 +1429,29 @@ const App = {
       }
       changeEl.style.display = '';
       if (changeAlt >= 0) {
+        // The cashier can hand back change in any configured currency,
+        // independent of what the customer paid in (pays USD, wants JMD
+        // change back, etc.) — defaults to matching the payment currency the
+        // first time this becomes visible, but only then, so switching it
+        // manually afterward isn't clobbered by every keystroke re-running
+        // this same update function.
+        if (changeCurrencyGroup) {
+          if (changeCurrencyGroup.style.display === 'none') { changeCurrencyGroup.style.display = ''; if (changeCurrencySel) changeCurrencySel.value = code; }
+        }
+        const changeRate = changeCurrencySel ? parseFloat(changeCurrencySel.selectedOptions[0]?.dataset.rate || '1') : 1;
+        const changeCode = changeCurrencySel ? changeCurrencySel.value : base;
+        const changeAmountAlt = parseFloat((changeBase * changeRate).toFixed(2));
         changeEl.style.background = '#e8f5e9'; changeValEl.style.color = 'var(--success)';
-        changeValEl.textContent = rate !== 1 ? this.fmt(changeBase) : `${code} ${changeAlt.toFixed(2)}`;
+        changeValEl.textContent = changeRate !== 1 ? `${changeCode} ${changeAmountAlt.toFixed(2)}` : this.fmt(changeBase);
       } else {
+        if (changeCurrencyGroup) changeCurrencyGroup.style.display = 'none';
         changeEl.style.background = '#fff3e0'; changeValEl.style.color = 'var(--danger)';
         changeValEl.textContent = rate !== 1 ? `Short ${this.fmt(Math.abs(changeBase))}` : `Short ${code} ${Math.abs(changeAlt).toFixed(2)}`;
       }
     } else {
       if (changeEl) changeEl.style.display = 'none';
       if (tenderedInfoEl) tenderedInfoEl.style.display = 'none';
+      if (changeCurrencyGroup) changeCurrencyGroup.style.display = 'none';
     }
   },
 
@@ -1443,12 +1463,30 @@ const App = {
     const totalAlt = parseFloat((total * rate).toFixed(2));
     const tenderedAlt = parseFloat(document.getElementById('ctm-tendered')?.value);
     if (isNaN(tenderedAlt) || tenderedAlt < totalAlt - 0.001) { this.alert('Amount tendered is less than total', 'error'); return null; }
+    const changeAmount = parseFloat(((tenderedAlt - totalAlt) / rate).toFixed(2));
+    // Independent of the payment currency above — the cashier picks whatever
+    // currency they're actually handing back to the customer.
+    const changeCurrencySel = document.getElementById('ctm-change-currency');
+    const changeRate = changeCurrencySel ? parseFloat(changeCurrencySel.selectedOptions[0]?.dataset.rate || '1') : 1;
+    const changeCurrency = changeCurrencySel ? changeCurrencySel.value : base;
     return {
       amountTendered: parseFloat((tenderedAlt / rate).toFixed(2)),
-      changeAmount: parseFloat(((tenderedAlt - totalAlt) / rate).toFixed(2)),
+      changeAmount,
       tenderedAlt, changeAlt: parseFloat((tenderedAlt - totalAlt).toFixed(2)),
-      currency: code, rate
+      currency: code, rate,
+      changeCurrency, changeRate, changeAmountAlt: parseFloat((changeAmount * changeRate).toFixed(2)),
     };
+  },
+
+  // Change is handed back in whatever currency the cashier picked in the
+  // cash tender modal (ctm-change-currency) — independent of what currency
+  // the payment itself was tendered in. Falls back to the base currency
+  // when no cash result is on hand (card/other tenders) or no alt was chosen.
+  _changeDisplay(cashResult, changeBase) {
+    if (cashResult?.changeRate && cashResult.changeRate !== 1) {
+      return `${cashResult.changeCurrency} ${cashResult.changeAmountAlt.toFixed(2)}`;
+    }
+    return this.fmt(changeBase);
   },
 
   // ─── Card Approval Code Modal ─────────────────────────────
@@ -1776,13 +1814,15 @@ const App = {
   // Shown instead of the generic (manager-oriented) Dashboard for employees
   // flagged is_driver/is_security (see enterApp()'s landing-priority
   // check) — read entirely from the existing GET /rentals/agreements
-  // endpoint, no new backend routes. There's no pre-assignment step for
-  // delivery/pickup drivers or issue-time security (those fields are only
-  // set AS the Issue/Return action itself is completed, not booked ahead
-  // of time), so the "Needed" lists below are the shared pending pool any
-  // driver/guard can act on, paired with a personal history of what this
-  // specific employee has actually done.
-  _rentalDashRow(a, extra = '') {
+  // endpoint, no new backend routes for delivery/issue-time security (those
+  // fields are only set AS the Issue/Return action itself is completed, not
+  // booked ahead of time). Pickup is the one exception: a dispatcher can
+  // pre-assign pickup_driver_id (PATCH .../assign-pickup-driver, from the
+  // Rental Dispatch / agreement-detail "Assign Driver" action), so "Pickups
+  // Needed" below is filtered to jobs assigned to THIS driver and not yet
+  // confirmed, with a Confirm Pickup action — not the shared pending pool
+  // deliveries/security still are.
+  _rentalDashRow(a, extra = '', actionHtml = '') {
     const overdue = a.display_status === 'overdue';
     return `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)">
       <div>
@@ -1792,7 +1832,10 @@ const App = {
       <div style="text-align:right">
         <div style="font-size:12px;${overdue?'color:var(--danger);font-weight:600':'color:var(--text-muted)'}">${overdue?'Overdue — ':''}Due ${this.fmtDate(a.due_date)}</div>
         ${extra}
-        <button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="App.viewRentalAgreement(${a.id})">View</button>
+        <div style="margin-top:4px;display:flex;gap:6px;justify-content:flex-end">
+          ${actionHtml}
+          <button class="btn btn-sm btn-outline" onclick="App.viewRentalAgreement(${a.id})">View</button>
+        </div>
       </div>
     </div>`;
   },
@@ -1813,12 +1856,16 @@ const App = {
     if (this.section !== 'driver-dashboard') return;
 
     const deliveries = awaitingIssue.filter(a => a.delivery_required && !a.delivery_driver_id);
-    const pickups = active.filter(a => a.pickup_required).sort((a,b) => (a.due_date||'').localeCompare(b.due_date||''));
-
     const myId = this.currentUser.id;
+    // Only jobs dispatch has actually assigned to THIS driver (see
+    // assign-pickup-driver) and not yet confirmed in the field — not the
+    // shared pending pool deliveries above still is.
+    const pickups = active.filter(a => a.pickup_required && a.pickup_driver_id === myId && !a.pickup_confirmed_at)
+      .sort((a,b) => (a.due_date||'').localeCompare(b.due_date||''));
+
     const history = [...awaitingIssue, ...active, ...returned]
-      .filter(a => a.delivery_driver_id === myId || a.pickup_driver_id === myId || a.return_driver_employee_id === myId)
-      .map(a => ({ a, at: a.returned_at || a.checkout_datetime || a.created_at }))
+      .filter(a => a.delivery_driver_id === myId || (a.pickup_driver_id === myId && (a.pickup_confirmed_at || a.status === 'returned')) || a.return_driver_employee_id === myId)
+      .map(a => ({ a, at: a.returned_at || a.pickup_confirmed_at || a.checkout_datetime || a.created_at }))
       .sort((x,y) => (y.at||'').localeCompare(x.at||''))
       .slice(0, 8)
       .map(x => x.a);
@@ -1826,9 +1873,85 @@ const App = {
     document.getElementById('content').innerHTML = `
       <div class="section-header"><h2>My Deliveries</h2></div>
       ${this._rentalDashSection('Deliveries Needed', deliveries.map(a => this._rentalDashRow(a)), 'No deliveries waiting to go out.')}
-      ${this._rentalDashSection('Pickups Needed', pickups.map(a => this._rentalDashRow(a)), 'No pickups outstanding.')}
+      ${this._rentalDashSection('Pickups Needed', pickups.map(a => this._rentalDashRow(a, '', `<button class="btn btn-sm btn-primary" onclick="App.showConfirmPickupModal(${a.id})">Confirm Pickup</button>`)), 'No pickups assigned to you right now.')}
       ${this._rentalDashSection('My Recent Activity', history.map(a => this._rentalDashRow(a, `<div style="font-size:11px;color:var(--text-muted)">${a.display_status}</div>`)), 'No completed deliveries or pickups yet.')}
     `;
+  },
+
+  // ─── Pickup: dispatcher assignment + driver field confirmation ─────────
+
+  // Assign-side action (Rental Dispatch / agreement detail) — gated on
+  // rentals_issue, same permission the Issue/Dispatch actions already use.
+  async showAssignPickupDriverModal(id) {
+    const employees = await this.api('GET', '/employees');
+    const drivers = employees.filter(e => e.is_driver);
+    this.showModal(`
+      <div class="modal" style="max-width:400px">
+        <div class="modal-header"><span class="modal-title">Assign Pickup Driver</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div class="form-group"><label>Driver</label>
+            <select id="apd-driver">
+              <option value="">-- Select --</option>
+              ${drivers.map(e => `<option value="${e.id}">${e.first_name} ${e.last_name}</option>`).join('')}
+            </select>
+            ${!drivers.length ? `<div style="font-size:11px;color:var(--danger);margin-top:2px">No employees are flagged as a driver yet (Employees → edit → Driver checkbox).</div>` : ''}
+          </div>
+          <p style="font-size:12px;color:var(--text-muted)">The driver will see this pickup on their own dashboard and confirm it there once collected — no need to process the return yet.</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.submitAssignPickupDriver(${id})">Assign</button>
+        </div>
+      </div>`);
+  },
+
+  async submitAssignPickupDriver(id) {
+    const driverId = document.getElementById('apd-driver').value;
+    if (!driverId) { this.alert('Select a driver', 'error'); return; }
+    try {
+      await this.api('PATCH', `/rentals/agreements/${id}/assign-pickup-driver`, { driver_id: parseInt(driverId) });
+      this.closeModal();
+      this.alert('Pickup driver assigned');
+      if (this.section === 'rental-dispatch') this.loadDispatchTab();
+      else if (this.section === 'rentals') this.renderRentals();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // Driver-side action (My Deliveries dashboard) — the customer enters their
+  // own name and signs on the driver's device to confirm the item was
+  // actually collected; no financial settlement happens here (that's still
+  // Process Return, done later by whoever's at the counter).
+  async showConfirmPickupModal(id) {
+    const a = await this.api('GET', `/rentals/agreements/${id}`);
+    this.showModal(`
+      <div class="modal" style="max-width:440px">
+        <div class="modal-header"><span class="modal-title">Confirm Pickup — ${a.agreement_number}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">Have the customer enter their name and sign below to confirm this item was collected.</p>
+          <div class="form-group"><label>Customer Name</label><input id="cp-customer-name" placeholder="Full name" value="${(a.customer_name||'').replace(/"/g,'&quot;')}"></div>
+          ${this._sigPadHtml('cp-customer-sig', 'Customer Signature', 'required — confirms the item was collected')}
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.submitConfirmPickup(${id})">Confirm Pickup</button>
+        </div>
+      </div>`);
+    this._sigPadInit('cp-customer-sig');
+  },
+
+  async submitConfirmPickup(id) {
+    const name = document.getElementById('cp-customer-name').value.trim();
+    if (!name) { this.alert("Enter the customer's name", 'error'); return; }
+    if (!this._sigPadHasDrawn('cp-customer-sig')) { this.alert('Customer signature is required to confirm pickup', 'error'); return; }
+    try {
+      await this.api('PATCH', `/rentals/agreements/${id}/confirm-pickup`, {
+        customer_name: name,
+        customer_signature: this._sigPadDataUrl('cp-customer-sig'),
+      });
+      this.closeModal();
+      this.alert('Pickup confirmed');
+      this.renderDriverDashboard();
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   async renderGuardDashboard() {
@@ -2838,8 +2961,7 @@ const App = {
       });
 
       if (method === 'cash' && changeAmount > 0) {
-        const altMsg = cashResult?.rate !== 1 ? ` (${cashResult.currency} ${cashResult.changeAlt.toFixed(2)})` : '';
-        this.alert(`Change due: ${this.fmt(changeAmount)}${altMsg}`, 'success');
+        this.alert(`Change due: ${this._changeDisplay(cashResult, changeAmount)}`, 'success');
       }
 
       this.showReceipt(tx, changeAmount, cashResult, splitForeignCash);
@@ -3264,7 +3386,7 @@ const App = {
             <hr>
             <div class="receipt-row receipt-total"><span>TOTAL</span><span>${this.fmt(tx.total)}</span></div>
             ${tx.payment_method === 'split' ? this._splitPaymentReceiptRows(tx, splitForeignCash) : `<div class="receipt-row"><span>Payment</span><span>${tx.payment_method.replace('_',' ').toUpperCase()}</span></div>
-            ${tx.amount_tendered > tx.total ? (cashResult?.rate > 1 ? `<div class="receipt-row"><span>Tendered (${cashResult.currency})</span><span>${cashResult.currency} ${cashResult.tenderedAlt.toFixed(2)}</span></div><div class="receipt-row" style="font-size:10px;color:#666"><span>Equivalent</span><span>${this.fmt(tx.amount_tendered)}</span></div><div class="receipt-row"><span>Change</span><span>${this.fmt(change)}</span></div>` : `<div class="receipt-row"><span>Tendered</span><span>${this.fmt(tx.amount_tendered)}</span></div><div class="receipt-row"><span>Change</span><span>${this.fmt(change)}</span></div>`) : ''}
+            ${tx.amount_tendered > tx.total ? (cashResult?.rate > 1 ? `<div class="receipt-row"><span>Tendered (${cashResult.currency})</span><span>${cashResult.currency} ${cashResult.tenderedAlt.toFixed(2)}</span></div><div class="receipt-row" style="font-size:10px;color:#666"><span>Equivalent</span><span>${this.fmt(tx.amount_tendered)}</span></div><div class="receipt-row"><span>Change</span><span>${this._changeDisplay(cashResult, change)}</span></div>` : `<div class="receipt-row"><span>Tendered</span><span>${this.fmt(tx.amount_tendered)}</span></div><div class="receipt-row"><span>Change</span><span>${this._changeDisplay(cashResult, change)}</span></div>`) : ''}
             ${tx.approval_code ? `<div class="receipt-row"><span>${tx.payment_method === 'direct_deposit' ? 'Deposit Ref #' : tx.payment_method === 'gift_card' ? 'Gift Card #' : 'Approval Code'}</span><span style="font-family:monospace;font-weight:600">${tx.approval_code}</span></div>` : ''}`}
             <hr>
             <div style="text-align:center;margin-top:4px">${footer}</div>
@@ -3384,9 +3506,9 @@ const App = {
     } else {
       if (tx.amount_tendered > tx.total) {
         if (cashResult?.rate > 1) {
-          tenderRows.push([`Tendered (${cashResult.currency})`, `${cashResult.currency} ${cashResult.tenderedAlt.toFixed(2)}`], ['Equivalent', this.fmt(tx.amount_tendered)], ['Change', this.fmt(change)]);
+          tenderRows.push([`Tendered (${cashResult.currency})`, `${cashResult.currency} ${cashResult.tenderedAlt.toFixed(2)}`], ['Equivalent', this.fmt(tx.amount_tendered)], ['Change', this._changeDisplay(cashResult, change)]);
         } else {
-          tenderRows.push(['Tendered', this.fmt(tx.amount_tendered)], ['Change', this.fmt(change)]);
+          tenderRows.push(['Tendered', this.fmt(tx.amount_tendered)], ['Change', this._changeDisplay(cashResult, change)]);
         }
       }
       if (tx.approval_code) {
@@ -4590,7 +4712,7 @@ const App = {
           <td style="max-width:220px">${a.delivery_required ? `${fromAddr(a)||'—'} → ${toAddr(a)}` : '—'}</td>
           <td>${a.delivery_required ? (a.delivery_driver_name || notAssigned) : none}</td>
           <td>${a.delivery_required ? (a.checkout_date && a.status==='active' ? this.fmtDate(a.checkout_date) : '<span style="color:var(--text-muted)">Pending</span>') : none}</td>
-          <td>${a.pickup_required ? (a.pickup_driver_name || notAssigned) : none}</td>
+          <td>${this._pickupDriverCell(a)}</td>
           <td>${a.pickup_required ? this.fmtDate(a.due_date) : none}</td>
           <td>${a.operator_required ? (a.operator_name || notAssigned) : none}</td>
           <td><span class="badge-pill ${sc[a.display_status]||'badge-secondary'}">${a.display_status}</span></td>
@@ -5095,7 +5217,7 @@ const App = {
           <td>${(a.status==='pending'||a.status==='awaiting_issue') ? '—' : this.rentalDurationLabel(a.checkout_date, a.due_date, a.returned_at)}</td>
           <td><span class="badge badge-info">${a.item_count}</span></td>
           <td>${a.delivery_required ? (a.delivery_driver_name || notAssigned) : (a.customer_pickup ? customerPickupTag : none)}</td>
-          <td>${a.pickup_required ? (a.pickup_driver_name || notAssigned) : none}</td>
+          <td>${this._pickupDriverCell(a)}</td>
           <td>${a.operator_required ? (a.operator_name || notAssigned) : none}</td>
           <td>${this._rentalVerificationBadges(a)}</td>
           <td><span class="badge-pill ${sc[a.display_status]||'badge-secondary'}">${a.display_status}</span></td>
@@ -5263,7 +5385,9 @@ const App = {
             ${a.customer_pickup ? `<div>Customer Pickup — item collected by the customer at the counter</div>` : ''}
             ${a.delivery_required ? `<div>Delivery — ${this.fmt(a.delivery_cost)}${a.delivery_driver_name ? ` — ${a.delivery_driver_name}` : ' — driver not yet assigned'}</div>` : ''}
             ${a.operator_required ? `<div>Operator — ${this.fmt(a.operator_fee)}${a.operator_name ? ` — ${a.operator_name}` : ' — not yet assigned'}</div>` : ''}
-            ${a.pickup_required ? `<div>Pickup — ${this.fmt(a.pickup_cost)}${a.pickup_driver_name ? ` — ${a.pickup_driver_name}` : ' — driver not yet assigned'}</div>` : ''}
+            ${a.pickup_required ? `<div>Pickup — ${this.fmt(a.pickup_cost)}${a.pickup_driver_name ? ` — ${a.pickup_driver_name}` : ' — driver not yet assigned'}
+              ${a.pickup_confirmed_at ? ` <span class="badge-pill badge-success" style="font-size:10px">✓ Confirmed ${this.fmtDateTime(a.pickup_confirmed_at)}</span>${a.pickup_customer_name ? ` — signed by ${a.pickup_customer_name}` : ''}${this._sigButton(a.pickup_customer_signature, 'View Customer Signature')}`
+              : (a.status==='active' && this.can('rentals_issue') ? ` <button class="btn btn-sm btn-outline" style="padding:1px 8px;font-size:11px" onclick="App.closeModal();App.showAssignPickupDriverModal(${a.id})">${a.pickup_driver_name?'Reassign':'Assign'} Driver</button>` : '')}</div>` : ''}
           </div>` : ''}
           ${a.customer_po_number ? `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:12px">
             <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Customer PO</strong>
@@ -5502,6 +5626,21 @@ const App = {
       this.viewRentalAgreement(id);
       this.renderRentals();
     } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // Shared "Pickup" column cell for the dispatch/deliveries and rentals list
+  // tables — shows who's assigned (with an inline reassign/assign action,
+  // gated on rentals_issue same as Issue) and whether they've already
+  // confirmed collection in the field (see confirm-pickup).
+  _pickupDriverCell(a) {
+    if (!a.pickup_required) return '<span style="color:var(--text-muted)">None</span>';
+    const canAssign = a.status === 'active' && !a.pickup_confirmed_at && this.can('rentals_issue');
+    if (a.pickup_confirmed_at) {
+      return `${a.pickup_driver_name||'—'} <span class="badge-pill badge-success" style="font-size:10px">✓ Confirmed</span>`;
+    }
+    const nameOrNone = a.pickup_driver_name || '<span style="color:var(--text-muted)">Not yet assigned</span>';
+    const btn = canAssign ? ` <button class="btn btn-sm btn-outline" style="padding:1px 8px;font-size:10px" onclick="App.showAssignPickupDriverModal(${a.id})">${a.pickup_driver_name ? 'Reassign' : 'Assign'}</button>` : '';
+    return `${nameOrNone}${btn}`;
   },
 
   // A rental agreement can now carry up to three separate signatures
@@ -6631,13 +6770,15 @@ const App = {
           }).join('')}
           ${a.pickup_required ? `<div class="form-group">
             <label>Pickup Driver <span style="font-weight:400;color:var(--text-muted)">(fee ${this.fmt(a.pickup_cost)}, already charged)</span></label>
-            <select id="rr-pickup-driver">
+            <select id="rr-pickup-driver" ${a.pickup_confirmed_at ? 'disabled' : ''}>
               <option value="">-- Select --</option>
               ${drivers.map(e => `<option value="${e.id}" ${a.pickup_driver_id===e.id?'selected':''}>${e.first_name} ${e.last_name}</option>`).join('')}
             </select>
             ${!drivers.length ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">No employees are flagged as a driver yet.</div>` : ''}
           </div>
-          ${this._sigPadHtml('rr-driver-sig', 'Driver Signature', 'required — the driver above signs to confirm collection')}` : ''}
+          ${a.pickup_confirmed_at
+            ? `<div style="padding:8px 12px;background:rgba(22,163,74,0.08);border-left:3px solid #16a34a;border-radius:4px;font-size:12px;color:#166534;margin-bottom:12px">✓ Pickup already confirmed in the field by ${a.pickup_driver_name||'the driver'} on ${this.fmtDateTime(a.pickup_confirmed_at)}${a.pickup_customer_name ? ` — signed by ${a.pickup_customer_name}` : ''}${this._sigButton(a.pickup_customer_signature, 'View Customer Signature')}</div>`
+            : this._sigPadHtml('rr-driver-sig', 'Driver Signature', 'required — the driver above signs to confirm collection')}` : ''}
 
           <div class="form-group" style="border-top:1px solid var(--border);padding-top:12px">
             <label>Security Sign-In <span style="font-weight:400;color:var(--text-muted)">(required — item returning)</span></label>
@@ -6655,7 +6796,7 @@ const App = {
         </div>
       </div>`);
     this._sigPadInit('rr-guard-sig');
-    if (a.pickup_required) this._sigPadInit('rr-driver-sig');
+    if (a.pickup_required && !a.pickup_confirmed_at) this._sigPadInit('rr-driver-sig');
   },
 
   async saveRentalReturn(agreementId, itemIds) {
@@ -6668,9 +6809,13 @@ const App = {
     })).filter(i => i.quantity_returned > 0);
     if (!items.length) { this.alert('Enter at least one returned quantity', 'error'); return; }
     const pickupDriverEl = document.getElementById('rr-pickup-driver');
+    // The driver signature pad only exists when the pickup wasn't already
+    // confirmed in the field (see showRentalReturnModal) — nothing to check
+    // if it's not on the page.
+    const hasDriverSigPad = !!document.getElementById('rr-driver-sig');
     if (pickupDriverEl) {
       if (!pickupDriverEl.value) { this.alert('Select a driver for pickup', 'error'); return; }
-      if (!this._sigPadHasDrawn('rr-driver-sig')) { this.alert("The driver's signature is required to complete this pickup return", 'error'); return; }
+      if (hasDriverSigPad && !this._sigPadHasDrawn('rr-driver-sig')) { this.alert("The driver's signature is required to complete this pickup return", 'error'); return; }
     }
     const securityEl = document.getElementById('rr-security-employee');
     if (!securityEl?.value) { this.alert('Select the security employee signing this item back in', 'error'); return; }
@@ -6690,7 +6835,7 @@ const App = {
         return_security_employee_id: parseInt(securityEl.value),
         return_driver_employee_id: pickupDriverEl ? parseInt(pickupDriverEl.value) || null : null,
         security_signature: this._sigPadDataUrl('rr-guard-sig'),
-        driver_signature: pickupDriverEl ? this._sigPadDataUrl('rr-driver-sig') : null,
+        driver_signature: hasDriverSigPad ? this._sigPadDataUrl('rr-driver-sig') : null,
       });
       this.closeModal();
       if (updated.settlement_transaction_id) {

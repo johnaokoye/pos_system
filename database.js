@@ -1188,6 +1188,21 @@ async function _init() {
     'ALTER TABLE rental_agreement_pauses ADD COLUMN customer_confirmation TEXT',
     'ALTER TABLE rental_agreement_pauses ADD COLUMN confirmed_by INTEGER REFERENCES employees(id)',
     'ALTER TABLE rental_agreement_pauses ADD COLUMN confirmed_at DATETIME',
+    // Pickup driver pre-assignment + field confirmation. pickup_driver_id
+    // already existed (set only at return time, as whoever did the pickup);
+    // pickup_driver_assigned_at marks that a dispatcher assigned it ahead of
+    // the actual pickup (PATCH .../assign-pickup-driver), rather than it
+    // just being filled in retroactively during Process Return.
+    // pickup_confirmed_at/pickup_customer_name/pickup_customer_signature are
+    // captured by the assigned driver from their own login, in the field, at
+    // the moment of physical collection (PATCH .../confirm-pickup) — the
+    // customer's own sign-off, distinct from return_driver_signature (the
+    // driver's chain-of-custody signature, drawn by whoever finalizes the
+    // return afterward). See routes/rentals.js.
+    'ALTER TABLE rental_agreements ADD COLUMN pickup_driver_assigned_at DATETIME',
+    'ALTER TABLE rental_agreements ADD COLUMN pickup_confirmed_at DATETIME',
+    'ALTER TABLE rental_agreements ADD COLUMN pickup_customer_name TEXT',
+    'ALTER TABLE rental_agreements ADD COLUMN pickup_customer_signature TEXT',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
