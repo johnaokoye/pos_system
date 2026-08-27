@@ -3,7 +3,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { getOutstandingQty } = require('../lib/rentalAvailability');
 const { getBranchStock, feeFor, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, dueDateTime } = require('../lib/rentals');
-const { requirePermission, requireAnyPermission, requireAuth, can } = require('../lib/permissions');
+const { requirePermission, requireAnyPermission, can } = require('../lib/permissions');
 const { runCreditCheck } = require('./customers');
 const { nextNumber } = require('../lib/nextNumber');
 const { calcRentalCommission } = require('./commissions');
@@ -583,12 +583,12 @@ router.patch('/agreements/:id/assign-pickup-driver', requirePermission('rentals_
 
 // Driver-only — req.employee is whoever is actually logged in on the device
 // doing the pickup, so this can't be filed against a different driver's
-// assignment or by a non-driver account. Requires login (requireAuth) rather
-// than a rentals permission, since a driver's security group may grant
-// nothing but is_driver itself (My Deliveries is gated on that flag alone,
-// not on the rentals permission tree — see enterApp()/renderDriverDashboard
-// in public/index.html).
-router.patch('/agreements/:id/confirm-pickup', requireAuth, async (req, res) => {
+// assignment or by a non-driver account. Gated on rentals_confirm_pickup (a
+// security group can grant this without rentals_returns, so a driver can be
+// set up to collect the pickup signature without ever seeing Process
+// Return) — is_driver is still checked alongside it since that flag is what
+// puts the job on their My Deliveries dashboard in the first place.
+router.patch('/agreements/:id/confirm-pickup', requirePermission('rentals_confirm_pickup'), async (req, res) => {
   try {
     if (!req.employee.is_driver) return res.status(403).json({ error: 'Only drivers can confirm a pickup' });
     const { customer_name, customer_signature } = req.body;
