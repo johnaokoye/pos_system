@@ -1825,12 +1825,22 @@ const App = {
   // is_driver (to land on this dashboard and see what's assigned) without
   // necessarily being able to act on it, same as any other sub-permission.
   // Deliveries/security are still the shared pending pool they always were.
-  _rentalDashRow(a, extra = '', actionHtml = '') {
+  // Where the item currently sits — the delivery override address if one
+  // was set at hold-creation time, otherwise the customer's address on
+  // file. Same field a delivery driver dropped it off at, so it's also
+  // where a pickup driver needs to go collect it back from. Shared with
+  // loadDeliveriesTab's own toAddr (kept as a local alias there).
+  _rentalPickupAddress(a) {
+    return a.delivery_address || [a.customer_address, [a.customer_city, a.customer_state, a.customer_zip].filter(Boolean).join(' ')].filter(Boolean).join(', ') || null;
+  },
+
+  _rentalDashRow(a, extra = '', actionHtml = '', addressHtml = '') {
     const overdue = a.display_status === 'overdue';
     return `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)">
       <div>
         <div class="fw-600">${a.agreement_number} <span style="font-weight:400;color:var(--text-muted)">— ${a.customer_name||'—'}</span></div>
         <div style="font-size:12px;color:var(--text-muted)">${a.item_summary||''}</div>
+        ${addressHtml}
       </div>
       <div style="text-align:right">
         <div style="font-size:12px;${overdue?'color:var(--danger);font-weight:600':'color:var(--text-muted)'}">${overdue?'Overdue — ':''}Due ${this.fmtDate(a.due_date)}</div>
@@ -1876,7 +1886,7 @@ const App = {
     document.getElementById('content').innerHTML = `
       <div class="section-header"><h2>My Deliveries</h2></div>
       ${this._rentalDashSection('Deliveries Needed', deliveries.map(a => this._rentalDashRow(a)), 'No deliveries waiting to go out.')}
-      ${this._rentalDashSection('Pickups Needed', pickups.map(a => this._rentalDashRow(a, '', this.can('rentals_confirm_pickup') ? `<button class="btn btn-sm btn-primary" onclick="App.showConfirmPickupModal(${a.id})">Confirm Pickup</button>` : '')), 'No pickups assigned to you right now.')}
+      ${this._rentalDashSection('Pickups Needed', pickups.map(a => this._rentalDashRow(a, '', this.can('rentals_confirm_pickup') ? `<button class="btn btn-sm btn-primary" onclick="App.showConfirmPickupModal(${a.id})">Confirm Pickup</button>` : '', `<div style="font-size:12px;color:var(--text-muted)">📍 ${this._rentalPickupAddress(a) || 'No address on file'}</div>`)), 'No pickups assigned to you right now.')}
       ${this._rentalDashSection('My Recent Activity', history.map(a => this._rentalDashRow(a, `<div style="font-size:11px;color:var(--text-muted)">${a.display_status}</div>`)), 'No completed deliveries or pickups yet.')}
     `;
   },
@@ -4703,7 +4713,7 @@ const App = {
     const none = '<span style="color:var(--text-muted)">None</span>';
     const notAssigned = '<span style="color:var(--text-muted)">Not yet assigned</span>';
     const fromAddr = a => [a.branch_name, a.branch_address, [a.branch_city, a.branch_state, a.branch_zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
-    const toAddr = a => a.delivery_address || [a.customer_address, [a.customer_city, a.customer_state, a.customer_zip].filter(Boolean).join(' ')].filter(Boolean).join(', ') || '—';
+    const toAddr = a => this._rentalPickupAddress(a) || '—';
     document.getElementById('dispatch-content').innerHTML = !deliveries.length ? '<div class="empty-state"><p>No deliveries, pickups, or operator jobs to show.</p></div>' : `
       <div class="table-wrap">
       <table class="table">
