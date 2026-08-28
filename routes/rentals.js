@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { getOutstandingQty } = require('../lib/rentalAvailability');
-const { getBranchStock, feeFor, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, dueDateTime } = require('../lib/rentals');
+const { getBranchStock, feeFor, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, dueDateTime, requiredDepositReturnMethod } = require('../lib/rentals');
 const { requirePermission, requireAnyPermission, can } = require('../lib/permissions');
 const { runCreditCheck } = require('./customers');
 const { nextNumber } = require('../lib/nextNumber');
@@ -48,6 +48,29 @@ async function uploadSignature(dataUrl, filenamePrefix) {
   return `/uploads/rental-signatures/${filename}`;
 }
 
+// Attaches `required_deposit_return_method`/`required_deposit_return_reason`
+// (see lib/rentals.js's requiredDepositReturnMethod) to a joined agreement
+// row, but only when it's actually actionable: returned, a refund is due
+// (settlement_total < 0), the checkout wasn't billed to a credit account
+// (that refund auto-applies to account_balance — no manual disbursement to
+// pick), and nobody has recorded a method yet.
+function attachDepositReturnPolicy(agreement) {
+  const refundDue = agreement.settlement_total != null && agreement.settlement_total < 0;
+  if (agreement.status === 'returned' && refundDue && agreement.checkout_payment_method !== 'credit' && !agreement.deposit_return_method) {
+    const daysSinceCheckout = agreement.checkout_transaction_created_at
+      ? (Date.now() - new Date(agreement.checkout_transaction_created_at.replace(' ', 'T') + (agreement.checkout_transaction_created_at.includes('Z') ? '' : 'Z')).getTime()) / 86400000
+      : null;
+    const { method, reason } = requiredDepositReturnMethod({
+      originalPaymentMethod: agreement.checkout_payment_method,
+      depositAmount: agreement.deposit_total,
+      daysSinceCheckout,
+    });
+    agreement.required_deposit_return_method = method;
+    agreement.required_deposit_return_reason = reason;
+  }
+  return agreement;
+}
+
 // ─── Agreements list/detail ───────────────────────────────────────────────
 
 router.get('/agreements', requirePermission('rentals'), async (req, res) => {
@@ -58,7 +81,7 @@ router.get('/agreements', requirePermission('rentals'), async (req, res) => {
       b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip,
       e.first_name || ' ' || e.last_name as employee_name,
       q.quote_number as source_quote_number,
-      co.payment_method as checkout_payment_method,
+      co.payment_method as checkout_payment_method, co.created_at as checkout_transaction_created_at,
       se.total as settlement_total,
       dd.first_name || ' ' || dd.last_name as delivery_driver_name,
       pd.first_name || ' ' || pd.last_name as pickup_driver_name,
@@ -99,7 +122,7 @@ router.get('/agreements', requirePermission('rentals'), async (req, res) => {
     else if (view === 'returned' || view === 'cancelled' || view === 'pending' || view === 'awaiting_issue') { sql += ' AND ra.status = ?'; params.push(view); }
     sql += ' ORDER BY ra.created_at DESC LIMIT 200';
     const { rows } = await db.execute({ sql, args: params });
-    res.json(rows);
+    res.json(rows.map(attachDepositReturnPolicy));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -146,8 +169,8 @@ router.get('/agreements/:id', requirePermission('rentals'), async (req, res) => 
       c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
       b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone,
       e.first_name || ' ' || e.last_name as employee_name,
-      co.transaction_number as checkout_transaction_number, co.payment_method as checkout_payment_method,
-      se.transaction_number as settlement_transaction_number,
+      co.transaction_number as checkout_transaction_number, co.payment_method as checkout_payment_method, co.created_at as checkout_transaction_created_at,
+      se.transaction_number as settlement_transaction_number, se.total as settlement_total,
       q.id as source_quote_id, q.quote_number as source_quote_number, qe.first_name || ' ' || qe.last_name as quote_created_by,
       dd.first_name || ' ' || dd.last_name as delivery_driver_name,
       pd.first_name || ' ' || pd.last_name as pickup_driver_name,
@@ -216,6 +239,7 @@ router.get('/agreements/:id', requirePermission('rentals'), async (req, res) => 
       LEFT JOIN employees cb ON rp.confirmed_by = cb.id
       WHERE rp.agreement_id = ? ORDER BY rp.id`, args: [req.params.id] });
     agreement.pauses = pauses;
+    attachDepositReturnPolicy(agreement);
     res.json(agreement);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -318,6 +342,11 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
     if (!existingItems.length) return res.status(400).json({ error: 'This agreement has no items' });
 
     const method = payment_method || 'cash';
+    // Gift cards aren't accepted for a rental deposit — the store's refund
+    // policy (see lib/rentals.js's requiredDepositReturnMethod) has no rule
+    // for reversing a gift card charge, so this is blocked at the source
+    // rather than left as an unhandled case at return time.
+    if (method === 'gift_card') return res.status(400).json({ error: 'Gift Card cannot be used to pay a rental deposit — choose another payment method' });
     const isCredit = method === 'credit';
     let creditCustomer = null;
     if (isCredit) {
@@ -1068,6 +1097,13 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
       // there's no cash to collect from the customer in either case.
       const needsCashierHold = !checkoutIsCredit && settlementAmount > 0;
       let settlementTxId = null;
+      // Stamped alongside the settlement so the Deposits dashboard can
+      // aggregate without re-deriving this on every read. 'account_credit'
+      // and 'not_applicable' are both known automatically at this point;
+      // a real refund (settlementAmount < 0, non-credit) is left NULL —
+      // that's the case a human still has to record via
+      // PATCH .../deposit-return (or POST .../credit-note for store credit).
+      let depositReturnMethod = checkoutIsCredit ? 'account_credit' : (settlementAmount < 0 ? null : 'not_applicable');
 
       if (!needsCashierHold) {
         const transaction_number = await nextNumber(tx, 'transactions', 'transaction_number', 'TXN-', 6);
@@ -1095,7 +1131,7 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
         }
       }
 
-      await tx.execute({ sql: `UPDATE rental_agreements SET settlement_transaction_id = ?, deposit_refunded = ?, duration_adjustment_total = duration_adjustment_total + ?, tax_adjustment_total = tax_adjustment_total + ?, damage_fee_total = damage_fee_total + ?, pickup_driver_id = ?, status = ?, returned_at = ?, return_security_employee_id = ?, return_security_confirmed_at = ?, return_security_signature = ?, return_driver_employee_id = ?, return_driver_confirmed_at = ?, return_driver_signature = ? WHERE id = ?`, args: [settlementTxId, depositRefunded, durationAdjustmentTotal, taxAdjustmentTotal, damageFeeTotal, pickupDriverId, newStatus, allReturned ? now.toISOString() : agreement.returned_at, return_security_employee_id, now.toISOString(), guardSigPath, returnDriverId, returnDriverConfirmedAt, driverSigPath, req.params.id] });
+      await tx.execute({ sql: `UPDATE rental_agreements SET settlement_transaction_id = ?, deposit_refunded = ?, duration_adjustment_total = duration_adjustment_total + ?, tax_adjustment_total = tax_adjustment_total + ?, damage_fee_total = damage_fee_total + ?, pickup_driver_id = ?, status = ?, returned_at = ?, return_security_employee_id = ?, return_security_confirmed_at = ?, return_security_signature = ?, return_driver_employee_id = ?, return_driver_confirmed_at = ?, return_driver_signature = ?, deposit_return_method = ? WHERE id = ?`, args: [settlementTxId, depositRefunded, durationAdjustmentTotal, taxAdjustmentTotal, damageFeeTotal, pickupDriverId, newStatus, allReturned ? now.toISOString() : agreement.returned_at, return_security_employee_id, now.toISOString(), guardSigPath, returnDriverId, returnDriverConfirmedAt, driverSigPath, depositReturnMethod, req.params.id] });
       await tx.commit();
       if (checkoutIsCredit) { try { await runCreditCheck(agreement.customer_id); } catch(e) {} }
     } catch(e) {
@@ -1206,6 +1242,7 @@ router.post('/agreements/:id/credit-note', requirePermission('rentals_returns'),
     if (agreement.status !== 'returned') return res.status(400).json({ error: 'Credit notes can only be issued on a returned agreement' });
     if (!agreement.customer_id) return res.status(400).json({ error: 'This agreement has no customer to credit' });
     if (agreement.credit_note_amount > 0) return res.status(400).json({ error: `A credit note for ${agreement.credit_note_amount} has already been issued on this agreement` });
+    if (agreement.deposit_return_method && agreement.deposit_return_method !== 'store_credit') return res.status(400).json({ error: `A refund method (${agreement.deposit_return_method}) has already been recorded on this agreement — a credit note can't also be issued` });
 
     const { rows: [settlementTx] } = agreement.settlement_transaction_id
       ? await db.execute({ sql: 'SELECT * FROM transactions WHERE id = ?', args: [agreement.settlement_transaction_id] })
@@ -1226,7 +1263,8 @@ router.post('/agreements/:id/credit-note', requirePermission('rentals_returns'),
     let committed = false;
     try {
       await tx.execute({ sql: 'UPDATE customers SET account_balance = account_balance - ? WHERE id = ?', args: [amt, agreement.customer_id] });
-      await tx.execute({ sql: 'UPDATE rental_agreements SET credit_note_amount = ?, credit_note_issued_at = CURRENT_TIMESTAMP, credit_note_issued_by = ? WHERE id = ?', args: [amt, employee_id || null, agreement.id] });
+      await tx.execute({ sql: `UPDATE rental_agreements SET credit_note_amount = ?, credit_note_issued_at = CURRENT_TIMESTAMP, credit_note_issued_by = ?,
+        deposit_return_method = 'store_credit', deposit_return_recorded_by = ?, deposit_return_recorded_at = CURRENT_TIMESTAMP WHERE id = ?`, args: [amt, employee_id || null, employee_id || null, agreement.id] });
       await tx.commit();
       committed = true;
       const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [agreement.id] });
@@ -1238,6 +1276,90 @@ router.post('/agreements/:id/credit-note', requirePermission('rentals_returns'),
       if (!committed) await tx.rollback();
       res.status(committed ? 500 : 400).json({ error: e.message });
     }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Records HOW a due deposit refund was actually disbursed to the customer —
+// cash, bank transfer, or back to the original card. This is bookkeeping
+// only: the money itself already moved (or is expected to move) outside the
+// app the moment the settlement transaction posted as a 'refund'; this just
+// tells the Deposits dashboard which channel it went out through, mainly so
+// it can be checked against the policy in lib/rentals.js's
+// requiredDepositReturnMethod. Store credit is handled by POST
+// .../credit-note instead (it actually moves money — account_balance — so it
+// keeps its own endpoint); a credit-checkout rental's refund is stamped
+// 'account_credit' automatically at return time and never reaches here.
+router.patch('/agreements/:id/deposit-return', requirePermission('rentals_returns'), async (req, res) => {
+  try {
+    const { method, reference, notes, employee_id } = req.body;
+    const validMethods = ['cash', 'bank_transfer', 'original_card'];
+    if (!validMethods.includes(method)) return res.status(400).json({ error: `method must be one of: ${validMethods.join(', ')}` });
+
+    const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    if (!agreement) return res.status(404).json({ error: 'Not found' });
+    if (agreement.status !== 'returned') return res.status(400).json({ error: 'Only a returned agreement can have its deposit return recorded' });
+    if (!agreement.settlement_transaction_id) return res.status(400).json({ error: 'This rental has not been settled yet' });
+    if (agreement.credit_note_amount > 0) return res.status(400).json({ error: 'A credit note has already been issued on this agreement — cannot also record a cash/bank/card return' });
+
+    const { rows: [settlementTx] } = await db.execute({ sql: 'SELECT total FROM transactions WHERE id = ?', args: [agreement.settlement_transaction_id] });
+    if (!settlementTx || settlementTx.total >= 0) return res.status(400).json({ error: 'No refund is due on this agreement' });
+
+    const { rows: [checkoutTx] } = agreement.checkout_transaction_id
+      ? await db.execute({ sql: 'SELECT payment_method FROM transactions WHERE id = ?', args: [agreement.checkout_transaction_id] })
+      : { rows: [null] };
+    if (checkoutTx && checkoutTx.payment_method === 'credit') return res.status(400).json({ error: 'This rental was billed to a credit account — the refund already applied to account_balance automatically at return' });
+
+    await db.execute({
+      sql: `UPDATE rental_agreements SET deposit_return_method = ?, deposit_return_reference = ?, deposit_return_notes = ?, deposit_return_recorded_by = ?, deposit_return_recorded_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      args: [method, reference || null, notes || null, employee_id || null, req.params.id],
+    });
+    const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    res.json(updated);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Deposits dashboard summary — how much is currently held (deposits on
+// active/awaiting-issue rentals, not yet returned), how much has been given
+// back and through which channel, how much is still awaiting a recorded
+// method, and how much was simply consumed by fees/damage (nothing to
+// refund). One pass over every non-pending/cancelled agreement rather than N
+// SQL aggregates, since the bucketing logic (credit-checkout vs store credit
+// vs a recorded method vs still-pending vs no-refund-due) isn't expressible
+// as a single GROUP BY.
+router.get('/deposits/summary', requirePermission('rentals'), async (req, res) => {
+  try {
+    const { rows } = await db.execute({ sql: `SELECT ra.status, ra.deposit_total, ra.credit_note_amount, ra.deposit_return_method,
+      ra.settlement_transaction_id, ra.checkout_transaction_id, co.payment_method as checkout_payment_method, se.total as settlement_total
+      FROM rental_agreements ra
+      LEFT JOIN transactions co ON ra.checkout_transaction_id = co.id
+      LEFT JOIN transactions se ON ra.settlement_transaction_id = se.id
+      WHERE ra.status IN ('awaiting_issue', 'active', 'returned')`, args: [] });
+
+    const bucket = () => ({ count: 0, total: 0 });
+    const summary = {
+      held: bucket(),
+      refunded: { cash: bucket(), bank_transfer: bucket(), original_card: bucket() },
+      store_credit: bucket(),
+      applied_to_account: bucket(),
+      pending_method: bucket(),
+      no_refund_due: bucket(),
+    };
+    const add = (b, amount) => { b.count += 1; b.total = parseFloat((b.total + amount).toFixed(2)); };
+
+    for (const a of rows) {
+      if (a.status !== 'returned') {
+        if (a.deposit_total > 0) add(summary.held, a.deposit_total);
+        continue;
+      }
+      if (!a.settlement_transaction_id) continue; // awaiting_payment — deposit's disposition isn't decided yet
+      const refundDue = a.settlement_total < 0 ? parseFloat((-a.settlement_total).toFixed(2)) : 0;
+      if (a.credit_note_amount > 0) { add(summary.store_credit, a.credit_note_amount); continue; }
+      if (a.checkout_payment_method === 'credit') { if (refundDue > 0) add(summary.applied_to_account, refundDue); continue; }
+      if (refundDue <= 0) { if (a.deposit_total > 0) add(summary.no_refund_due, a.deposit_total); continue; } // deposit fully consumed by fees/damage, or exactly netted
+      if (a.deposit_return_method && summary.refunded[a.deposit_return_method]) add(summary.refunded[a.deposit_return_method], refundDue);
+      else add(summary.pending_method, refundDue);
+    }
+    res.json(summary);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

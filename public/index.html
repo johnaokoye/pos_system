@@ -5262,8 +5262,17 @@ const App = {
       <div class="section-header">
         <h2>Rental Deposits & Credit Notes</h2>
       </div>
+      <div id="rental-deposits-summary" style="margin-bottom:16px"></div>
       <div id="rental-deposits-content"></div>`;
     await this.loadRentalDeposits();
+  },
+
+  renderDepositSummaryCard(label, amount, count, color) {
+    return `<div style="border:1px solid var(--border);border-radius:8px;padding:12px 16px;min-width:160px">
+      <div style="font-size:11px;text-transform:uppercase;color:var(--text-muted);margin-bottom:4px">${label}</div>
+      <div style="font-size:20px;font-weight:700;color:${color||'inherit'}">${this.fmt(amount)}</div>
+      <div style="font-size:11px;color:var(--text-muted)">${count} agreement${count===1?'':'s'}</div>
+    </div>`;
   },
 
   async loadRentalDeposits() {
@@ -5272,16 +5281,33 @@ const App = {
     // awaiting_issue is included too — the deposit is collected at finalize
     // (PATCH .../checkout), which happens before issue, so a paid-but-not-yet-
     // issued agreement already holds a real deposit that belongs on this list.
-    const [awaitingIssue, active, returned] = await Promise.all([
+    const [awaitingIssue, active, returned, summary] = await Promise.all([
       this.api('GET', '/rentals/agreements?view=awaiting_issue'),
       this.api('GET', '/rentals/agreements?view=active'),
       this.api('GET', '/rentals/agreements?view=returned'),
+      this.api('GET', '/rentals/deposits/summary').catch(() => null),
     ]);
     const agreements = [...awaitingIssue, ...active, ...returned].sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
     if (!document.getElementById('rental-deposits-content')) return;
+
+    const summaryEl = document.getElementById('rental-deposits-summary');
+    if (summaryEl && summary) {
+      summaryEl.innerHTML = `<div style="display:flex;gap:12px;flex-wrap:wrap">
+        ${this.renderDepositSummaryCard('Held (Active Rentals)', summary.held.total, summary.held.count)}
+        ${this.renderDepositSummaryCard('Refunded — Cash', summary.refunded.cash.total, summary.refunded.cash.count)}
+        ${this.renderDepositSummaryCard('Refunded — Bank Transfer', summary.refunded.bank_transfer.total, summary.refunded.bank_transfer.count)}
+        ${this.renderDepositSummaryCard('Refunded — Original Card', summary.refunded.original_card.total, summary.refunded.original_card.count)}
+        ${this.renderDepositSummaryCard('Store Credit Issued', summary.store_credit.total, summary.store_credit.count)}
+        ${this.renderDepositSummaryCard('Applied to Account', summary.applied_to_account.total, summary.applied_to_account.count)}
+        ${this.renderDepositSummaryCard('Awaiting Method', summary.pending_method.total, summary.pending_method.count, summary.pending_method.count ? 'var(--warning,#e6a23c)' : null)}
+      </div>`;
+    } else if (summaryEl) {
+      summaryEl.innerHTML = '';
+    }
+
     document.getElementById('rental-deposits-content').innerHTML = !agreements.length ? '<div class="empty-state"><p>No rental deposits to show.</p></div>' : `
       <table class="table">
-        <thead><tr><th>Agreement #</th><th>Customer</th><th>Status</th><th>Deposit</th><th>Deposit Status</th><th>Credit Note</th><th></th></tr></thead>
+        <thead><tr><th>Agreement #</th><th>Customer</th><th>Status</th><th>Deposit</th><th>Deposit Status</th><th>Refund / Credit</th><th></th></tr></thead>
         <tbody>${agreements.map(a => this.renderRentalDepositRow(a)).join('')}</tbody>
       </table>`;
   },
@@ -5311,16 +5337,29 @@ const App = {
     // (early return, or just low usage/no damage) — a refund is due. Credit
     // accounts already settle this automatically via account_balance at
     // return time; everyone else got a 'refund'-type settlement transaction
-    // for the register to pay out, unless/until a credit note is issued here.
+    // for the register to pay out, and the method it actually went out
+    // through (cash/bank transfer/original card/store credit) is recorded
+    // here — see routes/rentals.js's deposit_return_method.
+    const methodLabels = { cash: 'Cash Refund', bank_transfer: 'Bank Transfer', original_card: 'Refunded to Original Card' };
     let creditCell;
     const refundDue = a.settlement_total < 0 ? parseFloat((-a.settlement_total).toFixed(2)) : 0;
     if (a.credit_note_amount > 0) {
       creditCell = `<span class="badge-pill badge-teal">Credit Note Issued</span> ${this.fmt(a.credit_note_amount)}`;
     } else if (a.checkout_payment_method === 'credit' && refundDue > 0) {
       creditCell = `<span class="badge-pill badge-info">Applied to Account</span> ${this.fmt(refundDue)}`;
+    } else if (methodLabels[a.deposit_return_method]) {
+      creditCell = `<span class="badge-pill badge-success">${methodLabels[a.deposit_return_method]}</span> ${this.fmt(refundDue)}${a.deposit_return_reference ? ` <span style="color:var(--text-muted);font-size:11px">Ref: ${a.deposit_return_reference}</span>` : ''}`;
     } else if (refundDue > 0) {
-      const custName = (a.customer_name||'').replace(/'/g,"\\'");
-      creditCell = `<span class="badge-pill badge-warning">Refund Due</span> ${this.fmt(refundDue)}${this.can('rentals_returns') ? ` <button class="btn btn-sm btn-outline" style="margin-left:6px" onclick="App.issueRentalCreditNote(${a.id},${refundDue},'${custName}')">Issue Credit Note</button>` : ''}`;
+      const esc = (s) => (s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+      const custName = esc(a.customer_name);
+      const reqMethod = esc(a.required_deposit_return_method);
+      const reqReason = esc(a.required_deposit_return_reason);
+      const policyHint = a.required_deposit_return_method ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">Policy: ${methodLabels[a.required_deposit_return_method]}</div>` : '';
+      creditCell = `<span class="badge-pill badge-warning">Refund Due</span> ${this.fmt(refundDue)}${policyHint}
+        ${this.can('rentals_returns') ? `<div style="margin-top:4px;display:flex;gap:6px">
+          <button class="btn btn-sm btn-outline" onclick="App.recordDepositReturn(${a.id},${refundDue},'${custName}','${reqMethod}','${reqReason}')">Record Refund</button>
+          <button class="btn btn-sm btn-outline" onclick="App.issueRentalCreditNote(${a.id},${refundDue},'${custName}')">Issue Credit Note</button>
+        </div>` : ''}`;
     } else {
       creditCell = '<span style="color:var(--text-muted)">—</span>';
     }
@@ -5360,6 +5399,52 @@ const App = {
       await this.api('POST', `/rentals/agreements/${id}/credit-note`, { amount, employee_id: this.currentUser?.id || null });
       this.closeModal();
       this.alert('Credit note issued');
+      this.loadRentalDeposits();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // Records how a due deposit refund (refundAmount) was actually disbursed —
+  // cash, bank transfer, or back to the original card. requiredMethod/
+  // requiredReason (from routes/rentals.js's requiredDepositReturnMethod,
+  // attached server-side as required_deposit_return_method/_reason) reflect
+  // the deposit-refund policy for this agreement's original payment method,
+  // amount, and age — pre-selected here but not locked, since real-world
+  // exceptions happen; picking a different method just skips the policy note.
+  recordDepositReturn(id, refundAmount, customerName, requiredMethod, requiredReason) {
+    const methods = [['cash','Cash Refund'], ['bank_transfer','Bank Transfer'], ['original_card','Refund to Original Card']];
+    this.showModal(`
+      <div class="modal" style="max-width:440px">
+        <div class="modal-header"><span class="modal-title">Record Deposit Refund</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px">Refund of <strong>${this.fmt(refundAmount)}</strong> due to <strong>${customerName||'this customer'}</strong>. Record how it was actually given back.</p>
+          ${requiredReason ? `<div style="padding:8px 12px;background:rgba(59,130,246,0.08);border-left:3px solid #3b82f6;border-radius:4px;font-size:12px;margin-bottom:12px">${requiredReason}</div>` : ''}
+          <div class="form-group"><label>Refund Method</label>
+            <select id="dr-method">
+              ${methods.map(([v,l]) => `<option value="${v}" ${v===requiredMethod?'selected':''}>${l}${v===requiredMethod?' (per policy)':''}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group"><label>Reference # <span style="color:var(--text-muted);font-weight:400">(transfer ref, approval code, etc. — optional)</span></label>
+            <input id="dr-reference" type="text">
+          </div>
+          <div class="form-group"><label>Notes <span style="color:var(--text-muted);font-weight:400">(optional)</span></label>
+            <textarea id="dr-notes" rows="2"></textarea>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-success" onclick="App.confirmDepositReturn(${id})">Record</button>
+        </div>
+      </div>`);
+  },
+
+  async confirmDepositReturn(id) {
+    const method = document.getElementById('dr-method').value;
+    const reference = document.getElementById('dr-reference').value.trim();
+    const notes = document.getElementById('dr-notes').value.trim();
+    try {
+      await this.api('PATCH', `/rentals/agreements/${id}/deposit-return`, { method, reference, notes, employee_id: this.currentUser?.id || null });
+      this.closeModal();
+      this.alert('Deposit refund recorded');
       this.loadRentalDeposits();
     } catch(e) { this.alert(e.message, 'error'); }
   },
@@ -6426,7 +6511,6 @@ const App = {
               <option value="credit_card">Credit Card</option>
               <option value="debit_card">Debit Card</option>
               <option value="check">Check</option>
-              <option value="gift_card">Gift Card</option>
               <option value="direct_deposit">Direct Deposit</option>
               <option value="credit">Charge Account (Credit)</option>
             </select>

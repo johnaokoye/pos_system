@@ -1203,6 +1203,20 @@ async function _init() {
     'ALTER TABLE rental_agreements ADD COLUMN pickup_confirmed_at DATETIME',
     'ALTER TABLE rental_agreements ADD COLUMN pickup_customer_name TEXT',
     'ALTER TABLE rental_agreements ADD COLUMN pickup_customer_signature TEXT',
+    // How a deposit refund was actually disbursed — 'cash', 'bank_transfer',
+    // 'original_card' (manually recorded via PATCH .../deposit-return once a
+    // refund is due), 'store_credit' (stamped by POST .../credit-note),
+    // 'account_credit' (credit-checkout rentals — already auto-applied to
+    // account_balance at return, no manual step), or 'not_applicable' (return
+    // left no refund due — deposit fully consumed by fees/damage, or there
+    // was no deposit). NULL means a refund is due and still awaiting a
+    // manual method — see lib/rentals.js's requiredDepositReturnMethod for
+    // the policy this is checked against.
+    'ALTER TABLE rental_agreements ADD COLUMN deposit_return_method TEXT',
+    'ALTER TABLE rental_agreements ADD COLUMN deposit_return_reference TEXT',
+    'ALTER TABLE rental_agreements ADD COLUMN deposit_return_notes TEXT',
+    'ALTER TABLE rental_agreements ADD COLUMN deposit_return_recorded_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE rental_agreements ADD COLUMN deposit_return_recorded_at DATETIME',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
@@ -1304,6 +1318,26 @@ async function _init() {
   // Backfill source for WooCommerce-imported transactions
   try {
     await db.execute({ sql: "UPDATE transactions SET source='woocommerce' WHERE transaction_number LIKE 'WC-%' AND (source IS NULL OR source='pos')", args: [] });
+  } catch(e) {}
+
+  // Backfill deposit_return_method on rentals settled before this column
+  // existed, so the Rental Deposits dashboard's breakdown is complete from
+  // day one rather than only covering returns processed after this feature
+  // shipped. Only fills in the cases we can already know for certain from
+  // existing data — a credit note already issued, or a credit-account
+  // checkout (both auto-apply to account_balance, no manual disbursement),
+  // or no refund having been due at all. A real cash/bank-transfer/
+  // original-card refund that predates this feature has no record of HOW it
+  // was actually paid out, so those rows are deliberately left NULL for
+  // staff to record retroactively via PATCH .../deposit-return.
+  try {
+    await db.execute({ sql: "UPDATE rental_agreements SET deposit_return_method = 'store_credit' WHERE deposit_return_method IS NULL AND credit_note_amount > 0", args: [] });
+    await db.execute({ sql: `UPDATE rental_agreements SET deposit_return_method = 'account_credit'
+      WHERE deposit_return_method IS NULL AND status = 'returned' AND settlement_transaction_id IS NOT NULL
+      AND checkout_transaction_id IN (SELECT id FROM transactions WHERE payment_method = 'credit')`, args: [] });
+    await db.execute({ sql: `UPDATE rental_agreements SET deposit_return_method = 'not_applicable'
+      WHERE deposit_return_method IS NULL AND status = 'returned' AND settlement_transaction_id IS NOT NULL
+      AND settlement_transaction_id IN (SELECT id FROM transactions WHERE total >= 0)`, args: [] });
   } catch(e) {}
 
   // Add CRM + commissions permissions to existing security groups
