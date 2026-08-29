@@ -428,6 +428,8 @@
         <li>A product or category can only belong to <strong>one active promotion at a time</strong> — the system blocks adding it to a second one while the first is still active, so promotions never silently stack on the same item.</li>
         <li>A promotion can have one or more <strong>codes</strong>, each with its own usage limit — retiring one code doesn't kill the whole promotion.</li>
         <li>At checkout, promotions with no code attached are offered automatically; the best (largest discount) one is suggested first if more than one qualifies.</li>
+        <li><strong>Start Time / End Time (optional)</strong> — narrows a promotion to a window of the day, e.g. a 2:00 PM-4:00 PM happy hour. Left blank, the promotion runs all day on any date it's otherwise eligible.</li>
+        <li><strong>Recurring daily</strong> — when checked, the time window repeats every day within the optional Start Date/End Date range (either side left blank is unbounded). Unchecked (the default), Start Time/End Time apply only to the Start Date and End Date themselves — a one-time window that can still span several full days in between, e.g. a weekend sale from Friday 6:00 PM to Sunday 11:59 PM.</li>
       </ul>
       <p>Needs <span class="perm-pill">promotions_create</span> to build a promotion, <span class="perm-pill">promotions_codes</span> to manage its codes.</p>
     </section>

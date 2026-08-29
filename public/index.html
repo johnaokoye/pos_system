@@ -17548,7 +17548,7 @@ const App = {
                 <td>${p.type === 'percentage' ? 'Percentage' : 'Fixed'}</td>
                 <td>${p.type === 'percentage' ? p.value + '%' : this.fmt(p.value)}</td>
                 <td>${p.applies_to === 'all' ? 'All Items' : p.applies_to === 'categories' ? `<span class="badge-pill badge-purple">${p.item_count} categories</span>` : p.applies_to === 'items' ? `<span class="badge-pill badge-blue">${p.item_count} products</span>` : `<span class="badge-pill badge-purple">${p.item_count} items/cats</span>`}</td>
-                <td style="font-size:12px">${p.start_date || '—'} → ${p.end_date || '∞'}</td>
+                <td style="font-size:12px">${this._promoScheduleLabel(p)}</td>
                 <td><span class="badge-pill badge-blue">${p.code_count} codes</span></td>
                 <td>${statusBadge(p)}</td>
                 <td>
@@ -17654,6 +17654,16 @@ const App = {
             <div class="form-group"><label>Start Date (optional)</label><input type="date" id="pm-start" value="${p.start_date||''}"></div>
             <div class="form-group"><label>End Date (optional)</label><input type="date" id="pm-end" value="${p.end_date||''}"></div>
           </div>
+          <div class="input-row">
+            <div class="form-group"><label>Start Time (optional)</label><input type="time" id="pm-start-time" value="${p.start_time||''}"></div>
+            <div class="form-group"><label>End Time (optional)</label><input type="time" id="pm-end-time" value="${p.end_time||''}"></div>
+          </div>
+          <div class="form-group">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+              <input type="checkbox" id="pm-recurring" ${p.is_recurring?'checked':''} style="width:auto" onchange="App._promoRecurringToggle()"> Recurring daily
+            </label>
+            <p id="pm-recurring-hint" style="font-size:11px;color:var(--text-muted);margin:4px 0 0">${this._promoRecurringHint(p.is_recurring)}</p>
+          </div>
           <div class="form-group"><label style="display:flex;align-items:center;gap:8px;cursor:pointer">
             <input type="checkbox" id="pm-active" ${p.active?'checked':''} style="width:auto"> Active
           </label></div>
@@ -17679,6 +17689,32 @@ const App = {
     if (itemSec) itemSec.style.display = val === 'items' ? '' : 'none';
   },
 
+  _promoRecurringHint(isRecurring) {
+    return isRecurring
+      ? 'Runs every day between the times above (leave blank for all day), within the optional date range above.'
+      : "Runs once: from the start date/time to the end date/time. Times only apply to the start/end date itself — leave blank for all day on that date.";
+  },
+
+  _promoRecurringToggle() {
+    const hint = document.getElementById('pm-recurring-hint');
+    if (hint) hint.textContent = this._promoRecurringHint(document.getElementById('pm-recurring')?.checked);
+  },
+
+  _promoFmtTime(t) {
+    if (!t) return null;
+    const [h, m] = t.split(':').map(Number);
+    const period = h < 12 ? 'AM' : 'PM';
+    const h12 = h % 12 || 12;
+    return `${h12}:${String(m).padStart(2,'0')} ${period}`;
+  },
+
+  _promoScheduleLabel(p) {
+    const dateRange = `${p.start_date || '—'} → ${p.end_date || '∞'}`;
+    const timeRange = (p.start_time || p.end_time) ? `${this._promoFmtTime(p.start_time) || '12:00 AM'}–${this._promoFmtTime(p.end_time) || '11:59 PM'}` : '';
+    if (p.is_recurring) return `<span class="badge-pill badge-purple" style="font-size:10px">Daily</span> ${timeRange || 'all day'}<br><span style="color:var(--text-muted)">${dateRange}</span>`;
+    return `${dateRange}${timeRange ? `<br><span style="color:var(--text-muted)">${timeRange}</span>` : ''}`;
+  },
+
   _filterPromoProducts() {
     const q = (document.getElementById('pm-prod-search')?.value || '').toLowerCase();
     document.querySelectorAll('#pm-prod-list .pm-prod-label').forEach(lbl => {
@@ -17696,6 +17732,9 @@ const App = {
       applies_to: document.getElementById('pm-applies').value,
       start_date: document.getElementById('pm-start').value || null,
       end_date: document.getElementById('pm-end').value || null,
+      start_time: document.getElementById('pm-start-time').value || null,
+      end_time: document.getElementById('pm-end-time').value || null,
+      is_recurring: document.getElementById('pm-recurring').checked,
       active: document.getElementById('pm-active').checked,
     };
     if (!data.name) return this.alert('Name required', 'error');

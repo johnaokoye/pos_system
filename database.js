@@ -1217,6 +1217,16 @@ async function _init() {
     'ALTER TABLE rental_agreements ADD COLUMN deposit_return_notes TEXT',
     'ALTER TABLE rental_agreements ADD COLUMN deposit_return_recorded_by INTEGER REFERENCES employees(id)',
     'ALTER TABLE rental_agreements ADD COLUMN deposit_return_recorded_at DATETIME',
+    // Time-of-day window (HH:MM, 24h) a promotion runs within on any day it's
+    // eligible — e.g. a 2:00 PM-4:00 PM happy hour. NULL means no time-of-day
+    // limit (runs all day). is_recurring=1 repeats that window every day
+    // within start_date/end_date (either bound optional/NULL = unbounded);
+    // is_recurring=0 treats start_time/end_time as refining only the
+    // start_date/end_date boundary days themselves — see lib/promotions.js's
+    // promoTimingStatus for the full evaluation.
+    'ALTER TABLE promotions ADD COLUMN start_time TEXT',
+    'ALTER TABLE promotions ADD COLUMN end_time TEXT',
+    'ALTER TABLE promotions ADD COLUMN is_recurring INTEGER DEFAULT 0',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

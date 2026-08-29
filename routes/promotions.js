@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { requirePermission } = require('../lib/permissions');
+const { promoTimingStatus } = require('../lib/promotions');
 
 // List all promotions with code count
 router.get('/', requirePermission('promotions'), async (req, res) => {
@@ -46,13 +47,13 @@ router.get('/:id', requirePermission('promotions'), async (req, res) => {
 // Create promotion
 router.post('/', requirePermission('promotions'), async (req, res) => {
   try {
-    const { name, description, type, value, min_purchase, applies_to, start_date, end_date, active } = req.body;
+    const { name, description, type, value, min_purchase, applies_to, start_date, end_date, start_time, end_time, is_recurring, active } = req.body;
     if (!name) return res.status(400).json({ error: 'Name required' });
     if (!['percentage', 'fixed'].includes(type)) return res.status(400).json({ error: 'Invalid type' });
     const result = await db.execute({ sql: `
-      INSERT INTO promotions (name, description, type, value, min_purchase, applies_to, start_date, end_date, active)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, args: [name, description || null, type, value || 0, min_purchase || 0, applies_to || 'all', start_date || null, end_date || null, active !== false ? 1 : 0] });
+      INSERT INTO promotions (name, description, type, value, min_purchase, applies_to, start_date, end_date, start_time, end_time, is_recurring, active)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, args: [name, description || null, type, value || 0, min_purchase || 0, applies_to || 'all', start_date || null, end_date || null, start_time || null, end_time || null, is_recurring ? 1 : 0, active !== false ? 1 : 0] });
     res.json({ id: Number(result.lastInsertRowid) });
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
@@ -60,12 +61,12 @@ router.post('/', requirePermission('promotions'), async (req, res) => {
 // Update promotion
 router.put('/:id', requirePermission('promotions'), async (req, res) => {
   try {
-    const { name, description, type, value, min_purchase, applies_to, start_date, end_date, active } = req.body;
+    const { name, description, type, value, min_purchase, applies_to, start_date, end_date, start_time, end_time, is_recurring, active } = req.body;
     if (!name) return res.status(400).json({ error: 'Name required' });
     await db.execute({ sql: `
-      UPDATE promotions SET name=?, description=?, type=?, value=?, min_purchase=?, applies_to=?, start_date=?, end_date=?, active=?
+      UPDATE promotions SET name=?, description=?, type=?, value=?, min_purchase=?, applies_to=?, start_date=?, end_date=?, start_time=?, end_time=?, is_recurring=?, active=?
       WHERE id=?
-    `, args: [name, description || null, type, value || 0, min_purchase || 0, applies_to || 'all', start_date || null, end_date || null, active ? 1 : 0, req.params.id] });
+    `, args: [name, description || null, type, value || 0, min_purchase || 0, applies_to || 'all', start_date || null, end_date || null, start_time || null, end_time || null, is_recurring ? 1 : 0, active ? 1 : 0, req.params.id] });
     res.json({ success: true });
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
@@ -144,15 +145,13 @@ router.delete('/:id/codes/:codeId', requirePermission('promotions'), async (req,
 router.post('/auto-apply', requirePermission('pos'), async (req, res) => {
   try {
     const { cart_items = [], subtotal = 0 } = req.body;
-    const today = new Date().toISOString().split('T')[0];
-    const { rows: promos } = await db.execute({
+    const { rows: allPromos } = await db.execute({
       sql: `SELECT p.* FROM promotions p
             WHERE p.active = 1
-              AND (p.start_date IS NULL OR p.start_date <= ?)
-              AND (p.end_date IS NULL OR p.end_date >= ?)
               AND (SELECT COUNT(*) FROM promotion_codes WHERE promotion_id = p.id) = 0`,
-      args: [today, today]
+      args: []
     });
+    const promos = allPromos.filter(p => promoTimingStatus(p).active);
 
     // One batched lookup for every scoped promo's items instead of one
     // query per promo — this runs on the POS checkout/cart hot path.
@@ -198,7 +197,7 @@ router.post('/validate-code', requirePermission('pos'), async (req, res) => {
 
     const { rows: [pc] } = await db.execute({ sql: `
       SELECT pc.*, p.name as promo_name, p.type, p.value, p.min_purchase, p.applies_to,
-             p.start_date, p.end_date, p.active as promo_active
+             p.start_date, p.end_date, p.start_time, p.end_time, p.is_recurring, p.active as promo_active
       FROM promotion_codes pc
       JOIN promotions p ON p.id = pc.promotion_id
       WHERE pc.code = ? COLLATE NOCASE
@@ -207,9 +206,15 @@ router.post('/validate-code', requirePermission('pos'), async (req, res) => {
     if (!pc) return res.status(404).json({ error: 'Invalid promotion code' });
     if (!pc.active || !pc.promo_active) return res.status(400).json({ error: 'This promotion code is inactive' });
 
-    const today = new Date().toISOString().split('T')[0];
-    if (pc.start_date && today < pc.start_date) return res.status(400).json({ error: 'Promotion has not started yet' });
-    if (pc.end_date && today > pc.end_date) return res.status(400).json({ error: 'Promotion has expired' });
+    const timing = promoTimingStatus(pc);
+    if (!timing.active) {
+      const messages = {
+        not_started: 'Promotion has not started yet',
+        expired: 'Promotion has expired',
+        outside_daily_window: `This promotion only runs from ${pc.start_time || '12:00 AM'} to ${pc.end_time || '11:59 PM'} each day`,
+      };
+      return res.status(400).json({ error: messages[timing.reason] || 'Promotion is not currently active' });
+    }
     if (pc.usage_limit !== null && pc.times_used >= pc.usage_limit) return res.status(400).json({ error: 'This code has reached its usage limit' });
     if (pc.min_purchase > 0 && subtotal < pc.min_purchase) {
       return res.status(400).json({ error: `Minimum purchase of ${pc.min_purchase} required` });
