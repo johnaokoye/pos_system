@@ -7013,18 +7013,19 @@ const App = {
     { key: 'awaiting_pickup', label: 'Awaiting Pickup' },
     { key: 'picked_up',       label: 'Picked Up' },
     { key: 'cancelled',       label: 'Cancelled' },
+    { key: 'not_worth_fixing', label: 'Not Worth Fixing' },
     { key: 'all',             label: 'All' },
   ],
 
   _woStatusLabels: {
     intake: 'Intake', assessed: 'Assessed', pending_deposit: 'Pending Deposit', in_progress: 'In Progress',
-    awaiting_signoff: 'Awaiting Sign-Off', complete: 'Complete', awaiting_pickup: 'Awaiting Pickup',
-    picked_up: 'Picked Up', cancelled: 'Cancelled',
+    awaiting_signoff: 'Awaiting Sign-Off', awaiting_parts: 'Awaiting Parts', complete: 'Complete', awaiting_pickup: 'Awaiting Pickup',
+    picked_up: 'Picked Up', cancelled: 'Cancelled', not_worth_fixing: 'Not Worth Fixing',
   },
   _woStatusBadge: {
     intake: 'badge-warning', assessed: 'badge-warning', pending_deposit: 'badge-warning', in_progress: 'badge-info',
-    awaiting_signoff: 'badge-info', complete: 'badge-success', awaiting_pickup: 'badge-success',
-    picked_up: 'badge-secondary', cancelled: 'badge-secondary',
+    awaiting_signoff: 'badge-info', awaiting_parts: 'badge-warning', complete: 'badge-success', awaiting_pickup: 'badge-success',
+    picked_up: 'badge-secondary', cancelled: 'badge-secondary', not_worth_fixing: 'badge-danger',
   },
 
   async renderWorkOrders() {
@@ -7188,8 +7189,8 @@ const App = {
     // mirrors what the backend already allows (any pre-completion status), so
     // a tech isn't blocked from pulling/ordering parts just because the
     // customer hasn't paid a deposit yet.
-    const canManageParts = wo.status !== 'cancelled';
-    const partsEditable = !['complete','awaiting_pickup','picked_up','cancelled'].includes(wo.status) && this.can('wo_assign_parts');
+    const canManageParts = !['cancelled','not_worth_fixing'].includes(wo.status);
+    const partsEditable = !['complete','awaiting_pickup','picked_up','cancelled','not_worth_fixing'].includes(wo.status) && this.can('wo_assign_parts');
     if (partsEditable) {
       const [products, branches] = await Promise.all([
         this.api('GET', `/products?is_service=0&is_rental=0&active=1${wo.branch_id?'&branch_id='+wo.branch_id:''}`),
@@ -7199,8 +7200,8 @@ const App = {
       this._woBranches = (branches||[]).filter(b => String(b.id) !== String(wo.branch_id));
       this._woPartsStockCache = {};
     }
-    const tasksSectionVisible = ['in_progress','awaiting_signoff','complete','awaiting_pickup','picked_up'].includes(wo.status);
-    const tasksEditable = ['in_progress','awaiting_signoff'].includes(wo.status) && this.can('wo_technician');
+    const tasksSectionVisible = ['in_progress','awaiting_signoff','awaiting_parts','complete','awaiting_pickup','picked_up','not_worth_fixing'].includes(wo.status);
+    const tasksEditable = ['in_progress','awaiting_signoff','awaiting_parts'].includes(wo.status) && this.can('wo_technician');
     if (tasksEditable) {
       this._woTechnicians = await this.api('GET', '/employees');
     }
@@ -7222,7 +7223,7 @@ const App = {
           </div>
           <div class="form-group">
             <label style="display:flex;justify-content:space-between;align-items:center">Description
-              ${!['complete','awaiting_pickup','picked_up','cancelled'].includes(wo.status) && this.can('work_orders') ? `<button type="button" class="btn btn-sm btn-outline" onclick="App._toggleWODescEdit(${wo.id})">Edit</button>` : ''}
+              ${!['complete','awaiting_pickup','picked_up','cancelled','not_worth_fixing'].includes(wo.status) && this.can('work_orders') ? `<button type="button" class="btn btn-sm btn-outline" onclick="App._toggleWODescEdit(${wo.id})">Edit</button>` : ''}
             </label>
             <div id="wo-desc-view">${wo.description}</div>
             <div id="wo-desc-edit" style="display:none">
@@ -7293,7 +7294,7 @@ const App = {
           ${wo.status==='intake' ? `<span class="badge-pill badge-warning" style="align-self:center;padding:6px 10px" title="Collected at the register — open Hold Recall in POS to take payment">On hold — awaiting cashier</span>` : ''}
           ${wo.status==='assessed' && this.can('wo_assess') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showWOEstimateModal(${wo.id})">Enter Estimate</button>` : ''}
           ${wo.status==='pending_deposit' ? `<span class="badge-pill badge-warning" style="align-self:center;padding:6px 10px" title="Collected at the register — open Hold Recall in POS to take payment">On hold — awaiting cashier</span>` : ''}
-          ${['in_progress','awaiting_signoff'].includes(wo.status) && this.can('work_orders') ? `<button class="btn btn-secondary" onclick="App.closeModal();App.showWOStatusCommentModal(${wo.id})">Add Status Update</button>` : ''}
+          ${['in_progress','awaiting_signoff','awaiting_parts'].includes(wo.status) && this.can('work_orders') ? `<button class="btn btn-secondary" onclick="App.closeModal();App.showWOStatusCommentModal(${wo.id})">Add Status Update</button>` : ''}
           ${['in_progress','awaiting_signoff'].includes(wo.status) && this.can('wo_signoff') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showWOSignoffModal(${wo.id})">Supervisor Sign-Off</button>` : ''}
           ${wo.status==='complete' && this.can('work_orders') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showWONotifyModal(${wo.id})">Notify Customer</button>` : ''}
           ${wo.status==='awaiting_pickup' ? `<span class="badge-pill badge-warning" style="align-self:center;padding:6px 10px" title="Collected at the register — open Hold Recall in POS to take payment">On hold — awaiting cashier</span>` : ''}
@@ -7418,6 +7419,8 @@ const App = {
               <option value="">No change — just log a comment</option>
               <option value="in_progress">In Progress</option>
               <option value="awaiting_signoff">Awaiting Sign-Off (work done, ready for supervisor)</option>
+              <option value="awaiting_parts">Awaiting Parts (paused, waiting on a part)</option>
+              <option value="not_worth_fixing">Not Worth Fixing (stop work, item isn't repairable/economical)</option>
             </select>
           </div>
           <div class="form-group"><label>Comment *</label><textarea id="wo-status-comment" rows="3" placeholder="What's happening"></textarea></div>

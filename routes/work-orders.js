@@ -7,10 +7,14 @@ const { processWorkOrderItems, processWorkOrderPartSourcing } = require('../lib/
 
 // Statuses a WO can freely log a comment against via PATCH /:id/status without
 // going through a dedicated money-moving endpoint (assessment-paid,
-// deposit-paid, signoff each own their own transition below). 'in_progress'
-// and 'awaiting_signoff' are the two phases a technician/supervisor actually
-// works from day to day.
-const FREE_STATUS_TRANSITIONS = ['in_progress', 'awaiting_signoff'];
+// deposit-paid, signoff each own their own transition below). 'in_progress',
+// 'awaiting_signoff' and 'awaiting_parts' are phases a technician/supervisor
+// moves between day to day; 'not_worth_fixing' is a terminal outcome reached
+// once work has started (the pre-deposit equivalent is the /cancel endpoint).
+const FREE_STATUS_TRANSITIONS = ['in_progress', 'awaiting_signoff', 'awaiting_parts', 'not_worth_fixing'];
+// Statuses a WO can move between freely — anything outside this set (not
+// started yet, or already a terminal outcome) can't take a free transition.
+const ACTIVE_WORK_STATUSES = ['in_progress', 'awaiting_signoff', 'awaiting_parts'];
 
 async function logStatus(executor, workOrderId, status, comment, employeeId) {
   await executor.execute({ sql: 'INSERT INTO work_order_status_log (work_order_id, status, comment, employee_id) VALUES (?,?,?,?)', args: [workOrderId, status, comment || null, employeeId || null] });
@@ -32,12 +36,12 @@ router.get('/', requirePermission('work_orders'), async (req, res) => {
     const { status, view, customer_id, branch_id, limit = 200 } = req.query;
     let sql = `${WO_LIST_SELECT} WHERE 1=1`;
     const params = [];
-    if (view === 'active') { sql += " AND wo.status NOT IN ('picked_up','cancelled')"; }
+    if (view === 'active') { sql += " AND wo.status NOT IN ('picked_up','cancelled','not_worth_fixing')"; }
     // Assessment fee (status='intake'), deposit (status='pending_deposit'), or the
     // final balance (status='awaiting_pickup') due — surfaced in the POS Hold
     // Recall list so a cashier can pick it up and take payment there.
     else if (view === 'awaiting_payment') { sql += " AND wo.status IN ('intake','pending_deposit','awaiting_pickup')"; }
-    else if (view === 'awaiting_pickup' || view === 'picked_up' || view === 'cancelled') { sql += ' AND wo.status = ?'; params.push(view); }
+    else if (view === 'awaiting_pickup' || view === 'picked_up' || view === 'cancelled' || view === 'not_worth_fixing') { sql += ' AND wo.status = ?'; params.push(view); }
     else if (status) { sql += ' AND wo.status = ?'; params.push(status); }
     if (customer_id) { sql += ' AND wo.customer_id = ?'; params.push(customer_id); }
     if (branch_id) { sql += ' AND wo.branch_id = ?'; params.push(branch_id); }
@@ -220,7 +224,7 @@ router.patch('/:id/parts', requirePermission('wo_assign_parts'), async (req, res
     const { items } = req.body;
     const { rows: [wo] } = await db.execute({ sql: 'SELECT * FROM work_orders WHERE id = ?', args: [req.params.id] });
     if (!wo) return res.status(404).json({ error: 'Not found' });
-    if (['complete', 'awaiting_pickup', 'picked_up', 'cancelled'].includes(wo.status)) return res.status(400).json({ error: `Cannot edit parts on a ${wo.status} work order` });
+    if (['complete', 'awaiting_pickup', 'picked_up', 'cancelled', 'not_worth_fixing'].includes(wo.status)) return res.status(400).json({ error: `Cannot edit parts on a ${wo.status} work order` });
 
     let processedItems;
     try {
@@ -320,7 +324,7 @@ router.patch('/:id', requirePermission('work_orders'), async (req, res) => {
     const { description, item_label, employee_id } = req.body;
     const { rows: [wo] } = await db.execute({ sql: 'SELECT * FROM work_orders WHERE id = ?', args: [req.params.id] });
     if (!wo) return res.status(404).json({ error: 'Not found' });
-    if (['complete', 'awaiting_pickup', 'picked_up', 'cancelled'].includes(wo.status)) return res.status(400).json({ error: `Cannot edit a ${wo.status} work order` });
+    if (['complete', 'awaiting_pickup', 'picked_up', 'cancelled', 'not_worth_fixing'].includes(wo.status)) return res.status(400).json({ error: `Cannot edit a ${wo.status} work order` });
     if (description != null && !description.trim()) return res.status(400).json({ error: 'Description cannot be empty' });
 
     const newDescription = description != null ? description.trim() : wo.description;
@@ -443,7 +447,7 @@ router.patch('/:id/status', requirePermission('work_orders'), async (req, res) =
     let newStatus = wo.status;
     if (status && status !== wo.status) {
       if (!FREE_STATUS_TRANSITIONS.includes(status)) return res.status(400).json({ error: `Cannot set status to ${status} directly — use the dedicated action for that step` });
-      if (wo.status !== 'in_progress') return res.status(400).json({ error: `This work order is ${wo.status}, not in progress` });
+      if (!ACTIVE_WORK_STATUSES.includes(wo.status)) return res.status(400).json({ error: `This work order is ${wo.status}, not in progress` });
       newStatus = status;
       await db.execute({ sql: 'UPDATE work_orders SET status = ? WHERE id = ?', args: [newStatus, req.params.id] });
     }
@@ -485,7 +489,7 @@ router.post('/:id/tasks', requirePermission('wo_technician'), async (req, res) =
     if (!description || !description.trim()) return res.status(400).json({ error: 'A task description is required' });
     const { rows: [wo] } = await db.execute({ sql: 'SELECT id, status FROM work_orders WHERE id = ?', args: [req.params.id] });
     if (!wo) return res.status(404).json({ error: 'Not found' });
-    if (!['in_progress', 'awaiting_signoff'].includes(wo.status)) return res.status(400).json({ error: `Cannot add tasks to a ${wo.status} work order` });
+    if (!['in_progress', 'awaiting_signoff', 'awaiting_parts'].includes(wo.status)) return res.status(400).json({ error: `Cannot add tasks to a ${wo.status} work order` });
     const result = await db.execute({ sql: 'INSERT INTO work_order_tasks (work_order_id, description, allotted_minutes, technician_id) VALUES (?,?,?,?)', args: [req.params.id, description.trim(), parseInt(allotted_minutes) || 0, technician_id || null] });
     const taskId = Number(result.lastInsertRowid);
     await syncTaskSkills(taskId, skill_ids);
