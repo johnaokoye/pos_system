@@ -3989,7 +3989,7 @@ const App = {
         ${products.map(p => `<tr id="inv-row-${p.id}">
           <td style="width:52px">${p.image_path ? `<img src="${p.image_path}" class="prod-img-thumb" alt="">` : `<div class="prod-img-placeholder" onclick="App.showProductForm(${p.id})">📷</div>`}</td>
           <td style="font-family:monospace;font-size:12px">${p.sku}</td>
-          <td class="fw-600">${p.name}${p.has_variations > 0 ? `<span class="has-vars-badge">${p.has_variations} var</span>` : ''}${p.used_of_product_id ? `<span class="badge-pill badge-purple" style="font-size:10px;margin-left:6px">Used</span>` : ''}</td>
+          <td class="fw-600">${p.name}${p.has_variations > 0 ? `<span class="has-vars-badge">${p.has_variations} var</span>` : ''}${p.used_of_product_id ? `<span class="badge-pill badge-purple" style="font-size:10px;margin-left:6px">Used</span>` : ''}${p.merged_into_product_id ? `<span class="badge-pill badge-secondary" style="font-size:10px;margin-left:6px" title="Merged into ${p.merged_into_sku||''}">Merged → ${p.merged_into_sku||'?'}</span>` : ''}</td>
           <td style="color:var(--text-muted)">${p.category_name || '—'}</td>
           <td>${this.fmt(p.price)}</td>
           <td style="color:var(--text-muted)">${this.fmt(p.cost)}</td>
@@ -4007,6 +4007,7 @@ const App = {
             <button class="btn btn-secondary btn-sm" onclick="App.showLabelPrint(${p.id})" title="Print Labels" style="padding:4px 7px">
               <svg viewBox="0 0 24 24" fill="currentColor" width="13" height="13"><path d="M19 8H5c-1.66 0-3 1.34-3 3v6h4v4h12v-4h4v-6c0-1.66-1.34-3-3-3zm-3 11H8v-5h8v5zm3-7c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm-1-9H6v4h12V3z"/></svg>
             </button>
+            ${!p.merged_into_product_id && !p.is_rental && !(p.has_variations > 0) && this.can('inventory_edit') ? `<button class="btn btn-outline btn-sm" onclick="App.showMergeProductModal(${p.id})" title="Merge this duplicate into another product">Merge</button>` : ''}
           </td>
         </tr>
         <tr id="inv-hist-${p.id}" style="display:none">
@@ -4014,6 +4015,78 @@ const App = {
         </tr>`).join('')}
       </tbody>
     </table>`;
+  },
+
+  // Merges a duplicate retail SKU (id) into another product the user picks —
+  // combines stock and history onto the survivor, retires the duplicate
+  // (deactivated, tagged, never deleted). Rental items and anything with
+  // active variations are excluded server-side; this list mirrors that so
+  // the picker never offers an ineligible target.
+  async showMergeProductModal(id) {
+    const [source, all] = await Promise.all([
+      this.api('GET', `/products/${id}`),
+      this.api('GET', '/products?active=1'),
+    ]);
+    this._mergeSource = source;
+    this._mergeCandidates = all.filter(p => p.id !== source.id && !p.is_rental && !p.merged_into_product_id && !(p.has_variations > 0));
+    this.showModal(`
+      <div class="modal" style="max-width:520px">
+        <div class="modal-header"><span class="modal-title">Merge Duplicate SKU</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted)"><strong>${this.escapeAttr(source.name)}</strong> (${source.sku}) will be deactivated and its stock (${source.stock_qty}) and history moved onto whichever product you pick below. This can't be undone from here.</p>
+          <div class="form-group">
+            <label>Merge into *</label>
+            <input type="text" id="merge-search" placeholder="Search by name or SKU..." oninput="App._filterMergeTargets()">
+            <select id="merge-target" size="8" style="width:100%;margin-top:6px" onchange="App._updateMergePreview()">
+              ${this._mergeTargetOptionsHtml(this._mergeCandidates)}
+            </select>
+          </div>
+          <div id="merge-preview" style="font-size:13px;background:var(--bg-secondary,#f8f9fa);border:1px solid var(--border);border-radius:6px;padding:8px 10px;display:none"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-danger" id="merge-confirm-btn" onclick="App.confirmMergeProduct()" disabled>Merge</button>
+        </div>
+      </div>`);
+  },
+
+  _mergeTargetOptionsHtml(list) {
+    if (!list.length) return '<option value="">No eligible products</option>';
+    return list.map(p => `<option value="${p.id}">${p.sku} — ${p.name} (Stock: ${p.stock_qty})</option>`).join('');
+  },
+
+  _filterMergeTargets() {
+    const q = document.getElementById('merge-search').value.trim().toLowerCase();
+    const filtered = !q ? this._mergeCandidates : this._mergeCandidates.filter(p => p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q));
+    document.getElementById('merge-target').innerHTML = this._mergeTargetOptionsHtml(filtered);
+    this._updateMergePreview();
+  },
+
+  _updateMergePreview() {
+    const sel = document.getElementById('merge-target');
+    const preview = document.getElementById('merge-preview');
+    const btn = document.getElementById('merge-confirm-btn');
+    const targetId = parseInt(sel.value);
+    if (!targetId) { preview.style.display = 'none'; btn.disabled = true; return; }
+    const target = this._mergeCandidates.find(p => p.id === targetId);
+    const source = this._mergeSource;
+    preview.style.display = 'block';
+    preview.innerHTML = `After merging: <strong>${this.escapeAttr(target.name)}</strong> (${target.sku}) stock becomes <strong>${(target.stock_qty||0) + (source.stock_qty||0)}</strong> (${target.stock_qty||0} + ${source.stock_qty||0}). <strong>${this.escapeAttr(source.name)}</strong> (${source.sku}) will be deactivated and marked as merged.`;
+    btn.disabled = false;
+  },
+
+  async confirmMergeProduct() {
+    const targetId = parseInt(document.getElementById('merge-target').value);
+    if (!targetId) return;
+    const source = this._mergeSource;
+    const target = this._mergeCandidates.find(p => p.id === targetId);
+    if (!confirm(`Merge "${source.name}" (${source.sku}) into "${target.name}" (${target.sku})? This can't be undone from here.`)) return;
+    try {
+      await this.api('POST', `/products/${source.id}/merge`, { target_id: targetId });
+      this.closeModal();
+      this.alert(`Merged ${source.sku} into ${target.sku}`);
+      this.renderInventory(this._inventoryTab);
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   async toggleProductHistory(id) {

@@ -1285,6 +1285,13 @@ async function _init() {
     // and the POS/Quotations product pickers key off this to decide whether
     // to surface a given rental item alongside normal retail products.
     'ALTER TABLE products ADD COLUMN rental_allow_sale INTEGER NOT NULL DEFAULT 0',
+    // Set on a "duplicate" product once it's been merged into another (the
+    // surviving) product via POST /products/:id/merge — see lib/productMerge.js.
+    // The merged row is deactivated and kept, never deleted, so anything that
+    // still names it (an old receipt, a stale report) keeps resolving to a
+    // real row instead of a dangling id.
+    'ALTER TABLE products ADD COLUMN merged_into_product_id INTEGER REFERENCES products(id)',
+    'ALTER TABLE products ADD COLUMN merged_at DATETIME',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

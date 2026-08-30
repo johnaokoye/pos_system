@@ -8,6 +8,7 @@ const fs = require('fs');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 const { requireAuth, requirePermission, can } = require('../lib/permissions');
 const { getOutstandingQty } = require('../lib/rentalAvailability');
+const { mergeProducts } = require('../lib/productMerge');
 
 // CSV cells for money/quantity fields often carry currency symbols, thousands
 // separators, or stray whitespace (e.g. "$15.00", "1,000") — bare parseFloat/
@@ -116,6 +117,8 @@ router.get('/', requireAuth, async (req, res) => {
         p.stock_qty as global_stock_qty,
         c.name as category_name,
         (SELECT COUNT(*) FROM product_variations WHERE product_id = p.id AND active = 1) as has_variations,
+        p.merged_into_product_id,
+        (SELECT sku FROM products mp WHERE mp.id = p.merged_into_product_id) as merged_into_sku,
         ${rentalOutstandingExpr(true)}
         FROM products p
         LEFT JOIN categories c ON p.category_id = c.id
@@ -128,7 +131,8 @@ router.get('/', requireAuth, async (req, res) => {
     } else {
       sql = `SELECT p.*, c.name as category_name, (SELECT COUNT(*) FROM product_variations WHERE product_id = p.id AND active = 1) as has_variations, ${rentalOutstandingExpr(false)},
         (SELECT bi.branch_id FROM branch_inventory bi WHERE bi.product_id = p.id LIMIT 1) as assigned_branch_id,
-        (SELECT b.name FROM branch_inventory bi JOIN branches b ON bi.branch_id = b.id WHERE bi.product_id = p.id LIMIT 1) as assigned_branch_name
+        (SELECT b.name FROM branch_inventory bi JOIN branches b ON bi.branch_id = b.id WHERE bi.product_id = p.id LIMIT 1) as assigned_branch_name,
+        (SELECT sku FROM products mp WHERE mp.id = p.merged_into_product_id) as merged_into_sku
         FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE 1=1`;
     }
 
@@ -590,6 +594,19 @@ router.put('/:id', async (req, res, next) => {
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
+});
+
+// Merge a duplicate product (:id) into another (target_id) — combines stock
+// and repoints every table that references the duplicate, then deactivates
+// it rather than deleting it. See lib/productMerge.js for the full list of
+// what moves and why it's not a hard delete.
+router.post('/:id/merge', requirePermission('inventory_edit'), async (req, res) => {
+  try {
+    const { target_id } = req.body;
+    if (!target_id) return res.status(400).json({ error: 'A product to merge into is required' });
+    const updated = await mergeProducts(parseInt(req.params.id), parseInt(target_id));
+    res.json(updated);
+  } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
 // PATCH adjust stock (global or branch-specific)

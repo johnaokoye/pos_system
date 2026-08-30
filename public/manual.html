@@ -481,6 +481,9 @@
       <h3>Adjusting stock and stock movements</h3>
       <p>Manual stock adjustments (needs <span class="perm-pill">inventory_adjust</span>) and every automatic change (sales, receiving, transfers, cycle-count corrections) are logged as stock movements you can review per product, so you can always trace why a number changed.</p>
 
+      <h3>Merging duplicate SKUs</h3>
+      <p><strong>Merge</strong> on a product's row (needs <span class="perm-pill">inventory_edit</span>) consolidates it into another product you pick from a searchable list: the surviving product's stock (overall and per-branch) absorbs the duplicate's, and every sale, purchase order, quotation, work order, transfer, cycle count, bin assignment, and other record that named the duplicate is repointed to the survivor — so reports and history read as one SKU going forward. The duplicate itself is never deleted; it's deactivated and tagged <strong>Merged → [surviving SKU]</strong> on the inventory list, so anything that still shows its old name or SKU (a printed receipt, an old invoice) still traces back to a real record. This can't be undone from the UI — it would take a database-level fix — so double-check the target before confirming. Rental items and anything with active variations can't be merged (they don't offer the button); a variation-level duplicate should be cleaned up on the product's own Variations tab instead.</p>
+
       <h3>CSV import/export</h3>
       <p>Bulk-manage the catalog with a CSV template you can download, edit, and re-import — useful for large catalog updates or migrating from another system. A separate template/import exists specifically for rental items.</p>
 
