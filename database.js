@@ -1253,6 +1253,32 @@ async function _init() {
     // for those.
     "ALTER TABLE promotions ADD COLUMN recurrence_type TEXT DEFAULT 'none'",
     'ALTER TABLE promotions ADD COLUMN recurrence_days TEXT',
+    // The vendor's own reference for the order (e.g. an Amazon order #, or a
+    // supplier's quote #) — distinct from our own po_number. Freight fields
+    // track the leg between placing the order and the goods physically
+    // landing at a branch, which is handled by many suppliers via a freight
+    // forwarder: 'pending' -> 'received_by_forwarder' (forwarder has the
+    // goods) -> 'forwarded' (forwarder shipped them on to us). Orthogonal to
+    // purchase_orders.status, which tracks internal approval/receiving.
+    'ALTER TABLE purchase_orders ADD COLUMN vendor_order_number TEXT',
+    "ALTER TABLE purchase_orders ADD COLUMN freight_status TEXT NOT NULL DEFAULT 'pending'",
+    'ALTER TABLE purchase_orders ADD COLUMN freight_forwarder_received_at DATETIME',
+    'ALTER TABLE purchase_orders ADD COLUMN freight_forwarded_at DATETIME',
+    'ALTER TABLE purchase_orders ADD COLUMN freight_tracking_number TEXT',
+    'ALTER TABLE purchase_orders ADD COLUMN freight_notes TEXT',
+    // How many of a work order part's assigned quantity were later returned
+    // to stock instead of installed (see POST /work-orders/:id/parts/:itemId/return)
+    // — quantity stays the original assigned amount for the audit trail; the
+    // line's billable `total` is reduced as returns come in.
+    'ALTER TABLE work_order_items ADD COLUMN quantity_returned INTEGER NOT NULL DEFAULT 0',
+    // Marks a product as the "(Used)" discounted-resale sibling of another
+    // product — created on demand when a work order part is returned to
+    // stock instead of installed. Kept as a fully separate product (own SKU,
+    // price, stock_qty) rather than a variation of the original, since
+    // giving a plain product any variation makes the POS force a variant
+    // picker and stop selling its own base stock — see POST
+    // /work-orders/:id/parts/:itemId/return in routes/work-orders.js.
+    'ALTER TABLE products ADD COLUMN used_of_product_id INTEGER REFERENCES products(id)',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

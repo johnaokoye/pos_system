@@ -7,6 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 const { requireAuth, requirePermission, can } = require('../lib/permissions');
+const { getOutstandingQty } = require('../lib/rentalAvailability');
 
 // CSV cells for money/quantity fields often carry currency symbols, thousands
 // separators, or stray whitespace (e.g. "$15.00", "1,000") — bare parseFloat/
@@ -92,10 +93,12 @@ router.get('/', requireAuth, async (req, res) => {
 
     // Outstanding rental qty is scoped to the requested branch when one is given
     // (matching the branch-specific stock_qty below), otherwise it's global —
-    // keep this in sync with lib/rentalAvailability.js's getOutstandingQty().
+    // kept in sync with lib/rentalAvailability.js's getOutstandingQty() (same
+    // status list, including 'pending' — a held-for-checkout agreement
+    // reserves the unit same as an active one).
     const rentalOutstandingExpr = (branchScoped) => `(SELECT COALESCE(SUM(rai.quantity - rai.quantity_returned),0)
         FROM rental_agreement_items rai JOIN rental_agreements ra ON rai.agreement_id = ra.id
-        WHERE rai.product_id = p.id AND ra.status IN ('active', 'awaiting_issue')${branchScoped ? ' AND ra.branch_id = ?' : ''}) as rental_outstanding_qty`;
+        WHERE rai.product_id = p.id AND ra.status IN ('active', 'pending', 'awaiting_issue')${branchScoped ? ' AND ra.branch_id = ?' : ''}) as rental_outstanding_qty`;
 
     if (branch_id) {
       // price is recalculated against the branch's price_tier_percent (a
@@ -545,10 +548,25 @@ router.put('/:id', async (req, res, next) => {
     const acc = is_accessory ? 1 : 0;
     const lay = is_layaway_eligible ? 1 : 0;
     const tax = taxable === undefined ? 1 : (taxable ? 1 : 0);
-    await db.execute({ sql: `UPDATE products SET sku=?,barcode=?,name=?,description=?,category_id=?,price=?,cost=?,tax_rate=?,stock_qty=?,min_stock=?,active=?,supplier_id=?,is_service=?,unit=?,online_available=?,web_allotment=?,is_rental=?,rental_rate_type=?,rental_rate=?,rental_deposit=?,rental_late_fee_rate=?,replacement_value=?,rental_classification=?,rental_weekly_rate=?,rental_monthly_rate=?,rental_hourly_rate=?,is_accessory=?,is_layaway_eligible=?,model_number=?,size=?,brand=?,taxable=? WHERE id=?`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, tax_rate??8.5, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null, rnt, rental_rate_type||'daily', rental_rate||0, rental_deposit||0, rental_late_fee_rate||0, replacement_value||0, rental_classification||'tool', rental_weekly_rate||0, rental_monthly_rate||0, rental_hourly_rate||0, acc, lay, model_number||null, size||null, brand||null, tax, req.params.id] });
     // Rental items live at a single branch — reassigning the dropdown moves
-    // the stock there; clearing it drops back to unassigned/global-only
-    // (matches the "Unassigned (global stock only)" option in the form).
+    // the stock there instantly, with no audit trail or driver hand-off.
+    // That's fine for a never-rented item, but moving it out from under units
+    // that are still out on an active rental would strand that rental's
+    // return at a branch the item no longer shows as belonging to — checked
+    // here, before any write, so a rejected move doesn't leave the rest of
+    // the edit (rates, name, etc.) half-saved. Use Branch Transfers instead
+    // once there's outstanding stock to move deliberately.
+    if (rnt && branch_id !== undefined) {
+      const { rows: [currentBI] } = await db.execute({ sql: 'SELECT branch_id FROM branch_inventory WHERE product_id = ?', args: [req.params.id] });
+      const oldBranchId = currentBI?.branch_id || null;
+      if (oldBranchId && String(oldBranchId) !== String(branch_id || '')) {
+        const outstanding = await getOutstandingQty(db, req.params.id, oldBranchId);
+        if (outstanding > 0) {
+          return res.status(400).json({ error: `${outstanding} unit(s) are still out on active rentals from its current branch — use Branch Transfers to move the available stock instead, or wait until they're returned.` });
+        }
+      }
+    }
+    await db.execute({ sql: `UPDATE products SET sku=?,barcode=?,name=?,description=?,category_id=?,price=?,cost=?,tax_rate=?,stock_qty=?,min_stock=?,active=?,supplier_id=?,is_service=?,unit=?,online_available=?,web_allotment=?,is_rental=?,rental_rate_type=?,rental_rate=?,rental_deposit=?,rental_late_fee_rate=?,replacement_value=?,rental_classification=?,rental_weekly_rate=?,rental_monthly_rate=?,rental_hourly_rate=?,is_accessory=?,is_layaway_eligible=?,model_number=?,size=?,brand=?,taxable=? WHERE id=?`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, tax_rate??8.5, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null, rnt, rental_rate_type||'daily', rental_rate||0, rental_deposit||0, rental_late_fee_rate||0, replacement_value||0, rental_classification||'tool', rental_weekly_rate||0, rental_monthly_rate||0, rental_hourly_rate||0, acc, lay, model_number||null, size||null, brand||null, tax, req.params.id] });
     if (rnt && branch_id !== undefined) {
       await db.execute({ sql: 'DELETE FROM branch_inventory WHERE product_id = ? AND branch_id != ?', args: [req.params.id, branch_id || 0] });
       if (branch_id) {

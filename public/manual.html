@@ -326,6 +326,13 @@
       <p>Managed separately from retail Inventory. Each item has a daily rate, a classification (<strong>Tool</strong> or <strong>Equipment</strong>), a model number and size, and can have mandatory or optional accessories attached (needs <span class="perm-pill">rentals_manage_items</span>).</p>
       <div class="callout note"><strong>Tool pricing tiers</strong>Tools get automatic volume discounts off the daily rate instead of a manually-set weekly/monthly catalog price: renting 7-28 days bills the <em>whole</em> rental at 85% of the daily rate per day, and renting more than 28 days bills the whole rental at 75% of that (i.e. 63.75% of the original daily rate) per day. The Weekly/Monthly Rate fields on the item form are only used for Equipment items, which still bill in fixed week/month blocks at their own configured rates plus an hourly rate for partial days.</div>
 
+      <h3>Moving a rental item between locations</h3>
+      <p>A rental item lives at a single branch at a time (its <strong>Branch / Location</strong> on the item form) — only staff at that branch, or with multi-branch access, can see and rent it. There are two ways to change that:</p>
+      <ul>
+        <li><strong>Edit the item directly</strong> — changing the Branch / Location dropdown moves its stock to the new branch instantly, with no transfer record. Fine for an item that's never been rented, but blocked (with an error naming how many units and telling you to use Branch Transfers instead) whenever units of it are still out on an active rental from its current branch — reassigning it out from under an active loan would leave that rental's return pointing at a branch the item no longer shows as belonging to.</li>
+        <li><strong>Transfer</strong> (needs <span class="perm-pill">transfers</span>) — the <strong>Transfer</strong> button on the item's row in Rental Items jumps into <a href="#transfers">Branch Transfers</a> with the item and its current branch pre-filled, going through the same pickup/receive audit trail retail stock uses. Only units actually free right now can be moved — a rental item's stock figure is the total number owned, so whatever's currently checked out to a customer from that branch is subtracted from what's offered for transfer, both in the item picker and if attempted anyway.</li>
+      </ul>
+
       <h3>Customer eligibility</h3>
       <p>A customer can't start a new rental until their profile has an ID (type, number, and a scanned copy), a proof of address, and an emergency reference on file. This is enforced at both the direct rental-hold flow and at converting a rental quote into an agreement.</p>
 
@@ -403,6 +410,7 @@
       </ul>
       <p style="font-size:12px;color:var(--text-muted);margin-top:-6px">Each line shows a one-line hint under it explaining exactly what picking that type will do — read it before saving if you're not sure which one applies.</p>
       <p><strong>Save Parts</strong> records what's needed; <strong>Confirm Parts</strong> is the separate, explicit step that actually creates those transfers/purchase requests — the same "confirm what was drafted" split a quotation's Accept step uses. Each part line shows a live status badge (sourced from branch / transfer pending / PR pending / PO received / Q / Customer Supplied) that updates the same way a quotation's does once its linked purchase order comes in.</p>
+      <p>A catalog part that's pulled for a job but ends up not being installed — or one removed from the customer's machine and still resalable — can be sent back with <strong>Return</strong> on its line (any pre-completion status, needs <span class="perm-pill">wo_assign_parts</span>). It asks how many to return and at what discounted resale price, then restocks that quantity under a distinct <strong>"(Used)"</strong> sibling product (its own SKU, price, and stock, tagged <span class="badge-pill badge-purple" style="font-size:10px">Used</span> in Inventory) rather than mixing it back into the original product's new-condition stock — created automatically the first time a part of that product is returned, and topped up (at the latest asking price) on later returns. The original line keeps its assigned quantity for the record but shows how many were returned, and its charge on the work order drops to cover only what's left.</p>
 
       <h3>Tasks &amp; time tracking</h3>
       <p>Once a WO is <strong>In Progress</strong> (needs <span class="perm-pill">wo_technician</span>), it can be broken into tasks — a description, an allotted time in minutes, and an assigned technician. Each task has a <strong>Clock In</strong> / <strong>Clock Out</strong> button: clocking in starts a timer (and flips the task to In Progress); clocking out stops it. Actual time is the sum of every clock-in/clock-out pair on that task, so a technician can pause and resume across a break without losing what's already been logged. Actual time is shown in red once it exceeds the allotted minutes.</p>
@@ -503,6 +511,7 @@
         <li><strong>Receiving</strong> (needs <span class="perm-pill">purchasing_receive</span>) — mark items as arrived; this can happen over multiple partial deliveries. Receiving updates stock (both overall and at the PO's branch) and refreshes the product's cost to the latest price paid.</li>
       </ol>
       <p>A PO can also be marked <strong>cancelled</strong>, and items received damaged can be logged separately to reverse the stock that was just added. You can attach files to a PO — invoices, packing slips — up to 20MB each.</p>
+      <p>A PO can carry the <strong>vendor's own order/quote number</strong> (e.g. an Amazon order #) separate from its own PO number — set it when creating the PO or edit it later from the PO detail view. Alongside it, a <strong>Freight Forwarding</strong> panel tracks orders that ship through a freight forwarder before reaching a branch: <strong>Pending → Received by Forwarder → Forwarded to Us</strong>, each stamped with a timestamp, plus an optional freight tracking number and notes. This status is independent of the PO's own approval/receiving status above.</p>
       <div class="callout note"><strong>Items with no product yet</strong>A PO line for something not yet in your catalog can be "linked" to a product after the fact — either an existing one or a brand-new one created on the spot — and any quantity already received retroactively applies to its stock. If the line traces back to a quotation's "Q" item, the newly created product is automatically tagged non-inventory and shows under Inventory's <a href="#inventory">Non-Inventory Items tab</a> rather than the main catalog list, since it was bought for that one quote.</div>
     </section>
 
@@ -521,6 +530,7 @@
         <li><strong>Receive</strong> (needs <span class="perm-pill">transfers_dropoff</span>) — add the stock to the destination branch; this can be done in partial batches over more than one delivery.</li>
       </ol>
       <p>Cancelling a transfer restores whatever hadn't yet been received back to the source branch. Transfers can also be created automatically when a multi-branch quotation is accepted and part of the order has to come from another location.</p>
+      <p>The New Transfer product picker works for rental items too (tagged <span style="font-weight:600">[Rental]</span> in the list) — see <a href="#rentals">Rentals</a> for how a rental item's currently-checked-out units are excluded from what's offered.</p>
     </section>
 
     <section class="module" id="warehouse">

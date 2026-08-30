@@ -54,7 +54,7 @@ router.get('/:id', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const { supplier_id, branch_id, employee_id, items, notes, expected_date } = req.body;
+    const { supplier_id, branch_id, employee_id, items, notes, expected_date, vendor_order_number } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in PO' });
 
     const po_number = await nextNumber(db, 'purchase_orders', 'po_number', 'PO-', 6);
@@ -74,7 +74,7 @@ router.post('/', async (req, res) => {
     const tx = await db.transaction('write');
     let committed = false;
     try {
-      const result = await tx.execute({ sql: 'INSERT INTO purchase_orders (po_number,supplier_id,branch_id,employee_id,subtotal,total,notes,expected_date) VALUES (?,?,?,?,?,?,?,?)', args: [po_number, supplier_id||null, branch_id||null, employee_id||null, subtotal, subtotal, notes||null, expected_date||null] });
+      const result = await tx.execute({ sql: 'INSERT INTO purchase_orders (po_number,supplier_id,branch_id,employee_id,subtotal,total,notes,expected_date,vendor_order_number) VALUES (?,?,?,?,?,?,?,?,?)', args: [po_number, supplier_id||null, branch_id||null, employee_id||null, subtotal, subtotal, notes||null, expected_date||null, vendor_order_number||null] });
       const poId = Number(result.lastInsertRowid);
       for (const item of processedItems) {
         await tx.execute({ sql: 'INSERT INTO purchase_order_items (po_id,product_id,product_name,sku,quantity_ordered,unit_cost,total) VALUES (?,?,?,?,?,?,?)', args: [poId, item.product_id, item.product_name, item.sku, item.quantity_ordered, item.unit_cost, item.total] });
@@ -112,6 +112,43 @@ router.patch('/:id/status', async (req, res) => {
     await db.execute({ sql: 'UPDATE purchase_orders SET status = ? WHERE id = ?', args: [status, req.params.id] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });
     res.json(row);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Freight forwarding tracking — the vendor's own order/quote number (e.g. an
+// Amazon order #) plus the freight forwarder's receipt/forwarding status for
+// POs that ship through a forwarder before reaching a branch. Orthogonal to
+// the PO's own status/receiving workflow above.
+router.patch('/:id/freight', async (req, res) => {
+  try {
+    const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });
+    if (!po) return res.status(404).json({ error: 'Not found' });
+
+    const { vendor_order_number, freight_status, freight_tracking_number, freight_notes } = req.body;
+    if (freight_status !== undefined && !['pending', 'received_by_forwarder', 'forwarded'].includes(freight_status)) {
+      return res.status(400).json({ error: 'Invalid freight status' });
+    }
+
+    const fields = [];
+    const args = [];
+    if (vendor_order_number !== undefined) { fields.push('vendor_order_number = ?'); args.push(vendor_order_number || null); }
+    if (freight_tracking_number !== undefined) { fields.push('freight_tracking_number = ?'); args.push(freight_tracking_number || null); }
+    if (freight_notes !== undefined) { fields.push('freight_notes = ?'); args.push(freight_notes || null); }
+    if (freight_status !== undefined) {
+      fields.push('freight_status = ?'); args.push(freight_status);
+      if (freight_status === 'received_by_forwarder' && !po.freight_forwarder_received_at) {
+        fields.push('freight_forwarder_received_at = ?'); args.push(new Date().toISOString());
+      }
+      if (freight_status === 'forwarded' && !po.freight_forwarded_at) {
+        fields.push('freight_forwarded_at = ?'); args.push(new Date().toISOString());
+      }
+    }
+    if (!fields.length) return res.status(400).json({ error: 'No fields to update' });
+    args.push(req.params.id);
+    await db.execute({ sql: `UPDATE purchase_orders SET ${fields.join(', ')} WHERE id = ?`, args });
+
+    const { rows: [updated] } = await db.execute({ sql: `SELECT po.*, s.name as supplier_name, b.name as branch_name FROM purchase_orders po LEFT JOIN suppliers s ON po.supplier_id = s.id LEFT JOIN branches b ON po.branch_id = b.id WHERE po.id = ?`, args: [req.params.id] });
+    res.json(updated);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

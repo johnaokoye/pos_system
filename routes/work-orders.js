@@ -285,6 +285,85 @@ router.post('/:id/confirm-parts', requirePermission('wo_assign_parts'), async (r
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Returns some/all of a catalog part's remaining quantity to stock instead of
+// installing it — e.g. pulled for the job but not needed, or removed from
+// the customer's machine and still resalable. Restocked as a distinct
+// "(Used)" sibling product at a discounted price (found by
+// products.used_of_product_id, created on first use) rather than a
+// variation of the original — see the used_of_product_id migration comment
+// in database.js for why. Reduces this line's billable total (and so the
+// WO's parts charge) by the returned quantity; `quantity` itself stays the
+// original assigned amount so the audit trail (assigned vs. returned) is
+// visible on the line.
+router.post('/:id/parts/:itemId/return', requirePermission('wo_assign_parts'), async (req, res) => {
+  try {
+    const { rows: [wo] } = await db.execute({ sql: 'SELECT * FROM work_orders WHERE id = ?', args: [req.params.id] });
+    if (!wo) return res.status(404).json({ error: 'Not found' });
+    if (['complete', 'awaiting_pickup', 'picked_up', 'cancelled', 'not_worth_fixing'].includes(wo.status)) {
+      return res.status(400).json({ error: `Cannot return parts on a ${wo.status} work order` });
+    }
+    const { rows: [item] } = await db.execute({ sql: 'SELECT * FROM work_order_items WHERE id = ? AND work_order_id = ?', args: [req.params.itemId, req.params.id] });
+    if (!item) return res.status(404).json({ error: 'Part not found' });
+    if (item.is_customer_supplied) return res.status(400).json({ error: "Customer-supplied items can't be returned to stock" });
+    if (!item.product_id) return res.status(400).json({ error: "This item isn't a catalog product and can't be returned to stock" });
+
+    const qty = parseInt(req.body.quantity);
+    if (!qty || qty <= 0) return res.status(400).json({ error: 'A return quantity is required' });
+    const remaining = item.quantity - (item.quantity_returned || 0);
+    if (qty > remaining) return res.status(400).json({ error: `Only ${remaining} unit(s) remain on this line` });
+    const usedPrice = parseFloat(req.body.used_price);
+    if (isNaN(usedPrice) || usedPrice < 0) return res.status(400).json({ error: 'A used resale price is required' });
+    const notes = (req.body.notes || '').trim() || null;
+
+    const tx = await db.transaction('write');
+    let committed = false;
+    try {
+      const newReturned = (item.quantity_returned || 0) + qty;
+      const newRemaining = item.quantity - newReturned;
+      const newTotal = parseFloat((item.unit_price * newRemaining).toFixed(2));
+      await tx.execute({ sql: 'UPDATE work_order_items SET quantity_returned = ?, total = ? WHERE id = ?', args: [newReturned, newTotal, item.id] });
+
+      const { rows: [product] } = await tx.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] });
+      let { rows: [sibling] } = await tx.execute({ sql: 'SELECT * FROM products WHERE used_of_product_id = ?', args: [item.product_id] });
+      if (!sibling) {
+        let sku = `${product.sku}-USED`;
+        let suffix = 2;
+        while ((await tx.execute({ sql: 'SELECT id FROM products WHERE sku = ?', args: [sku] })).rows.length) {
+          sku = `${product.sku}-USED-${suffix++}`;
+        }
+        const result = await tx.execute({
+          sql: 'INSERT INTO products (sku,name,category_id,price,cost,tax_rate,stock_qty,min_stock,active,supplier_id,used_of_product_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+          args: [sku, `${product.name} (Used)`, product.category_id || null, usedPrice, product.cost || 0, product.tax_rate ?? 8.5, 0, 0, 1, product.supplier_id || null, product.id],
+        });
+        const { rows: [created] } = await tx.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [Number(result.lastInsertRowid)] });
+        sibling = created;
+      } else {
+        // Most recent asking price wins — a later batch's discount may
+        // differ from the last one's.
+        await tx.execute({ sql: 'UPDATE products SET price = ? WHERE id = ?', args: [usedPrice, sibling.id] });
+      }
+
+      await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [qty, sibling.id] });
+      if (wo.branch_id) {
+        await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, 0, CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [sibling.id, wo.branch_id, qty, qty] });
+      }
+      await tx.execute({ sql: 'INSERT INTO stock_movements (product_id, branch_id, quantity_change, type, reference, reason) VALUES (?,?,?,?,?,?)', args: [sibling.id, wo.branch_id || null, qty, 'wo_return_used', wo.wo_number, notes || `Returned from ${item.product_name} on ${wo.wo_number}, restocked as used`] });
+      await logStatus(tx, wo.id, wo.status, `Returned ${qty}x ${item.product_name} to stock as Used (${sibling.sku}) @ ${usedPrice.toFixed(2)} each`, req.body.employee_id);
+
+      await tx.commit();
+      committed = true;
+    } catch(e) {
+      if (!committed) await tx.rollback();
+      return res.status(committed ? 500 : 400).json({ error: e.message });
+    }
+
+    const { rows: [updated] } = await db.execute({ sql: `${WO_LIST_SELECT} WHERE wo.id = ?`, args: [req.params.id] });
+    const { rows: items } = await db.execute({ sql: WO_ITEMS_SELECT, args: [req.params.id] });
+    updated.items = await attachWorkOrderItemSources(items);
+    res.json(updated);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ─── Intake ─────────────────────────────────────────────────────────────────
 
 router.post('/', requirePermission('wo_intake'), async (req, res) => {

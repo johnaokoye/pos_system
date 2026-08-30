@@ -3976,7 +3976,7 @@ const App = {
         ${products.map(p => `<tr id="inv-row-${p.id}">
           <td style="width:52px">${p.image_path ? `<img src="${p.image_path}" class="prod-img-thumb" alt="">` : `<div class="prod-img-placeholder" onclick="App.showProductForm(${p.id})">📷</div>`}</td>
           <td style="font-family:monospace;font-size:12px">${p.sku}</td>
-          <td class="fw-600">${p.name}${p.has_variations > 0 ? `<span class="has-vars-badge">${p.has_variations} var</span>` : ''}</td>
+          <td class="fw-600">${p.name}${p.has_variations > 0 ? `<span class="has-vars-badge">${p.has_variations} var</span>` : ''}${p.used_of_product_id ? `<span class="badge-pill badge-purple" style="font-size:10px;margin-left:6px">Used</span>` : ''}</td>
           <td style="color:var(--text-muted)">${p.category_name || '—'}</td>
           <td>${this.fmt(p.price)}</td>
           <td style="color:var(--text-muted)">${this.fmt(p.cost)}</td>
@@ -4898,6 +4898,7 @@ const App = {
               <td style="white-space:nowrap">
                 ${this.can('rentals_manage_items') ? `<button class="btn btn-sm btn-secondary" onclick="App.showRentalItemForm(${p.id})">Edit</button>
                 <button class="btn btn-sm btn-outline" onclick="App.showRentalAccessoriesModal(${p.id}, '${p.name.replace(/'/g,"\\'")}')">Accessories</button>` : ''}
+                ${this.can('transfers') && p.assigned_branch_id ? `<button class="btn btn-sm btn-outline" onclick="App.showTransferForm({fromBranchId:${p.assigned_branch_id},productId:${p.id}})">Transfer</button>` : ''}
               </td>
             </tr>`).join('')}</tbody>
           </table>
@@ -7248,8 +7249,8 @@ const App = {
           ${canManageParts ? `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px">
             <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Parts</strong>
             <div id="wo-parts-list" style="margin-top:6px">
-              ${(wo.items||[]).length ? `<table class="table" style="font-size:12px"><thead><tr><th>Part</th><th>Qty</th><th>Total</th><th>Source</th></tr></thead><tbody>
-                ${wo.items.map(i => `<tr><td>${i.product_name}</td><td>${i.quantity}</td><td>${this.fmt(i.total)}</td><td>${this._woPartStatusBadge(i)}</td></tr>`).join('')}
+              ${(wo.items||[]).length ? `<table class="table" style="font-size:12px"><thead><tr><th>Part</th><th>Qty</th><th>Total</th><th>Source</th><th></th></tr></thead><tbody>
+                ${wo.items.map(i => { const remaining = i.quantity - (i.quantity_returned||0); const canReturn = partsEditable && i.product_id && !i.is_customer_supplied && remaining > 0; return `<tr><td>${i.product_name}</td><td>${i.quantity}${i.quantity_returned>0?` <span style="color:var(--text-muted)">(${i.quantity_returned} returned)</span>`:''}</td><td>${this.fmt(i.total)}</td><td>${this._woPartStatusBadge(i)}</td><td>${canReturn ? `<button class="btn btn-sm btn-outline" onclick="App.showWOPartReturnModal(${wo.id},${i.id})">Return</button>` : ''}</td></tr>`; }).join('')}
               </tbody></table>` : '<div style="color:var(--text-muted);font-size:12px">No parts assigned yet</div>'}
             </div>
             ${partsEditable ? `
@@ -7673,6 +7674,47 @@ const App = {
       await this.api('POST', `/work-orders/${id}/confirm-parts`);
       this.alert('Parts confirmed — transfers/purchase requests created where needed');
       await this.viewWorkOrder(id);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // Pulled for the job but not installed (or removed from the customer's
+  // machine and still resalable) — sends the remaining quantity back to
+  // stock as a discounted "Used" sibling product and knocks it off this
+  // line's charge on the work order.
+  async showWOPartReturnModal(woId, itemId) {
+    const wo = await this.api('GET', `/work-orders/${woId}`);
+    const item = (wo.items||[]).find(i => i.id === itemId);
+    if (!item) return;
+    const remaining = item.quantity - (item.quantity_returned || 0);
+    this.showSecondaryModal(`
+      <div class="modal">
+        <div class="modal-header"><span class="modal-title">Return to Stock — ${this.escapeAttr(item.product_name)}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:12px;color:var(--text-muted)">Restocks this quantity as a discounted "Used" item (kept separate from new-condition stock) and reduces this line's charge on the work order.</p>
+          <div class="input-row">
+            <div class="form-group"><label>Quantity to Return</label><input type="number" id="wopr-qty" min="1" max="${remaining}" value="${remaining}"></div>
+            <div class="form-group"><label>Used Resale Price (each)</label><input type="number" id="wopr-price" min="0" step="0.01" value="${item.unit_price}"></div>
+          </div>
+          <div class="form-group"><label>Notes</label><textarea id="wopr-notes" rows="2" placeholder="Why it's being returned"></textarea></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeSecondaryModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.saveWOPartReturn(${woId},${itemId})">Return to Stock</button>
+        </div>
+      </div>`);
+  },
+
+  async saveWOPartReturn(woId, itemId) {
+    const quantity = parseInt(document.getElementById('wopr-qty').value);
+    const used_price = parseFloat(document.getElementById('wopr-price').value);
+    const notes = document.getElementById('wopr-notes').value.trim();
+    if (!quantity || quantity <= 0) { this.alert('Enter a quantity to return', 'error'); return; }
+    if (isNaN(used_price) || used_price < 0) { this.alert('Enter a used resale price', 'error'); return; }
+    try {
+      await this.api('POST', `/work-orders/${woId}/parts/${itemId}/return`, { quantity, used_price, notes, employee_id: this.currentUser.id });
+      this.closeSecondaryModal();
+      this.alert('Returned to stock as Used');
+      await this.viewWorkOrder(woId);
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
@@ -11922,8 +11964,9 @@ const App = {
           </div>
           <div class="input-row">
             <div class="form-group"><label>Expected Date</label><input id="po-date" type="date"></div>
-            <div class="form-group"><label>Notes</label><input id="po-notes"></div>
+            <div class="form-group"><label>Vendor Order/Quote #</label><input id="po-vendor-order" placeholder="e.g. Amazon order #"></div>
           </div>
+          <div class="form-group"><label>Notes</label><input id="po-notes"></div>
           <div style="margin-bottom:10px">
             <div class="card-header"><span class="card-title">Items</span>
               <div style="display:flex;gap:8px">
@@ -12106,6 +12149,7 @@ const App = {
     const branch_id = document.getElementById('po-branch').value;
     const expected_date = document.getElementById('po-date').value;
     const notes = document.getElementById('po-notes').value;
+    const vendor_order_number = document.getElementById('po-vendor-order').value.trim() || null;
     const items = [];
     document.querySelectorAll('[id^="poi-prod-"]').forEach(sel => {
       if (!sel.closest('[id^="po-item-"]')) return;
@@ -12119,7 +12163,7 @@ const App = {
     if (!supplier_id) { this.alert('Please select a supplier', 'error'); return; }
     if (!items.length) { this.alert('Add at least one item', 'error'); return; }
     try {
-      await this.api('POST', '/purchase-orders', { supplier_id, branch_id: branch_id||null, notes, expected_date: expected_date||null, items });
+      await this.api('POST', '/purchase-orders', { supplier_id, branch_id: branch_id||null, notes, expected_date: expected_date||null, vendor_order_number, items });
       this.closeModal();
       this.alert('Purchase order created');
       this.renderPurchasing();
@@ -12141,6 +12185,8 @@ const App = {
       return '📎';
     };
     const fmtBytes = b => b < 1024 ? `${b} B` : b < 1048576 ? `${(b/1024).toFixed(1)} KB` : `${(b/1048576).toFixed(1)} MB`;
+    const freightStatusColor = { pending:'badge-warning', received_by_forwarder:'badge-info', forwarded:'badge-teal' };
+    const freightStatusLabel = { pending:'Pending', received_by_forwarder:'Received by Forwarder', forwarded:'Forwarded to Us' };
     this.showModal(`
       <div class="modal" style="max-width:700px">
         <div class="modal-header">
@@ -12153,7 +12199,7 @@ const App = {
         <div class="modal-body">
           <div class="two-col" style="margin-bottom:14px;font-size:13px">
             <div><strong>Supplier:</strong> ${po.supplier_name||'-'}<br><strong>Contact:</strong> ${po.supplier_contact||'-'}<br><strong>Email:</strong> ${po.supplier_email||'-'}</div>
-            <div><strong>Branch:</strong> ${po.branch_name||'-'}<br><strong>Created:</strong> ${this.fmtDate(po.created_at)}<br><strong>Expected:</strong> ${po.expected_date ? this.fmtDate(po.expected_date) : '-'}</div>
+            <div><strong>Branch:</strong> ${po.branch_name||'-'}<br><strong>Created:</strong> ${this.fmtDate(po.created_at)}<br><strong>Expected:</strong> ${po.expected_date ? this.fmtDate(po.expected_date) : '-'}<br><strong>Vendor Order/Quote #:</strong> ${po.vendor_order_number || '-'}</div>
           </div>
           <div class="table-wrap">
             <table>
@@ -12172,6 +12218,24 @@ const App = {
             </table>
           </div>
           <div style="text-align:right;margin-top:10px;font-size:15px;font-weight:700">Total: ${this.fmt(po.total)}</div>
+
+          <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:14px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+              <span style="font-weight:700;font-size:14px">Freight Forwarding</span>
+              <button class="btn btn-sm btn-outline" onclick="App.showFreightForm(${po.id})">Edit</button>
+            </div>
+            <div style="font-size:13px;display:flex;flex-direction:column;gap:4px;margin-bottom:10px">
+              <div><strong>Status:</strong> <span class="badge-pill ${freightStatusColor[po.freight_status]||'badge-warning'}">${freightStatusLabel[po.freight_status]||po.freight_status}</span></div>
+              ${po.freight_forwarder_received_at ? `<div><strong>Received by Forwarder:</strong> ${this.fmtDate(po.freight_forwarder_received_at)}</div>` : ''}
+              ${po.freight_forwarded_at ? `<div><strong>Forwarded to Us:</strong> ${this.fmtDate(po.freight_forwarded_at)}</div>` : ''}
+              ${po.freight_tracking_number ? `<div><strong>Tracking #:</strong> ${po.freight_tracking_number}</div>` : ''}
+              ${po.freight_notes ? `<div><strong>Notes:</strong> ${po.freight_notes}</div>` : ''}
+            </div>
+            <div style="display:flex;gap:8px">
+              ${po.freight_status==='pending' ? `<button class="btn btn-sm btn-secondary" onclick="App.updateFreightStatus(${po.id},'received_by_forwarder')">Mark Received by Forwarder</button>` : ''}
+              ${po.freight_status==='received_by_forwarder' ? `<button class="btn btn-sm btn-primary" onclick="App.updateFreightStatus(${po.id},'forwarded')">Mark Forwarded</button>` : ''}
+            </div>
+          </div>
 
           <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:14px">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -12203,6 +12267,41 @@ const App = {
         </div>
       </div>`);
     this._viewingPOId = po.id;
+  },
+
+  async showFreightForm(poId) {
+    const po = await this.api('GET', `/purchase-orders/${poId}`);
+    this.showSecondaryModal(`
+      <div class="modal">
+        <div class="modal-header"><span class="modal-title">Freight Forwarding Details</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div class="form-group"><label>Vendor Order/Quote #</label><input id="ff-vendor-order" value="${this.escapeAttr(po.vendor_order_number || '')}" placeholder="e.g. Amazon order #"></div>
+          <div class="form-group"><label>Freight Tracking #</label><input id="ff-tracking" value="${this.escapeAttr(po.freight_tracking_number || '')}"></div>
+          <div class="form-group"><label>Notes</label><textarea id="ff-notes" rows="3">${po.freight_notes || ''}</textarea></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeSecondaryModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.saveFreightForm(${poId})">Save</button>
+        </div>
+      </div>`);
+  },
+
+  async saveFreightForm(poId) {
+    const vendor_order_number = document.getElementById('ff-vendor-order').value.trim() || null;
+    const freight_tracking_number = document.getElementById('ff-tracking').value.trim() || null;
+    const freight_notes = document.getElementById('ff-notes').value.trim() || null;
+    try {
+      await this.api('PATCH', `/purchase-orders/${poId}/freight`, { vendor_order_number, freight_tracking_number, freight_notes });
+      this.closeSecondaryModal();
+      this.viewPO(poId);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async updateFreightStatus(poId, freight_status) {
+    try {
+      await this.api('PATCH', `/purchase-orders/${poId}/freight`, { freight_status });
+      this.viewPO(poId);
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   // A received PO line with no product_id never touched stock (see
@@ -12524,7 +12623,10 @@ const App = {
     this._transferBranches = branches;
   },
 
-  async showTransferForm() {
+  // prefill (optional): { fromBranchId, productId } — used by Rental Items'
+  // "Transfer" action to jump straight into a transfer of one specific item
+  // instead of making the user reselect the branch and product by hand.
+  async showTransferForm(prefill) {
     const branches = this.currentUser.branches || [];
     this._transferProducts = [];
     this._transferItemIdx = 0;
@@ -12536,7 +12638,7 @@ const App = {
             <div class="form-group"><label>From Branch *</label>
               <select id="trf-from" onchange="App.onTransferFromChange()">
                 <option value="">-- Select Source --</option>
-                ${branches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
+                ${branches.map(b => `<option value="${b.id}" ${prefill?.fromBranchId && String(prefill.fromBranchId)===String(b.id)?'selected':''}>${b.name}</option>`).join('')}
               </select>
             </div>
             <div class="form-group"><label>To Branch *</label>
@@ -12557,9 +12659,13 @@ const App = {
           <button class="btn btn-primary" onclick="App.saveTransfer()">Create Transfer</button>
         </div>
       </div>`);
+    if (prefill?.fromBranchId) await this.onTransferFromChange(prefill.productId);
   },
 
-  async onTransferFromChange() {
+  // preselectedId (optional): passed through when the source-branch load was
+  // triggered by showTransferForm's prefill, so the one item it cares about
+  // gets added automatically instead of leaving the item list empty.
+  async onTransferFromChange(preselectedId) {
     const branchId = document.getElementById('trf-from')?.value;
     const container = document.getElementById('trf-items');
     const addBtn = document.getElementById('trf-add-btn');
@@ -12573,19 +12679,24 @@ const App = {
     }
     container.innerHTML = '<p style="color:var(--text-muted);font-size:13px;padding:8px 0">Loading…</p>';
     const all = await this.api('GET', `/products?active=1&branch_id=${branchId}`);
-    this._transferProducts = all.filter(p => p.stock_qty > 0);
+    // A rental item's stock_qty is the total owned count, not what's free to
+    // move — units currently out on an active rental from this branch don't
+    // physically sit on the shelf here, so they're excluded from what can be
+    // transferred (matches the same subtraction the server enforces).
+    all.forEach(p => { p.available_qty = (p.stock_qty || 0) - (p.rental_outstanding_qty || 0); });
+    this._transferProducts = all.filter(p => p.available_qty > 0);
     this._transferItemIdx = 0;
     container.innerHTML = '';
     if (addBtn) addBtn.disabled = false;
     if (this._transferProducts.length === 0) {
-      container.innerHTML = '<p style="color:var(--text-muted);font-size:13px;padding:8px 0">No products with stock at this branch.</p>';
+      container.innerHTML = '<p style="color:var(--text-muted);font-size:13px;padding:8px 0">No products with available stock at this branch.</p>';
       if (addBtn) addBtn.disabled = true;
       return;
     }
-    this.addTransferItem();
+    this.addTransferItem(preselectedId);
   },
 
-  addTransferItem() {
+  addTransferItem(preselectedId) {
     const container = document.getElementById('trf-items');
     if (!container) return;
     const products = this._transferProducts || [];
@@ -12597,12 +12708,17 @@ const App = {
     div.innerHTML = `
       <select style="flex:2" id="trfi-prod-${idx}" onchange="App.onTransferProductChange(${idx})">
         <option value="">-- Select Product --</option>
-        ${products.map(p => `<option value="${p.id}" data-stock="${p.stock_qty}">${p.name} (${p.sku}) — Avail: ${p.stock_qty}</option>`).join('')}
+        ${products.map(p => `<option value="${p.id}" data-stock="${p.available_qty}">${p.name} (${p.sku})${p.is_rental?' [Rental]':''} — Avail: ${p.available_qty}</option>`).join('')}
       </select>
       <input id="trfi-qty-${idx}" type="number" min="1" max="" value="1" style="width:80px" placeholder="Qty">
       <span id="trfi-stock-${idx}" style="font-size:12px;color:var(--text-muted);white-space:nowrap"></span>
       <button class="btn btn-sm btn-danger" onclick="document.getElementById('trf-item-${idx}').remove()">✕</button>`;
     container.appendChild(div);
+    if (preselectedId) {
+      const sel = document.getElementById(`trfi-prod-${idx}`);
+      sel.value = String(preselectedId);
+      this.onTransferProductChange(idx);
+    }
   },
 
   onTransferProductChange(idx) {
