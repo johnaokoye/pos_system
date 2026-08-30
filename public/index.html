@@ -2172,9 +2172,21 @@ const App = {
     const branch = this.currentUser.branches.find(b => b.id === branchId);
     if (!branch) return;
     this.posBranch = branch;
-    this.allProducts = await this.api('GET', `/products?active=1&is_rental=0&branch_id=${branchId}`);
+    this.allProducts = await this.api('GET', `/products?active=1&for_sale=1&branch_id=${branchId}`);
+    this._applySellableRentalStock(this.allProducts);
     this.renderProductGrid();
     this.renderPOSBranchBar();
+  },
+
+  // A rental item's stock_qty is the total number owned, not what's free to
+  // sell right now — units out on an active rental don't physically sit on
+  // the shelf, so they're subtracted before this list reaches the product
+  // grid/cart cap. No-op for non-rental products (rental_outstanding_qty is
+  // always 0 for them).
+  _applySellableRentalStock(products) {
+    (products || []).forEach(p => {
+      if (p.is_rental) p.stock_qty = Math.max(0, (p.stock_qty || 0) - (p.rental_outstanding_qty || 0));
+    });
   },
 
   async renderPOS() {
@@ -2192,8 +2204,9 @@ const App = {
 
     [this.allCategories, this.allProducts] = await Promise.all([
       this.api('GET', '/categories'),
-      this.api('GET', `/products?active=1&is_rental=0${branchParam}`),
+      this.api('GET', `/products?active=1&for_sale=1${branchParam}`),
     ]);
+    this._applySellableRentalStock(this.allProducts);
     if (this.section !== 'pos') return;
     this.posCategory = 'all';
     this.posSearch = '';
@@ -2611,7 +2624,7 @@ const App = {
       const thumb = p.image_path ? `<img src="${p.image_path}" style="width:44px;height:44px;object-fit:cover;border-radius:4px;margin:0 auto 4px;display:block" alt="">` : `<div class="product-emoji">${this.productEmoji(p.category_name)}</div>`;
       return `<div class="product-card ${oos ? 'out-of-stock' : ''} ${hasVars ? 'has-vars' : ''}" onclick="App.addToCart(${p.id})">
         ${thumb}
-        <div class="product-name">${p.name}</div>
+        <div class="product-name">${p.name}${p.is_rental ? ' <span style="font-size:9px;background:#fff3e0;color:#e65100;padding:1px 5px;border-radius:3px;vertical-align:middle">RENTAL ITEM</span>' : ''}</div>
         <div class="product-price">${this.fmt(p.price)}</div>
         <div class="product-stock">${stockLabel}</div>
       </div>`;
@@ -4885,7 +4898,7 @@ const App = {
             <thead><tr><th>SKU</th><th>Name</th><th>Branch</th><th>Class</th><th>Daily</th><th>Weekly</th><th>Monthly</th><th>Hourly</th><th>Stock</th><th>Available</th><th>Status</th><th></th></tr></thead>
             <tbody>${filtered.map(p => `<tr>
               <td class="fw-600">${p.sku}${p.is_accessory?' <span class="badge-pill badge-secondary" style="font-size:10px">accessory</span>':''}</td>
-              <td>${p.name}</td>
+              <td>${p.name}${p.rental_allow_sale ? ` <span class="badge-pill badge-teal" style="font-size:10px" title="Also sellable/quotable outright at ${this.fmt(p.price)}">For Sale · ${this.fmt(p.price)}</span>` : ''}</td>
               <td>${p.assigned_branch_name || '—'}</td>
               <td><span class="badge-pill ${p.rental_classification==='equipment'?'badge-info':'badge-secondary'}">${p.rental_classification==='equipment'?'Equipment':'Tool'}</span></td>
               <td>${this.fmt(p.rental_rate)}</td>
@@ -4953,6 +4966,16 @@ const App = {
               ${branches.map(b => `<option value="${b.id}" ${p.assigned_branch_id===b.id?'selected':''}>${b.name}</option>`).join('')}
             </select>
             <p style="font-size:11px;color:var(--text-muted);margin-top:2px">Determines which branch's stock this item is drawn from — only staff at (or with multi-branch access to) this branch can see and rent it. Changing this moves the item's stock to the new branch.</p>
+          </div>
+          <div class="form-group">
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:normal">
+              <input type="checkbox" id="rf-allow-sale" ${p.rental_allow_sale?'checked':''} onchange="App._toggleRentalSaleFields()" style="width:auto"> Also allow selling or quoting this item outright, like a retail item
+            </label>
+            <p style="font-size:11px;color:var(--text-muted);margin:2px 0 0">Once checked, this item shows up in POS and Quotations at the selling price below, in addition to being rentable. A unit sold this way is removed from stock for good — it never comes back the way a returned rental does.</p>
+          </div>
+          <div class="form-group" id="rf-sale-price-wrap" style="${p.rental_allow_sale?'':'display:none'}">
+            <label>Selling Price *</label>
+            <input type="number" id="rf-sale-price" value="${p.price||0}" min="0" step="0.01">
           </div>
           <div class="input-row-3">
             <div class="form-group"><label>Stock Qty *</label><input type="number" id="rf-stock" value="${p.stock_qty??0}" min="0"></div>
@@ -5025,6 +5048,11 @@ const App = {
     return { weekTierDayRate, monthTierDayRate: weekTierDayRate * 0.75 };
   },
 
+  _toggleRentalSaleFields() {
+    const wrap = document.getElementById('rf-sale-price-wrap');
+    if (wrap) wrap.style.display = document.getElementById('rf-allow-sale')?.checked ? '' : 'none';
+  },
+
   _toggleRentalRateFields() {
     const cls = document.getElementById('rf-classification')?.value;
     const isEquipment = cls === 'equipment';
@@ -5075,6 +5103,9 @@ const App = {
     const name = document.getElementById('rf-name').value.trim();
     if (!sku || !name) { this.alert('SKU and name are required', 'error'); return; }
     const classification = document.getElementById('rf-classification').value;
+    const allowSale = document.getElementById('rf-allow-sale').checked;
+    const salePrice = parseFloat(document.getElementById('rf-sale-price').value) || 0;
+    if (allowSale && salePrice <= 0) { this.alert('Enter a selling price to allow this item to be sold or quoted outright', 'error'); return; }
     const data = {
       sku,
       name,
@@ -5096,7 +5127,8 @@ const App = {
       active: parseInt(document.getElementById('rf-active').value),
       is_accessory: document.getElementById('rf-is-accessory').checked ? 1 : 0,
       is_rental: 1,
-      price: 0,
+      rental_allow_sale: allowSale ? 1 : 0,
+      price: allowSale ? salePrice : 0,
     };
     data.branch_id = document.getElementById('rf-branch')?.value || null;
     const selectedMandatoryIds = Array.from(document.querySelectorAll('.rf-mandatory-acc:checked')).map(cb => parseInt(cb.value));
@@ -12956,7 +12988,7 @@ const App = {
     const [customers, employees, products] = await Promise.all([
       this.api('GET', '/customers?limit=200'),
       this.api('GET', '/employees'),
-      this.api('GET', '/products'),
+      this.api('GET', '/products?for_sale=1'),
     ]);
     const branches = this.currentUser.branches || [];
     this._quoteProducts = products;
@@ -13150,7 +13182,7 @@ const App = {
     div.innerHTML = `
       <select style="flex:2" onchange="App.updateQuoteItem(${idx},this.value)" id="qti-prod-${idx}">
         <option value="">-- Select Product --</option>
-        ${products.map(p => `<option value="${p.id}" data-price="${p.price}" ${prefill&&prefill.product_id===p.id?'selected':''}>${p.name} (${this.fmt(p.price)})</option>`).join('')}
+        ${products.map(p => `<option value="${p.id}" data-price="${p.price}" ${prefill&&prefill.product_id===p.id?'selected':''}>${p.name}${p.is_rental?' [Rental]':''} (${this.fmt(p.price)})</option>`).join('')}
       </select>
       <input id="qti-qty-${idx}" type="number" min="1" value="${prefill?prefill.quantity:1}" style="width:70px" placeholder="Qty" oninput="App.calcQuoteTotal();App.checkQuoteItemStock(${idx})">
       <input id="qti-price-${idx}" type="number" step="0.01" value="${prefill?prefill.unit_price:''}" style="width:90px" placeholder="Price" oninput="App.calcQuoteTotal()">
@@ -13303,7 +13335,11 @@ const App = {
     if (!this._quoteStockCache[branchId]) {
       const all = await this.api('GET', `/products?branch_id=${branchId}`);
       const map = {};
-      all.forEach(p => { map[p.id] = { stock_qty: p.stock_qty, price: p.price }; });
+      // A rental item's stock_qty is the total number owned, not what's free
+      // to sell/quote right now — subtract units out on an active rental
+      // from this branch, same as the POS grid does. No-op for non-rental
+      // products.
+      all.forEach(p => { map[p.id] = { stock_qty: p.is_rental ? Math.max(0, (p.stock_qty||0) - (p.rental_outstanding_qty||0)) : p.stock_qty, price: p.price }; });
       this._quoteStockCache[branchId] = map;
     }
     return this._quoteStockCache[branchId];

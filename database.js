@@ -1279,6 +1279,12 @@ async function _init() {
     // picker and stop selling its own base stock — see POST
     // /work-orders/:id/parts/:itemId/return in routes/work-orders.js.
     'ALTER TABLE products ADD COLUMN used_of_product_id INTEGER REFERENCES products(id)',
+    // Lets a rental item also be sold or quoted outright at its regular
+    // `price` column (previously always 0 and unreachable from the rental
+    // item form), on top of being rentable. GET /products' `for_sale` param
+    // and the POS/Quotations product pickers key off this to decide whether
+    // to surface a given rental item alongside normal retail products.
+    'ALTER TABLE products ADD COLUMN rental_allow_sale INTEGER NOT NULL DEFAULT 0',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
