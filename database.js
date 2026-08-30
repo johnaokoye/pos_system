@@ -745,6 +745,19 @@ async function _init() {
       item_id INTEGER NOT NULL,
       UNIQUE(promotion_id, item_type, item_id)
     )` },
+    // One row per brand assigned to a promotion. excluded=0 rows are the
+    // inclusion set used when promotions.applies_to='brands' (like
+    // promotion_items scopes to specific products/categories); excluded=1
+    // rows carve a brand OUT of an otherwise-qualifying promotion regardless
+    // of applies_to (e.g. "10% off everything except Brand X"). A brand can't
+    // be both at once for the same promotion — see the UNIQUE constraint.
+    { sql: `CREATE TABLE IF NOT EXISTS promotion_brands (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      promotion_id INTEGER NOT NULL REFERENCES promotions(id) ON DELETE CASCADE,
+      brand TEXT NOT NULL COLLATE NOCASE,
+      excluded INTEGER DEFAULT 0,
+      UNIQUE(promotion_id, brand)
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS promotion_codes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       promotion_id INTEGER NOT NULL REFERENCES promotions(id) ON DELETE CASCADE,
@@ -1227,6 +1240,19 @@ async function _init() {
     'ALTER TABLE promotions ADD COLUMN start_time TEXT',
     'ALTER TABLE promotions ADD COLUMN end_time TEXT',
     'ALTER TABLE promotions ADD COLUMN is_recurring INTEGER DEFAULT 0',
+    // Recurrence pattern superseding the daily-only is_recurring above.
+    // 'none' = original one-time window (start_time/end_time only refine the
+    // start_date/end_date boundary days). 'daily' = same as legacy
+    // is_recurring=1. 'weekly' repeats on the day(s) of week listed in
+    // recurrence_days (JSON array, 0=Sun..6=Sat) — falls back to start_date's
+    // own weekday if empty. 'monthly'/'yearly' repeat on start_date's
+    // day-of-month / month-and-day (clamped to the last day of shorter
+    // months). All bounded by the optional start_date/end_date range. Rows
+    // written before this column existed have recurrence_type NULL — see
+    // lib/promotions.js's promoTimingStatus, which falls back to is_recurring
+    // for those.
+    "ALTER TABLE promotions ADD COLUMN recurrence_type TEXT DEFAULT 'none'",
+    'ALTER TABLE promotions ADD COLUMN recurrence_days TEXT',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

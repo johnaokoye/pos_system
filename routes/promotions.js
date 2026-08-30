@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { requirePermission } = require('../lib/permissions');
-const { promoTimingStatus } = require('../lib/promotions');
+const { promoTimingStatus, computeEligibleAmount } = require('../lib/promotions');
 
 // List all promotions with code count
 router.get('/', requirePermission('promotions'), async (req, res) => {
@@ -10,7 +10,9 @@ router.get('/', requirePermission('promotions'), async (req, res) => {
     const { rows } = await db.execute({ sql: `
       SELECT p.*,
         (SELECT COUNT(*) FROM promotion_codes WHERE promotion_id = p.id) as code_count,
-        (SELECT COUNT(*) FROM promotion_items WHERE promotion_id = p.id) as item_count
+        (SELECT COUNT(*) FROM promotion_items WHERE promotion_id = p.id) as item_count,
+        (SELECT COUNT(*) FROM promotion_brands WHERE promotion_id = p.id AND excluded = 0) as brand_count,
+        (SELECT COUNT(*) FROM promotion_brands WHERE promotion_id = p.id AND excluded = 1) as excluded_brand_count
       FROM promotions p ORDER BY p.created_at DESC
     `, args: [] });
     res.json(rows);
@@ -31,29 +33,58 @@ router.get('/product-assignments', requirePermission('promotions'), async (req, 
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Get single promotion with items and codes
+// All brand inclusions across active promotions (for exclusivity display) —
+// exclusions aren't listed here since multiple promotions can each exclude
+// the same brand without conflict.
+router.get('/brand-assignments', requirePermission('promotions'), async (req, res) => {
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT pb.brand, pb.promotion_id, p.name as promotion_name
+            FROM promotion_brands pb
+            JOIN promotions p ON pb.promotion_id = p.id
+            WHERE p.active = 1 AND pb.excluded = 0`,
+      args: []
+    });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Distinct brands in the catalog, for the promotion form's brand pickers
+router.get('/brands', requirePermission('promotions'), async (req, res) => {
+  try {
+    const { rows } = await db.execute({ sql: `SELECT DISTINCT brand FROM products WHERE brand IS NOT NULL AND TRIM(brand) != '' ORDER BY brand COLLATE NOCASE`, args: [] });
+    res.json(rows.map(r => r.brand));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Get single promotion with items, brands, and codes
 router.get('/:id', requirePermission('promotions'), async (req, res) => {
   try {
     const { rows: [promo] } = await db.execute({ sql: 'SELECT * FROM promotions WHERE id = ?', args: [req.params.id] });
     if (!promo) return res.status(404).json({ error: 'Not found' });
     const { rows: items } = await db.execute({ sql: 'SELECT * FROM promotion_items WHERE promotion_id = ?', args: [req.params.id] });
+    const { rows: brands } = await db.execute({ sql: 'SELECT * FROM promotion_brands WHERE promotion_id = ?', args: [req.params.id] });
     const { rows: codes } = await db.execute({ sql: 'SELECT * FROM promotion_codes WHERE promotion_id = ? ORDER BY created_at DESC', args: [req.params.id] });
     promo.items = items;
+    promo.brands = brands;
     promo.codes = codes;
     res.json(promo);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+const RECURRENCE_TYPES = ['none', 'daily', 'weekly', 'monthly', 'yearly'];
+
 // Create promotion
 router.post('/', requirePermission('promotions'), async (req, res) => {
   try {
-    const { name, description, type, value, min_purchase, applies_to, start_date, end_date, start_time, end_time, is_recurring, active } = req.body;
+    const { name, description, type, value, min_purchase, applies_to, start_date, end_date, start_time, end_time, is_recurring, recurrence_type, recurrence_days, active } = req.body;
     if (!name) return res.status(400).json({ error: 'Name required' });
     if (!['percentage', 'fixed'].includes(type)) return res.status(400).json({ error: 'Invalid type' });
+    const recurType = recurrence_type && RECURRENCE_TYPES.includes(recurrence_type) ? recurrence_type : (is_recurring ? 'daily' : 'none');
     const result = await db.execute({ sql: `
-      INSERT INTO promotions (name, description, type, value, min_purchase, applies_to, start_date, end_date, start_time, end_time, is_recurring, active)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, args: [name, description || null, type, value || 0, min_purchase || 0, applies_to || 'all', start_date || null, end_date || null, start_time || null, end_time || null, is_recurring ? 1 : 0, active !== false ? 1 : 0] });
+      INSERT INTO promotions (name, description, type, value, min_purchase, applies_to, start_date, end_date, start_time, end_time, is_recurring, recurrence_type, recurrence_days, active)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, args: [name, description || null, type, value || 0, min_purchase || 0, applies_to || 'all', start_date || null, end_date || null, start_time || null, end_time || null, recurType !== 'none' ? 1 : 0, recurType, recurType === 'weekly' && Array.isArray(recurrence_days) ? JSON.stringify(recurrence_days) : null, active !== false ? 1 : 0] });
     res.json({ id: Number(result.lastInsertRowid) });
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
@@ -61,12 +92,13 @@ router.post('/', requirePermission('promotions'), async (req, res) => {
 // Update promotion
 router.put('/:id', requirePermission('promotions'), async (req, res) => {
   try {
-    const { name, description, type, value, min_purchase, applies_to, start_date, end_date, start_time, end_time, is_recurring, active } = req.body;
+    const { name, description, type, value, min_purchase, applies_to, start_date, end_date, start_time, end_time, is_recurring, recurrence_type, recurrence_days, active } = req.body;
     if (!name) return res.status(400).json({ error: 'Name required' });
+    const recurType = recurrence_type && RECURRENCE_TYPES.includes(recurrence_type) ? recurrence_type : (is_recurring ? 'daily' : 'none');
     await db.execute({ sql: `
-      UPDATE promotions SET name=?, description=?, type=?, value=?, min_purchase=?, applies_to=?, start_date=?, end_date=?, start_time=?, end_time=?, is_recurring=?, active=?
+      UPDATE promotions SET name=?, description=?, type=?, value=?, min_purchase=?, applies_to=?, start_date=?, end_date=?, start_time=?, end_time=?, is_recurring=?, recurrence_type=?, recurrence_days=?, active=?
       WHERE id=?
-    `, args: [name, description || null, type, value || 0, min_purchase || 0, applies_to || 'all', start_date || null, end_date || null, start_time || null, end_time || null, is_recurring ? 1 : 0, active ? 1 : 0, req.params.id] });
+    `, args: [name, description || null, type, value || 0, min_purchase || 0, applies_to || 'all', start_date || null, end_date || null, start_time || null, end_time || null, recurType !== 'none' ? 1 : 0, recurType, recurType === 'weekly' && Array.isArray(recurrence_days) ? JSON.stringify(recurrence_days) : null, active ? 1 : 0, req.params.id] });
     res.json({ success: true });
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
@@ -100,6 +132,38 @@ router.post('/:id/items', requirePermission('promotions'), async (req, res) => {
 router.delete('/:id/items/:itemId', requirePermission('promotions'), async (req, res) => {
   try {
     await db.execute({ sql: 'DELETE FROM promotion_items WHERE promotion_id = ? AND id = ?', args: [req.params.id, req.params.itemId] });
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Add a brand to a promotion — either as part of its inclusion set
+// (excluded=false, only meaningful when applies_to='brands', same exclusivity
+// rule as product/category assignment) or to carve it OUT of an otherwise-
+// qualifying promotion (excluded=true, no exclusivity check — several
+// promotions can each exclude the same brand).
+router.post('/:id/brands', requirePermission('promotions'), async (req, res) => {
+  try {
+    const { brand, excluded } = req.body;
+    if (!brand || !brand.trim()) return res.status(400).json({ error: 'Brand is required' });
+    const isExcluded = !!excluded;
+    if (!isExcluded) {
+      const { rows: conflicts } = await db.execute({
+        sql: `SELECT p.name FROM promotion_brands pb
+              JOIN promotions p ON pb.promotion_id = p.id
+              WHERE pb.brand = ? COLLATE NOCASE AND pb.excluded = 0 AND pb.promotion_id != ? AND p.active = 1`,
+        args: [brand.trim(), req.params.id]
+      });
+      if (conflicts.length) return res.status(400).json({ error: `Already assigned to active promotion "${conflicts[0].name}"` });
+    }
+    await db.execute({ sql: 'INSERT OR REPLACE INTO promotion_brands (promotion_id, brand, excluded) VALUES (?, ?, ?)', args: [req.params.id, brand.trim(), isExcluded ? 1 : 0] });
+    res.json({ success: true });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// Remove a brand from a promotion
+router.delete('/:id/brands/:brandId', requirePermission('promotions'), async (req, res) => {
+  try {
+    await db.execute({ sql: 'DELETE FROM promotion_brands WHERE promotion_id = ? AND id = ?', args: [req.params.id, req.params.brandId] });
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -153,31 +217,36 @@ router.post('/auto-apply', requirePermission('pos'), async (req, res) => {
     });
     const promos = allPromos.filter(p => promoTimingStatus(p).active);
 
-    // One batched lookup for every scoped promo's items instead of one
-    // query per promo — this runs on the POS checkout/cart hot path.
-    const scopedPromoIds = promos.filter(p => ['specific', 'categories', 'items'].includes(p.applies_to)).map(p => p.id);
+    // One batched lookup for every scoped promo's items/brands instead of
+    // one query per promo — this runs on the POS checkout/cart hot path.
+    const scopedPromoIds = promos.filter(p => ['specific', 'categories', 'items', 'brands'].includes(p.applies_to)).map(p => p.id);
     let itemsByPromo = {};
     if (scopedPromoIds.length) {
       const placeholders = scopedPromoIds.map(() => '?').join(',');
       const { rows: allItems } = await db.execute({ sql: `SELECT * FROM promotion_items WHERE promotion_id IN (${placeholders})`, args: scopedPromoIds });
       for (const item of allItems) { (itemsByPromo[item.promotion_id] = itemsByPromo[item.promotion_id] || []).push(item); }
     }
+    const allPromoIds = promos.map(p => p.id);
+    let brandsByPromo = {};
+    if (allPromoIds.length) {
+      const placeholders = allPromoIds.map(() => '?').join(',');
+      const { rows: allBrands } = await db.execute({ sql: `SELECT * FROM promotion_brands WHERE promotion_id IN (${placeholders})`, args: allPromoIds });
+      for (const b of allBrands) { (brandsByPromo[b.promotion_id] = brandsByPromo[b.promotion_id] || []).push(b); }
+    }
+    const cartProductIds = [...new Set(cart_items.map(ci => ci.product_id).filter(Boolean))];
+    let brandByProduct = {};
+    if (cartProductIds.length) {
+      const placeholders = cartProductIds.map(() => '?').join(',');
+      const { rows: prodRows } = await db.execute({ sql: `SELECT id, brand FROM products WHERE id IN (${placeholders})`, args: cartProductIds });
+      for (const pr of prodRows) brandByProduct[pr.id] = pr.brand;
+    }
 
     const results = [];
 
     for (const promo of promos) {
       if (promo.min_purchase > 0 && subtotal < promo.min_purchase) continue;
-      let eligibleAmount = subtotal;
-      if (['specific', 'categories', 'items'].includes(promo.applies_to)) {
-        const items = itemsByPromo[promo.id] || [];
-        const productIds = new Set(promo.applies_to !== 'categories' ? items.filter(i => i.item_type === 'product').map(i => i.item_id) : []);
-        const categoryIds = new Set(promo.applies_to !== 'items' ? items.filter(i => i.item_type === 'category').map(i => i.item_id) : []);
-        eligibleAmount = cart_items.reduce((sum, ci) => {
-          if (productIds.has(ci.product_id) || categoryIds.has(ci.category_id)) return sum + ci.price * ci.quantity;
-          return sum;
-        }, 0);
-        if (eligibleAmount === 0) continue;
-      }
+      const eligibleAmount = computeEligibleAmount(promo, cart_items, subtotal, { items: itemsByPromo[promo.id] || [], brands: brandsByPromo[promo.id] || [], brandByProduct });
+      if (eligibleAmount === 0) continue;
       const discount = promo.type === 'percentage'
         ? parseFloat((eligibleAmount * promo.value / 100).toFixed(2))
         : parseFloat(Math.min(promo.value, eligibleAmount).toFixed(2));
@@ -197,7 +266,7 @@ router.post('/validate-code', requirePermission('pos'), async (req, res) => {
 
     const { rows: [pc] } = await db.execute({ sql: `
       SELECT pc.*, p.name as promo_name, p.type, p.value, p.min_purchase, p.applies_to,
-             p.start_date, p.end_date, p.start_time, p.end_time, p.is_recurring, p.active as promo_active
+             p.start_date, p.end_date, p.start_time, p.end_time, p.is_recurring, p.recurrence_type, p.recurrence_days, p.active as promo_active
       FROM promotion_codes pc
       JOIN promotions p ON p.id = pc.promotion_id
       WHERE pc.code = ? COLLATE NOCASE
@@ -211,7 +280,8 @@ router.post('/validate-code', requirePermission('pos'), async (req, res) => {
       const messages = {
         not_started: 'Promotion has not started yet',
         expired: 'Promotion has expired',
-        outside_daily_window: `This promotion only runs from ${pc.start_time || '12:00 AM'} to ${pc.end_time || '11:59 PM'} each day`,
+        not_recurrence_day: 'This promotion doesn\'t run today',
+        outside_daily_window: `This promotion only runs from ${pc.start_time || '12:00 AM'} to ${pc.end_time || '11:59 PM'}`,
       };
       return res.status(400).json({ error: messages[timing.reason] || 'Promotion is not currently active' });
     }
@@ -222,17 +292,22 @@ router.post('/validate-code', requirePermission('pos'), async (req, res) => {
 
     // Calculate eligible amount
     let eligibleAmount = subtotal;
-    if (['specific', 'categories', 'items'].includes(pc.applies_to) && cart_items && cart_items.length) {
-      const { rows: items } = await db.execute({ sql: `SELECT * FROM promotion_items WHERE promotion_id = ?`, args: [pc.promotion_id] });
-      const productIds = pc.applies_to !== 'categories' ? items.filter(i => i.item_type === 'product').map(i => i.item_id) : [];
-      const categoryIds = pc.applies_to !== 'items' ? items.filter(i => i.item_type === 'category').map(i => i.item_id) : [];
-      eligibleAmount = cart_items.reduce((sum, ci) => {
-        if (productIds.includes(ci.product_id) || categoryIds.includes(ci.category_id)) {
-          return sum + ci.price * ci.quantity;
-        }
-        return sum;
-      }, 0);
-      if (eligibleAmount === 0) return res.status(400).json({ error: 'No items in cart qualify for this promotion' });
+    if (cart_items && cart_items.length) {
+      const [{ rows: items }, { rows: brands }] = await Promise.all([
+        db.execute({ sql: `SELECT * FROM promotion_items WHERE promotion_id = ?`, args: [pc.promotion_id] }),
+        db.execute({ sql: `SELECT * FROM promotion_brands WHERE promotion_id = ?`, args: [pc.promotion_id] }),
+      ]);
+      const cartProductIds = [...new Set(cart_items.map(ci => ci.product_id).filter(Boolean))];
+      let brandByProduct = {};
+      if (cartProductIds.length) {
+        const placeholders = cartProductIds.map(() => '?').join(',');
+        const { rows: prodRows } = await db.execute({ sql: `SELECT id, brand FROM products WHERE id IN (${placeholders})`, args: cartProductIds });
+        for (const pr of prodRows) brandByProduct[pr.id] = pr.brand;
+      }
+      eligibleAmount = computeEligibleAmount(pc, cart_items, subtotal, { items, brands, brandByProduct });
+      if (eligibleAmount === 0 && (['specific', 'categories', 'items', 'brands'].includes(pc.applies_to) || brands.some(b => b.excluded))) {
+        return res.status(400).json({ error: 'No items in cart qualify for this promotion' });
+      }
     }
 
     const discount = pc.type === 'percentage'

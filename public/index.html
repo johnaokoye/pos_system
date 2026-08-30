@@ -4070,13 +4070,14 @@ const App = {
       </div>
       <div class="form-group"><label>Name *</label><input id="pf-name" value="${p.name||''}"></div>
       <div class="form-group"><label>Description</label><input id="pf-desc" value="${p.description||''}"></div>
-      <div class="input-row">
+      <div class="input-row-3">
         <div class="form-group"><label>Category</label>
           <select id="pf-cat"><option value="">— None —</option>${categories.map(c => `<option value="${c.id}" ${p.category_id==c.id?'selected':''}>${c.name}</option>`).join('')}</select>
         </div>
         <div class="form-group"><label>Supplier</label>
           <select id="pf-supplier"><option value="">— None —</option>${suppliers.map(s => `<option value="${s.id}" ${p.supplier_id==s.id?'selected':''}>${s.name}</option>`).join('')}</select>
         </div>
+        <div class="form-group"><label>Brand</label><input id="pf-brand" value="${p.brand||''}"></div>
       </div>
       <div class="input-row-3">
         <div class="form-group"><label>Price *</label><input type="number" id="pf-price" value="${p.price||0}" min="0" step="0.01"></div>
@@ -4195,6 +4196,7 @@ const App = {
       description: document.getElementById('pf-desc').value.trim() || null,
       category_id: document.getElementById('pf-cat').value || null,
       supplier_id: document.getElementById('pf-supplier').value || null,
+      brand: document.getElementById('pf-brand').value.trim() || null,
       price: parseFloat(document.getElementById('pf-price').value) || 0,
       cost: parseFloat(document.getElementById('pf-cost').value) || 0,
       tax_rate: parseFloat(document.getElementById('pf-tax').value) || 0,
@@ -12842,6 +12844,7 @@ const App = {
     ]);
     const branches = this.currentUser.branches || [];
     this._quoteProducts = products;
+    this._quoteAllCustomers = customers;
     this._quoteItems = [];
     this._quoteBranches = branches;
     this._quoteStockCache = {};
@@ -12866,6 +12869,7 @@ const App = {
                 <option value="">-- Walk-in / No Customer --</option>
                 ${customers.map(c => `<option value="${c.id}" ${q&&q.customer_id===c.id?'selected':''}>${c.first_name} ${c.last_name} (${c.customer_number})</option>`).join('')}
               </select>
+              <p id="qt-cust-hint" style="display:none;font-size:11px;color:var(--text-muted);margin:4px 0 0">Only approved rental customers are listed.</p>
             </div>
             <div class="form-group"><label>Branch</label>
               <select id="qt-branch" onchange="App.onQuoteBranchTypeChange()">
@@ -12975,7 +12979,24 @@ const App = {
     if (rentalSection) rentalSection.style.display = type==='rental' ? '' : 'none';
     if (validGroup) validGroup.style.display = type==='retail' ? '' : 'none';
     if (dueGroup) dueGroup.style.display = type==='rental' ? '' : 'none';
+    this._applyQuoteCustomerFilter(type);
     this.calcQuoteTotal();
+  },
+
+  // Rental quotes only offer customers already approved for rentals
+  // (is_rental_customer) — the current selection is kept even if it doesn't
+  // match, so editing an older quote (or a customer whose flag changed
+  // since) never silently loses its assigned customer.
+  _applyQuoteCustomerFilter(type) {
+    const select = document.getElementById('qt-cust');
+    const hint = document.getElementById('qt-cust-hint');
+    if (!select) return;
+    const selectedId = select.value;
+    const list = this._quoteAllCustomers || [];
+    const filtered = type === 'rental' ? list.filter(c => c.is_rental_customer || String(c.id) === String(selectedId)) : list;
+    select.innerHTML = `<option value="">-- Walk-in / No Customer --</option>` +
+      filtered.map(c => `<option value="${c.id}" ${String(selectedId)===String(c.id)?'selected':''}>${c.first_name} ${c.last_name} (${c.customer_number})</option>`).join('');
+    if (hint) hint.style.display = type === 'rental' ? '' : 'none';
   },
 
   // Toggle-button handler (new-quote flow only — the type is fixed once a
@@ -17547,14 +17568,15 @@ const App = {
                 <td class="fw-600">${p.name}</td>
                 <td>${p.type === 'percentage' ? 'Percentage' : 'Fixed'}</td>
                 <td>${p.type === 'percentage' ? p.value + '%' : this.fmt(p.value)}</td>
-                <td>${p.applies_to === 'all' ? 'All Items' : p.applies_to === 'categories' ? `<span class="badge-pill badge-purple">${p.item_count} categories</span>` : p.applies_to === 'items' ? `<span class="badge-pill badge-blue">${p.item_count} products</span>` : `<span class="badge-pill badge-purple">${p.item_count} items/cats</span>`}</td>
+                <td>${p.applies_to === 'all' ? 'All Items' : p.applies_to === 'categories' ? `<span class="badge-pill badge-purple">${p.item_count} categories</span>` : p.applies_to === 'items' ? `<span class="badge-pill badge-blue">${p.item_count} products</span>` : p.applies_to === 'brands' ? `<span class="badge-pill badge-purple">${p.brand_count} brands</span>` : `<span class="badge-pill badge-purple">${p.item_count} items/cats</span>`}${p.excluded_brand_count > 0 ? `<br><span class="badge-pill badge-danger" style="font-size:10px">${p.excluded_brand_count} brand${p.excluded_brand_count>1?'s':''} excluded</span>` : ''}</td>
                 <td style="font-size:12px">${this._promoScheduleLabel(p)}</td>
                 <td><span class="badge-pill badge-blue">${p.code_count} codes</span></td>
                 <td>${statusBadge(p)}</td>
                 <td>
                   <button class="btn btn-sm btn-secondary" onclick="App.showPromoForm(${p.id})">Edit</button>
                   <button class="btn btn-sm btn-outline" onclick="App.managePromoCodes(${p.id},'${p.name.replace(/'/g,"\\'")}')">Codes</button>
-                  ${p.applies_to !== 'all' ? `<button class="btn btn-sm btn-outline" onclick="App.managePromoItems(${p.id},'${p.name.replace(/'/g,"\\'")}')">Items</button>` : ''}
+                  ${['categories','items','specific'].includes(p.applies_to) ? `<button class="btn btn-sm btn-outline" onclick="App.managePromoItems(${p.id},'${p.name.replace(/'/g,"\\'")}')">Items</button>` : ''}
+                  <button class="btn btn-sm btn-outline" onclick="App.managePromoBrands(${p.id},'${p.name.replace(/'/g,"\\'")}')">Brands</button>
                   <button class="btn btn-sm btn-danger" onclick="App.deletePromotion(${p.id})">Del</button>
                 </td>
               </tr>`).join('') : '<tr><td colspan="8" class="empty-state">No promotions yet</td></tr>'}
@@ -17606,6 +17628,13 @@ const App = {
 
     // Normalise legacy 'specific' value to 'items' in the UI
     const appliesToVal = (p.applies_to === 'specific') ? 'items' : (p.applies_to || 'all');
+    const recurrenceVal = p.recurrence_type || (p.is_recurring ? 'daily' : 'none');
+    const recurrenceDays = new Set((() => { try { return JSON.parse(p.recurrence_days || '[]'); } catch { return []; } })());
+    const dayLabels = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const dayCheckboxes = dayLabels.map((lbl, i) => `
+      <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:12px">
+        <input type="checkbox" class="pm-recur-day" value="${i}" ${recurrenceDays.has(i)?'checked':''} style="width:auto"> ${lbl}
+      </label>`).join('');
 
     this.showModal(`
       <div class="modal" style="max-width:540px">
@@ -17634,6 +17663,7 @@ const App = {
                 <option value="all" ${appliesToVal==='all'?'selected':''}>All Items</option>
                 <option value="categories" ${appliesToVal==='categories'?'selected':''}>Specific Categories</option>
                 <option value="items" ${appliesToVal==='items'?'selected':''}>Specific Products</option>
+                <option value="brands" ${appliesToVal==='brands'?'selected':''}>Specific Brands</option>
               </select>
             </div>
           </div>
@@ -17650,6 +17680,9 @@ const App = {
               ${products.filter(pr=>pr.active).length ? prodCheckboxes : '<span style="font-size:13px;color:var(--text-muted)">No products found</span>'}
             </div>
           </div>
+          <div id="pm-brands-section" style="display:${appliesToVal==='brands'?'':'none'};margin-bottom:12px;border:1px solid var(--border);border-radius:6px;padding:10px;background:var(--bg-secondary,var(--bg))">
+            <span style="font-size:13px">${id ? `Pick which brands this promotion applies to from the <strong>Brands</strong> button on the promotions list.` : `Save this promotion first, then use its <strong>Brands</strong> button on the list to pick which brands it applies to.`}</span>
+          </div>
           <div class="input-row">
             <div class="form-group"><label>Start Date (optional)</label><input type="date" id="pm-start" value="${p.start_date||''}"></div>
             <div class="form-group"><label>End Date (optional)</label><input type="date" id="pm-end" value="${p.end_date||''}"></div>
@@ -17659,10 +17692,18 @@ const App = {
             <div class="form-group"><label>End Time (optional)</label><input type="time" id="pm-end-time" value="${p.end_time||''}"></div>
           </div>
           <div class="form-group">
-            <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-              <input type="checkbox" id="pm-recurring" ${p.is_recurring?'checked':''} style="width:auto" onchange="App._promoRecurringToggle()"> Recurring daily
-            </label>
-            <p id="pm-recurring-hint" style="font-size:11px;color:var(--text-muted);margin:4px 0 0">${this._promoRecurringHint(p.is_recurring)}</p>
+            <label>Recurrence</label>
+            <select id="pm-recurrence" onchange="App._promoRecurringToggle()">
+              <option value="none" ${recurrenceVal==='none'?'selected':''}>None — runs once</option>
+              <option value="daily" ${recurrenceVal==='daily'?'selected':''}>Daily</option>
+              <option value="weekly" ${recurrenceVal==='weekly'?'selected':''}>Weekly</option>
+              <option value="monthly" ${recurrenceVal==='monthly'?'selected':''}>Monthly</option>
+              <option value="yearly" ${recurrenceVal==='yearly'?'selected':''}>Yearly</option>
+            </select>
+            <p id="pm-recurring-hint" style="font-size:11px;color:var(--text-muted);margin:4px 0 0">${this._promoRecurringHint(recurrenceVal)}</p>
+            <div id="pm-recur-days" style="display:${recurrenceVal==='weekly'?'flex':'none'};flex-wrap:wrap;gap:10px;margin-top:8px;padding:8px;border:1px solid var(--border);border-radius:6px">
+              ${dayCheckboxes}
+            </div>
           </div>
           <div class="form-group"><label style="display:flex;align-items:center;gap:8px;cursor:pointer">
             <input type="checkbox" id="pm-active" ${p.active?'checked':''} style="width:auto"> Active
@@ -17685,19 +17726,29 @@ const App = {
     const val = document.getElementById('pm-applies')?.value;
     const catSec = document.getElementById('pm-cat-section');
     const itemSec = document.getElementById('pm-items-section');
+    const brandSec = document.getElementById('pm-brands-section');
     if (catSec) catSec.style.display = val === 'categories' ? '' : 'none';
     if (itemSec) itemSec.style.display = val === 'items' ? '' : 'none';
+    if (brandSec) brandSec.style.display = val === 'brands' ? '' : 'none';
   },
 
-  _promoRecurringHint(isRecurring) {
-    return isRecurring
-      ? 'Runs every day between the times above (leave blank for all day), within the optional date range above.'
-      : "Runs once: from the start date/time to the end date/time. Times only apply to the start/end date itself — leave blank for all day on that date.";
+  _promoRecurringHint(recurrenceType) {
+    const hints = {
+      none: "Runs once: from the start date/time to the end date/time. Times only apply to the start/end date itself — leave blank for all day on that date.",
+      daily: 'Runs every day between the times above (leave blank for all day), within the optional date range above.',
+      weekly: 'Runs every week on the day(s) checked below, between the times above, within the optional date range above.',
+      monthly: 'Runs every month on the same day-of-month as the Start Date, between the times above, within the optional date range above.',
+      yearly: 'Runs every year on the same month/day as the Start Date, between the times above, within the optional date range above.',
+    };
+    return hints[recurrenceType] || hints.none;
   },
 
   _promoRecurringToggle() {
+    const val = document.getElementById('pm-recurrence')?.value || 'none';
     const hint = document.getElementById('pm-recurring-hint');
-    if (hint) hint.textContent = this._promoRecurringHint(document.getElementById('pm-recurring')?.checked);
+    if (hint) hint.textContent = this._promoRecurringHint(val);
+    const daysWrap = document.getElementById('pm-recur-days');
+    if (daysWrap) daysWrap.style.display = val === 'weekly' ? 'flex' : 'none';
   },
 
   _promoFmtTime(t) {
@@ -17711,8 +17762,16 @@ const App = {
   _promoScheduleLabel(p) {
     const dateRange = `${p.start_date || '—'} → ${p.end_date || '∞'}`;
     const timeRange = (p.start_time || p.end_time) ? `${this._promoFmtTime(p.start_time) || '12:00 AM'}–${this._promoFmtTime(p.end_time) || '11:59 PM'}` : '';
-    if (p.is_recurring) return `<span class="badge-pill badge-purple" style="font-size:10px">Daily</span> ${timeRange || 'all day'}<br><span style="color:var(--text-muted)">${dateRange}</span>`;
-    return `${dateRange}${timeRange ? `<br><span style="color:var(--text-muted)">${timeRange}</span>` : ''}`;
+    const recurType = p.recurrence_type || (p.is_recurring ? 'daily' : 'none');
+    if (recurType === 'none') return `${dateRange}${timeRange ? `<br><span style="color:var(--text-muted)">${timeRange}</span>` : ''}`;
+    const dayAbbr = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    let label = recurType[0].toUpperCase() + recurType.slice(1);
+    if (recurType === 'weekly') {
+      let days = [];
+      try { days = JSON.parse(p.recurrence_days || '[]'); } catch {}
+      if (days.length) label += ` (${days.map(d=>dayAbbr[d]).join(',')})`;
+    }
+    return `<span class="badge-pill badge-purple" style="font-size:10px">${label}</span> ${timeRange || 'all day'}<br><span style="color:var(--text-muted)">${dateRange}</span>`;
   },
 
   _filterPromoProducts() {
@@ -17734,7 +17793,8 @@ const App = {
       end_date: document.getElementById('pm-end').value || null,
       start_time: document.getElementById('pm-start-time').value || null,
       end_time: document.getElementById('pm-end-time').value || null,
-      is_recurring: document.getElementById('pm-recurring').checked,
+      recurrence_type: document.getElementById('pm-recurrence').value,
+      recurrence_days: [...document.querySelectorAll('.pm-recur-day:checked')].map(cb => parseInt(cb.value)),
       active: document.getElementById('pm-active').checked,
     };
     if (!data.name) return this.alert('Name required', 'error');
@@ -18037,6 +18097,57 @@ const App = {
       await this.api('DELETE', `/promotions/${promoId}/items/${rowId}`);
       this.alert('Item removed');
       this.managePromoItems(promoId, promoName);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async managePromoBrands(promoId, promoName) {
+    const [promo, brandList] = await Promise.all([
+      this.api('GET', `/promotions/${promoId}`),
+      this.api('GET', '/promotions/brands'),
+    ]);
+    const includedMap = new Map(promo.brands.filter(b=>!b.excluded).map(b=>[b.brand.toLowerCase(), b]));
+    const excludedMap = new Map(promo.brands.filter(b=>b.excluded).map(b=>[b.brand.toLowerCase(), b]));
+    const escName = promoName.replace(/'/g,"\\'");
+
+    const rows = brandList.map(brand => {
+      const key = brand.toLowerCase();
+      const inc = includedMap.get(key);
+      const exc = excludedMap.get(key);
+      const status = inc ? '<span class="badge-pill badge-green">Included</span>' : exc ? '<span class="badge-pill badge-danger">Excluded</span>' : '<span style="color:var(--text-muted)">—</span>';
+      const rowId = inc ? inc.id : exc ? exc.id : null;
+      const escBrand = brand.replace(/'/g,"\\'");
+      const actions = [];
+      if (!inc) actions.push(`<button class="btn btn-sm btn-secondary" onclick="App._setPromoBrand(${promoId},'${escBrand}',false,'${escName}')">Include</button>`);
+      if (!exc) actions.push(`<button class="btn btn-sm btn-outline" onclick="App._setPromoBrand(${promoId},'${escBrand}',true,'${escName}')">Exclude</button>`);
+      if (rowId) actions.push(`<button class="btn btn-sm btn-danger" onclick="App._removePromoBrand(${promoId},${rowId},'${escName}')">Remove</button>`);
+      return `<tr><td>${brand}</td><td>${status}</td><td style="white-space:nowrap">${actions.join(' ')}</td></tr>`;
+    }).join('');
+
+    this.showModal(`
+      <div class="modal" style="max-width:640px">
+        <div class="modal-header">
+          <span class="modal-title">Brands — ${promoName}</span>
+          <button class="modal-close" onclick="App.closeModal()">✕</button>
+        </div>
+        <div class="modal-body" style="max-height:60vh;overflow-y:auto">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px"><strong>Included</strong> brands only matter when this promotion's Applies To is "Specific Brands" — the discount is limited to those brands. <strong>Excluded</strong> brands are carved out of this promotion no matter what it applies to.</p>
+          ${brandList.length ? `<table><thead><tr><th>Brand</th><th>Status</th><th>Action</th></tr></thead><tbody>${rows}</tbody></table>` : '<p style="color:var(--text-muted)">No brands found in the catalog yet — set a Brand on a product first.</p>'}
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">Done</button></div>
+      </div>`);
+  },
+
+  async _setPromoBrand(promoId, brand, excluded, promoName) {
+    try {
+      await this.api('POST', `/promotions/${promoId}/brands`, { brand, excluded });
+      this.managePromoBrands(promoId, promoName);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async _removePromoBrand(promoId, rowId, promoName) {
+    try {
+      await this.api('DELETE', `/promotions/${promoId}/brands/${rowId}`);
+      this.managePromoBrands(promoId, promoName);
     } catch(e) { this.alert(e.message, 'error'); }
   },
 

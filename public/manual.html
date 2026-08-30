@@ -292,7 +292,7 @@
       <p class="module-intro">Formal price quotes for a customer, for either retail goods or a rental, that can later become a real sale.</p>
 
       <h3>Two kinds of quote</h3>
-      <p><strong>Retail</strong> quotes price from the current catalog and can mix real products with free-typed custom line items (for things not yet in your catalog). <strong>Rental</strong> quotes are priced as a non-binding estimate using the item's daily/weekly/monthly rate over the requested date range, and can include delivery, pickup, and operator add-ons.</p>
+      <p><strong>Retail</strong> quotes price from the current catalog and can mix real products with free-typed custom line items (for things not yet in your catalog). <strong>Rental</strong> quotes are priced as a non-binding estimate using the item's daily/weekly/monthly rate over the requested date range, and can include delivery, pickup, and operator add-ons. Switching Quote Type to Rental also narrows the Customer picker to customers already flagged <strong>Rental Customer</strong> on their profile (see <a href="#customers">Customers</a>) — the same eligibility a customer needs before a rental agreement can be created directly.</p>
 
       <h3>Status flow</h3>
       <ol class="steps">
@@ -429,7 +429,9 @@
         <li>A promotion can have one or more <strong>codes</strong>, each with its own usage limit — retiring one code doesn't kill the whole promotion.</li>
         <li>At checkout, promotions with no code attached are offered automatically; the best (largest discount) one is suggested first if more than one qualifies.</li>
         <li><strong>Start Time / End Time (optional)</strong> — narrows a promotion to a window of the day, e.g. a 2:00 PM-4:00 PM happy hour. Left blank, the promotion runs all day on any date it's otherwise eligible.</li>
-        <li><strong>Recurring daily</strong> — when checked, the time window repeats every day within the optional Start Date/End Date range (either side left blank is unbounded). Unchecked (the default), Start Time/End Time apply only to the Start Date and End Date themselves — a one-time window that can still span several full days in between, e.g. a weekend sale from Friday 6:00 PM to Sunday 11:59 PM.</li>
+        <li><strong>Recurrence</strong> — <strong>None</strong> (the default) runs the promotion once: Start Time/End Time apply only to the Start Date and End Date themselves, so a one-time window can still span several full days in between, e.g. a weekend sale from Friday 6:00 PM to Sunday 11:59 PM. <strong>Daily</strong> repeats the time window every day. <strong>Weekly</strong> repeats it on the day(s) of the week checked in the form (defaults to the Start Date's own weekday if none are checked). <strong>Monthly</strong>/<strong>Yearly</strong> repeat on the Start Date's day-of-month / month-and-day (clamped to the last day of a shorter month, e.g. a 31st-anchored monthly promo runs on the 28th/29th in February). Every recurrence is still bounded by the optional Start Date/End Date range.</li>
+        <li><strong>Applies To → Specific Brands</strong> — scopes the promotion to one or more brands (set on each product — see Inventory). Pick which brands from the promotion's own <strong>Brands</strong> button on the list, the same way Items assigns products/categories. A brand can only be the inclusion set of <strong>one active promotion at a time</strong>, same exclusivity rule as products/categories.</li>
+        <li><strong>Brand exclusion</strong> — independent of Applies To, the same <strong>Brands</strong> button can exclude a brand from a promotion no matter what it applies to (all items, a category, specific products, or another brand) — e.g. "15% off everything except Brand X." Multiple promotions can each exclude the same brand with no conflict, since exclusion never stacks a second discount on top.</li>
       </ul>
       <p>Needs <span class="perm-pill">promotions_create</span> to build a promotion, <span class="perm-pill">promotions_codes</span> to manage its codes.</p>
     </section>
@@ -457,7 +459,7 @@
       <p class="module-intro">The retail product catalog and stock levels — rental items and services live in their own sections.</p>
 
       <h3>Products</h3>
-      <p>Each product has a SKU, barcode, price, cost, tax rate, category, and a minimum-stock threshold used for low-stock alerts. Products can carry a photo (uploaded per product) and be organized by category.</p>
+      <p>Each product has a SKU, barcode, price, cost, tax rate, category, supplier, an optional free-text <strong>Brand</strong>, and a minimum-stock threshold used for low-stock alerts. Products can carry a photo (uploaded per product) and be organized by category. Brand is also what <a href="#promotions">Promotions</a> uses for brand-scoped and brand-excluded discounts.</p>
 
       <h3>Variations</h3>
       <p>For products that come in options (Size, Color, etc.), define variation types on the product, then add individual variants — each with its own SKU, price, and stock level. A sale against a specific variant deducts that variant's stock, not the parent product's.</p>
