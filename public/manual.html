@@ -302,6 +302,9 @@
         <li><strong>Converted</strong> — the quote becomes real: a retail quote becomes a held order a cashier finalizes at the POS; a rental quote becomes a rental agreement (after re-checking stock and the customer's rental eligibility, since time may have passed since the quote was drafted).</li>
       </ol>
       <p>A quote can also be <strong>declined</strong> instead of accepted. Needs <span class="perm-pill">quotations_create</span> to build one, <span class="perm-pill">quotations_approve</span> to move it through status changes, and <span class="perm-pill">quotations_convert</span> to finalize it into a sale or agreement.</p>
+
+      <h3>Per-line discount</h3>
+      <p>Each retail line — a real product or a free-typed custom item — has its own optional <strong>Discount</strong> field, separate from the whole-quote <strong>Discount ($)</strong> field. It's a record of how much was knocked off that specific line, shown next to the item wherever the line shows up; it doesn't itself change the price you type in — enter the already-discounted price there. If the line isn't in stock and gets bundled into a Purchase Request (or later a Purchase Order) at Accept, its discount comes along too, shown as a small tag on that line — so whoever approves the PR or PO can see the item is backing a discounted sale before signing off.</p>
     </section>
 
     <section class="module" id="layaway">
@@ -507,7 +510,7 @@
       <p class="module-intro">Getting new stock from suppliers, from an internal request through to receiving it.</p>
 
       <h3>Purchase Requests (PR) — the ask</h3>
-      <p>Staff request items either for resale or for internal use (consumables that won't track stock). A request line can point at an existing catalog product, or just be typed in by name with an optional source URL — handy for something not in the catalog yet. Requests flow <strong>draft → submitted → approved/rejected</strong> (needs <span class="perm-pill">pr_create</span> / <span class="perm-pill">pr_approve</span>), and an approved request converts 1:1 into a Purchase Order (<span class="perm-pill">pr_convert</span>).</p>
+      <p>Staff request items either for resale or for internal use (consumables that won't track stock). A request line can point at an existing catalog product, or just be typed in by name with an optional source URL — handy for something not in the catalog yet. Requests flow <strong>draft → submitted → approved/rejected</strong> (needs <span class="perm-pill">pr_create</span> / <span class="perm-pill">pr_approve</span>), and an approved request converts 1:1 into a Purchase Order (<span class="perm-pill">pr_convert</span>). A line auto-created from an accepted <a href="#quotations">quotation</a> carries that quote line's discount forward as a small tag, visible here and again on the resulting PO — see <a href="#quotations">Quotations</a>' Per-line discount note.</p>
 
       <h3>Purchase Orders (PO) — the supplier-facing order</h3>
       <ol class="steps">

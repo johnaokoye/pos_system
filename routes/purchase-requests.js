@@ -232,8 +232,8 @@ router.post('/:id/convert', async (req, res) => {
         // Internal-use items are added to PO but without a product link (won't update stock on receive)
         const productId = item.item_type === 'internal' ? null : item.product_id;
         await tx.execute({
-          sql: 'INSERT INTO purchase_order_items (po_id, product_id, product_name, sku, quantity_ordered, unit_cost, total, quotation_item_id, work_order_item_id) VALUES (?,?,?,?,?,?,?,?,?)',
-          args: [poId, productId, item.product_name, item.sku, item.quantity, item.unit_cost, item.total, item.quotation_item_id, item.work_order_item_id]
+          sql: 'INSERT INTO purchase_order_items (po_id, product_id, product_name, sku, quantity_ordered, unit_cost, total, quotation_item_id, work_order_item_id, discount_amount) VALUES (?,?,?,?,?,?,?,?,?,?)',
+          args: [poId, productId, item.product_name, item.sku, item.quantity, item.unit_cost, item.total, item.quotation_item_id, item.work_order_item_id, item.discount_amount || 0]
         });
       }
 

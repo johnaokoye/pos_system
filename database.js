@@ -1304,6 +1304,13 @@ async function _init() {
     'ALTER TABLE purchase_orders ADD COLUMN rejected_by INTEGER REFERENCES employees(id)',
     'ALTER TABLE purchase_orders ADD COLUMN rejected_at DATETIME',
     'ALTER TABLE purchase_orders ADD COLUMN rejection_reason TEXT',
+    // Carries a retail quote line's discount_amount (see quotation_items)
+    // forward onto the PR/PO item it flows into — purely informational, same
+    // as everywhere else discount_amount is used, but visible to whoever is
+    // deciding whether to approve the purchase (the item may be quoted to
+    // the customer below list price, worth knowing before signing off on it).
+    'ALTER TABLE purchase_request_items ADD COLUMN discount_amount REAL DEFAULT 0',
+    'ALTER TABLE purchase_order_items ADD COLUMN discount_amount REAL DEFAULT 0',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

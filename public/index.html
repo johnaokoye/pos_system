@@ -11920,7 +11920,7 @@ const App = {
     const hasUrls = (pr.items||[]).some(i => i.product_url);
     const renderItemRows = items => items.map(i => `<tr>
       <td>
-        ${i.product_name}${i.item_type==='internal'?'<span style="font-size:10px;margin-left:4px;color:var(--text-muted)">[internal]</span>':''}
+        ${i.product_name}${i.item_type==='internal'?'<span style="font-size:10px;margin-left:4px;color:var(--text-muted)">[internal]</span>':''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on the originating quote line">-${this.fmt(i.discount_amount)} quoted</span>` : ''}
         ${i.product_url ? `<br><a href="${i.product_url}" target="_blank" rel="noopener" style="font-size:11px;color:var(--accent);word-break:break-all">${i.product_url}</a>` : ''}
       </td>
       <td>${i.sku||'-'}</td>
@@ -12410,7 +12410,7 @@ const App = {
               <thead><tr><th>Product</th><th>SKU</th><th>Ordered</th><th>Received</th><th>Damaged</th><th>Unit Cost</th><th>Total</th></tr></thead>
               <tbody>
                 ${po.items.map(i => `<tr>
-                  <td>${i.product_name}${itemLinkBadges(i)}${(!i.product_id && i.quantity_received>0) ? `<br><button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="App.showLinkToInventory(${po.id},${i.id})">+ Add to Inventory</button>` : ''}</td>
+                  <td>${i.product_name}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on the originating quote line">-${this.fmt(i.discount_amount)} quoted</span>` : ''}${itemLinkBadges(i)}${(!i.product_id && i.quantity_received>0) ? `<br><button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="App.showLinkToInventory(${po.id},${i.id})">+ Add to Inventory</button>` : ''}</td>
                   <td>${i.sku||'-'}</td>
                   <td>${i.quantity_ordered}</td>
                   <td><span class="${i.quantity_received>=i.quantity_ordered?'color-success':'color-warning'}">${i.quantity_received||0}</span></td>
@@ -13436,6 +13436,7 @@ const App = {
       </select>
       <input id="qti-qty-${idx}" type="number" min="1" value="${prefill?prefill.quantity:1}" style="width:70px" placeholder="Qty" oninput="App.calcQuoteTotal();App.checkQuoteItemStock(${idx})">
       <input id="qti-price-${idx}" type="number" step="0.01" value="${prefill?prefill.unit_price:''}" style="width:90px" placeholder="Price" oninput="App.calcQuoteTotal()">
+      <input id="qti-disc-${idx}" type="number" min="0" step="0.01" value="${prefill&&prefill.discount_amount||''}" style="width:80px" placeholder="Discount" title="Discount given on this line — recorded for reference, doesn't change the price above">
       <button class="btn btn-sm btn-danger" onclick="document.getElementById('qt-item-${idx}').remove();const a=document.getElementById('qt-alloc-${idx}');if(a)a.remove();App.calcQuoteTotal()">✕</button>`;
     container.appendChild(div);
     const allocDiv = document.createElement('div');
@@ -13461,6 +13462,7 @@ const App = {
       <input id="qti-desc-${idx}" style="flex:2" placeholder="Custom item description" value="${prefill?this.escapeAttr(prefill.product_name):''}" data-pr-id="${prefill&&prefill.purchase_request_id||''}">
       <input id="qti-qty-${idx}" type="number" min="1" value="${prefill?prefill.quantity:1}" style="width:70px" placeholder="Qty" oninput="App.calcQuoteTotal()">
       <input id="qti-price-${idx}" type="number" step="0.01" value="${prefill?prefill.unit_price:''}" style="width:90px" placeholder="Amount" oninput="App.calcQuoteTotal()">
+      <input id="qti-disc-${idx}" type="number" min="0" step="0.01" value="${prefill&&prefill.discount_amount||''}" style="width:80px" placeholder="Discount" title="Discount given on this line — recorded for reference, doesn't change the price above">
       <span class="badge-pill badge-warning" style="flex-shrink:0" title="Flags this item for Purchasing to order — a Purchase Request is auto-created">Q</span>
       <button class="btn btn-sm btn-danger" onclick="document.getElementById('qt-item-${idx}').remove();App.calcQuoteTotal()">✕</button>`;
     container.appendChild(div);
@@ -13765,10 +13767,11 @@ const App = {
       const idx = row.id.split('-').pop();
       const quantity = parseInt(document.getElementById(`qti-qty-${idx}`).value) || 1;
       const unit_price = parseFloat(document.getElementById(`qti-price-${idx}`).value) || 0;
+      const discount = parseFloat(document.getElementById(`qti-disc-${idx}`)?.value) || 0;
       const prodSel = document.getElementById(`qti-prod-${idx}`);
       if (prodSel) {
         if (!prodSel.value) return;
-        const item = { product_id: prodSel.value, quantity, unit_price };
+        const item = { product_id: prodSel.value, quantity, unit_price, discount };
         const allocInputs = document.querySelectorAll(`[id^="qt-alloc-${idx}-b"]`);
         if (allocInputs.length && branch_id) {
           // Rebuild the split deterministically so it always sums exactly to
@@ -13797,7 +13800,7 @@ const App = {
       const description = descInp?.value.trim();
       if (!description) return;
       const purchase_request_id = descInp.dataset.prId || null;
-      items.push({ description, quantity, unit_price, purchase_request_id });
+      items.push({ description, quantity, unit_price, discount, purchase_request_id });
     });
     if (!items.length) { this.alert('Add at least one item', 'error'); return; }
     try {
@@ -13863,7 +13866,7 @@ const App = {
         <table>
           <thead><tr><th>Product</th><th>Qty</th><th>Price</th><th>Tax</th><th>Total</th></tr></thead>
           <tbody>
-            ${q.items.map(i => `<tr><td>${i.product_name}${i.is_temp_item ? ` <span class="badge-pill badge-warning" style="font-size:10px" title="Flagged for Purchasing to order">Q</span>${i.purchase_request_number ? ` <a href="#" style="font-size:11px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${i.purchase_request_id})">${i.purchase_request_number}</a>` : ''}` : ''}${this.renderQuoteItemSources(i, q)}</td><td>${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td>${this.fmt(i.tax_amount)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}
+            ${q.items.map(i => `<tr><td>${i.product_name}${i.is_temp_item ? ` <span class="badge-pill badge-warning" style="font-size:10px" title="Flagged for Purchasing to order">Q</span>${i.purchase_request_number ? ` <a href="#" style="font-size:11px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${i.purchase_request_id})">${i.purchase_request_number}</a>` : ''}` : ''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on this line">-${this.fmt(i.discount_amount)}</span>` : ''}${this.renderQuoteItemSources(i, q)}</td><td>${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td>${this.fmt(i.tax_amount)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}
           </tbody>
         </table>
       </div>`;

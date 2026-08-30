@@ -203,7 +203,7 @@ async function flagItemsForPurchasing(quote) {
   try {
     const { rows: unflaggedQItems } = await db.execute({ sql: 'SELECT * FROM quotation_items WHERE quote_id = ? AND is_temp_item = 1 AND purchase_request_id IS NULL', args: [quote.id] });
     const { rows: shortfalls } = await db.execute({
-      sql: `SELECT qis.id as source_id, qi.id as item_id, qi.product_id, qi.product_name, qi.unit_price, qis.quantity
+      sql: `SELECT qis.id as source_id, qi.id as item_id, qi.product_id, qi.product_name, qi.unit_price, qi.discount_amount, qis.quantity
             FROM quotation_item_sources qis JOIN quotation_items qi ON qis.quotation_item_id = qi.id
             WHERE qi.quote_id = ? AND qis.branch_id IS NULL AND qis.purchase_request_item_id IS NULL`,
       args: [quote.id],
@@ -212,14 +212,20 @@ async function flagItemsForPurchasing(quote) {
 
     const prId = await ensureQuotePR(quote);
 
+    // A discount noted on the quote line (see quotation_items.discount_amount)
+    // is carried forward here, and again at PR→PO conversion — purely
+    // informational, but worth an approver seeing before signing off, since
+    // it means this purchase is backing an item sold below list price.
+    const discountNote = amt => amt > 0 ? ` (quoted with a ${parseFloat(amt).toFixed(2)} discount)` : '';
+
     for (const item of unflaggedQItems) {
       // Bring the quoted price forward as the starting est. cost — Purchasing
       // can adjust it once they've actually sourced the item.
       const unitCost = item.unit_price;
       const total = parseFloat((unitCost * item.quantity).toFixed(2));
       await db.execute({
-        sql: 'INSERT INTO purchase_request_items (pr_id, product_name, quantity, unit_cost, item_type, notes, total, quotation_item_id) VALUES (?,?,?,?,?,?,?,?)',
-        args: [prId, item.product_name, item.quantity, unitCost, 'sale', `Quoted at ${item.unit_price}/unit on ${quote.quote_number}`, total, item.id]
+        sql: 'INSERT INTO purchase_request_items (pr_id, product_name, quantity, unit_cost, item_type, notes, total, quotation_item_id, discount_amount) VALUES (?,?,?,?,?,?,?,?,?)',
+        args: [prId, item.product_name, item.quantity, unitCost, 'sale', `Quoted at ${item.unit_price}/unit on ${quote.quote_number}${discountNote(item.discount_amount)}`, total, item.id, item.discount_amount || 0]
       });
       await db.execute({ sql: 'UPDATE quotation_items SET purchase_request_id = ? WHERE id = ?', args: [prId, item.id] });
     }
@@ -228,8 +234,8 @@ async function flagItemsForPurchasing(quote) {
       const unitCost = s.unit_price;
       const total = parseFloat((unitCost * s.quantity).toFixed(2));
       const result = await db.execute({
-        sql: 'INSERT INTO purchase_request_items (pr_id, product_id, product_name, quantity, unit_cost, item_type, notes, total, quotation_item_id) VALUES (?,?,?,?,?,?,?,?,?)',
-        args: [prId, s.product_id, s.product_name, s.quantity, unitCost, 'sale', `No branch had enough stock — quoted at ${s.unit_price}/unit on ${quote.quote_number}`, total, s.item_id]
+        sql: 'INSERT INTO purchase_request_items (pr_id, product_id, product_name, quantity, unit_cost, item_type, notes, total, quotation_item_id, discount_amount) VALUES (?,?,?,?,?,?,?,?,?,?)',
+        args: [prId, s.product_id, s.product_name, s.quantity, unitCost, 'sale', `No branch had enough stock — quoted at ${s.unit_price}/unit on ${quote.quote_number}${discountNote(s.discount_amount)}`, total, s.item_id, s.discount_amount || 0]
       });
       await db.execute({ sql: 'UPDATE quotation_item_sources SET purchase_request_item_id = ? WHERE id = ?', args: [Number(result.lastInsertRowid), s.source_id] });
     }
