@@ -11496,12 +11496,14 @@ const App = {
         <div class="section-header">
           <h2>Purchasing</h2>
           <div style="display:flex;gap:8px">
+            ${this.can('purchasing_approve') ? `<button class="btn btn-outline" onclick="App.renderPurchasing('approvals')">Approvals</button>` : ''}
             ${this.can('purchase_requests') ? `<button class="btn btn-outline" onclick="App.showPRForm()">+ New Purchase Request</button>` : ''}
             <button class="btn btn-primary" onclick="App.showPOForm()">+ New PO</button>
           </div>
         </div>
         <div style="display:flex;gap:8px;margin-bottom:16px">
           ${tabBtn('orders','Purchase Orders')}
+          ${this.can('purchasing_approve') ? tabBtn('approvals','Approvals') : ''}
           ${this.can('purchase_requests') ? tabBtn('requests','Purchase Requests') : ''}
         </div>
         <div class="card">
@@ -11520,7 +11522,7 @@ const App = {
                     <td style="color:var(--text-muted)">${this.fmtDate(po.created_at)}</td>
                     <td>
                       <button class="btn btn-sm btn-secondary" onclick="App.viewPO(${po.id})">View</button>
-                      ${(po.status==='draft'||po.status==='sent') && this.can('purchasing_approve') ? `<button class="btn btn-sm btn-primary" onclick="App.updatePOStatus(${po.id},'approved')">Approve</button>` : ''}
+                      ${po.status==='sent' && this.can('purchasing_approve') ? `<button class="btn btn-sm btn-primary" onclick="App.showApprovePOModal(${po.id})">Approve</button>` : ''}
                       ${(po.status==='draft'||po.status==='sent'||po.status==='approved'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-sm btn-success" onclick="App.showReceivePO(${po.id})">Receive</button>` : ''}
                     </td>
                   </tr>`).join('') : '<tr><td colspan="8" class="empty-state">No purchase orders yet</td></tr>'}
@@ -11530,6 +11532,50 @@ const App = {
         </div>`;
       this._poSuppliers = suppliers;
       this._poBranches = branches;
+
+    } else if (tab === 'approvals') {
+      // Tray of POs formally submitted ('sent') and awaiting an approve/reject
+      // decision — draft POs aren't included since they haven't been
+      // submitted by their requester yet.
+      const orders = await this.api('GET', '/purchase-orders?status=sent&limit=100');
+      if (this.section !== 'purchasing' && this.section !== 'purchase-requests') return;
+      c.innerHTML = `
+        <div class="section-header">
+          <h2>Purchasing</h2>
+          <div style="display:flex;gap:8px">
+            ${this.can('purchasing_approve') ? `<button class="btn btn-outline" onclick="App.renderPurchasing('approvals')">Approvals</button>` : ''}
+            ${this.can('purchase_requests') ? `<button class="btn btn-outline" onclick="App.showPRForm()">+ New Purchase Request</button>` : ''}
+            <button class="btn btn-primary" onclick="App.showPOForm()">+ New PO</button>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:16px">
+          ${tabBtn('orders','Purchase Orders')}
+          ${tabBtn('approvals','Approvals')}
+          ${this.can('purchase_requests') ? tabBtn('requests','Purchase Requests') : ''}
+        </div>
+        <p style="font-size:13px;color:var(--text-muted);margin:-8px 0 14px">Purchase orders submitted for approval. Review the items and any linked quote or work order before approving or rejecting.</p>
+        <div class="card">
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>PO #</th><th>Supplier</th><th>Branch</th><th>Total</th><th>Submitted</th><th>Actions</th></tr></thead>
+              <tbody>
+                ${orders.length ? orders.map(po => `
+                  <tr>
+                    <td class="fw-600">${po.po_number}</td>
+                    <td>${po.supplier_name || '-'}</td>
+                    <td>${po.branch_name || '-'}</td>
+                    <td class="fw-600">${this.fmt(po.total)}</td>
+                    <td style="color:var(--text-muted)">${this.fmtDate(po.created_at)}</td>
+                    <td>
+                      <button class="btn btn-sm btn-secondary" onclick="App.viewPO(${po.id})">Review</button>
+                      <button class="btn btn-sm btn-primary" onclick="App.showApprovePOModal(${po.id})">Approve</button>
+                      <button class="btn btn-sm btn-danger" onclick="App.showRejectPOModal(${po.id})">Reject</button>
+                    </td>
+                  </tr>`).join('') : '<tr><td colspan="6" class="empty-state">Nothing awaiting approval</td></tr>'}
+              </tbody>
+            </table>
+          </div>
+        </div>`;
 
     } else {
       // Purchase Requests tab
@@ -11548,10 +11594,14 @@ const App = {
       c.innerHTML = `
         <div class="section-header">
           <h2>Purchasing</h2>
-          <button class="btn btn-primary" onclick="App.showPRForm()">+ New Request</button>
+          <div style="display:flex;gap:8px">
+            ${this.can('purchasing_approve') ? `<button class="btn btn-outline" onclick="App.renderPurchasing('approvals')">Approvals</button>` : ''}
+            <button class="btn btn-primary" onclick="App.showPRForm()">+ New Request</button>
+          </div>
         </div>
         <div style="display:flex;gap:8px;margin-bottom:16px">
           ${tabBtn('orders','Purchase Orders')}
+          ${this.can('purchasing_approve') ? tabBtn('approvals','Approvals') : ''}
           ${tabBtn('requests','Purchase Requests')}
         </div>
         <div class="card" style="margin-bottom:0;border-bottom:none;border-radius:8px 8px 0 0;padding:10px 16px 0">
@@ -12043,35 +12093,43 @@ const App = {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
-  async showPOForm() {
-    const [suppliers, products] = await Promise.all([
+  // editId (optional): edits an existing draft PO instead of creating a new
+  // one — reachable from its own "Edit PO" button, or after a rejection
+  // sends it back to Draft for adjustments. Existing lines render as fixed
+  // rows (qty/cost only, product locked) so an item's quotation_item_id/
+  // work_order_item_id link — if it traces back to a "Q" line — survives the
+  // edit untouched; "+ Add Item" still adds a fresh catalog-product line the
+  // normal way.
+  async showPOForm(editId) {
+    const [suppliers, products, po] = await Promise.all([
       this.api('GET', '/suppliers'),
       this.api('GET', '/products'),
+      editId ? this.api('GET', `/purchase-orders/${editId}`) : Promise.resolve(null),
     ]);
     const branches = this.currentUser.branches || [];
     this.showModal(`
       <div class="modal" style="max-width:720px">
-        <div class="modal-header"><span class="modal-title">New Purchase Order</span><button class="modal-close">✕</button></div>
+        <div class="modal-header"><span class="modal-title">${editId ? `Edit Purchase Order: ${po.po_number}` : 'New Purchase Order'}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <div class="input-row">
             <div class="form-group"><label>Supplier *</label>
               <select id="po-supplier" onchange="App.onPOSupplierChange()">
                 <option value="">-- Select Supplier --</option>
-                ${suppliers.map(s => `<option value="${s.id}">${s.name}</option>`).join('')}
+                ${suppliers.map(s => `<option value="${s.id}" ${po&&po.supplier_id===s.id?'selected':''}>${s.name}</option>`).join('')}
               </select>
             </div>
             <div class="form-group"><label>Branch</label>
               <select id="po-branch">
                 <option value="">-- All Branches --</option>
-                ${branches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
+                ${branches.map(b => `<option value="${b.id}" ${po&&po.branch_id===b.id?'selected':''}>${b.name}</option>`).join('')}
               </select>
             </div>
           </div>
           <div class="input-row">
-            <div class="form-group"><label>Expected Date</label><input id="po-date" type="date"></div>
-            <div class="form-group"><label>Vendor Order/Quote #</label><input id="po-vendor-order" placeholder="e.g. Amazon order #"></div>
+            <div class="form-group"><label>Expected Date</label><input id="po-date" type="date" value="${po&&po.expected_date?String(po.expected_date).slice(0,10):''}"></div>
+            <div class="form-group"><label>Vendor Order/Quote #</label><input id="po-vendor-order" placeholder="e.g. Amazon order #" value="${this.escapeAttr(po&&po.vendor_order_number)}"></div>
           </div>
-          <div class="form-group"><label>Notes</label><input id="po-notes"></div>
+          <div class="form-group"><label>Notes</label><input id="po-notes" value="${this.escapeAttr(po&&po.notes)}"></div>
           <div style="margin-bottom:10px">
             <div class="card-header"><span class="card-title">Items</span>
               <div style="display:flex;gap:8px">
@@ -12080,19 +12138,34 @@ const App = {
               </div>
             </div>
             <div id="po-items-status" style="font-size:12px;color:var(--text-muted);padding:4px 0 8px">Select a supplier above to see their products.</div>
+            <div id="po-existing-items">${po ? po.items.map(i => this._poExistingItemRowHtml(i)).join('') : ''}</div>
             <div id="po-items"></div>
           </div>
           <div style="text-align:right;font-size:15px;font-weight:700">Total: <span id="po-total">$0.00</span></div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-          <button class="btn btn-primary" onclick="App.savePO()">Create PO</button>
+          <button class="btn btn-primary" onclick="App.savePO(${editId||'null'})">${editId ? 'Update PO' : 'Create PO'}</button>
         </div>
       </div>`);
     this._poAllProducts = products;
     this._poProducts = [];
     this._poItems = [];
-    this.addPOItem();
+    if (po) {
+      this.onPOSupplierChange();
+      this.calcPOTotal();
+    } else {
+      this.addPOItem();
+    }
+  },
+
+  _poExistingItemRowHtml(item) {
+    return `<div class="po-receive-row po-existing-item" data-item-id="${item.id}" data-product-id="${item.product_id||''}">
+      <span style="flex:2;font-size:13px">${item.product_name}${item.sku?` <span style="color:var(--text-muted)">(${item.sku})</span>`:''}</span>
+      <input type="number" class="poi-existing-qty" min="1" value="${item.quantity_ordered}" style="width:70px" placeholder="Qty" oninput="App.calcPOTotal()">
+      <input type="number" class="poi-existing-cost" step="0.01" value="${item.unit_cost}" style="width:90px" placeholder="Unit Cost" oninput="App.calcPOTotal()">
+      <button class="btn btn-sm btn-danger" onclick="this.closest('.po-existing-item').remove();App.calcPOTotal()">✕</button>
+    </div>`;
   },
 
   _productOpts() {
@@ -12245,17 +12318,27 @@ const App = {
       const cost = parseFloat(document.getElementById(`poi-cost-${idx}`)?.value) || 0;
       total += qty * cost;
     });
+    document.querySelectorAll('.po-existing-item').forEach(row => {
+      const qty = parseFloat(row.querySelector('.poi-existing-qty')?.value) || 0;
+      const cost = parseFloat(row.querySelector('.poi-existing-cost')?.value) || 0;
+      total += qty * cost;
+    });
     const el = document.getElementById('po-total');
     if (el) el.textContent = this.fmt(total);
   },
 
-  async savePO() {
+  async savePO(editId) {
     const supplier_id = document.getElementById('po-supplier').value;
     const branch_id = document.getElementById('po-branch').value;
     const expected_date = document.getElementById('po-date').value;
     const notes = document.getElementById('po-notes').value;
     const vendor_order_number = document.getElementById('po-vendor-order').value.trim() || null;
     const items = [];
+    document.querySelectorAll('.po-existing-item').forEach(row => {
+      const qty = parseInt(row.querySelector('.poi-existing-qty').value) || 1;
+      const unit_cost = parseFloat(row.querySelector('.poi-existing-cost').value) || 0;
+      items.push({ id: row.dataset.itemId, product_id: row.dataset.productId || null, quantity_ordered: qty, unit_cost });
+    });
     document.querySelectorAll('[id^="poi-prod-"]').forEach(sel => {
       if (!sel.closest('[id^="po-item-"]')) return;
       const idx = sel.id.split('-').pop();
@@ -12268,9 +12351,15 @@ const App = {
     if (!supplier_id) { this.alert('Please select a supplier', 'error'); return; }
     if (!items.length) { this.alert('Add at least one item', 'error'); return; }
     try {
-      await this.api('POST', '/purchase-orders', { supplier_id, branch_id: branch_id||null, notes, expected_date: expected_date||null, vendor_order_number, items });
-      this.closeModal();
-      this.alert('Purchase order created');
+      if (editId) {
+        await this.api('PUT', `/purchase-orders/${editId}`, { supplier_id, branch_id: branch_id||null, notes, expected_date: expected_date||null, vendor_order_number, items });
+        this.closeModal();
+        this.alert('Purchase order updated');
+      } else {
+        await this.api('POST', '/purchase-orders', { supplier_id, branch_id: branch_id||null, notes, expected_date: expected_date||null, vendor_order_number, items });
+        this.closeModal();
+        this.alert('Purchase order created');
+      }
       this.renderPurchasing();
     } catch(e) { this.alert(e.message, 'error'); }
   },
@@ -12292,6 +12381,12 @@ const App = {
     const fmtBytes = b => b < 1024 ? `${b} B` : b < 1048576 ? `${(b/1024).toFixed(1)} KB` : `${(b/1048576).toFixed(1)} MB`;
     const freightStatusColor = { pending:'badge-warning', received_by_forwarder:'badge-info', forwarded:'badge-teal' };
     const freightStatusLabel = { pending:'Pending', received_by_forwarder:'Received by Forwarder', forwarded:'Forwarded to Us' };
+    const itemLinkBadges = i => {
+      const badges = [];
+      if (i.quotation_id) badges.push(`<a href="#" style="font-size:10px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewQuote(${i.quotation_id})">Quote ${i.quote_number}</a>`);
+      if (i.work_order_id) badges.push(`<a href="#" style="font-size:10px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewWorkOrder(${i.work_order_id})">WO ${i.wo_number}</a>`);
+      return badges.length ? `<br>${badges.join(' &bull; ')}` : '';
+    };
     this.showModal(`
       <div class="modal" style="max-width:700px">
         <div class="modal-header">
@@ -12302,16 +12397,20 @@ const App = {
           </div>
         </div>
         <div class="modal-body">
+          ${po.status==='draft' && po.rejection_reason ? `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:10px 12px;margin-bottom:14px;font-size:13px;color:#991b1b">
+            <strong>Rejected${po.rejected_by_name ? ` by ${po.rejected_by_name}` : ''}${po.rejected_at ? ` on ${this.fmtDateTime(po.rejected_at)}` : ''}:</strong> ${po.rejection_reason}
+          </div>` : ''}
           <div class="two-col" style="margin-bottom:14px;font-size:13px">
             <div><strong>Supplier:</strong> ${po.supplier_name||'-'}<br><strong>Contact:</strong> ${po.supplier_contact||'-'}<br><strong>Email:</strong> ${po.supplier_email||'-'}</div>
             <div><strong>Branch:</strong> ${po.branch_name||'-'}<br><strong>Created:</strong> ${this.fmtDate(po.created_at)}<br><strong>Expected:</strong> ${po.expected_date ? this.fmtDate(po.expected_date) : '-'}<br><strong>Vendor Order/Quote #:</strong> ${po.vendor_order_number || '-'}</div>
           </div>
+          ${po.source_pr_id ? `<div style="font-size:12px;color:var(--text-muted);margin:-6px 0 12px">Converted from <a href="#" style="color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${po.source_pr_id})">${po.source_pr_number}</a></div>` : ''}
           <div class="table-wrap">
             <table>
               <thead><tr><th>Product</th><th>SKU</th><th>Ordered</th><th>Received</th><th>Damaged</th><th>Unit Cost</th><th>Total</th></tr></thead>
               <tbody>
                 ${po.items.map(i => `<tr>
-                  <td>${i.product_name}${(!i.product_id && i.quantity_received>0) ? `<br><button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="App.showLinkToInventory(${po.id},${i.id})">+ Add to Inventory</button>` : ''}</td>
+                  <td>${i.product_name}${itemLinkBadges(i)}${(!i.product_id && i.quantity_received>0) ? `<br><button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="App.showLinkToInventory(${po.id},${i.id})">+ Add to Inventory</button>` : ''}</td>
                   <td>${i.sku||'-'}</td>
                   <td>${i.quantity_ordered}</td>
                   <td><span class="${i.quantity_received>=i.quantity_ordered?'color-success':'color-warning'}">${i.quantity_received||0}</span></td>
@@ -12323,6 +12422,10 @@ const App = {
             </table>
           </div>
           <div style="text-align:right;margin-top:10px;font-size:15px;font-weight:700">Total: ${this.fmt(po.total)}</div>
+          ${po.status==='approved' ? `<div style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px;font-size:13px">
+            <strong>Approved by:</strong> ${po.approved_by_name||'-'} on ${this.fmtDateTime(po.approved_at)}
+            ${po.approval_signature ? `<button type="button" class="btn btn-sm btn-outline" style="margin-left:8px;padding:1px 8px;font-size:11px" onclick="App.showRentalSignature('${po.approval_signature.replace(/'/g,"\\'")}','Approver Signature')">View Signature</button>` : ''}
+          </div>` : ''}
 
           <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:14px">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -12362,12 +12465,16 @@ const App = {
           </div>
         </div>
         <div class="modal-footer">
-          ${po.status==='draft' ? `<button class="btn btn-secondary" onclick="App.updatePOStatus(${po.id},'sent')">Mark as Sent</button>` : ''}
-          ${(po.status==='draft'||po.status==='sent') && this.can('purchasing_approve') ? `<button class="btn btn-primary" onclick="App.updatePOStatus(${po.id},'approved')">Approve PO</button>` : ''}
+          ${po.status==='draft' ? `<button class="btn btn-outline" onclick="App.closeModal();App.showPOForm(${po.id})">Edit PO</button>` : ''}
+          ${po.status==='draft' ? `<button class="btn btn-secondary" onclick="App.updatePOStatus(${po.id},'sent')">Send for Approval</button>` : ''}
+          ${po.status==='sent' && this.can('purchasing_approve') ? `<button class="btn btn-danger" onclick="App.showRejectPOModal(${po.id})">Reject</button>` : ''}
+          ${po.status==='sent' && this.can('purchasing_approve') ? `<button class="btn btn-primary" onclick="App.showApprovePOModal(${po.id})">Approve PO</button>` : ''}
           ${po.status!=='cancelled'&&po.status!=='received' ? `<button class="btn btn-danger" onclick="App.updatePOStatus(${po.id},'cancelled')">Cancel PO</button>` : ''}
           ${(po.status==='draft'||po.status==='sent'||po.status==='approved'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-success" onclick="App.closeModal();App.showReceivePO(${po.id})">Receive Items</button>` : ''}
           ${(po.status==='received'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn" style="background:#f59e0b;color:#fff;border:none" onclick="App.closeModal();App.showProcessDamaged(${po.id})">⚠️ Process Damaged</button>` : ''}
           ${(po.status==='received'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-secondary" onclick="App.emailGRN(${po.id},'${(po.supplier_email||'').replace(/'/g,"\\'")}')">✉️ Email GRN</button>` : ''}
+          ${po.status==='approved' ? `<button class="btn btn-secondary" onclick="App.printApprovedPO(${po.id})">🖨️ Print</button>` : ''}
+          ${po.status==='approved' ? `<button class="btn btn-secondary" onclick="App.emailApprovedPO(${po.id},'${(po.supplier_email||'').replace(/'/g,"\\'")}')">✉️ Email PO</button>` : ''}
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
@@ -12594,6 +12701,76 @@ const App = {
       this.alert(`PO ${status}`);
       this.renderPurchasing();
     } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  showRejectPOModal(id) {
+    this.showModal(`
+      <div class="modal" style="max-width:460px">
+        <div class="modal-header"><span class="modal-title">Reject Purchase Order</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted)">This sends the PO back to Draft so the requester can make adjustments and resubmit it.</p>
+          <div class="form-group"><label>Reason *</label><textarea id="po-reject-reason" rows="3" placeholder="What needs to change"></textarea></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-danger" onclick="App.confirmRejectPO(${id})">Reject PO</button>
+        </div>
+      </div>`);
+  },
+
+  async confirmRejectPO(id) {
+    const reason = document.getElementById('po-reject-reason').value.trim();
+    if (!reason) { this.alert('A rejection reason is required', 'error'); return; }
+    try {
+      await this.api('PATCH', `/purchase-orders/${id}/reject`, { reason, employee_id: this.currentUser.id });
+      this.closeModal();
+      this.alert('Purchase order rejected — back in Draft');
+      this.renderPurchasing();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  showApprovePOModal(id) {
+    this.showModal(`
+      <div class="modal" style="max-width:480px">
+        <div class="modal-header"><span class="modal-title">Approve Purchase Order</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted)">Sign to approve. Your signature is recorded on the completed PO.</p>
+          ${this._sigPadHtml('po-approve-sig', 'Approver Signature', 'sign to approve')}
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.confirmApprovePO(${id})">Approve</button>
+        </div>
+      </div>`);
+    this._sigPadInit('po-approve-sig');
+  },
+
+  async confirmApprovePO(id) {
+    if (!this._sigPadHasDrawn('po-approve-sig')) { this.alert('Your signature is required to approve this PO', 'error'); return; }
+    try {
+      await this.api('PATCH', `/purchase-orders/${id}/approve`, {
+        signature: this._sigPadDataUrl('po-approve-sig'),
+        employee_id: this.currentUser.id,
+      });
+      this.closeModal();
+      this.alert('Purchase order approved');
+      this.renderPurchasing();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  printApprovedPO(id) {
+    const win = window.open(`/api/email/po-preview/${id}`, '_blank', 'width=820,height=700');
+    win.addEventListener('load', () => win.print());
+  },
+
+  emailApprovedPO(id, supplierEmail) {
+    this.showEmailModal('Email Purchase Order', supplierEmail, async (to) => {
+      this.closeModal();
+      try {
+        await this.api('POST', `/email/send-po/${id}`, { to });
+        this.alert(`Purchase order sent to ${to}`);
+      } catch(e) { this.alert(e.message, 'error'); }
+    });
   },
 
   async showReceivePO(id) {

@@ -6,8 +6,35 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
-const { requirePermission, can } = require('../lib/permissions');
+const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
+const { uploadSignature } = require('../lib/signatures');
+
+// Items joined with the quotation/work order they trace back to (a PR's "Q"
+// line converted into this PO) — lets the PO detail view click straight
+// through to the document that drove the purchase, alongside the PR itself
+// (see the source_pr_* subqueries below).
+const PO_ITEMS_SELECT = `SELECT poi.*, q.quote_number, q.id as quotation_id, wo.wo_number, wo.id as work_order_id
+  FROM purchase_order_items poi
+  LEFT JOIN quotation_items qi ON poi.quotation_item_id = qi.id
+  LEFT JOIN quotations q ON qi.quote_id = q.id
+  LEFT JOIN work_order_items woi ON poi.work_order_item_id = woi.id
+  LEFT JOIN work_orders wo ON woi.work_order_id = wo.id
+  WHERE poi.po_id = ?`;
+
+const PO_DETAIL_SELECT = `SELECT po.*, s.name as supplier_name, s.contact_name as supplier_contact, s.email as supplier_email,
+  b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name,
+  ea.first_name || ' ' || ea.last_name as approved_by_name,
+  er.first_name || ' ' || er.last_name as rejected_by_name,
+  (SELECT id FROM purchase_requests WHERE converted_to_po_id = po.id LIMIT 1) as source_pr_id,
+  (SELECT pr_number FROM purchase_requests WHERE converted_to_po_id = po.id LIMIT 1) as source_pr_number
+  FROM purchase_orders po
+  LEFT JOIN suppliers s ON po.supplier_id = s.id
+  LEFT JOIN branches b ON po.branch_id = b.id
+  LEFT JOIN employees e ON po.employee_id = e.id
+  LEFT JOIN employees ea ON po.approved_by = ea.id
+  LEFT JOIN employees er ON po.rejected_by = er.id
+  WHERE po.id = ?`;
 
 router.use(requirePermission('purchasing'));
 
@@ -44,9 +71,9 @@ router.get('/', async (req, res) => {
 
 router.get('/:id', async (req, res) => {
   try {
-    const { rows: [po] } = await db.execute({ sql: `SELECT po.*, s.name as supplier_name, s.contact_name as supplier_contact, s.email as supplier_email, b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name FROM purchase_orders po LEFT JOIN suppliers s ON po.supplier_id = s.id LEFT JOIN branches b ON po.branch_id = b.id LEFT JOIN employees e ON po.employee_id = e.id WHERE po.id = ?`, args: [req.params.id] });
+    const { rows: [po] } = await db.execute({ sql: PO_DETAIL_SELECT, args: [req.params.id] });
     if (!po) return res.status(404).json({ error: 'Not found' });
-    const { rows: items } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ?', args: [req.params.id] });
+    const { rows: items } = await db.execute({ sql: PO_ITEMS_SELECT, args: [req.params.id] });
     po.items = items;
     res.json(po);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -96,22 +123,129 @@ router.post('/', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Update PO status (send, cancel) — approving specifically requires
-// purchasing_approve, on top of the router-level `purchasing` gate above;
-// sending/cancelling stay governed by the general permission.
+// Update PO status (send, cancel) — approving and rejecting now go through
+// their own dedicated endpoints below (a captured signature or a required
+// reason isn't a fit for this generic transition).
 router.patch('/:id/status', async (req, res) => {
   try {
     const { status } = req.body;
-    if (!['draft', 'sent', 'approved', 'cancelled'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
-    if (status === 'approved' && !req.apiKey && !can(req.employee.permissions, 'purchasing_approve')) {
-      return res.status(403).json({ error: 'Missing permission: purchasing_approve' });
-    }
+    if (!['sent', 'cancelled'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
     const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });
     if (!po) return res.status(404).json({ error: 'Not found' });
     if (po.status === 'received') return res.status(400).json({ error: 'Cannot change status of received PO' });
-    await db.execute({ sql: 'UPDATE purchase_orders SET status = ? WHERE id = ?', args: [status, req.params.id] });
+    if (status === 'sent') {
+      // Re-sending after a rejection is the "resubmitted" step — clear the
+      // old rejection so its banner doesn't linger on the PO the requester
+      // just fixed and sent back for another look.
+      await db.execute({ sql: 'UPDATE purchase_orders SET status = ?, rejected_by = NULL, rejected_at = NULL, rejection_reason = NULL WHERE id = ?', args: [status, req.params.id] });
+    } else {
+      await db.execute({ sql: 'UPDATE purchase_orders SET status = ? WHERE id = ?', args: [status, req.params.id] });
+    }
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });
     res.json(row);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Approve a submitted PO — requires purchasing_approve (on top of the
+// router-level `purchasing` gate above) and a captured signature, so
+// approval always carries who signed off and how. Only a 'sent' (formally
+// submitted) PO can be approved; a draft has to be sent first.
+router.patch('/:id/approve', requirePermission('purchasing_approve'), async (req, res) => {
+  try {
+    const { signature, employee_id } = req.body;
+    if (!signature) return res.status(400).json({ error: "The approver's signature is required to approve a purchase order" });
+    const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });
+    if (!po) return res.status(404).json({ error: 'Not found' });
+    if (po.status !== 'sent') return res.status(400).json({ error: `This PO is ${po.status}, not awaiting approval` });
+
+    const sigUrl = await uploadSignature(signature, `po-${req.params.id}-approve`, 'po-approval-signatures');
+    await db.execute({
+      sql: `UPDATE purchase_orders SET status = 'approved', approved_by = ?, approved_at = CURRENT_TIMESTAMP, approval_signature = ?,
+            rejected_by = NULL, rejected_at = NULL, rejection_reason = NULL WHERE id = ?`,
+      args: [employee_id || (req.employee && req.employee.id) || null, sigUrl, req.params.id],
+    });
+    const { rows: [updated] } = await db.execute({ sql: PO_DETAIL_SELECT, args: [req.params.id] });
+    res.json(updated);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Reject a submitted PO back to draft with a required reason — the same
+// permission as approving, since it's the other half of the same decision.
+router.patch('/:id/reject', requirePermission('purchasing_approve'), async (req, res) => {
+  try {
+    const { reason, employee_id } = req.body;
+    if (!reason || !reason.trim()) return res.status(400).json({ error: 'A rejection reason is required' });
+    const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });
+    if (!po) return res.status(404).json({ error: 'Not found' });
+    if (po.status !== 'sent') return res.status(400).json({ error: `This PO is ${po.status}, not awaiting approval` });
+
+    await db.execute({
+      sql: `UPDATE purchase_orders SET status = 'draft', rejected_by = ?, rejected_at = CURRENT_TIMESTAMP, rejection_reason = ? WHERE id = ?`,
+      args: [employee_id || (req.employee && req.employee.id) || null, reason.trim(), req.params.id],
+    });
+    const { rows: [updated] } = await db.execute({ sql: PO_DETAIL_SELECT, args: [req.params.id] });
+    res.json(updated);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Edit a draft PO's items/details — only reachable pre-submission (or after
+// a rejection sends it back here). Existing lines are updated in place by
+// id (preserving any quotation_item_id/work_order_item_id link back to the
+// quote/work order that requested them); lines with no id are new catalog
+// additions; anything not resent is removed.
+router.put('/:id', async (req, res) => {
+  try {
+    const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });
+    if (!po) return res.status(404).json({ error: 'Not found' });
+    if (po.status !== 'draft') return res.status(400).json({ error: 'Only a draft PO can be edited' });
+
+    const { supplier_id, branch_id, notes, expected_date, vendor_order_number, items } = req.body;
+    if (!items || !items.length) return res.status(400).json({ error: 'A PO needs at least one item' });
+
+    const { rows: existingItems } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ?', args: [req.params.id] });
+    const existingById = new Map(existingItems.map(i => [i.id, i]));
+
+    const tx = await db.transaction('write');
+    let committed = false;
+    try {
+      const keepIds = new Set();
+      let subtotal = 0;
+      for (const item of items) {
+        const qty = parseInt(item.quantity_ordered) || 1;
+        const unit_cost = parseFloat(item.unit_cost) || 0;
+        const total = parseFloat((qty * unit_cost).toFixed(2));
+        subtotal += total;
+        const existingId = item.id ? parseInt(item.id) : null;
+        if (existingId && existingById.has(existingId)) {
+          await tx.execute({ sql: 'UPDATE purchase_order_items SET quantity_ordered = ?, unit_cost = ?, total = ? WHERE id = ?', args: [qty, unit_cost, total, existingId] });
+          keepIds.add(existingId);
+        } else {
+          if (!item.product_id) throw new Error('New items must reference a catalog product');
+          const { rows: [product] } = await tx.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] });
+          if (!product) throw new Error('Product not found');
+          const result = await tx.execute({ sql: 'INSERT INTO purchase_order_items (po_id,product_id,product_name,sku,quantity_ordered,unit_cost,total) VALUES (?,?,?,?,?,?,?)', args: [req.params.id, product.id, product.name, product.sku, qty, unit_cost, total] });
+          keepIds.add(Number(result.lastInsertRowid));
+        }
+      }
+      for (const existing of existingItems) {
+        if (!keepIds.has(existing.id)) await tx.execute({ sql: 'DELETE FROM purchase_order_items WHERE id = ?', args: [existing.id] });
+      }
+      subtotal = parseFloat(subtotal.toFixed(2));
+      await tx.execute({
+        sql: 'UPDATE purchase_orders SET supplier_id = ?, branch_id = ?, notes = ?, expected_date = ?, vendor_order_number = ?, subtotal = ?, total = ? WHERE id = ?',
+        args: [supplier_id || po.supplier_id, branch_id || null, notes ?? po.notes, expected_date || null, vendor_order_number || null, subtotal, subtotal, req.params.id],
+      });
+      await tx.commit();
+      committed = true;
+    } catch(e) {
+      if (!committed) await tx.rollback();
+      return res.status(committed ? 500 : 400).json({ error: e.message });
+    }
+
+    const { rows: [updated] } = await db.execute({ sql: PO_DETAIL_SELECT, args: [req.params.id] });
+    const { rows: updatedItems } = await db.execute({ sql: PO_ITEMS_SELECT, args: [req.params.id] });
+    updated.items = updatedItems;
+    res.json(updated);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

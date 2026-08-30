@@ -1292,6 +1292,18 @@ async function _init() {
     // real row instead of a dangling id.
     'ALTER TABLE products ADD COLUMN merged_into_product_id INTEGER REFERENCES products(id)',
     'ALTER TABLE products ADD COLUMN merged_at DATETIME',
+    // Formal PO approval — a submitted ('sent') PO is approved with a captured
+    // signature (see PATCH /purchase-orders/:id/approve) or rejected with a
+    // required reason (PATCH .../reject), which drops it back to 'draft' for
+    // the requester to fix and resubmit. rejected_* is cleared the next time
+    // the PO is re-sent, so a stale rejection banner doesn't linger after the
+    // requester has already addressed it.
+    'ALTER TABLE purchase_orders ADD COLUMN approved_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE purchase_orders ADD COLUMN approved_at DATETIME',
+    'ALTER TABLE purchase_orders ADD COLUMN approval_signature TEXT',
+    'ALTER TABLE purchase_orders ADD COLUMN rejected_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE purchase_orders ADD COLUMN rejected_at DATETIME',
+    'ALTER TABLE purchase_orders ADD COLUMN rejection_reason TEXT',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

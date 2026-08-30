@@ -27,26 +27,11 @@ const uploadPoAttachment = multer({
 // A canvas signature pad already gives us a base64 PNG client-side, so this
 // skips multer/multipart entirely — same cloudUpload-or-local-disk fallback
 // routes/customers.js's ID-scan upload uses, just fed a decoded Buffer
-// instead of req.file.buffer. Shared by three call sites (customer's
-// signature at issue, the guard's at issue, the guard's at return) so the
-// decode/upload logic exists in exactly one place.
-async function uploadSignature(dataUrl, filenamePrefix) {
-  const match = /^data:image\/(\w+);base64,(.+)$/.exec(dataUrl || '');
-  if (!match) return null;
-  const buffer = Buffer.from(match[2], 'base64');
-  const cloudResult = await cloudUpload(buffer, {
-    folder: 'pos-system/rental-signatures',
-    public_id: `${filenamePrefix}-${Date.now()}`,
-    overwrite: true,
-    resource_type: 'image',
-  });
-  if (cloudResult) return cloudResult.secure_url;
-  const dir = path.join(__dirname, '../uploads/rental-signatures');
-  fs.mkdirSync(dir, { recursive: true });
-  const filename = `${filenamePrefix}-${Date.now()}.${match[1]}`;
-  fs.writeFileSync(path.join(dir, filename), buffer);
-  return `/uploads/rental-signatures/${filename}`;
-}
+// instead of req.file.buffer. Shared by three call sites here (customer's
+// signature at issue, the guard's at issue, the guard's at return), and now
+// also by purchase order approvals — see lib/signatures.js.
+const { uploadSignature: uploadSignatureTo } = require('../lib/signatures');
+const uploadSignature = (dataUrl, filenamePrefix) => uploadSignatureTo(dataUrl, filenamePrefix, 'rental-signatures');
 
 // Attaches `required_deposit_return_method`/`required_deposit_return_reason`
 // (see lib/rentals.js's requiredDepositReturnMethod) to a joined agreement

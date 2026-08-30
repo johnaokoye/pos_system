@@ -718,6 +718,139 @@ function buildGrnHtml(po, s) {
 </html>`;
 }
 
+// Shared by the approved-PO print preview and the email-it action below —
+// same absolute-URL-for-the-signature reasoning as buildRentalInvoiceHtml: a
+// locally-stored (non-Cloudinary) /uploads/... signature path only resolves
+// against this server's own origin, which an email client can't infer on
+// its own, so both callers pass the request's real origin.
+function buildApprovedPoHtml(po, s, origin) {
+  const storeName = s.store_name || 'My Store';
+  const storeAddr = s.store_address || '';
+  const storePhone = s.store_phone || '';
+  const absUrl = (path) => !path ? null : (/^https?:\/\//.test(path) ? path : (origin ? `${origin}${path}` : path));
+
+  const rows = (po.items || []).map(i => `
+    <tr>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku || ''}</span></td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${i.quantity_ordered}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${fmt(i.unit_cost)}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(i.total)}</td>
+    </tr>`).join('');
+
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Purchase Order ${po.po_number}</title></head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
+<tr><td align="center">
+  <table width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+    <tr><td style="background:#1a56db;padding:24px;text-align:center">
+      <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
+      ${storeAddr ? `<div style="color:#bcd4ff;font-size:12px;margin-top:4px">${storeAddr}</div>` : ''}
+      ${storePhone ? `<div style="color:#bcd4ff;font-size:12px">${storePhone}</div>` : ''}
+    </td></tr>
+    <tr><td style="padding:20px 24px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px">
+        <div>
+          <div style="font-size:20px;font-weight:700;color:#111">PURCHASE ORDER</div>
+          <div style="font-size:13px;color:#888;margin-top:2px">${po.po_number}</div>
+        </div>
+        <div style="text-align:right;font-size:13px;color:#444">
+          <div><strong>Approved:</strong> ${po.approved_at ? new Date(po.approved_at).toLocaleDateString() : '—'}</div>
+          ${po.branch_name ? `<div><strong>Branch:</strong> ${po.branch_name}</div>` : ''}
+          ${po.vendor_order_number ? `<div><strong>Vendor Order #:</strong> ${po.vendor_order_number}</div>` : ''}
+        </div>
+      </div>
+      ${po.supplier_name ? `<div style="background:#f9fafb;border:1px solid #e8e8e8;border-radius:6px;padding:12px;margin-bottom:16px;font-size:13px">
+        <strong>Supplier:</strong><br>${po.supplier_name}${po.supplier_contact ? `<br>${po.supplier_contact}` : ''}${po.supplier_email ? `<br>${po.supplier_email}` : ''}
+      </div>` : ''}
+      <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px">
+        <thead><tr style="background:#f9fafb">
+          <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Item</th>
+          <th style="padding:8px;text-align:center;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Qty</th>
+          <th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Unit Cost</th>
+          <th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Total</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div style="text-align:right;margin-top:10px;font-size:15px;font-weight:700;color:#111">Total: ${fmt(po.total)}</div>
+      ${po.notes ? `<div style="margin-top:16px;font-size:13px;color:#444"><strong>Notes:</strong> ${po.notes}</div>` : ''}
+      ${po.approval_signature ? `
+      <div style="margin-top:24px;padding-top:16px;border-top:1px solid #e8e8e8">
+        <div style="font-size:10px;font-weight:bold;text-transform:uppercase;color:#888;margin-bottom:6px">Approved By</div>
+        <img src="${absUrl(po.approval_signature)}" style="max-height:60px;max-width:220px;border-bottom:1px solid #333;padding-bottom:4px;display:block" />
+        <div style="font-size:12px;color:#555;margin-top:4px">${po.approved_by_name || ''}</div>
+        ${po.approved_at ? `<div style="font-size:11px;color:#888">${new Date(po.approved_at).toLocaleString()}</div>` : ''}
+      </div>` : ''}
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body>
+</html>`;
+}
+
+// Purchase order print preview — opened directly in a browser tab (Print
+// button on the PO detail view), same shared-template pattern as
+// statement-preview below. Requires the PO to already be approved (the
+// document's whole point is showing that signature).
+router.get('/po-preview/:id', requireAuth, async (req, res) => {
+  try {
+    const { rows: [po] } = await db.execute({ sql: `SELECT po.*, s.name as supplier_name, s.contact_name as supplier_contact, s.email as supplier_email,
+      b.name as branch_name, ea.first_name || ' ' || ea.last_name as approved_by_name
+      FROM purchase_orders po
+      LEFT JOIN suppliers s ON po.supplier_id = s.id
+      LEFT JOIN branches b ON po.branch_id = b.id
+      LEFT JOIN employees ea ON po.approved_by = ea.id
+      WHERE po.id = ?`, args: [req.params.id] });
+    if (!po) return res.status(404).send('<p>Purchase order not found</p>');
+    if (po.status !== 'approved') return res.status(400).send('<p>This purchase order has not been approved yet</p>');
+    const { rows: items } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ?', args: [req.params.id] });
+    po.items = items;
+    const s = await getSettings();
+    const origin = `${req.protocol}://${req.get('host')}`;
+    res.setHeader('Content-Type', 'text/html');
+    res.send(buildApprovedPoHtml(po, s, origin));
+  } catch(e) { res.status(500).send(`<p>Error: ${e.message}</p>`); }
+});
+
+// Email the approved PO document (with the approver's signature) to the
+// supplier or anyone else who needs it.
+router.post('/send-po/:id', requireAuth, async (req, res) => {
+  const { to } = req.body;
+  if (!to) return res.status(400).json({ error: 'Recipient email is required' });
+  try {
+    const { rows: [po] } = await db.execute({ sql: `SELECT po.*, s.name as supplier_name, s.contact_name as supplier_contact, s.email as supplier_email,
+      b.name as branch_name, ea.first_name || ' ' || ea.last_name as approved_by_name
+      FROM purchase_orders po
+      LEFT JOIN suppliers s ON po.supplier_id = s.id
+      LEFT JOIN branches b ON po.branch_id = b.id
+      LEFT JOIN employees ea ON po.approved_by = ea.id
+      WHERE po.id = ?`, args: [req.params.id] });
+    if (!po) return res.status(404).json({ error: 'Purchase order not found' });
+    if (po.status !== 'approved') return res.status(400).json({ error: 'This purchase order has not been approved yet' });
+    const { rows: items } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ?', args: [req.params.id] });
+    po.items = items;
+
+    const s = await getSettings();
+    const origin = `${req.protocol}://${req.get('host')}`;
+    try {
+      const transporter = createTransporter(s);
+      const fromName = s.email_from_name || s.store_name || 'POS System';
+      const fromAddr = s.email_smtp_user || s.store_email || '';
+      await transporter.sendMail({
+        from: `"${fromName}" <${fromAddr}>`,
+        to,
+        subject: `Purchase Order ${po.po_number} from ${s.store_name || 'Our Store'}`,
+        html: buildApprovedPoHtml(po, s, origin),
+      });
+      res.json({ success: true, message: `Purchase order sent to ${to}` });
+    } catch (e) {
+      res.status(500).json({ error: `Failed to send email: ${e.message}` });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Send goods received note
 router.post('/send-grn/:id', requireAuth, async (req, res) => {
   const { to } = req.body;

@@ -511,12 +511,21 @@
 
       <h3>Purchase Orders (PO) — the supplier-facing order</h3>
       <ol class="steps">
-        <li><strong>Draft</strong> — built directly or from a converted PR.</li>
-        <li><strong>Sent</strong> to the supplier.</li>
-        <li><strong>Approved</strong> (needs <span class="perm-pill">purchasing_approve</span>, on top of the base purchasing permission).</li>
+        <li><strong>Draft</strong> — built directly, from a converted PR, or sent back here by a rejection. Fully editable: items (qty/cost), supplier, branch, dates, and notes can all be changed while a PO is in Draft.</li>
+        <li><strong>Sent</strong> — formally submitted for approval.</li>
+        <li><strong>Approved</strong> or <strong>Rejected</strong> (needs <span class="perm-pill">purchasing_approve</span>) — the decision on a submitted PO.</li>
         <li><strong>Receiving</strong> (needs <span class="perm-pill">purchasing_receive</span>) — mark items as arrived; this can happen over multiple partial deliveries. Receiving updates stock (both overall and at the PO's branch) and refreshes the product's cost to the latest price paid.</li>
       </ol>
       <p>A PO can also be marked <strong>cancelled</strong>, and items received damaged can be logged separately to reverse the stock that was just added. You can attach files to a PO — invoices, packing slips — up to 20MB each.</p>
+
+      <h3>Approvals</h3>
+      <p>The <strong>Approvals</strong> tab (visible with <span class="perm-pill">purchasing_approve</span>) is a tray of every PO currently <strong>Sent</strong> and awaiting a decision — draft POs aren't shown there since their requester hasn't submitted them yet. From the tray, or from a PO's own detail view, an approver can:</p>
+      <ul>
+        <li><strong>Approve</strong> — draw a signature to confirm; it's captured and shown on the completed PO document (see below). Approving clears any earlier rejection note.</li>
+        <li><strong>Reject</strong> with a required reason — the PO drops back to <strong>Draft</strong>, the reason shows as a banner on the PO (who rejected it and why) until the requester edits it and marks it <strong>Sent</strong> again, which clears the banner.</li>
+      </ul>
+      <p>A PO's detail view also links straight through to whatever document drove the purchase: the <strong>Purchase Request</strong> it was converted from (if any), and per line, the specific <strong>Quotation</strong> or <strong>Work Order</strong> its "Q" item traces back to — so an approver can check the original context without hunting for it separately.</p>
+      <p>Once approved, <strong>Print</strong> and <strong>Email PO</strong> on the detail view produce the same completed document — supplier, items, total, and the approver's captured signature with their name and the approval date/time.</p>
       <p>A PO can carry the <strong>vendor's own order/quote number</strong> (e.g. an Amazon order #) separate from its own PO number — set it when creating the PO or edit it later from the PO detail view. Alongside it, a <strong>Freight Forwarding</strong> panel tracks orders that ship through a freight forwarder before reaching a branch: <strong>Pending → Received by Forwarder → Forwarded to Us</strong>, each stamped with a timestamp, plus an optional freight tracking number and notes. This status is independent of the PO's own approval/receiving status above.</p>
       <div class="callout note"><strong>Items with no product yet</strong>A PO line for something not yet in your catalog can be "linked" to a product after the fact — either an existing one or a brand-new one created on the spot — and any quantity already received retroactively applies to its stock. If the line traces back to a quotation's "Q" item, the newly created product is automatically tagged non-inventory and shows under Inventory's <a href="#inventory">Non-Inventory Items tab</a> rather than the main catalog list, since it was bought for that one quote.</div>
     </section>
