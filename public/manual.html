@@ -325,7 +325,7 @@
       <p class="module-intro">Custom quotes/invoices for one-off jobs — tree removal, a special install, anything that isn't a normal retail sale — where line items are typed in freely (labour, equipment rental, tools) with an optional catalog item mixed in, usually priced above cost. Its own button on the Sales hub, its own permissions, and its own screen — separate from Quotations even though it's built on the same underlying quote.</p>
 
       <h3>Who can use it</h3>
-      <p>Deliberately restricted to a handful of people, independent of ordinary Quotations access: <span class="perm-pill">special_projects</span> to build, submit, and convert a project; <span class="perm-pill">special_projects_approve</span> to approve or reject one. Having <span class="perm-pill">quotations</span> alone does not grant either — a Special Project is invisible in both the Special Projects screen and the API to anyone without one of these two permissions, even in an unfiltered list.</p>
+      <p>Deliberately restricted to a handful of people, independent of ordinary Quotations access: <span class="perm-pill">special_projects</span> to build, submit, and convert a project; <span class="perm-pill">special_projects_approve</span> to approve or reject one. Having <span class="perm-pill">quotations</span> alone does not grant either — a Special Project is invisible in both the Special Projects screen and the API to anyone without one of these two permissions, even in an unfiltered list. The two are genuinely independent permissions, not a module-and-sub-permission pair — checking <span class="perm-pill">special_projects</span> in Security Groups does <strong>not</strong> also grant approval rights, so the same person doesn't have to both set a project's pricing and sign off on it.</p>
 
       <h3>Line items and markup</h3>
       <p>Each line is either a real catalog product or a free-typed custom item (same "pick a product OR type a description" builder Quotations uses) — but unlike a regular quote's custom line, a Special Project's custom items never generate a Purchasing "Q" flag or a Purchase Request; they're priced references and labour/service charges, not things the store needs to go buy. Every line also has an optional <strong>Cost</strong> field alongside <strong>Price</strong> (pre-filled from the catalog for a real product), with a live markup/margin percentage shown next to it — purely informational, it never changes what gets charged.</p>
@@ -756,7 +756,8 @@
         <tr><td>transfers</td><td>transfers_create, transfers_approve, transfers_pickup, transfers_dropoff</td></tr>
         <tr><td>quotations</td><td>quotations_create, quotations_approve, quotations_convert</td></tr>
         <tr><td>sales_manager</td><td>(none)</td></tr>
-        <tr><td>special_projects</td><td>special_projects_approve</td></tr>
+        <tr><td>special_projects</td><td>(none — special_projects_approve is a separate, independent permission below, not a sub-key)</td></tr>
+        <tr><td>special_projects_approve</td><td>(none)</td></tr>
         <tr><td>accounts</td><td>accounts_create, accounts_payments, accounts_writeoff</td></tr>
         <tr><td>crm</td><td>crm_leads, crm_opportunities</td></tr>
         <tr><td>commissions</td><td>commissions_plans, commissions_approve, commissions_pay, commissions_delete</td></tr>

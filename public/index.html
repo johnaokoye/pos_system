@@ -15407,9 +15407,12 @@ const App = {
       { key: 'quotations_convert', label: 'Convert to Invoice' },
     ]},
     { key: 'sales_manager', label: 'Sales Manager', subs: [] },
-    { key: 'special_projects', label: 'Special Projects', subs: [
-      { key: 'special_projects_approve', label: 'Approve Special Projects' },
-    ]},
+    // Independent top-level permissions, not parent/sub — creating a
+    // Special Project and approving one are meant to be separable (the
+    // parent-checkbox auto-checks-all-subs behavior below would otherwise
+    // grant approval rights the moment "Special Projects" is checked).
+    { key: 'special_projects', label: 'Special Projects', subs: [] },
+    { key: 'special_projects_approve', label: 'Approve Special Projects', subs: [] },
     { key: 'accounts', label: 'Accounts Receivable', subs: [
       { key: 'accounts_create', label: 'Create Invoices' },
       { key: 'accounts_payments', label: 'Record Payments' },
