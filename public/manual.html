@@ -233,6 +233,10 @@
         <li><strong>Discount cards</strong> — attaching a customer who carries an active discount card applies their flat percentage automatically, and it always takes priority over a promo code — attaching such a customer clears any promo already on the cart (see <a href="#discount-cards">Discount Cards</a>).</li>
       </ul>
 
+      <h3>Line-item discounts</h3>
+      <p>The <strong>%</strong> button on a cart row (needs <span class="perm-pill">pos_discounts</span>) opens a per-line discount, separate from the whole-ticket Ticket Discount above. An item is only eligible if it isn't already covered by an active promotion (no stacking a manual discount on a promo) and its brand isn't on the store's discount-exclusion list (Settings → POS Line-Item Discounts) — otherwise the button explains why and no discount is offered.</p>
+      <p>A discount up to the store's configured <strong>Maximum Line Item Discount %</strong> (same settings card, 0 = unlimited) applies immediately. Going over that limit prompts for a manager PIN — an employee whose security group has <span class="perm-pill">pos_discount_override</span> — the same on-the-spot override pattern as Void Line; entering it records who authorized the discount right on the line. Every check (eligibility and the limit/override) is re-verified server-side at checkout too, so it can't be bypassed by tampering with the cart in the browser.</p>
+
       <h3>Holding an order</h3>
       <p>Use <strong>Hold</strong> (needs <span class="perm-pill">pos_hold</span>) to park a cart without charging it or touching stock — useful when a customer steps away or a quote is being converted. Use <strong>Hold Recall</strong> to finish it later from the held-orders list, or delete the hold entirely to abandon it.</p>
 

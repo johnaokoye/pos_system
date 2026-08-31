@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { requirePermission } = require('../lib/permissions');
-const { promoTimingStatus, computeEligibleAmount } = require('../lib/promotions');
+const { promoTimingStatus, computeEligibleAmount, promoAppliesToProduct } = require('../lib/promotions');
 
 // List all promotions with code count
 router.get('/', requirePermission('promotions'), async (req, res) => {
@@ -202,6 +202,62 @@ router.delete('/:id/codes/:codeId', requirePermission('promotions'), async (req,
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Whether `product` can receive a manual POS line-item discount right now —
+// blocked if any currently-active, code-free promotion already covers it (no
+// stacking a manual discount on top of a promo), or if its brand is on the
+// store's discount-exclusion list. Exported for routes/transactions.js to
+// re-run authoritatively at checkout, since a client could otherwise bypass
+// the GET below and send an unauthorized discount directly.
+async function checkDiscountEligibility(product) {
+  if (!product) return { eligible: false, reason: 'not_found' };
+  const brand = (product.brand || '').trim();
+  if (brand) {
+    const { rows: [excluded] } = await db.execute({ sql: 'SELECT id FROM pos_discount_excluded_brands WHERE brand = ? COLLATE NOCASE', args: [brand] });
+    if (excluded) return { eligible: false, reason: 'brand_excluded' };
+  }
+
+  const { rows: allPromos } = await db.execute({
+    sql: `SELECT p.* FROM promotions p
+          WHERE p.active = 1
+            AND (SELECT COUNT(*) FROM promotion_codes WHERE promotion_id = p.id) = 0`,
+    args: [],
+  });
+  const activePromos = allPromos.filter(p => promoTimingStatus(p).active);
+  if (activePromos.length) {
+    const scopedIds = activePromos.filter(p => ['specific', 'categories', 'items', 'brands'].includes(p.applies_to)).map(p => p.id);
+    let itemsByPromo = {};
+    if (scopedIds.length) {
+      const placeholders = scopedIds.map(() => '?').join(',');
+      const { rows } = await db.execute({ sql: `SELECT * FROM promotion_items WHERE promotion_id IN (${placeholders})`, args: scopedIds });
+      for (const item of rows) (itemsByPromo[item.promotion_id] = itemsByPromo[item.promotion_id] || []).push(item);
+    }
+    const allIds = activePromos.map(p => p.id);
+    let brandsByPromo = {};
+    if (allIds.length) {
+      const placeholders = allIds.map(() => '?').join(',');
+      const { rows } = await db.execute({ sql: `SELECT * FROM promotion_brands WHERE promotion_id IN (${placeholders})`, args: allIds });
+      for (const b of rows) (brandsByPromo[b.promotion_id] = brandsByPromo[b.promotion_id] || []).push(b);
+    }
+    for (const promo of activePromos) {
+      if (promoAppliesToProduct(promo, product, { items: itemsByPromo[promo.id] || [], brands: brandsByPromo[promo.id] || [] })) {
+        return { eligible: false, reason: 'promotion', promotion_name: promo.name };
+      }
+    }
+  }
+
+  return { eligible: true, reason: null };
+}
+
+router.get('/discount-eligibility/:productId', requirePermission('pos'), async (req, res) => {
+  try {
+    const { rows: [product] } = await db.execute({ sql: 'SELECT id, brand, category_id FROM products WHERE id = ?', args: [req.params.productId] });
+    if (!product) return res.status(404).json({ error: 'Product not found' });
+    const result = await checkDiscountEligibility(product);
+    const { rows: [setting] } = await db.execute({ sql: "SELECT value FROM settings WHERE key = 'pos_max_line_discount_percent'", args: [] });
+    res.json({ ...result, max_percent: parseFloat(setting?.value) || 0 });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Auto-apply: return ALL active promotions that require no code and match cart, sorted by discount desc
 // The next three are called from the POS cart during checkout (applying a
 // promo code to an in-progress sale), not the promotions management screen —
@@ -335,3 +391,4 @@ router.post('/use-code', requirePermission('pos'), async (req, res) => {
 });
 
 module.exports = router;
+module.exports.checkDiscountEligibility = checkDiscountEligibility;

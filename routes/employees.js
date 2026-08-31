@@ -146,7 +146,7 @@ router.post('/validate-pin', requireAuth, async (req, res) => {
       try { const p = JSON.parse(e.permissions || '{}'); return p[permission] === true; } catch { return false; }
     });
     if (!authorizer) return res.status(403).json({ error: 'Invalid PIN or insufficient privilege' });
-    res.json({ authorized: true, name: `${authorizer.first_name} ${authorizer.last_name}` });
+    res.json({ authorized: true, id: authorizer.id, name: `${authorizer.first_name} ${authorizer.last_name}` });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

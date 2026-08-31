@@ -767,6 +767,17 @@ async function _init() {
       active INTEGER DEFAULT 1,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // Brands a manual POS line-item discount can never be applied to (e.g.
+    // MAP-protected or vendor-restricted brands) — independent of any
+    // specific promotion's own brand rules (promotion_brands above), and
+    // checked regardless of whether a promotion is even involved. Managed
+    // from Settings; see POST /transactions' server-side re-check and
+    // GET /promotions/discount-eligibility/:productId for the client-side one.
+    { sql: `CREATE TABLE IF NOT EXISTS pos_discount_excluded_brands (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      brand TEXT UNIQUE NOT NULL COLLATE NOCASE,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS discount_card_types (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -1311,6 +1322,12 @@ async function _init() {
     // the customer below list price, worth knowing before signing off on it).
     'ALTER TABLE purchase_request_items ADD COLUMN discount_amount REAL DEFAULT 0',
     'ALTER TABLE purchase_order_items ADD COLUMN discount_amount REAL DEFAULT 0',
+    // POS per-line-item discounts (distinct from the existing whole-ticket
+    // discount_amount below): the % actually given on that line, and who
+    // authorized it if it exceeded the store's per-line limit (see
+    // POST /transactions and the pos_discount_override permission).
+    'ALTER TABLE transaction_items ADD COLUMN discount_percent REAL DEFAULT 0',
+    'ALTER TABLE transaction_items ADD COLUMN discount_override_by INTEGER REFERENCES employees(id)',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
@@ -1465,6 +1482,21 @@ async function _init() {
       const perms = JSON.parse(g.permissions || '{}');
       if (!('multi_branch_access' in perms)) {
         perms.multi_branch_access = (g.name === 'Administrator' || g.name === 'Manager');
+        await db.execute({ sql: 'UPDATE security_groups SET permissions = ? WHERE id = ?', args: [JSON.stringify(perms), g.id] });
+      }
+    }
+  } catch(e) {}
+
+  // Add pos_discount_override to existing security groups missing it —
+  // Administrator/Manager only, since the whole point is a cashier can't
+  // grant their own override (see POST /transactions and the "Discount"
+  // action on a POS cart line).
+  try {
+    const { rows: groups } = await db.execute({ sql: 'SELECT id, name, permissions FROM security_groups', args: [] });
+    for (const g of groups) {
+      const perms = JSON.parse(g.permissions || '{}');
+      if (!('pos_discount_override' in perms)) {
+        perms.pos_discount_override = (g.name === 'Administrator' || g.name === 'Manager');
         await db.execute({ sql: 'UPDATE security_groups SET permissions = ? WHERE id = ?', args: [JSON.stringify(perms), g.id] });
       }
     }

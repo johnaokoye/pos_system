@@ -2856,10 +2856,12 @@ const App = {
 
     list.innerHTML = this.cart.map((item, idx) => {
       const sku = item.sku || this.allProducts.find(p => p.id === item.product_id)?.sku || '—';
+      const lineGross = item.price * item.quantity;
+      const lineNet = this._cartLineNet(item);
       return `
       <tr class="pos-ticket-row${this._selectedCartLine === idx ? ' selected' : ''}" onclick="App.selectCartLine(event,${idx})">
         <td style="font-family:monospace;font-size:12px">${sku}</td>
-        <td>${item.name}${item.variation_name ? `<div style="font-size:11px;color:var(--text-muted)">${item.variation_name}</div>` : ''}</td>
+        <td>${item.name}${item.variation_name ? `<div style="font-size:11px;color:var(--text-muted)">${item.variation_name}</div>` : ''}${item.discountPercent > 0 ? `<div style="font-size:11px;color:var(--success)">-${item.discountPercent}% off${item.discountOverrideName ? ` (override: ${item.discountOverrideName})` : ''}</div>` : ''}</td>
         <td style="text-align:center">
           <div class="qty-ctrl" style="justify-content:center">
             <button class="qty-btn" onclick="App.updateCartQty(${idx},-1)">−</button>
@@ -2868,17 +2870,18 @@ const App = {
           </div>
         </td>
         <td style="text-align:right">${this.fmt(item.price)}</td>
-        <td style="text-align:right;font-weight:600">${this.fmt(item.price * item.quantity)}</td>
+        <td style="text-align:right;font-weight:600">${item.discountPercent > 0 ? `<span style="text-decoration:line-through;color:var(--text-muted);font-weight:400;font-size:11px">${this.fmt(lineGross)}</span> ${this.fmt(lineNet)}` : this.fmt(lineGross)}</td>
         <td style="white-space:nowrap">
+          ${this.can('pos_discounts') ? `<button class="btn-secondary" style="padding:2px 8px;font-size:11px" title="Line Discount" onclick="event.stopPropagation();App.showLineDiscountModal(${idx})">%</button>` : ''}
           <button class="btn-void-line" title="Void Line" onclick="App.voidCartLine(${idx})">VOID</button>
           <button class="btn-remove" onclick="App.removeFromCart(${idx})">×</button>
         </td>
       </tr>`;
     }).join('');
 
-    let subtotal = this.cart.reduce((s, i) => s + i.price * i.quantity, 0);
+    let subtotal = this.cart.reduce((s, i) => s + this._cartLineNet(i), 0);
     const isTaxExempt = this.isCartTaxExempt();
-    let tax = isTaxExempt ? 0 : this.cart.reduce((s, i) => s + (i.price * i.quantity * i.tax_rate / 100), 0);
+    let tax = isTaxExempt ? 0 : this.cart.reduce((s, i) => s + (this._cartLineNet(i) * i.tax_rate / 100), 0);
     const discount = this.cartDiscount || 0;
     // Must match getCartTotals()'s formula exactly (including the floor at
     // 0) — this is what the "Amount Due" box below shows, and it needs to
@@ -2897,15 +2900,124 @@ const App = {
       <div class="pos-amount-due"><label>Amount Due</label><span>${this.fmt(total)}</span></div>`;
   },
 
+  // Net (post-line-discount) amount for one cart line — the single place
+  // both renderCart() and getCartTotals() derive subtotal/tax from, so the
+  // two can never drift out of sync with each other (see the comment on
+  // renderCart's total below).
+  _cartLineNet(item) {
+    const pct = item.discountPercent || 0;
+    return parseFloat((item.price * item.quantity * (1 - pct / 100)).toFixed(2));
+  },
+
   getCartTotals() {
-    const subtotal = this.cart.reduce((s, i) => s + i.price * i.quantity, 0);
+    const subtotal = this.cart.reduce((s, i) => s + this._cartLineNet(i), 0);
     const isTaxExempt = this.isCartTaxExempt();
-    const tax = isTaxExempt ? 0 : this.cart.reduce((s, i) => s + (i.price * i.quantity * i.tax_rate / 100), 0);
+    const tax = isTaxExempt ? 0 : this.cart.reduce((s, i) => s + (this._cartLineNet(i) * i.tax_rate / 100), 0);
     const discount = this.cartDiscount || 0;
     const storeCredit = this._storeCreditApplied || 0;
     const cashBack = this._cashBackApplied || 0;
     const total = Math.max(0, subtotal + tax - discount - storeCredit - cashBack);
     return { subtotal: parseFloat(subtotal.toFixed(2)), tax: parseFloat(tax.toFixed(2)), discount: parseFloat(discount.toFixed(2)), storeCredit: parseFloat(storeCredit.toFixed(2)), cashBack: parseFloat(cashBack.toFixed(2)), total: parseFloat(total.toFixed(2)) };
+  },
+
+  // Manual per-line discount ("%" button on a cart row) — capped at the
+  // store's configured limit (Settings → POS Discounts) for items not
+  // already covered by an active promotion and not on the brand-exclusion
+  // list; going over the cap prompts for a manager PIN with override
+  // privileges, same UX as Void Line. Re-validated server-side at checkout
+  // either way (see POST /transactions) — this modal is convenience, not
+  // the actual gate.
+  async showLineDiscountModal(idx) {
+    const item = this.cart[idx];
+    if (!item) return;
+    if (!item.product_id) { this.alert('This line has no catalog product to check discount eligibility against', 'error'); return; }
+    let eligibility;
+    try {
+      eligibility = await this.api('GET', `/promotions/discount-eligibility/${item.product_id}`);
+    } catch(e) { this.alert(e.message, 'error'); return; }
+
+    if (!eligibility.eligible) {
+      const reasonText = eligibility.reason === 'brand_excluded'
+        ? 'This brand is on the store\'s discount-exclusion list and can\'t be manually discounted.'
+        : `This item is already covered by the promotion "${eligibility.promotion_name||''}" — a manual discount can't be stacked on top of it.`;
+      this.showModal(`
+        <div class="modal" style="max-width:380px">
+          <div class="modal-header"><span class="modal-title">Discount Not Available</span><button class="modal-close">✕</button></div>
+          <div class="modal-body"><p style="font-size:13px;color:var(--text-muted)">${reasonText}</p></div>
+          <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">Close</button></div>
+        </div>`);
+      return;
+    }
+
+    const maxPct = parseFloat(eligibility.max_percent) || 0;
+    this.showModal(`
+      <div class="modal" style="max-width:400px">
+        <div class="modal-header"><span class="modal-title">Line Discount — ${this.escapeAttr(item.name)}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted)">${maxPct > 0 ? `Up to ${maxPct}% without a manager override.` : 'No store limit currently configured.'}</p>
+          <div class="form-group"><label>Discount %</label><input type="number" id="line-disc-pct" min="0" max="100" step="0.1" value="${item.discountPercent||''}" placeholder="e.g. 10"></div>
+          <div id="line-disc-override" style="display:none">
+            <div class="form-group"><label>Manager Override PIN</label>
+              <input type="password" id="line-disc-pin" maxlength="8" placeholder="Enter PIN" style="letter-spacing:4px;font-size:18px;text-align:center" onkeydown="if(event.key==='Enter')App.confirmLineDiscount(${idx},${maxPct})">
+            </div>
+          </div>
+          <div id="line-disc-err" style="color:var(--danger);font-size:13px;min-height:16px"></div>
+        </div>
+        <div class="modal-footer">
+          ${item.discountPercent > 0 ? `<button class="btn btn-outline" onclick="App.clearLineDiscount(${idx})">Remove Discount</button>` : ''}
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.confirmLineDiscount(${idx},${maxPct})">Apply</button>
+        </div>
+      </div>`);
+  },
+
+  confirmLineDiscount(idx, maxPct) {
+    const item = this.cart[idx];
+    if (!item) return;
+    const errEl = document.getElementById('line-disc-err');
+    const pct = parseFloat(document.getElementById('line-disc-pct')?.value);
+    if (!pct || pct <= 0) { if (errEl) errEl.textContent = 'Enter a discount percentage.'; return; }
+    if (pct > 100) { if (errEl) errEl.textContent = 'Discount can\'t exceed 100%.'; return; }
+
+    if (maxPct > 0 && pct > maxPct) {
+      const overrideRow = document.getElementById('line-disc-override');
+      const pin = document.getElementById('line-disc-pin')?.value;
+      if (overrideRow && overrideRow.style.display === 'none') {
+        overrideRow.style.display = 'block';
+        if (errEl) errEl.textContent = `Exceeds the ${maxPct}% store limit — enter a manager PIN to override.`;
+        document.getElementById('line-disc-pin')?.focus();
+        return;
+      }
+      if (!pin) { if (errEl) errEl.textContent = 'PIN is required to override the store limit.'; return; }
+      this.api('POST', '/employees/validate-pin', { pin, permission: 'pos_discount_override' }).then(result => {
+        item.discountPercent = pct;
+        item.discountOverrideEmployeeId = result.id;
+        item.discountOverrideName = result.name;
+        this.closeModal();
+        this.renderCart();
+        this.alert(`${pct}% discount applied — authorised by ${result.name}`, 'success');
+      }).catch(e => {
+        if (errEl) errEl.textContent = e.message;
+        document.getElementById('line-disc-pin').value = '';
+      });
+      return;
+    }
+
+    item.discountPercent = pct;
+    item.discountOverrideEmployeeId = null;
+    item.discountOverrideName = null;
+    this.closeModal();
+    this.renderCart();
+  },
+
+  clearLineDiscount(idx) {
+    const item = this.cart[idx];
+    if (!item) return;
+    item.discountPercent = 0;
+    item.discountOverrideEmployeeId = null;
+    item.discountOverrideName = null;
+    this.closeModal();
+    this.renderCart();
   },
 
   async processPayment(method) {
@@ -2955,7 +3067,7 @@ const App = {
         employee_id: this.currentUser?.id || 1,
         branch_id: this.posBranch?.id || null,
         drawer_session_id: this.currentDrawerSession?.id || null,
-        items: this.cart.map(i => ({ product_id: i.product_id, variation_id: i.variation_id||null, quantity: i.quantity })),
+        items: this.cart.map(i => ({ product_id: i.product_id, variation_id: i.variation_id||null, quantity: i.quantity, discount_percent: i.discountPercent||0, discount_override_employee_id: i.discountOverrideEmployeeId||null })),
         discount_amount: discount,
         promotion_code: this.appliedDiscountCard ? (this.appliedDiscountCard.card_number || null) : (this.appliedPromoCode?.code || null),
         promotion_name: this.appliedDiscountCard ? `${this.appliedDiscountCard.type_name} Discount Card` : (this.appliedPromoCode?.promo_name || this.autoAppliedPromo?.name || null),
@@ -10798,6 +10910,20 @@ const App = {
             <button class="btn btn-primary" onclick="App.saveSettings()">Save Settings</button>
           </div>
           <div class="card" style="margin-bottom:16px">
+            <div class="card-header"><span class="card-title">POS Line-Item Discounts</span></div>
+            <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">Governs the per-line "Discount" action in the POS cart — separate from the whole-ticket Maximum Discount above. An item already covered by an active promotion, or whose brand is listed below, can't take a manual discount at all.</p>
+            <div class="form-group"><label>Maximum Line Item Discount (%, 0 = unlimited)</label><input type="number" id="s-max-line-discount" value="${s.pos_max_line_discount_percent||0}" min="0" max="100" step="0.1" placeholder="e.g. 15 for 15% max"></div>
+            <p style="font-size:11px;color:var(--text-muted);margin:0 0 8px">A discount above this needs a manager PIN with <span class="perm-pill">pos_discount_override</span> to authorize.</p>
+            <button class="btn btn-primary" onclick="App.saveSettings()">Save Settings</button>
+            <div style="border-top:1px solid var(--border);margin:14px 0 12px"></div>
+            <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Brands Excluded From Manual Discounts</div>
+            <div id="discount-excluded-brands-wrap">Loading…</div>
+            <div class="input-row" style="margin-top:10px;align-items:flex-end">
+              <div class="form-group" style="flex:1"><label>Brand</label><input id="discount-excl-brand-input" placeholder="e.g. Apple" onkeydown="if(event.key==='Enter')App.addDiscountExcludedBrand()"></div>
+              <div style="padding-bottom:4px"><button class="btn btn-secondary" onclick="App.addDiscountExcludedBrand()">+ Add</button></div>
+            </div>
+          </div>
+          <div class="card" style="margin-bottom:16px">
             <div class="card-header"><span class="card-title">Alternate Currencies</span></div>
             <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">Define currencies accepted at the POS with their exchange rate relative to <strong>${s.currency||'USD'}</strong>. Cashiers can select these when processing cash payments.</p>
             <div id="alt-currencies-table">${this._renderAltCurrenciesTable()}</div>
@@ -10938,6 +11064,35 @@ const App = {
     this.loadDenominations();
     this.loadWooLogs();
     this.loadApiKeys();
+    this.loadDiscountExcludedBrands();
+  },
+
+  async loadDiscountExcludedBrands() {
+    const wrap = document.getElementById('discount-excluded-brands-wrap');
+    if (!wrap) return;
+    const brands = await this.api('GET', '/settings/discount-excluded-brands');
+    if (!brands.length) { wrap.innerHTML = `<p style="font-size:12px;color:var(--text-muted);margin:0">No brands excluded — every item is eligible for a manual discount (subject to the promotion check above).</p>`; return; }
+    wrap.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:8px">
+      ${brands.map(b => `<span class="badge-pill badge-secondary" style="display:flex;align-items:center;gap:6px;padding:5px 6px 5px 10px">${this.escapeAttr(b.brand)}<button class="btn-remove" style="font-size:14px" title="Remove" onclick="App.removeDiscountExcludedBrand(${b.id})">×</button></span>`).join('')}
+    </div>`;
+  },
+
+  async addDiscountExcludedBrand() {
+    const input = document.getElementById('discount-excl-brand-input');
+    const brand = input?.value.trim();
+    if (!brand) return;
+    try {
+      await this.api('POST', '/settings/discount-excluded-brands', { brand });
+      input.value = '';
+      this.loadDiscountExcludedBrands();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async removeDiscountExcludedBrand(id) {
+    try {
+      await this.api('DELETE', `/settings/discount-excluded-brands/${id}`);
+      this.loadDiscountExcludedBrands();
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   async loadDenominations() {
@@ -11097,6 +11252,7 @@ const App = {
       layaway_cancellation_fee_type: document.getElementById('s-layaway-fee-type').value,
       layaway_cancellation_fee_value: document.getElementById('s-layaway-fee-value').value,
       wo_assessment_fee: document.getElementById('s-wo-fee').value,
+      pos_max_line_discount_percent: document.getElementById('s-max-line-discount').value,
       email_smtp_host: document.getElementById('s-smtp-host').value,
       email_smtp_port: document.getElementById('s-smtp-port').value,
       email_smtp_user: document.getElementById('s-smtp-user').value,
@@ -14636,6 +14792,7 @@ const App = {
     { key: 'dashboard', label: 'Dashboard', subs: [] },
     { key: 'pos', label: 'Point of Sale', subs: [
       { key: 'pos_discounts', label: 'Apply Discounts' },
+      { key: 'pos_discount_override', label: 'Override Discount Limit' },
       { key: 'pos_refunds', label: 'Process Refunds' },
       { key: 'pos_void_items', label: 'Void Line Items' },
       { key: 'pos_hold', label: 'Hold & Recall Orders' },

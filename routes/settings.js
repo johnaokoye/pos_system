@@ -103,4 +103,33 @@ router.delete('/logo', requirePermission('settings'), async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── POS discount-excluded brands ────────────────────────────────────────
+// Brands a manual POS line-item discount can never be applied to (checked
+// by routes/promotions.js's discount-eligibility endpoint and re-checked
+// server-side at checkout) — independent of any specific promotion's own
+// brand rules.
+router.get('/discount-excluded-brands', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await db.execute({ sql: 'SELECT * FROM pos_discount_excluded_brands ORDER BY brand', args: [] });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/discount-excluded-brands', requirePermission('settings'), async (req, res) => {
+  try {
+    const brand = (req.body.brand || '').trim();
+    if (!brand) return res.status(400).json({ error: 'A brand name is required' });
+    const result = await db.execute({ sql: 'INSERT INTO pos_discount_excluded_brands (brand) VALUES (?)', args: [brand] });
+    const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM pos_discount_excluded_brands WHERE id = ?', args: [Number(result.lastInsertRowid)] });
+    res.status(201).json(row);
+  } catch(e) { res.status(400).json({ error: e.message.includes('UNIQUE') ? 'That brand is already excluded' : e.message }); }
+});
+
+router.delete('/discount-excluded-brands/:id', requirePermission('settings'), async (req, res) => {
+  try {
+    await db.execute({ sql: 'DELETE FROM pos_discount_excluded_brands WHERE id = ?', args: [req.params.id] });
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 module.exports = router;

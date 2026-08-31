@@ -4,8 +4,9 @@ const { db } = require('../database');
 const { calcCommission } = require('./commissions');
 const { getWcSettings, wcRequest } = require('./woocommerce');
 const { syncBinQty } = require('../lib/binSync');
-const { requireAuth, requirePermission } = require('../lib/permissions');
+const { requireAuth, requirePermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
+const { checkDiscountEligibility } = require('./promotions');
 
 // Mirrors availableCashBack() in public/index.html — the frontend uses this
 // same formula to decide whether to show the Cash Back bar; this copy is the
@@ -163,6 +164,12 @@ router.post('/', requirePermission('pos'), async (req, res) => {
 
     const transaction_number = await nextNumber(db, 'transactions', 'transaction_number', 'TXN-', 6);
 
+    // Store-wide cap for a manual per-line discount (see the POS "Discount"
+    // action on a cart line) — 0/unset means no limit is configured, same
+    // convention as the existing whole-ticket max_discount_pct setting.
+    const { rows: [maxDiscSetting] } = await db.execute({ sql: "SELECT value FROM settings WHERE key = 'pos_max_line_discount_percent'", args: [] });
+    const maxLineDiscountPercent = parseFloat(maxDiscSetting?.value) || 0;
+
     const isTaxExempt = tax_exempt ? 1 : 0;
     let subtotal = 0, tax_amount = 0;
     const processedItems = [];
@@ -176,11 +183,39 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         variation = v;
         unit_price = v.price != null ? v.price : parseFloat((product.price + (v.price_modifier || 0)).toFixed(2));
       }
-      const lineTotal = parseFloat((unit_price * item.quantity).toFixed(2));
+      const grossLineTotal = parseFloat((unit_price * item.quantity).toFixed(2));
+
+      // Manual per-line discount — re-validated here (not just trusted from
+      // the POS UI's own check) so a bypassed client can't apply one to an
+      // ineligible item or skip the manager override past the store limit.
+      const discountPercent = parseFloat(item.discount_percent) || 0;
+      let discountAmount = 0, discountOverrideBy = null;
+      if (discountPercent > 0) {
+        if (discountPercent > 100) throw new Error(`Invalid discount percentage for ${product.name}`);
+        const eligibility = await checkDiscountEligibility(product);
+        if (!eligibility.eligible) {
+          throw new Error(eligibility.reason === 'brand_excluded'
+            ? `${product.name} (${product.brand}) is on the discount-exclusion list and can't be manually discounted`
+            : `${product.name} is already on a promotion and can't also get a manual discount`);
+        }
+        if (maxLineDiscountPercent > 0 && discountPercent > maxLineDiscountPercent) {
+          if (!item.discount_override_employee_id) {
+            throw new Error(`A ${discountPercent}% discount on ${product.name} exceeds the store limit of ${maxLineDiscountPercent}% — manager override required`);
+          }
+          const { rows: [overrider] } = await db.execute({ sql: 'SELECT sg.permissions FROM employees e LEFT JOIN security_groups sg ON e.security_group_id = sg.id WHERE e.id = ? AND e.active = 1', args: [item.discount_override_employee_id] });
+          let authorized = false;
+          try { authorized = overrider && can(JSON.parse(overrider.permissions || '{}'), 'pos_discount_override'); } catch { authorized = false; }
+          if (!authorized) throw new Error(`The employee authorizing the discount override on ${product.name} doesn't have override privileges`);
+          discountOverrideBy = item.discount_override_employee_id;
+        }
+        discountAmount = parseFloat((grossLineTotal * discountPercent / 100).toFixed(2));
+      }
+
+      const lineTotal = parseFloat((grossLineTotal - discountAmount).toFixed(2));
       const lineTax = isTaxExempt ? 0 : parseFloat((lineTotal * product.tax_rate / 100).toFixed(2));
       subtotal += lineTotal;
       tax_amount += lineTax;
-      processedItems.push({ product, variation, quantity: item.quantity, unit_price, lineTotal, lineTax, discount: item.discount || 0 });
+      processedItems.push({ product, variation, quantity: item.quantity, unit_price, lineTotal, lineTax, discount: discountAmount, discountPercent, discountOverrideBy });
     }
 
     subtotal = parseFloat(subtotal.toFixed(2));
@@ -245,10 +280,10 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         await tx.execute({ sql: 'INSERT INTO transaction_payments (transaction_id, payment_method, amount, approval_code) VALUES (?,?,?,?)', args: [txId, leg.payment_method, leg.amount, leg.approval_code || null] });
       }
 
-      for (const { product, variation, quantity, unit_price, lineTotal, lineTax, discount } of processedItems) {
+      for (const { product, variation, quantity, unit_price, lineTotal, lineTax, discount, discountPercent, discountOverrideBy } of processedItems) {
         const itemName = variation ? `${product.name} — ${variation.name}` : product.name;
         const itemSku = variation ? variation.sku : product.sku;
-        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, args: [txId, product.id, itemName, itemSku, quantity, unit_price, discount, lineTax, lineTotal, variation?.id||null, variation?.name||null] });
+        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,discount_percent,discount_override_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [txId, product.id, itemName, itemSku, quantity, unit_price, discount, lineTax, lineTotal, variation?.id||null, variation?.name||null, discountPercent || 0, discountOverrideBy || null] });
         if (variation) {
           await tx.execute({ sql: 'UPDATE product_variations SET stock_qty = stock_qty - ? WHERE id = ?', args: [quantity, variation.id] });
         } else {
