@@ -9484,7 +9484,7 @@ const App = {
               Rental Customer
               <input type="checkbox" id="cf-rental-customer" ${isRentalCust?'checked':''} onchange="App.toggleRentalCustomerFields()" style="margin:0">
             </label>
-            <p style="font-size:11px;color:var(--text-muted);margin:2px 0 0">Required for anyone renting equipment — a valid photo ID, proof of address, and a reference on file.</p>
+            <p style="font-size:11px;color:var(--text-muted);margin:2px 0 0">Required for anyone renting equipment — a valid photo ID, an uploaded proof of address, and three references on file.</p>
             <div id="cf-rental-customer-fields" style="display:${isRentalCust?'block':'none'};margin-top:10px">
               <strong style="font-size:12px;color:var(--text-muted);text-transform:uppercase">Photo ID</strong>
               <div class="input-row" style="margin-top:6px">
@@ -9507,22 +9507,58 @@ const App = {
               </div>` : `<p style="font-size:11px;color:var(--text-muted);margin-top:6px">Save the customer first to upload an ID scan.</p>`}
               <hr style="margin:12px 0">
               <strong style="font-size:12px;color:var(--text-muted);text-transform:uppercase">Proof of Address</strong>
-              <div class="input-row" style="margin-top:6px">
-                <div class="form-group"><label>Document Type</label>
-                  <select id="cf-address-proof-type">
-                    <option value="">-- Select --</option>
-                    ${['Utility Bill','Bank Statement','Lease Agreement','Government Letter','Other'].map(t => `<option value="${t}" ${c.rental_address_proof_type===t?'selected':''}>${t}</option>`).join('')}
-                  </select>
-                </div>
-                <div class="form-group"><label>Details</label><input id="cf-address-proof-details" value="${c.rental_address_proof_details||''}" placeholder="e.g. account #, statement date"></div>
+              <div class="form-group" style="margin-top:6px"><label>Document Type</label>
+                <select id="cf-address-proof-type">
+                  <option value="">-- Select --</option>
+                  ${['Utility Bill','Bank Statement','Lease Agreement','Government Letter','Other'].map(t => `<option value="${t}" ${c.rental_address_proof_type===t?'selected':''}>${t}</option>`).join('')}
+                </select>
               </div>
+              ${id ? `<div class="form-group" style="margin-top:4px"><label>Document</label>
+                <div style="display:flex;align-items:center;gap:10px;margin-top:4px">
+                  ${c.rental_address_proof_path
+                    ? (/^image\//.test(c.rental_address_proof_mime||'')
+                        ? `<img src="${c.rental_address_proof_path}" class="prod-img-thumb" id="cf-address-proof-preview" alt="">`
+                        : `<a href="${c.rental_address_proof_path}" target="_blank" class="prod-img-placeholder" id="cf-address-proof-preview" style="text-decoration:none;font-size:22px">📄</a>`)
+                    : `<div class="prod-img-placeholder" id="cf-address-proof-preview" onclick="document.getElementById('cf-address-proof-input').click()">📄</div>`}
+                  <div>
+                    <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0">Upload Document<input type="file" id="cf-address-proof-input" accept="image/*,application/pdf" style="display:none" onchange="App.uploadCustomerAddressProof(${id},this)"></label>
+                    ${c.rental_address_proof_path ? `<button class="btn btn-danger btn-sm" style="margin-left:6px" onclick="App.deleteCustomerAddressProof(${id})">Remove</button>` : ''}
+                  </div>
+                </div>
+              </div>` : `<p style="font-size:11px;color:var(--text-muted);margin-top:6px">Save the customer first to upload a proof-of-address document.</p>`}
               <hr style="margin:12px 0">
-              <strong style="font-size:12px;color:var(--text-muted);text-transform:uppercase">Reference</strong>
+              <strong style="font-size:12px;color:var(--text-muted);text-transform:uppercase">Reference 1 (Main)</strong>
               <div class="input-row" style="margin-top:6px">
                 <div class="form-group"><label>Name</label><input id="cf-ref-name" value="${c.rental_reference_name||''}"></div>
                 <div class="form-group"><label>Phone</label><input id="cf-ref-phone" value="${c.rental_reference_phone||''}"></div>
               </div>
-              <div class="form-group"><label>Relationship</label><input id="cf-ref-relationship" value="${c.rental_reference_relationship||''}" placeholder="e.g. Employer, Family, Friend"></div>
+              <div class="input-row">
+                <div class="form-group"><label>Relationship</label><input id="cf-ref-relationship" value="${c.rental_reference_relationship||''}" placeholder="e.g. Employer, Family, Friend"></div>
+                <div class="form-group"><label>Address</label><input id="cf-ref-address" value="${c.rental_reference_address||''}"></div>
+              </div>
+              ${id ? `<div class="form-group" style="margin-top:4px"><label>Reference's Photo ID</label>
+                <div style="display:flex;align-items:center;gap:10px;margin-top:4px">
+                  ${c.rental_reference_id_path ? `<img src="${c.rental_reference_id_path}" class="prod-img-thumb" id="cf-reference-id-preview" alt="">` : `<div class="prod-img-placeholder" id="cf-reference-id-preview" onclick="document.getElementById('cf-reference-id-input').click()">📷</div>`}
+                  <div>
+                    <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0">Upload ID<input type="file" id="cf-reference-id-input" accept="image/*" style="display:none" onchange="App.uploadCustomerReferenceId(${id},this)"></label>
+                    ${c.rental_reference_id_path ? `<button class="btn btn-danger btn-sm" style="margin-left:6px" onclick="App.deleteCustomerReferenceId(${id})">Remove</button>` : ''}
+                  </div>
+                </div>
+              </div>` : `<p style="font-size:11px;color:var(--text-muted);margin-top:6px">Save the customer first to upload the main reference's ID.</p>`}
+              <hr style="margin:12px 0">
+              <strong style="font-size:12px;color:var(--text-muted);text-transform:uppercase">Reference 2</strong>
+              <div class="input-row" style="margin-top:6px">
+                <div class="form-group"><label>Name</label><input id="cf-ref2-name" value="${c.rental_reference2_name||''}"></div>
+                <div class="form-group"><label>Phone</label><input id="cf-ref2-phone" value="${c.rental_reference2_phone||''}"></div>
+              </div>
+              <div class="form-group"><label>Relationship</label><input id="cf-ref2-relationship" value="${c.rental_reference2_relationship||''}" placeholder="e.g. Employer, Family, Friend"></div>
+              <hr style="margin:12px 0">
+              <strong style="font-size:12px;color:var(--text-muted);text-transform:uppercase">Reference 3</strong>
+              <div class="input-row" style="margin-top:6px">
+                <div class="form-group"><label>Name</label><input id="cf-ref3-name" value="${c.rental_reference3_name||''}"></div>
+                <div class="form-group"><label>Phone</label><input id="cf-ref3-phone" value="${c.rental_reference3_phone||''}"></div>
+              </div>
+              <div class="form-group"><label>Relationship</label><input id="cf-ref3-relationship" value="${c.rental_reference3_relationship||''}" placeholder="e.g. Employer, Family, Friend"></div>
             </div>
           </div>
           <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">
@@ -9600,6 +9636,50 @@ const App = {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
+  async uploadCustomerReferenceId(customerId, input) {
+    const file = input.files[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append('reference_id', file);
+    try {
+      const res = await fetch(`/api/customers/${customerId}/reference-id`, { method: 'POST', body: fd });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Upload failed');
+      this.alert('Reference ID uploaded');
+      this.showCustomerForm(customerId);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async deleteCustomerReferenceId(customerId) {
+    if (!confirm("Remove the main reference's ID?")) return;
+    try {
+      await this.api('DELETE', `/customers/${customerId}/reference-id`);
+      this.showCustomerForm(customerId);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async uploadCustomerAddressProof(customerId, input) {
+    const file = input.files[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append('address_proof', file);
+    try {
+      const res = await fetch(`/api/customers/${customerId}/address-proof`, { method: 'POST', body: fd });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Upload failed');
+      this.alert('Proof of address uploaded');
+      this.showCustomerForm(customerId);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async deleteCustomerAddressProof(customerId) {
+    if (!confirm('Remove this proof-of-address document?')) return;
+    try {
+      await this.api('DELETE', `/customers/${customerId}/address-proof`);
+      this.showCustomerForm(customerId);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
   async saveCustomer(id) {
     const customerType = document.getElementById('cf-type')?.value || 'cash';
     const taxExempt = document.getElementById('cf-tax-exempt')?.checked ? 1 : 0;
@@ -9623,10 +9703,16 @@ const App = {
       rental_id_type: isRentalCustomer ? (document.getElementById('cf-id-type')?.value || null) : null,
       rental_id_number: isRentalCustomer ? (document.getElementById('cf-id-number')?.value.trim() || null) : null,
       rental_address_proof_type: isRentalCustomer ? (document.getElementById('cf-address-proof-type')?.value || null) : null,
-      rental_address_proof_details: isRentalCustomer ? (document.getElementById('cf-address-proof-details')?.value.trim() || null) : null,
       rental_reference_name: isRentalCustomer ? (document.getElementById('cf-ref-name')?.value.trim() || null) : null,
       rental_reference_phone: isRentalCustomer ? (document.getElementById('cf-ref-phone')?.value.trim() || null) : null,
       rental_reference_relationship: isRentalCustomer ? (document.getElementById('cf-ref-relationship')?.value.trim() || null) : null,
+      rental_reference_address: isRentalCustomer ? (document.getElementById('cf-ref-address')?.value.trim() || null) : null,
+      rental_reference2_name: isRentalCustomer ? (document.getElementById('cf-ref2-name')?.value.trim() || null) : null,
+      rental_reference2_phone: isRentalCustomer ? (document.getElementById('cf-ref2-phone')?.value.trim() || null) : null,
+      rental_reference2_relationship: isRentalCustomer ? (document.getElementById('cf-ref2-relationship')?.value.trim() || null) : null,
+      rental_reference3_name: isRentalCustomer ? (document.getElementById('cf-ref3-name')?.value.trim() || null) : null,
+      rental_reference3_phone: isRentalCustomer ? (document.getElementById('cf-ref3-phone')?.value.trim() || null) : null,
+      rental_reference3_relationship: isRentalCustomer ? (document.getElementById('cf-ref3-relationship')?.value.trim() || null) : null,
       discount_card_type_id: document.getElementById('cf-discount-card-type')?.value || null,
       discount_card_number: document.getElementById('cf-discount-card-number')?.value.trim() || null,
       cash_back_card_type_id: document.getElementById('cf-cash-back-card-type')?.value || null,
@@ -13359,23 +13445,59 @@ const App = {
     if (this.section === 'quotations') c.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
     const quotes = await this.api('GET', '/quotations?limit=100');
     if (this.section !== 'quotations') return;
-    const statusColor = { draft:'badge-warning', sent:'badge-info', accepted:'badge-success', declined:'badge-danger', converted:'badge-teal' };
+    this._quotesAll = quotes;
+    // Salespeople get a "My Quotes" / "All Quotes" split so they can find
+    // what they're currently working on (including anything reassigned to
+    // them) without scrolling past the whole store's quotes — everyone else
+    // just sees the flat list they always have.
+    const isSalesperson = !!this.currentUser.is_salesperson;
+    if (isSalesperson && !this.quoteTab) this.quoteTab = 'mine';
     c.innerHTML = `
       <div class="section-header">
         <h2>Quotations</h2>
         <button class="btn btn-primary" onclick="App.showQuoteForm()">+ New Quotation</button>
       </div>
+      ${isSalesperson ? `<div class="crm-tabs">
+        <button class="crm-tab ${this.quoteTab==='mine'?'active':''}" onclick="App.switchQuoteTab('mine')">My Quotes</button>
+        <button class="crm-tab ${this.quoteTab==='all'?'active':''}" onclick="App.switchQuoteTab('all')">All Quotes</button>
+      </div>` : ''}
+      <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;align-items:center">
+        <select id="qt-list-status" onchange="App.filterQuotationsList()" style="width:150px">
+          <option value="">All Statuses</option>
+          <option value="draft">Draft</option>
+          <option value="sent">Sent</option>
+          <option value="accepted">Accepted</option>
+          <option value="declined">Declined</option>
+          <option value="converted">Converted</option>
+        </select>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:normal;font-size:13px;text-transform:none;color:var(--text)">
+          <input type="checkbox" id="qt-list-reassigned" onchange="App.filterQuotationsList()" style="width:16px;height:16px;cursor:pointer">
+          Reassigned only
+        </label>
+      </div>
       <div class="card">
         <div class="table-wrap">
           <table>
             <thead><tr><th>Quote #</th><th>Type</th><th>Customer</th><th>Employee</th><th>Total</th><th>Valid Until / Due</th><th>Status</th><th>Invoice #</th><th>Date</th><th>Actions</th></tr></thead>
-            <tbody>
-              ${quotes.length ? quotes.map(q => `
+            <tbody id="quotes-tbody">
+              ${this.buildQuoteRows(isSalesperson && this.quoteTab === 'mine' ? quotes.filter(q => q.employee_id === this.currentUser.id) : quotes)}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+  },
+
+  buildQuoteRows(quotes) {
+    const statusColor = { draft:'badge-warning', sent:'badge-info', accepted:'badge-success', declined:'badge-danger', converted:'badge-teal' };
+    if (!quotes.length) return '<tr><td colspan="10" class="empty-state">No quotations found</td></tr>';
+    return quotes.map(q => {
+      const reassigned = q.original_employee_name && q.employee_name !== q.original_employee_name;
+      return `
                 <tr>
                   <td class="fw-600">${q.quote_number}</td>
                   <td><span class="badge-pill ${q.quote_type==='rental'?'badge-warning':'badge-info'}" style="font-size:10px">${q.quote_type==='rental'?'RENTAL':'RETAIL'}</span></td>
                   <td>${q.customer_name || '<em style="color:#999">No Customer</em>'}</td>
-                  <td>${q.employee_name||'-'}</td>
+                  <td>${q.employee_name||'-'}${reassigned ? ` <span class="badge-pill badge-info" style="font-size:10px" title="Sale credited to ${q.original_employee_name}">↪ reassigned</span>` : ''}</td>
                   <td class="fw-600">${this.fmt(q.total)}</td>
                   <td>${q.quote_type==='rental' ? (q.due_date ? this.fmtDate(q.due_date) : '-') : (q.valid_until ? this.fmtDate(q.valid_until) : '-')}</td>
                   <td><span class="badge-pill ${statusColor[q.status]||'badge-info'}">${q.status}</span></td>
@@ -13388,11 +13510,27 @@ const App = {
                     ${q.status!=='converted'&&q.status!=='declined' ? `<button class="btn btn-sm btn-outline" onclick="App.showQuoteForm(${q.id})">Edit</button>` : ''}
                     ${q.status!=='converted'&&q.status!=='declined' ? `<button class="btn btn-sm btn-primary" onclick="App.showConvertQuote(${q.id})">Convert</button>` : ''}
                   </td>
-                </tr>`).join('') : '<tr><td colspan="10" class="empty-state">No quotations yet</td></tr>'}
-            </tbody>
-          </table>
-        </div>
-      </div>`;
+                </tr>`;
+    }).join('');
+  },
+
+  switchQuoteTab(tab) {
+    this.quoteTab = tab;
+    this.renderQuotations();
+  },
+
+  filterQuotationsList() {
+    const status = document.getElementById('qt-list-status')?.value || '';
+    const reassignedOnly = document.getElementById('qt-list-reassigned')?.checked || false;
+    const mineOnly = !!this.currentUser.is_salesperson && this.quoteTab === 'mine';
+    const filtered = (this._quotesAll||[]).filter(q => {
+      if (mineOnly && q.employee_id !== this.currentUser.id) return false;
+      if (status && q.status !== status) return false;
+      if (reassignedOnly && !(q.original_employee_name && q.employee_name !== q.original_employee_name)) return false;
+      return true;
+    });
+    const tbody = document.getElementById('quotes-tbody');
+    if (tbody) tbody.innerHTML = this.buildQuoteRows(filtered);
   },
 
   async showQuoteForm(editId) {
@@ -14929,9 +15067,10 @@ const App = {
       { key: 'crm_opportunities', label: 'Manage Opportunities' },
     ]},
     { key: 'commissions', label: 'Commissions', subs: [
-      { key: 'commissions_plans', label: 'Manage Plans' },
+      { key: 'commissions_plans', label: 'Manage Plans & Assignments' },
       { key: 'commissions_approve', label: 'Approve Commissions' },
       { key: 'commissions_pay', label: 'Mark as Paid' },
+      { key: 'commissions_delete', label: 'Delete Records' },
     ]},
     { key: 'warehouse', label: 'Warehouse', subs: [
       { key: 'warehouse_bins', label: 'Manage Bins' },
@@ -15166,14 +15305,14 @@ const App = {
       <div class="section-header">
         <h2>Commission Tracking ${this.currentUser.is_salesperson ? '<span style="font-size:12px;font-weight:normal;color:var(--text-muted);border:1px solid var(--border);border-radius:4px;padding:2px 8px;margin-left:8px;vertical-align:middle">My Commissions Only</span>' : ''}</h2>
         <div style="display:flex;gap:8px">
-          <button class="btn btn-outline btn-sm" onclick="App.showPlanModal()">+ New Plan</button>
+          ${this.can('commissions_plans') ? `<button class="btn btn-outline btn-sm" onclick="App.showPlanModal()">+ New Plan</button>` : ''}
           <button class="btn btn-primary btn-sm" onclick="App.showManualCommModal()">+ Manual Entry</button>
         </div>
       </div>
       <div class="crm-tabs">
         <button class="crm-tab ${this.commTab==='dashboard'?'active':''}" data-tab="dashboard" onclick="App.switchCommTab('dashboard')">Dashboard</button>
         <button class="crm-tab ${this.commTab==='records'?'active':''}" data-tab="records" onclick="App.switchCommTab('records')">Records</button>
-        <button class="crm-tab ${this.commTab==='plans'?'active':''}" data-tab="plans" onclick="App.switchCommTab('plans')">Plans &amp; Assignments</button>
+        ${this.can('commissions_plans') ? `<button class="crm-tab ${this.commTab==='plans'?'active':''}" data-tab="plans" onclick="App.switchCommTab('plans')">Plans &amp; Assignments</button>` : ''}
       </div>
       <div id="comm-tab-content"></div>`;
     await this.renderCommTab();
@@ -15221,10 +15360,10 @@ const App = {
       <div class="stats-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:16px">
         <div class="stat-card blue"><div class="stat-label">Total Earned</div><div class="stat-value">${this.fmt(summary.totals.total)}</div><div class="stat-sub">${summary.totals.count} records</div></div>
         <div class="stat-card orange"><div class="stat-label">Pending Approval</div><div class="stat-value">${this.fmt(summary.totals.pending)}</div>
-          ${summary.totals.pending > 0 ? `<div style="margin-top:6px"><button class="btn btn-sm btn-primary" onclick="App.bulkApproveAll('${this._commPeriod}')">Approve All</button></div>` : '<div class="stat-sub">None pending</div>'}
+          ${summary.totals.pending > 0 && this.can('commissions_approve') ? `<div style="margin-top:6px"><button class="btn btn-sm btn-primary" onclick="App.bulkApproveAll('${this._commPeriod}')">Approve All</button></div>` : (summary.totals.pending > 0 ? '' : '<div class="stat-sub">None pending</div>')}
         </div>
         <div class="stat-card purple"><div class="stat-label">Approved (Unpaid)</div><div class="stat-value">${this.fmt(summary.totals.approved)}</div>
-          ${summary.totals.approved > 0 ? `<div style="margin-top:6px"><button class="btn btn-sm btn-success" onclick="App.bulkPayAll('${this._commPeriod}')">Pay All</button></div>` : '<div class="stat-sub">None to pay</div>'}
+          ${summary.totals.approved > 0 && this.can('commissions_pay') ? `<div style="margin-top:6px"><button class="btn btn-sm btn-success" onclick="App.bulkPayAll('${this._commPeriod}')">Pay All</button></div>` : (summary.totals.approved > 0 ? '' : '<div class="stat-sub">None to pay</div>')}
         </div>
         <div class="stat-card green"><div class="stat-label">Paid This Period</div><div class="stat-value">${this.fmt(summary.totals.paid)}</div><div class="stat-sub">Disbursed</div></div>
       </div>
@@ -15310,10 +15449,12 @@ const App = {
   },
 
   async renderCommRecords(el) {
-    const [employees, plans] = await Promise.all([
-      this.api('GET', '/employees'),
-      this.api('GET', '/commissions/plans'),
-    ]);
+    // Only /employees is actually used below — this used to also fetch
+    // /commissions/plans (result was unused dead code) but that endpoint is
+    // now gated by commissions_plans, which a view-only commissions user
+    // legitimately lacks; fetching it here would break the Records tab for
+    // them for no reason.
+    const employees = await this.api('GET', '/employees');
     const curPeriod = new Date().toISOString().slice(0,7);
     this._recPeriod = this._recPeriod || curPeriod;
     this._recEmp = this._recEmp || '';
@@ -15342,8 +15483,8 @@ const App = {
           <option value="paid" ${this._recStatus==='paid'?'selected':''}>Paid</option>
         </select>
         <div style="margin-left:auto;display:flex;gap:6px">
-          ${pending.length ? `<button class="btn btn-sm btn-primary" onclick="App.bulkApproveAll('${this._recPeriod}')">Approve All Pending (${pending.length})</button>` : ''}
-          ${approved.length ? `<button class="btn btn-sm btn-success" onclick="App.bulkPayAll('${this._recPeriod}')">Pay All Approved (${approved.length})</button>` : ''}
+          ${pending.length && this.can('commissions_approve') ? `<button class="btn btn-sm btn-primary" onclick="App.bulkApproveAll('${this._recPeriod}')">Approve All Pending (${pending.length})</button>` : ''}
+          ${approved.length && this.can('commissions_pay') ? `<button class="btn btn-sm btn-success" onclick="App.bulkPayAll('${this._recPeriod}')">Pay All Approved (${approved.length})</button>` : ''}
         </div>
       </div>
       <div class="card">
@@ -15367,9 +15508,9 @@ const App = {
                     <td><span class="comm-plan-badge">${r.plan_name||'Manual'}</span></td>
                     <td>${this.commStatusBadge(r.status)}</td>
                     <td style="white-space:nowrap">
-                      ${r.status==='pending' ? `<button class="btn btn-sm btn-primary" onclick="App.approveRecord(${r.id})">Approve</button> ` : ''}
-                      ${r.status==='approved' ? `<button class="btn btn-sm btn-success" onclick="App.payRecord(${r.id})">Pay</button> ` : ''}
-                      ${r.status!=='paid' ? `<button class="btn btn-sm btn-secondary" onclick="App.deleteRecord(${r.id})">Del</button>` : ''}
+                      ${r.status==='pending' && this.can('commissions_approve') ? `<button class="btn btn-sm btn-primary" onclick="App.approveRecord(${r.id})">Approve</button> ` : ''}
+                      ${r.status==='approved' && this.can('commissions_pay') ? `<button class="btn btn-sm btn-success" onclick="App.payRecord(${r.id})">Pay</button> ` : ''}
+                      ${r.status!=='paid' && this.can('commissions_delete') ? `<button class="btn btn-sm btn-secondary" onclick="App.deleteRecord(${r.id})">Del</button>` : ''}
                     </td>
                   </tr>`).join('')}
             </tbody>

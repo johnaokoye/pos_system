@@ -89,14 +89,17 @@ async function calcRentalCommission(agreement, checkoutTx) {
 router.use(requirePermission('commissions'));
 
 // ── Plans ──────────────────────────────────────────────────
-router.get('/plans', async (req, res) => {
+// Gated by commissions_plans (not just the blanket module check above) so a
+// view-only commissions user — granted `commissions` but with this sub-key
+// unchecked — can't see or touch plan rate structures or assignments.
+router.get('/plans', requirePermission('commissions_plans'), async (req, res) => {
   try {
     const { rows } = await db.execute({ sql: 'SELECT * FROM commission_plans ORDER BY active DESC, name', args: [] });
     res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/plans', async (req, res) => {
+router.post('/plans', requirePermission('commissions_plans'), async (req, res) => {
   const { name, type, rate, tiers, apply_to, min_sale_amount, notes } = req.body;
   if (!name) return res.status(400).json({ error: 'Name required' });
   const valid = ['percentage','tiered','flat'];
@@ -111,7 +114,7 @@ router.post('/plans', async (req, res) => {
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
 
-router.put('/plans/:id', async (req, res) => {
+router.put('/plans/:id', requirePermission('commissions_plans'), async (req, res) => {
   try {
     const { rows: [plan] } = await db.execute({ sql: 'SELECT * FROM commission_plans WHERE id = ?', args: [req.params.id] });
     if (!plan) return res.status(404).json({ error: 'Not found' });
@@ -122,7 +125,7 @@ router.put('/plans/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/plans/:id', async (req, res) => {
+router.delete('/plans/:id', requirePermission('commissions_plans'), async (req, res) => {
   try {
     const { rows: [used] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM employee_commission_plans WHERE plan_id = ?', args: [req.params.id] });
     if (Number(used.c) > 0) return res.status(400).json({ error: 'Plan is assigned to employees — remove assignments first' });
@@ -132,14 +135,14 @@ router.delete('/plans/:id', async (req, res) => {
 });
 
 // ── Assignments ────────────────────────────────────────────
-router.get('/assignments', async (req, res) => {
+router.get('/assignments', requirePermission('commissions_plans'), async (req, res) => {
   try {
     const { rows } = await db.execute({ sql: `SELECT ecp.*, e.first_name || ' ' || e.last_name as employee_name, e.employee_number, cp.name as plan_name, cp.type as plan_type, cp.rate as plan_rate FROM employee_commission_plans ecp JOIN employees e ON ecp.employee_id = e.id JOIN commission_plans cp ON ecp.plan_id = cp.id ORDER BY e.last_name, ecp.effective_from DESC`, args: [] });
     res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/assignments', async (req, res) => {
+router.post('/assignments', requirePermission('commissions_plans'), async (req, res) => {
   const { employee_id, plan_id, effective_from, effective_to } = req.body;
   if (!employee_id || !plan_id || !effective_from) return res.status(400).json({ error: 'employee_id, plan_id, effective_from required' });
   try {
@@ -149,7 +152,7 @@ router.post('/assignments', async (req, res) => {
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
 
-router.delete('/assignments/:id', async (req, res) => {
+router.delete('/assignments/:id', requirePermission('commissions_plans'), async (req, res) => {
   try {
     await db.execute({ sql: 'DELETE FROM employee_commission_plans WHERE id = ?', args: [req.params.id] });
     res.json({ ok: true });
@@ -185,7 +188,7 @@ router.post('/records', async (req, res) => {
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
 
-router.patch('/records/:id/approve', async (req, res) => {
+router.patch('/records/:id/approve', requirePermission('commissions_approve'), async (req, res) => {
   try {
     const { rows: [rec] } = await db.execute({ sql: 'SELECT * FROM commission_records WHERE id = ?', args: [req.params.id] });
     if (!rec) return res.status(404).json({ error: 'Not found' });
@@ -196,7 +199,7 @@ router.patch('/records/:id/approve', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.patch('/records/:id/pay', async (req, res) => {
+router.patch('/records/:id/pay', requirePermission('commissions_pay'), async (req, res) => {
   try {
     const { rows: [rec] } = await db.execute({ sql: 'SELECT * FROM commission_records WHERE id = ?', args: [req.params.id] });
     if (!rec) return res.status(404).json({ error: 'Not found' });
@@ -206,7 +209,7 @@ router.patch('/records/:id/pay', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.patch('/records/bulk-approve', async (req, res) => {
+router.patch('/records/bulk-approve', requirePermission('commissions_approve'), async (req, res) => {
   try {
     const { ids } = req.body;
     if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids array required' });
@@ -217,7 +220,7 @@ router.patch('/records/bulk-approve', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.patch('/records/bulk-pay', async (req, res) => {
+router.patch('/records/bulk-pay', requirePermission('commissions_pay'), async (req, res) => {
   try {
     const { ids } = req.body;
     if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids array required' });
@@ -228,7 +231,7 @@ router.patch('/records/bulk-pay', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/records/:id', async (req, res) => {
+router.delete('/records/:id', requirePermission('commissions_delete'), async (req, res) => {
   try {
     const { rows: [rec] } = await db.execute({ sql: 'SELECT * FROM commission_records WHERE id = ?', args: [req.params.id] });
     if (!rec) return res.status(404).json({ error: 'Not found' });

@@ -314,6 +314,8 @@
 
       <h3>Reassigning a quote</h3>
       <p>Someone with the <span class="perm-pill">sales_manager</span> permission can hand an open quote (not yet converted or declined) to a different salesperson using the <strong>Reassign</strong> button on the quote's detail view. This is for handing off the follow-through work — the new assignee becomes who the quote shows as "Assigned to." Commission on the eventual sale still goes to whoever the quote was <em>originally</em> assigned to (shown as "Sale credited to" once a quote has been reassigned) — reassigning it again keeps tracing credit back to that same original salesperson, not whoever it was most recently passed from.</p>
+      <p>The Quotations list marks any reassigned quote with a small "↪ reassigned" tag next to its current assignee, and a <strong>Reassigned only</strong> checkbox (alongside the Status filter) narrows the list down to just those — the quickest way to see everything currently out with someone other than the salesperson who'll be credited for it.</p>
+      <p>An employee flagged <strong>Salesperson</strong> (see <a href="#employees">Employees</a>) sees two tabs at the top of Quotations: <strong>My Quotes</strong> (the default — everything currently assigned to them, including anything handed to them via Reassign) and <strong>All Quotes</strong>. This is a convenience filter only — it doesn't restrict which quotes they can open, unlike the hard scoping applied to Transactions, CRM, and Commissions.</p>
     </section>
 
     <section class="module" id="layaway">
@@ -349,7 +351,7 @@
       </ul>
 
       <h3>Customer eligibility</h3>
-      <p>A customer can't start a new rental until their profile has an ID (type, number, and a scanned copy), a proof of address, and an emergency reference on file. This is enforced at both the direct rental-hold flow and at converting a rental quote into an agreement.</p>
+      <p>A customer can't start a new rental until their profile has an ID (type, number, and a scanned copy), an uploaded proof-of-address document, and three references on file — including a scanned photo ID for the main reference. This is enforced at both the direct rental-hold flow and at converting a rental quote into an agreement.</p>
 
       <h3>Rental Dispatch — the agreement lifecycle</h3>
       <ol class="steps">
@@ -582,7 +584,7 @@
         <li><strong>Credit accounts</strong> — flag a customer as a credit customer to let them buy on account; see <a href="#accounts">Accounts Receivable</a> for how that's collected and enforced.</li>
         <li><strong>Discount card</strong> assignment (type + card number) lives on this profile — see <a href="#discount-cards">Discount Cards</a>.</li>
         <li><strong>Cash back card</strong> assignment (type + card number) also lives on this profile — see <a href="#cash-back-cards">Cash Back Cards</a>.</li>
-        <li><strong>Rental compliance</strong> fields (ID scan, address proof, emergency reference) also live here and gate whether the customer can start a new rental.</li>
+        <li><strong>Rental compliance</strong> fields also live here and gate whether the customer can start a new rental: a photo ID (type, number, and a scanned copy), an uploaded proof-of-address document (image or PDF), and three references — the main one (Reference 1) also captures an address and its own scanned photo ID upload; References 2 and 3 are name/phone/relationship only.</li>
         <li>A customer's full transaction history is viewable from their profile.</li>
       </ul>
       <p>Needs <span class="perm-pill">customers_add</span> / <span class="perm-pill">customers_edit</span> / <span class="perm-pill">customers_delete</span>; extending or adjusting credit terms needs <span class="perm-pill">customers_credit</span>.</p>
@@ -620,9 +622,10 @@
         <li>A commission record is <strong>created automatically</strong> whenever an assigned employee completes a sale or wins a CRM opportunity — no manual entry needed for the common case.</li>
         <li>A plan's <strong>Applies To</strong> setting scopes it to POS sales, quotes, CRM deals, rentals, or all of them — a plan only earns commission on the category(ies) it's scoped to, so assigning someone a POS-only plan doesn't automatically start paying them on rentals too.</li>
         <li><strong>Rentals are commissioned on a delay, not at booking</strong> — the risk being commissioned against is different depending on how the rental was paid. A cash/card-paid rental earns commission once the item is fully returned; a credit-account rental earns commission once the customer actually pays off that rental's invoice (whether that happens before or after the item comes back). This is deliberate: it rewards staff for following up and closing the loop, not just for booking the rental.</li>
-        <li>Records move through <strong>approval</strong> (<span class="perm-pill">commissions_approve</span>, individually or in bulk) before being marked <strong>paid</strong> (<span class="perm-pill">commissions_pay</span>, also available in bulk).</li>
+        <li>Records move through <strong>approval</strong> (<span class="perm-pill">commissions_approve</span>, individually or in bulk) before being marked <strong>paid</strong> (<span class="perm-pill">commissions_pay</span>, also available in bulk). Deleting a record needs its own <span class="perm-pill">commissions_delete</span>.</li>
         <li>A summary view totals commissions owed/paid across employees and time periods.</li>
         <li>An employee flagged <strong>Salesperson</strong> (see <a href="#employees">Employees</a>) only sees their own commission records and their own row of the summary — never other employees' figures.</li>
+        <li><strong>View-only access</strong>: giving a Security Group the base <span class="perm-pill">commissions</span> permission with none of its sub-permissions checked lets someone see the Dashboard and Records tabs (read-only — no Approve/Pay/Delete buttons appear) without granting any of those actions; unchecking <span class="perm-pill">commissions_plans</span> also hides the Plans &amp; Assignments tab entirely, so plan rate structures stay hidden from that group. All of this is enforced server-side too, not just hidden in the UI.</li>
       </ul>
     </section>
 
@@ -723,7 +726,7 @@
         <tr><td>sales_manager</td><td>(none)</td></tr>
         <tr><td>accounts</td><td>accounts_create, accounts_payments, accounts_writeoff</td></tr>
         <tr><td>crm</td><td>crm_leads, crm_opportunities</td></tr>
-        <tr><td>commissions</td><td>commissions_plans, commissions_approve, commissions_pay</td></tr>
+        <tr><td>commissions</td><td>commissions_plans, commissions_approve, commissions_pay, commissions_delete</td></tr>
         <tr><td>warehouse</td><td>warehouse_bins, warehouse_assign</td></tr>
         <tr><td>shipping</td><td>shipping_create, shipping_carriers</td></tr>
         <tr><td>cycle-counts</td><td>cyclecounts_create, cyclecounts_approve</td></tr>

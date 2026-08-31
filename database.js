@@ -1341,6 +1341,30 @@ async function _init() {
     // work/complete it) — see PATCH /quotations/:id/reassign and the
     // sales_manager permission.
     'ALTER TABLE quotations ADD COLUMN original_employee_id INTEGER REFERENCES employees(id)',
+    // Rental customer compliance now requires two references instead of one
+    // (the original rental_reference_* columns above become "Reference 1"
+    // and gain an address; rental_reference2_* is the second, name/phone/
+    // relationship only). Proof of address moves from a type+details text
+    // description to an actual uploaded file, same Cloudinary-or-local
+    // pattern as rental_id_scan_path — rental_address_proof_type is kept as
+    // a classification dropdown alongside the file, but the old free-text
+    // rental_address_proof_details field is no longer used (left in place,
+    // unpopulated, per the additive-only migration convention).
+    'ALTER TABLE customers ADD COLUMN rental_reference_address TEXT',
+    'ALTER TABLE customers ADD COLUMN rental_reference2_name TEXT',
+    'ALTER TABLE customers ADD COLUMN rental_reference2_phone TEXT',
+    'ALTER TABLE customers ADD COLUMN rental_reference2_relationship TEXT',
+    'ALTER TABLE customers ADD COLUMN rental_address_proof_path TEXT',
+    'ALTER TABLE customers ADD COLUMN rental_address_proof_mime TEXT',
+    // A third reference (name/phone/relationship, no address — same shape as
+    // reference 2), plus a photo ID upload for reference 1 specifically (the
+    // "main" reference, the one with an address on file) — same
+    // Cloudinary-or-local upload pattern as the customer's own ID scan, see
+    // POST /customers/:id/reference-id.
+    'ALTER TABLE customers ADD COLUMN rental_reference3_name TEXT',
+    'ALTER TABLE customers ADD COLUMN rental_reference3_phone TEXT',
+    'ALTER TABLE customers ADD COLUMN rental_reference3_relationship TEXT',
+    'ALTER TABLE customers ADD COLUMN rental_reference_id_path TEXT',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

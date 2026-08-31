@@ -10,6 +10,8 @@ uploads/customer-ids/*
 uploads/rental-signatures/*
 uploads/rental-po-attachments/*
 uploads/po-approval-signatures/*
+uploads/customer-address-proofs/*
+uploads/customer-reference-ids/*
 !uploads/products/.gitkeep
 !uploads/po-attachments/.gitkeep
 !uploads/branding/.gitkeep
@@ -17,6 +19,8 @@ uploads/po-approval-signatures/*
 !uploads/rental-signatures/.gitkeep
 !uploads/rental-po-attachments/.gitkeep
 !uploads/po-approval-signatures/.gitkeep
+!uploads/customer-address-proofs/.gitkeep
+!uploads/customer-reference-ids/.gitkeep
 .env
 .vercel
 test-results/
