@@ -1381,6 +1381,14 @@ async function _init() {
     'ALTER TABLE customers ADD COLUMN rental_reference_id_path TEXT',
     // See customer_categories table above.
     'ALTER TABLE customers ADD COLUMN customer_category_id INTEGER REFERENCES customer_categories(id)',
+    // Express same-day service — a supervisor-only surcharge (see the
+    // wo_signoff check in PATCH /work-orders/:id/estimate) applied at
+    // assessment time. The 25% is baked directly into estimate_labor/
+    // estimate_consumables when this is set, so every downstream balance
+    // calculation (final payment, POS Hold Recall, the schedule modal)
+    // needs no changes of its own — this flag is just the audit/display
+    // marker that a surcharge was applied.
+    'ALTER TABLE work_orders ADD COLUMN is_express INTEGER NOT NULL DEFAULT 0',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

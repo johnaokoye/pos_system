@@ -7245,6 +7245,7 @@ const App = {
 
   _woTabs: [
     { key: 'active',          label: 'Active' },
+    { key: 'assessed',        label: 'Assessment Queue' },
     { key: 'awaiting_pickup', label: 'Awaiting Pickup' },
     { key: 'picked_up',       label: 'Picked Up' },
     { key: 'cancelled',       label: 'Cancelled' },
@@ -7307,20 +7308,23 @@ const App = {
   async loadWorkOrders() {
     const el = document.getElementById('wo-content');
     if (!el) return;
+    const isQueue = this.woTab === 'assessed';
     const view = this.woTab === 'all' ? '' : this.woTab;
     const workOrders = await this.api('GET', `/work-orders${view ? '?view='+view : ''}`);
     if (!document.getElementById('wo-content')) return;
     document.getElementById('wo-content').innerHTML = !workOrders.length ? '<div class="empty-state"><p>No work orders found.</p></div>' : `
+      ${isQueue ? `<p style="font-size:12px;color:var(--text-muted);margin:0 0 8px">Waiting to be assessed, oldest first — work top to bottom unless a supervisor bumps a job for express service.</p>` : ''}
       <div class="table-wrap">
       <table class="table">
-        <thead><tr><th>WO #</th><th>Customer</th><th>Description</th><th>Branch</th><th>Opened</th><th>Pickup Due</th><th>Status</th><th></th></tr></thead>
-        <tbody>${workOrders.map(wo => `<tr>
-          <td class="fw-600">${wo.wo_number}</td>
+        <thead><tr>${isQueue ? '<th>#</th>' : ''}<th>WO #</th><th>Customer</th><th>Description</th><th>Branch</th><th>Opened</th>${isQueue ? '<th>Waiting</th>' : '<th>Pickup Due</th>'}<th>Status</th><th></th></tr></thead>
+        <tbody>${workOrders.map((wo,i) => `<tr>
+          ${isQueue ? `<td class="fw-600">${i+1}</td>` : ''}
+          <td class="fw-600">${wo.wo_number}${wo.is_express ? ' <span class="badge-pill badge-danger" style="font-size:10px" title="Express same-day service">⚡</span>' : ''}</td>
           <td>${wo.customer_name||'—'}</td>
           <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${this.escapeAttr(wo.description)}">${wo.description}</td>
           <td>${wo.branch_name||'—'}</td>
           <td>${this.fmtDate(wo.created_at)}</td>
-          <td>${this.fmtDate(wo.pickup_due_date)}${this._woPickupBadge(wo)}</td>
+          ${isQueue ? `<td>${this._woWaitingLabel(wo.created_at)}</td>` : `<td>${this.fmtDate(wo.pickup_due_date)}${this._woPickupBadge(wo)}</td>`}
           <td><span class="badge-pill ${this._woStatusBadge[wo.status]||'badge-secondary'}">${this._woStatusLabels[wo.status]||wo.status}</span></td>
           <td style="text-align:right;white-space:nowrap">
             <button class="btn btn-sm btn-outline" onclick="App.viewWorkOrder(${wo.id})">View</button>
@@ -7328,6 +7332,15 @@ const App = {
         </tr>`).join('')}</tbody>
       </table>
       </div>`;
+  },
+
+  // Days (or hours, for same-day jobs) since a work order entered the
+  // assessment queue — shown next to the FIFO position so a supervisor can
+  // see at a glance how long the line has actually been waiting.
+  _woWaitingLabel(createdAt) {
+    const hours = (Date.now() - new Date(createdAt).getTime()) / 36e5;
+    if (hours < 24) return `${Math.max(0, Math.floor(hours))}h`;
+    return `${Math.floor(hours / 24)}d`;
   },
 
   async showWOIntakeModal() {
@@ -7444,7 +7457,7 @@ const App = {
     this.showModal(`
       <div class="modal" style="max-width:640px">
         <div class="modal-header">
-          <span class="modal-title">${wo.wo_number} <span class="badge-pill ${this._woStatusBadge[wo.status]||'badge-secondary'}" style="margin-left:6px">${this._woStatusLabels[wo.status]||wo.status}</span></span>
+          <span class="modal-title">${wo.wo_number} <span class="badge-pill ${this._woStatusBadge[wo.status]||'badge-secondary'}" style="margin-left:6px">${this._woStatusLabels[wo.status]||wo.status}</span>${wo.is_express ? `<span class="badge-pill badge-danger" style="margin-left:6px" title="Express same-day service — 25% surcharge applied">⚡ Express</span>` : ''}</span>
           <button class="modal-close">✕</button>
         </div>
         <div class="modal-body">
@@ -7471,7 +7484,7 @@ const App = {
           <div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:13px">
             <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Fees & Estimate</strong>
             <div style="display:flex;justify-content:space-between;margin-top:4px"><span>Assessment Fee</span><span>${this.fmt(wo.assessment_fee)} ${wo.assessment_transaction_id ? '<span class="badge-pill badge-success" style="font-size:10px">Paid</span>' : '<span style="color:var(--text-muted)">Unpaid</span>'}</span></div>
-            ${wo.status !== 'intake' ? `<div style="display:flex;justify-content:space-between"><span>Estimate (labor + consumables)</span><span>${this.fmt(estimateTotal)}</span></div>` : ''}
+            ${wo.status !== 'intake' ? `<div style="display:flex;justify-content:space-between"><span>Estimate (labor + consumables)${wo.is_express ? ' <span class="badge-pill badge-danger" style="font-size:10px">Express +25%</span>' : ''}</span><span>${this.fmt(estimateTotal)}</span></div>` : ''}
             ${partsTotal > 0 ? `<div style="display:flex;justify-content:space-between"><span>Parts</span><span>${this.fmt(partsTotal)}</span></div>` : ''}
             ${wo.deposit_amount > 0 ? `<div style="display:flex;justify-content:space-between"><span>Deposit</span><span>${this.fmt(wo.deposit_amount)} ${wo.deposit_transaction_id ? '<span class="badge-pill badge-success" style="font-size:10px">Paid</span>' : '<span style="color:var(--text-muted)">Unpaid</span>'}</span></div>` : ''}
             ${['complete','awaiting_pickup','picked_up'].includes(wo.status) ? `<div style="display:flex;justify-content:space-between;margin-top:4px;border-top:1px solid var(--border);padding-top:4px"><strong>Balance Due</strong><strong>${this.fmt(Math.max(0, estimateTotal + partsTotal - (parseFloat(wo.deposit_amount)||0)))} ${wo.final_transaction_id ? '<span class="badge-pill badge-success" style="font-size:10px">Paid</span>' : (wo.status === 'picked_up' ? '' : '<span style="color:var(--text-muted)">Unpaid</span>')}</strong></div>` : ''}
@@ -7583,23 +7596,44 @@ const App = {
   },
 
   showWOEstimateModal(id) {
+    const canExpress = this.can('wo_signoff');
     this.showModal(`
       <div class="modal" style="max-width:460px">
         <div class="modal-header"><span class="modal-title">Enter Estimate</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <div class="input-row">
-            <div class="form-group"><label>Labor Estimate</label><input type="number" id="wo-est-labor" min="0" step="0.01" value="0"></div>
-            <div class="form-group"><label>Consumables Estimate</label><input type="number" id="wo-est-consumables" min="0" step="0.01" value="0"></div>
+            <div class="form-group"><label>Labor Estimate</label><input type="number" id="wo-est-labor" min="0" step="0.01" value="0" oninput="App._updateWOEstimatePreview()"></div>
+            <div class="form-group"><label>Consumables Estimate</label><input type="number" id="wo-est-consumables" min="0" step="0.01" value="0" oninput="App._updateWOEstimatePreview()"></div>
           </div>
           <div class="form-group"><label>Estimate Notes</label><textarea id="wo-est-notes" rows="2" placeholder="What's needed, findings from assessment, etc."></textarea></div>
-          <div class="form-group"><label>Deposit Required *</label><input type="number" id="wo-est-deposit" min="0.01" step="0.01" placeholder="Amount to collect before work begins"></div>
+          <div class="form-group"><label>Deposit (optional)</label><input type="number" id="wo-est-deposit" min="0" step="0.01" placeholder="Leave blank if no deposit is required"></div>
           <p style="font-size:11px;color:var(--text-muted);margin-top:-4px">Parts costs are added separately once parts are assigned, and will show alongside this estimate.</p>
+          ${canExpress ? `
+          <div class="form-group" style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:normal">
+              <input type="checkbox" id="wo-est-express" style="width:16px;height:16px;cursor:pointer" onchange="App._updateWOEstimatePreview()">
+              ⚡ Express same-day service (+25%)
+            </label>
+            <p style="font-size:11px;color:var(--text-muted);margin:4px 0 0">Supervisor discretion only — weigh how many other jobs are queued and how hard this one is before offering it.</p>
+            <p id="wo-est-preview" style="font-size:12px;font-weight:600;margin:6px 0 0"></p>
+          </div>` : ''}
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
           <button class="btn btn-primary" onclick="App.saveWOEstimate(${id})">Save Estimate</button>
         </div>
       </div>`);
+    if (canExpress) this._updateWOEstimatePreview();
+  },
+
+  _updateWOEstimatePreview() {
+    const preview = document.getElementById('wo-est-preview');
+    if (!preview) return;
+    const labor = parseFloat(document.getElementById('wo-est-labor').value) || 0;
+    const consumables = parseFloat(document.getElementById('wo-est-consumables').value) || 0;
+    const express = document.getElementById('wo-est-express')?.checked;
+    const base = labor + consumables;
+    preview.textContent = express ? `Total with express surcharge: ${this.fmt(base * 1.25)} (base ${this.fmt(base)} + 25%)` : `Total: ${this.fmt(base)}`;
   },
 
   async saveWOEstimate(id) {
@@ -7607,11 +7641,11 @@ const App = {
     const estimate_consumables = document.getElementById('wo-est-consumables').value;
     const estimate_notes = document.getElementById('wo-est-notes').value.trim();
     const deposit_amount = document.getElementById('wo-est-deposit').value;
-    if (!parseFloat(deposit_amount)) { this.alert('A deposit amount is required', 'error'); return; }
+    const is_express = document.getElementById('wo-est-express')?.checked || false;
     try {
-      const wo = await this.api('PATCH', `/work-orders/${id}/estimate`, { estimate_labor, estimate_consumables, estimate_notes, deposit_amount, employee_id: this.currentUser.id });
+      const wo = await this.api('PATCH', `/work-orders/${id}/estimate`, { estimate_labor, estimate_consumables, estimate_notes, deposit_amount, is_express, employee_id: this.currentUser.id });
       this.closeModal();
-      this.alert(`Estimate saved for ${wo.wo_number}`);
+      this.alert(`Estimate saved for ${wo.wo_number}${is_express ? ' — express same-day' : ''}${wo.status === 'in_progress' ? ' — no deposit required, now in progress' : ''}`);
       this.renderWorkOrders();
     } catch(e) { this.alert(e.message, 'error'); }
   },

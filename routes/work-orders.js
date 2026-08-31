@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
-const { requirePermission, requireAnyPermission } = require('../lib/permissions');
+const { requirePermission, requireAnyPermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { processWorkOrderItems, processWorkOrderPartSourcing } = require('../lib/workOrders');
 
@@ -36,16 +36,21 @@ router.get('/', requirePermission('work_orders'), async (req, res) => {
     const { status, view, customer_id, branch_id, limit = 200 } = req.query;
     let sql = `${WO_LIST_SELECT} WHERE 1=1`;
     const params = [];
+    let effectiveStatus = null;
     if (view === 'active') { sql += " AND wo.status NOT IN ('picked_up','cancelled','not_worth_fixing')"; }
     // Assessment fee (status='intake'), deposit (status='pending_deposit'), or the
     // final balance (status='awaiting_pickup') due — surfaced in the POS Hold
     // Recall list so a cashier can pick it up and take payment there.
     else if (view === 'awaiting_payment') { sql += " AND wo.status IN ('intake','pending_deposit','awaiting_pickup')"; }
-    else if (view === 'awaiting_pickup' || view === 'picked_up' || view === 'cancelled' || view === 'not_worth_fixing') { sql += ' AND wo.status = ?'; params.push(view); }
-    else if (status) { sql += ' AND wo.status = ?'; params.push(status); }
+    else if (['awaiting_pickup', 'picked_up', 'cancelled', 'not_worth_fixing', 'assessed'].includes(view)) { sql += ' AND wo.status = ?'; params.push(view); effectiveStatus = view; }
+    else if (status) { sql += ' AND wo.status = ?'; params.push(status); effectiveStatus = status; }
     if (customer_id) { sql += ' AND wo.customer_id = ?'; params.push(customer_id); }
     if (branch_id) { sql += ' AND wo.branch_id = ?'; params.push(branch_id); }
-    sql += ' ORDER BY wo.created_at DESC LIMIT ?';
+    // Every other view is "most recently touched first" for day-to-day triage,
+    // but the assessment queue (status='assessed', paid and waiting for
+    // someone to assess it) is a strict first-in-first-out line — whoever
+    // assesses next works the oldest-opened item first, oldest at the top.
+    sql += effectiveStatus === 'assessed' ? ' ORDER BY wo.created_at ASC LIMIT ?' : ' ORDER BY wo.created_at DESC LIMIT ?';
     params.push(parseInt(limit));
     const { rows } = await db.execute({ sql, args: params });
     res.json(rows);
@@ -466,18 +471,40 @@ router.patch('/:id/assessment-paid', requireAnyPermission('wo_assess', 'pos'), a
 
 // ─── Estimate + deposit ─────────────────────────────────────────────────────
 
+// Express same-day service is a discretionary call — how busy the queue is,
+// how hard the job looks — so it's restricted to whoever holds wo_signoff
+// (the same "supervisor" permission /:id/signoff below is gated on), not
+// every wo_assess holder doing routine assessments. The 25% is folded
+// straight into the stored labor/consumables amounts so every other balance
+// calculation in the app (final payment, POS Hold Recall, the schedule
+// modal) keeps working unmodified — is_express is kept only as the
+// audit/display flag that a surcharge was applied.
+const EXPRESS_SURCHARGE = 1.25;
+
 router.patch('/:id/estimate', requirePermission('wo_assess'), async (req, res) => {
   try {
-    const { estimate_labor, estimate_consumables, estimate_notes, deposit_amount, employee_id } = req.body;
+    const { estimate_labor, estimate_consumables, estimate_notes, deposit_amount, is_express, employee_id } = req.body;
     const { rows: [wo] } = await db.execute({ sql: 'SELECT * FROM work_orders WHERE id = ?', args: [req.params.id] });
     if (!wo) return res.status(404).json({ error: 'Not found' });
     if (wo.status !== 'assessed') return res.status(400).json({ error: `This work order is ${wo.status}, not awaiting an estimate` });
+    // Deposit is optional (recent process change) — a $0/blank deposit skips
+    // the pending_deposit stop entirely and goes straight to in_progress,
+    // the same way a $0 final balance below skips creating a payment
+    // transaction rather than forcing a pointless $0 charge through the register.
     const deposit = parseFloat(deposit_amount) || 0;
-    if (deposit <= 0) return res.status(400).json({ error: 'A deposit amount is required' });
 
-    await db.execute({ sql: `UPDATE work_orders SET estimate_labor = ?, estimate_consumables = ?, estimate_notes = ?, deposit_amount = ?, status = 'pending_deposit' WHERE id = ?`,
-      args: [parseFloat(estimate_labor) || 0, parseFloat(estimate_consumables) || 0, estimate_notes || null, deposit, req.params.id] });
-    await logStatus(db, req.params.id, 'pending_deposit', `Estimate entered — labor ${estimate_labor||0}, consumables ${estimate_consumables||0}, deposit due ${deposit}`, employee_id);
+    const expressRequested = !!is_express;
+    if (expressRequested && !req.apiKey && !can(req.employee && req.employee.permissions, 'wo_signoff')) {
+      return res.status(403).json({ error: 'Express same-day service is a supervisor call — missing permission: wo_signoff' });
+    }
+    const surcharge = expressRequested ? EXPRESS_SURCHARGE : 1;
+    const laborAmt = parseFloat(((parseFloat(estimate_labor) || 0) * surcharge).toFixed(2));
+    const consumablesAmt = parseFloat(((parseFloat(estimate_consumables) || 0) * surcharge).toFixed(2));
+    const newStatus = deposit > 0 ? 'pending_deposit' : 'in_progress';
+
+    await db.execute({ sql: `UPDATE work_orders SET estimate_labor = ?, estimate_consumables = ?, estimate_notes = ?, deposit_amount = ?, is_express = ?, status = ? WHERE id = ?`,
+      args: [laborAmt, consumablesAmt, estimate_notes || null, deposit, expressRequested ? 1 : 0, newStatus, req.params.id] });
+    await logStatus(db, req.params.id, newStatus, `Estimate entered — labor ${laborAmt}, consumables ${consumablesAmt}${expressRequested ? ' (express same-day, +25% applied)' : ''}${deposit > 0 ? `, deposit due ${deposit}` : ', no deposit required — work can begin'}`, employee_id);
     const { rows: [updated] } = await db.execute({ sql: `${WO_LIST_SELECT} WHERE wo.id = ?`, args: [req.params.id] });
     res.json(updated);
   } catch(e) { res.status(500).json({ error: e.message }); }
