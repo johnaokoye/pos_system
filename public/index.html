@@ -2667,7 +2667,7 @@ const App = {
   },
 
   applyDiscount() {
-    if (this.appliedDiscountCard) { this.alert('This customer already has a discount card applied — remove the customer to use a manual discount instead.', 'error'); return; }
+    if (this.appliedDiscountCard) { this.alert(`This customer already has a ${(this.appliedDiscountCard.label || 'Discount Card').toLowerCase()} applied — remove the customer to use a manual discount instead.`, 'error'); return; }
     let val = parseFloat(document.getElementById('discount-input')?.value) || 0;
     const maxPct = parseFloat(this.settings.max_discount_pct) || 0;
     if (maxPct > 0 && val > 0) {
@@ -2685,7 +2685,7 @@ const App = {
   },
 
   async applyPromoCode() {
-    if (this.appliedDiscountCard) { this.alert('This customer already has a discount card applied — promo codes can\'t be combined with it.', 'error'); return; }
+    if (this.appliedDiscountCard) { this.alert(`This customer already has a ${(this.appliedDiscountCard.label || 'Discount Card').toLowerCase()} applied — promo codes can't be combined with it.`, 'error'); return; }
     const code = document.getElementById('promo-code-input')?.value?.trim();
     if (!code) return;
     const subtotal = this.cart.reduce((s, i) => s + i.price * i.quantity, 0);
@@ -2726,12 +2726,17 @@ const App = {
     const discountRow = document.getElementById('discount-row');
     const pd = document.getElementById('promo-display');
     if (this.appliedDiscountCard) {
+      // cartDiscount must be computed unconditionally, not just when the
+      // Ticket Discount modal happens to be open (promo-display etc. only
+      // exist in that modal's markup) — otherwise attaching a discount-card
+      // or customer-category customer wouldn't actually reduce the visible
+      // total/Amount Due until the cashier opened that modal at least once.
+      const subtotal = this.cart.reduce((s, i) => s + i.price * i.quantity, 0);
+      this.cartDiscount = parseFloat((subtotal * this.appliedDiscountCard.percent / 100).toFixed(2));
       if (row) row.style.display = 'none';
       if (discountRow) discountRow.style.display = 'none';
       if (pd) {
-        const subtotal = this.cart.reduce((s, i) => s + i.price * i.quantity, 0);
-        this.cartDiscount = parseFloat((subtotal * this.appliedDiscountCard.percent / 100).toFixed(2));
-        pd.innerHTML = `✓ ${this.appliedDiscountCard.type_name} Discount Card${this.appliedDiscountCard.card_number ? ` (${this.appliedDiscountCard.card_number})` : ''}: -${this.fmt(this.cartDiscount)}`;
+        pd.innerHTML = `✓ ${this.appliedDiscountCard.type_name} ${this.appliedDiscountCard.label || 'Discount Card'}${this.appliedDiscountCard.card_number ? ` (${this.appliedDiscountCard.card_number})` : ''}: -${this.fmt(this.cartDiscount)}`;
         pd.style.display = 'block';
       }
       const rb = document.getElementById('remove-promo-btn');
@@ -3068,7 +3073,7 @@ const App = {
         items: this.cart.map(i => ({ product_id: i.product_id, variation_id: i.variation_id||null, quantity: i.quantity, discount_percent: i.discountPercent||0, discount_override_employee_id: i.discountOverrideEmployeeId||null })),
         discount_amount: discount,
         promotion_code: this.appliedDiscountCard ? (this.appliedDiscountCard.card_number || null) : (this.appliedPromoCode?.code || null),
-        promotion_name: this.appliedDiscountCard ? `${this.appliedDiscountCard.type_name} Discount Card` : (this.appliedPromoCode?.promo_name || this.autoAppliedPromo?.name || null),
+        promotion_name: this.appliedDiscountCard ? `${this.appliedDiscountCard.type_name} ${this.appliedDiscountCard.label || 'Discount Card'}` : (this.appliedPromoCode?.promo_name || this.autoAppliedPromo?.name || null),
         payment_method: method,
         amount_tendered: amountTendered,
         source_return_id: this._returnCredit?.id || null,
@@ -3820,8 +3825,20 @@ const App = {
       }
       // Discount cards never stack with a promo code — a card-carrying
       // customer takes priority over whatever promo was already applied.
+      // A customer category's discount works the same way but only kicks in
+      // when there's no discount card — a card is a more deliberate,
+      // specific assignment and wins if the customer somehow has both.
       if (c.discount_card_type_id && c.discount_card_type_active) {
-        this.appliedDiscountCard = { type_name: c.discount_card_type_name, percent: c.discount_card_percent, card_number: c.discount_card_number };
+        this.appliedDiscountCard = { type_name: c.discount_card_type_name, percent: c.discount_card_percent, card_number: c.discount_card_number, label: 'Discount Card' };
+        this.appliedPromoCode = null;
+        this.autoAppliedPromo = null;
+        this._availablePromos = [];
+        const pi = document.getElementById('promo-code-input');
+        if (pi) pi.value = '';
+        const rb = document.getElementById('remove-promo-btn');
+        if (rb) rb.style.display = 'none';
+      } else if (c.customer_category_id && c.customer_category_active && c.customer_category_discount_percent > 0) {
+        this.appliedDiscountCard = { type_name: c.customer_category_name, percent: c.customer_category_discount_percent, card_number: null, label: 'Customer Discount' };
         this.appliedPromoCode = null;
         this.autoAppliedPromo = null;
         this._availablePromos = [];
@@ -9421,10 +9438,11 @@ const App = {
   },
 
   async showCustomerForm(id) {
-    const [c, cardTypes, cashBackCardTypes] = await Promise.all([
+    const [c, cardTypes, cashBackCardTypes, customerCategories] = await Promise.all([
       id ? this.api('GET', `/customers/${id}`) : Promise.resolve({}),
       this.api('GET', '/discount-cards'),
       this.api('GET', '/cash-back-cards'),
+      this.api('GET', '/customer-categories'),
     ]);
     const isCredit = (c.customer_type || 'cash') === 'credit';
     const isTaxExempt = c.tax_exempt ? true : false;
@@ -9437,6 +9455,9 @@ const App = {
     const cashBackCardTypeOptions = c.cash_back_card_type_id && !cashBackCardTypes.some(t => t.id === c.cash_back_card_type_id)
       ? [...cashBackCardTypes, { id: c.cash_back_card_type_id, name: `${c.cash_back_card_type_name} (inactive)` }]
       : cashBackCardTypes;
+    const customerCategoryOptions = c.customer_category_id && !customerCategories.some(t => t.id === c.customer_category_id)
+      ? [...customerCategories, { id: c.customer_category_id, name: `${c.customer_category_name} (inactive)`, discount_percent: 0 }]
+      : customerCategories;
     this.showModal(`
       <div class="modal">
         <div class="modal-header"><span class="modal-title">${id ? 'Edit Customer' : 'Add Customer'}</span><button class="modal-close">✕</button></div>
@@ -9462,6 +9483,13 @@ const App = {
               <option value="cash" ${!isCredit?'selected':''}>Cash</option>
               <option value="credit" ${isCredit?'selected':''}>Credit</option>
             </select>
+          </div>
+          <div class="form-group"><label>Customer Category</label>
+            <select id="cf-category">
+              <option value="">— None —</option>
+              ${customerCategoryOptions.map(cat => `<option value="${cat.id}" ${c.customer_category_id===cat.id?'selected':''}>${cat.name}${cat.discount_percent > 0 ? ` (${cat.discount_percent}% off)` : ''}</option>`).join('')}
+            </select>
+            <p style="font-size:11px;color:var(--text-muted);margin-top:4px">A classification like Individual/Company/Contractor — separate from the Cash/Credit type above. Set up in Settings.</p>
           </div>
           <div id="cf-credit-fields" style="display:${isCredit?'block':'none'}">
             <div class="input-row">
@@ -9717,6 +9745,7 @@ const App = {
       discount_card_number: document.getElementById('cf-discount-card-number')?.value.trim() || null,
       cash_back_card_type_id: document.getElementById('cf-cash-back-card-type')?.value || null,
       cash_back_card_number: document.getElementById('cf-cash-back-card-number')?.value.trim() || null,
+      customer_category_id: document.getElementById('cf-category')?.value || null,
     };
     if (!data.first_name || !data.last_name) { this.alert('First and last name required', 'error'); return; }
     if (data.customer_type === 'credit' && data.credit_terms_days < 1) { this.alert('Credit terms must be at least 1 day', 'error'); return; }
@@ -10934,10 +10963,11 @@ const App = {
 
   // ─── Settings ─────────────────────────────────────────────
   async renderSettings() {
-    const [s, categories, branches] = await Promise.all([
+    const [s, categories, branches, customerCategories] = await Promise.all([
       this.api('GET', '/settings'),
       this.api('GET', '/categories'),
       this.api('GET', '/branches'),
+      this.api('GET', '/customer-categories'),
     ]);
     if (this.section !== 'settings') return;
 
@@ -11130,6 +11160,25 @@ const App = {
               <thead><tr><th>Name</th><th>Products</th><th>Actions</th></tr></thead>
               <tbody id="cat-table-body">
                 ${categories.map(c => `<tr><td class="fw-600">${c.name}</td><td style="text-align:center">${c.product_count}</td><td><button class="btn btn-secondary btn-sm" onclick="App.showCategoryForm(${c.id},'${c.name}','${c.description||''}')">Edit</button></td></tr>`).join('')}
+              </tbody>
+            </table>
+          </div>
+          <div class="card" style="margin-bottom:16px">
+            <div class="card-header"><span class="card-title">Customer Categories</span><button class="btn btn-primary btn-sm" onclick="App.showCustomerCategoryForm()">+ Add</button></div>
+            <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">Classify customers (Individual, Company, Contractor, ...) on their profile. A category's discount auto-applies at checkout like a discount card does, but only when the customer has no discount card assigned — a card always wins.</p>
+            <table>
+              <thead><tr><th>Name</th><th>Discount %</th><th>Customers</th><th>Status</th><th>Actions</th></tr></thead>
+              <tbody id="customer-cat-table-body">
+                ${customerCategories.length ? customerCategories.map(c => `<tr>
+                  <td class="fw-600">${c.name}</td>
+                  <td>${c.discount_percent}%</td>
+                  <td style="text-align:center"><span class="badge-pill badge-blue">${c.customer_count}</span></td>
+                  <td><span class="badge-pill ${c.active ? 'badge-green' : ''}" style="${c.active?'':'background:#e0e0e0;color:#666'}">${c.active ? 'Active' : 'Inactive'}</span></td>
+                  <td>
+                    <button class="btn btn-sm btn-secondary" onclick="App.showCustomerCategoryForm(${c.id})">Edit</button>
+                    <button class="btn btn-sm btn-danger" onclick="App.deleteCustomerCategory(${c.id})">Del</button>
+                  </td>
+                </tr>`).join('') : '<tr><td colspan="5" class="empty-state">No customer categories yet</td></tr>'}
               </tbody>
             </table>
           </div>
@@ -11581,6 +11630,53 @@ const App = {
       this.alert('Category deleted');
       if (fromInventory) { this.showCategoriesManager(); this.renderInventory(); }
       else { this.closeModal(); this.renderSettings(); }
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // ─── Customer Categories ──────────────────────────────────
+  async showCustomerCategoryForm(id) {
+    let t = { discount_percent: 0, active: 1 };
+    if (id) t = (await this.api('GET', '/customer-categories')).find(x => x.id === id) || t;
+    this.showModal(`
+      <div class="modal" style="max-width:400px">
+        <div class="modal-header">
+          <span class="modal-title">${id ? 'Edit' : 'New'} Customer Category</span>
+          <button class="modal-close" onclick="App.closeModal()">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group"><label>Name *</label><input id="cc-name" value="${t.name||''}" placeholder="e.g. Contractor"></div>
+          <div class="form-group"><label>Discount %</label><input type="number" id="cc-percent" value="${t.discount_percent}" min="0" max="100" step="0.01"></div>
+          <div class="form-group"><label style="display:flex;align-items:center;gap:6px">
+            <input type="checkbox" id="cc-active" ${t.active ? 'checked' : ''} style="width:auto"> Active
+          </label></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.saveCustomerCategory(${id||'null'})">Save</button>
+        </div>
+      </div>`);
+  },
+
+  async saveCustomerCategory(id) {
+    const name = document.getElementById('cc-name').value.trim();
+    const discount_percent = parseFloat(document.getElementById('cc-percent').value) || 0;
+    const active = document.getElementById('cc-active').checked;
+    if (!name) { this.alert('Name is required', 'error'); return; }
+    try {
+      if (id) await this.api('PUT', `/customer-categories/${id}`, { name, discount_percent, active });
+      else await this.api('POST', '/customer-categories', { name, discount_percent, active });
+      this.closeModal();
+      this.alert(id ? 'Category updated' : 'Category created');
+      this.renderSettings();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async deleteCustomerCategory(id) {
+    if (!confirm('Delete this customer category?')) return;
+    try {
+      await this.api('DELETE', `/customer-categories/${id}`);
+      this.alert('Category deleted');
+      this.renderSettings();
     } catch(e) { this.alert(e.message, 'error'); }
   },
 

@@ -232,6 +232,7 @@
         <li><strong>Promo codes</strong> — type a code at checkout; it's validated against active date windows, usage limits, and minimum-purchase rules before it's applied.</li>
         <li><strong>Auto-applied promotions</strong> — any active, code-less promotion that matches the cart is offered automatically (see <a href="#promotions">Promotions</a>).</li>
         <li><strong>Discount cards</strong> — attaching a customer who carries an active discount card applies their flat percentage automatically, and it always takes priority over a promo code — attaching such a customer clears any promo already on the cart (see <a href="#discount-cards">Discount Cards</a>).</li>
+        <li><strong>Customer Category discount</strong> — if the customer has no discount card, their <a href="#customers">Customer Category</a> discount (if any) applies the same way instead — a discount card still wins if the customer somehow has both.</li>
       </ul>
 
       <h3>Line-item discounts</h3>
@@ -583,6 +584,7 @@
         <li>Standard contact info, loyalty points (earned automatically on every sale), and total lifetime spend.</li>
         <li><strong>Credit accounts</strong> — flag a customer as a credit customer to let them buy on account; see <a href="#accounts">Accounts Receivable</a> for how that's collected and enforced.</li>
         <li><strong>Discount card</strong> assignment (type + card number) lives on this profile — see <a href="#discount-cards">Discount Cards</a>.</li>
+        <li><strong>Customer Category</strong> — a classification (Individual, Company, Contractor, ...) set up in <a href="#settings">Settings</a>, each with its own discount percentage. It's separate from the Cash/Credit <strong>Customer Type</strong> field above — that one governs accounts-receivable behavior, this one is just a tag with an optional automatic discount. It applies at POS checkout the same way a discount card does, but only when the customer has no discount card assigned (a card takes priority).</li>
         <li><strong>Cash back card</strong> assignment (type + card number) also lives on this profile — see <a href="#cash-back-cards">Cash Back Cards</a>.</li>
         <li><strong>Rental compliance</strong> fields also live here and gate whether the customer can start a new rental: a photo ID (type, number, and a scanned copy), an uploaded proof-of-address document (image or PDF), and three references — the main one (Reference 1) also captures an address and its own scanned photo ID upload; References 2 and 3 are name/phone/relationship only.</li>
         <li>A customer's full transaction history is viewable from their profile.</li>
@@ -699,6 +701,7 @@
             <li><strong>WooCommerce</strong> — two-way sync of products and orders with a WooCommerce store. Once configured, the app syncs automatically on an interval you set, and you can trigger a manual sync or review the sync log here too.</li>
           </ul>
         </li>
+        <li><strong>Customer Categories</strong> — a Categories-style manager (name, discount %, active) for classifying customers as Individual, Company, Contractor, or whatever fits — see <a href="#customers">Customers</a> for how the discount applies at checkout.</li>
       </ul>
       <div class="callout warn"><strong>Shipping carriers</strong>The Shipping screen under Warehouse Management lets you record a carrier and tracking number per shipment freeform (UPS, FedEx, USPS, DHL, Local Delivery, Other) — there's no live carrier-rate or tracking-API integration; it's a record-keeping field, not a connected shipping service.</div>
     </section>

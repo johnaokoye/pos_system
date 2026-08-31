@@ -102,11 +102,18 @@ router.get('/', requireAuth, async (req, res) => {
 // Cash-back fields (points_threshold/reward_amount/redemption gates) join in
 // the same way, so POS can compute eligibility client-side without a second
 // round trip — see availableCashBack() in public/index.html.
+// Customer category fields join the same way too — a category's
+// discount_percent auto-applies at checkout exactly like a discount card
+// (see setCartCustomer() in public/index.html), just without a card number,
+// and only when no discount card is present (a card is a more deliberate,
+// specific assignment and wins if both exist on the same customer).
 const CUSTOMER_WITH_CARD_SELECT = `SELECT c.*, dct.name as discount_card_type_name, dct.discount_percent as discount_card_percent, dct.active as discount_card_type_active,
   cbct.name as cash_back_card_type_name, cbct.points_threshold as cash_back_points_threshold, cbct.reward_amount as cash_back_reward_amount,
-  cbct.min_redeem_amount as cash_back_min_redeem_amount, cbct.min_redeem_days as cash_back_min_redeem_days, cbct.active as cash_back_card_type_active
+  cbct.min_redeem_amount as cash_back_min_redeem_amount, cbct.min_redeem_days as cash_back_min_redeem_days, cbct.active as cash_back_card_type_active,
+  cc.name as customer_category_name, cc.discount_percent as customer_category_discount_percent, cc.active as customer_category_active
   FROM customers c LEFT JOIN discount_card_types dct ON c.discount_card_type_id = dct.id
-  LEFT JOIN cash_back_card_types cbct ON c.cash_back_card_type_id = cbct.id WHERE c.id = ?`;
+  LEFT JOIN cash_back_card_types cbct ON c.cash_back_card_type_id = cbct.id
+  LEFT JOIN customer_categories cc ON c.customer_category_id = cc.id WHERE c.id = ?`;
 
 router.get('/:id', requireAuth, async (req, res) => {
   try {
@@ -175,6 +182,7 @@ router.post('/', requirePermission('customers'), async (req, res) => {
     rental_reference3_name, rental_reference3_phone, rental_reference3_relationship,
     discount_card_type_id, discount_card_number,
     cash_back_card_type_id, cash_back_card_number,
+    customer_category_id,
   } = req.body;
   if (!first_name || !last_name) return res.status(400).json({ error: 'First and last name required' });
   try {
@@ -195,15 +203,16 @@ router.post('/', requirePermission('customers'), async (req, res) => {
        rental_reference_name,rental_reference_phone,rental_reference_relationship,rental_reference_address,
        rental_reference2_name,rental_reference2_phone,rental_reference2_relationship,
        rental_reference3_name,rental_reference3_phone,rental_reference3_relationship,
-       discount_card_type_id,discount_card_number,cash_back_card_type_id,cash_back_card_number)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       discount_card_type_id,discount_card_number,cash_back_card_type_id,cash_back_card_number,customer_category_id)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       args: [customer_number, first_name, last_name, email||null, phone||null, address||null, city||null, state||null, zip||null, notes||null, type, terms, limit, creditEnabled, taxExempt, tax_exemption_number||null,
         isRentalCust, isRentalCust ? (rental_id_type||null) : null, isRentalCust ? (rental_id_number||null) : null, isRentalCust ? (rental_address_proof_type||null) : null,
         isRentalCust ? (rental_reference_name||null) : null, isRentalCust ? (rental_reference_phone||null) : null, isRentalCust ? (rental_reference_relationship||null) : null, isRentalCust ? (rental_reference_address||null) : null,
         isRentalCust ? (rental_reference2_name||null) : null, isRentalCust ? (rental_reference2_phone||null) : null, isRentalCust ? (rental_reference2_relationship||null) : null,
         isRentalCust ? (rental_reference3_name||null) : null, isRentalCust ? (rental_reference3_phone||null) : null, isRentalCust ? (rental_reference3_relationship||null) : null,
         discount_card_type_id || null, discount_card_type_id ? (discount_card_number || null) : null,
-        cash_back_card_type_id || null, cash_back_card_type_id ? (cash_back_card_number || null) : null] });
+        cash_back_card_type_id || null, cash_back_card_type_id ? (cash_back_card_number || null) : null,
+        customer_category_id || null] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [Number(result.lastInsertRowid)] });
     res.status(201).json(row);
   } catch (e) {
@@ -220,6 +229,7 @@ router.put('/:id', requirePermission('customers'), async (req, res) => {
     rental_reference3_name, rental_reference3_phone, rental_reference3_relationship,
     discount_card_type_id, discount_card_number,
     cash_back_card_type_id, cash_back_card_number,
+    customer_category_id,
   } = req.body;
   try {
     const cardError = await validateDiscountCard(discount_card_type_id, discount_card_number, req.params.id);
@@ -237,14 +247,15 @@ router.put('/:id', requirePermission('customers'), async (req, res) => {
       rental_reference_name=?,rental_reference_phone=?,rental_reference_relationship=?,rental_reference_address=?,
       rental_reference2_name=?,rental_reference2_phone=?,rental_reference2_relationship=?,
       rental_reference3_name=?,rental_reference3_phone=?,rental_reference3_relationship=?,
-      discount_card_type_id=?,discount_card_number=?,cash_back_card_type_id=?,cash_back_card_number=? WHERE id=?`,
+      discount_card_type_id=?,discount_card_number=?,cash_back_card_type_id=?,cash_back_card_number=?,customer_category_id=? WHERE id=?`,
       args: [first_name, last_name, email||null, phone||null, address||null, city||null, state||null, zip||null, notes||null, active??1, type, terms, limit, creditEnabled, taxExempt, tax_exemption_number||null,
         isRentalCust, isRentalCust ? (rental_id_type||null) : null, isRentalCust ? (rental_id_number||null) : null, isRentalCust ? (rental_address_proof_type||null) : null,
         isRentalCust ? (rental_reference_name||null) : null, isRentalCust ? (rental_reference_phone||null) : null, isRentalCust ? (rental_reference_relationship||null) : null, isRentalCust ? (rental_reference_address||null) : null,
         isRentalCust ? (rental_reference2_name||null) : null, isRentalCust ? (rental_reference2_phone||null) : null, isRentalCust ? (rental_reference2_relationship||null) : null,
         isRentalCust ? (rental_reference3_name||null) : null, isRentalCust ? (rental_reference3_phone||null) : null, isRentalCust ? (rental_reference3_relationship||null) : null,
         discount_card_type_id || null, discount_card_type_id ? (discount_card_number || null) : null,
-        cash_back_card_type_id || null, cash_back_card_type_id ? (cash_back_card_number || null) : null, req.params.id] });
+        cash_back_card_type_id || null, cash_back_card_type_id ? (cash_back_card_number || null) : null,
+        customer_category_id || null, req.params.id] });
     if (type === 'cash') {
       await db.execute({ sql: 'UPDATE customers SET account_blocked = 0 WHERE id = ?', args: [req.params.id] });
     } else {

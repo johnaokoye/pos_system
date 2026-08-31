@@ -84,6 +84,7 @@ app.use('/api/drawers',         require('./routes/drawers'));
 app.use('/api/promotions',      require('./routes/promotions'));
 app.use('/api/discount-cards',  require('./routes/discount-cards'));
 app.use('/api/cash-back-cards', require('./routes/cash-back-cards'));
+app.use('/api/customer-categories', require('./routes/customer-categories'));
 app.use('/api/denominations',   require('./routes/denominations'));
 app.use('/api/woocommerce',    woocommerceRouter);
 app.use('/api/api-keys',       require('./routes/api-keys'));

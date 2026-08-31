@@ -785,6 +785,20 @@ async function _init() {
       active INTEGER DEFAULT 1,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // A Settings-managed classification for customers (Individual, Company,
+    // Contractor, ...) — same shape as discount_card_types (name + a
+    // discount_percent that auto-applies at checkout), but assigned directly
+    // on the customer record rather than requiring a card number. Named
+    // "customer_categories" (not "customer_types") to avoid colliding with
+    // the existing customers.customer_type column (cash/credit, an
+    // unrelated AR concept) — the UI labels this "Customer Category".
+    { sql: `CREATE TABLE IF NOT EXISTS customer_categories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      discount_percent REAL NOT NULL DEFAULT 0,
+      active INTEGER DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS cash_back_card_types (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -1365,6 +1379,8 @@ async function _init() {
     'ALTER TABLE customers ADD COLUMN rental_reference3_phone TEXT',
     'ALTER TABLE customers ADD COLUMN rental_reference3_relationship TEXT',
     'ALTER TABLE customers ADD COLUMN rental_reference_id_path TEXT',
+    // See customer_categories table above.
+    'ALTER TABLE customers ADD COLUMN customer_category_id INTEGER REFERENCES customer_categories(id)',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
