@@ -25,15 +25,26 @@ router.use(requirePermission('crm'));
 // ── Dashboard ──────────────────────────────────────────────
 router.get('/dashboard', async (req, res) => {
   try {
-    const { rows: leadsByStatus } = await db.execute({ sql: `SELECT status, COUNT(*) as count, COALESCE(SUM(estimated_value),0) as value FROM crm_leads GROUP BY status`, args: [] });
-    const { rows: oppsByStage } = await db.execute({ sql: `SELECT stage, COUNT(*) as count, COALESCE(SUM(value),0) as value FROM crm_opportunities WHERE stage NOT IN ('closed_won','closed_lost') GROUP BY stage`, args: [] });
-    const { rows: [pipelineTotal] } = await db.execute({ sql: `SELECT COALESCE(SUM(value),0) as total FROM crm_opportunities WHERE stage NOT IN ('closed_won','closed_lost')`, args: [] });
-    const { rows: [wonThisMonth] } = await db.execute({ sql: `SELECT COUNT(*) as count, COALESCE(SUM(value),0) as value FROM crm_opportunities WHERE stage = 'closed_won' AND strftime('%Y-%m', won_at) = strftime('%Y-%m', 'now')`, args: [] });
-    const { rows: upcomingActivities } = await db.execute({ sql: `SELECT a.*, e.first_name || ' ' || e.last_name as employee_name, l.first_name || ' ' || l.last_name as lead_name, l.company as lead_company, c.first_name || ' ' || c.last_name as customer_name FROM crm_activities a LEFT JOIN employees e ON a.employee_id = e.id LEFT JOIN crm_leads l ON a.lead_id = l.id LEFT JOIN customers c ON a.customer_id = c.id WHERE a.completed = 0 AND a.due_date >= datetime('now') ORDER BY a.due_date ASC LIMIT 10`, args: [] });
-    const { rows: [overdueActivities] } = await db.execute({ sql: `SELECT COUNT(*) as count FROM crm_activities WHERE completed = 0 AND due_date < datetime('now')`, args: [] });
-    const { rows: recentLeads } = await db.execute({ sql: `SELECT l.*, e.first_name || ' ' || e.last_name as assigned_name FROM crm_leads l LEFT JOIN employees e ON l.assigned_to = e.id ORDER BY l.created_at DESC LIMIT 5`, args: [] });
-    const { rows: [totalLeads] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM crm_leads', args: [] });
-    const { rows: [wonLeads] } = await db.execute({ sql: "SELECT COUNT(*) as c FROM crm_leads WHERE status = 'won'", args: [] });
+    // A salesperson-flagged employee only ever sees their own pipeline here —
+    // every aggregate below is scoped to leads assigned to them / opportunities
+    // and activities they own, instead of the store-wide totals a manager sees.
+    const mine = !!req.employee?.is_salesperson;
+    const meId = req.employee?.id;
+    const leadScope = mine ? ' AND assigned_to = ?' : '';
+    const leadArgs = mine ? [meId] : [];
+    const oppScope = mine ? ' AND employee_id = ?' : '';
+    const oppArgs = mine ? [meId] : [];
+    const actScope = mine ? ' AND a.employee_id = ?' : '';
+
+    const { rows: leadsByStatus } = await db.execute({ sql: `SELECT status, COUNT(*) as count, COALESCE(SUM(estimated_value),0) as value FROM crm_leads WHERE 1=1${leadScope} GROUP BY status`, args: leadArgs });
+    const { rows: oppsByStage } = await db.execute({ sql: `SELECT stage, COUNT(*) as count, COALESCE(SUM(value),0) as value FROM crm_opportunities WHERE stage NOT IN ('closed_won','closed_lost')${oppScope} GROUP BY stage`, args: oppArgs });
+    const { rows: [pipelineTotal] } = await db.execute({ sql: `SELECT COALESCE(SUM(value),0) as total FROM crm_opportunities WHERE stage NOT IN ('closed_won','closed_lost')${oppScope}`, args: oppArgs });
+    const { rows: [wonThisMonth] } = await db.execute({ sql: `SELECT COUNT(*) as count, COALESCE(SUM(value),0) as value FROM crm_opportunities WHERE stage = 'closed_won' AND strftime('%Y-%m', won_at) = strftime('%Y-%m', 'now')${oppScope}`, args: oppArgs });
+    const { rows: upcomingActivities } = await db.execute({ sql: `SELECT a.*, e.first_name || ' ' || e.last_name as employee_name, l.first_name || ' ' || l.last_name as lead_name, l.company as lead_company, c.first_name || ' ' || c.last_name as customer_name FROM crm_activities a LEFT JOIN employees e ON a.employee_id = e.id LEFT JOIN crm_leads l ON a.lead_id = l.id LEFT JOIN customers c ON a.customer_id = c.id WHERE a.completed = 0 AND a.due_date >= datetime('now')${actScope} ORDER BY a.due_date ASC LIMIT 10`, args: mine ? [meId] : [] });
+    const { rows: [overdueActivities] } = await db.execute({ sql: `SELECT COUNT(*) as count FROM crm_activities a WHERE a.completed = 0 AND a.due_date < datetime('now')${actScope}`, args: mine ? [meId] : [] });
+    const { rows: recentLeads } = await db.execute({ sql: `SELECT l.*, e.first_name || ' ' || e.last_name as assigned_name FROM crm_leads l LEFT JOIN employees e ON l.assigned_to = e.id WHERE 1=1${leadScope} ORDER BY l.created_at DESC LIMIT 5`, args: leadArgs });
+    const { rows: [totalLeads] } = await db.execute({ sql: `SELECT COUNT(*) as c FROM crm_leads WHERE 1=1${leadScope}`, args: leadArgs });
+    const { rows: [wonLeads] } = await db.execute({ sql: `SELECT COUNT(*) as c FROM crm_leads WHERE status = 'won'${leadScope}`, args: leadArgs });
     const conversionRate = Number(totalLeads.c) > 0 ? Math.round((Number(wonLeads.c) / Number(totalLeads.c)) * 100) : 0;
     res.json({ leadsByStatus, oppsByStage, pipelineTotal, wonThisMonth, upcomingActivities, overdueActivities, recentLeads, conversionRate });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -46,7 +57,10 @@ router.get('/leads', async (req, res) => {
     let sql = `SELECT l.*, e.first_name || ' ' || e.last_name as assigned_name, c.customer_number, c.first_name || ' ' || c.last_name as customer_name, (SELECT COUNT(*) FROM crm_activities WHERE lead_id = l.id AND completed = 0) as open_activities, (SELECT COUNT(*) FROM crm_opportunities WHERE lead_id = l.id) as opportunities FROM crm_leads l LEFT JOIN employees e ON l.assigned_to = e.id LEFT JOIN customers c ON l.customer_id = c.id WHERE 1=1`;
     const params = [];
     if (status) { sql += ' AND l.status = ?'; params.push(status); }
-    if (assigned_to) { sql += ' AND l.assigned_to = ?'; params.push(assigned_to); }
+    // A salesperson's own leads always win over whatever assigned_to the
+    // client asked for — see is_salesperson migration note in database.js.
+    if (req.employee?.is_salesperson) { sql += ' AND l.assigned_to = ?'; params.push(req.employee.id); }
+    else if (assigned_to) { sql += ' AND l.assigned_to = ?'; params.push(assigned_to); }
     if (search) {
       sql += ' AND (l.first_name LIKE ? OR l.last_name LIKE ? OR l.company LIKE ? OR l.email LIKE ? OR l.phone LIKE ?)';
       const s = `%${search}%`;
@@ -63,6 +77,7 @@ router.get('/leads/:id', async (req, res) => {
   try {
     const { rows: [lead] } = await db.execute({ sql: `SELECT l.*, e.first_name || ' ' || e.last_name as assigned_name, c.customer_number, c.first_name || ' ' || c.last_name as customer_name FROM crm_leads l LEFT JOIN employees e ON l.assigned_to = e.id LEFT JOIN customers c ON l.customer_id = c.id WHERE l.id = ?`, args: [req.params.id] });
     if (!lead) return res.status(404).json({ error: 'Not found' });
+    if (req.employee?.is_salesperson && lead.assigned_to !== req.employee.id) return res.status(403).json({ error: 'Not assigned to you' });
     const { rows: activities } = await db.execute({ sql: `SELECT a.*, e.first_name || ' ' || e.last_name as employee_name FROM crm_activities a LEFT JOIN employees e ON a.employee_id = e.id WHERE a.lead_id = ? ORDER BY a.due_date DESC, a.created_at DESC`, args: [lead.id] });
     const { rows: opportunities } = await db.execute({ sql: `SELECT o.*, e.first_name || ' ' || e.last_name as employee_name FROM crm_opportunities o LEFT JOIN employees e ON o.employee_id = e.id WHERE o.lead_id = ? ORDER BY o.created_at DESC`, args: [lead.id] });
     lead.activities = activities;
@@ -147,7 +162,8 @@ router.get('/opportunities', async (req, res) => {
     let sql = `SELECT o.*, e.first_name || ' ' || e.last_name as employee_name, l.first_name || ' ' || l.last_name as lead_name, l.company as lead_company, c.first_name || ' ' || c.last_name as customer_name, q.quote_number FROM crm_opportunities o LEFT JOIN employees e ON o.employee_id = e.id LEFT JOIN crm_leads l ON o.lead_id = l.id LEFT JOIN customers c ON o.customer_id = c.id LEFT JOIN quotations q ON o.quote_id = q.id WHERE 1=1`;
     const params = [];
     if (stage) { sql += ' AND o.stage = ?'; params.push(stage); }
-    if (employee_id) { sql += ' AND o.employee_id = ?'; params.push(employee_id); }
+    if (req.employee?.is_salesperson) { sql += ' AND o.employee_id = ?'; params.push(req.employee.id); }
+    else if (employee_id) { sql += ' AND o.employee_id = ?'; params.push(employee_id); }
     if (lead_id) { sql += ' AND o.lead_id = ?'; params.push(lead_id); }
     sql += ' ORDER BY o.created_at DESC';
     const { rows } = await db.execute({ sql, args: params });
@@ -159,6 +175,7 @@ router.get('/opportunities/:id', async (req, res) => {
   try {
     const { rows: [opp] } = await db.execute({ sql: `SELECT o.*, e.first_name || ' ' || e.last_name as employee_name, l.first_name || ' ' || l.last_name as lead_name, l.company as lead_company, c.first_name || ' ' || c.last_name as customer_name, q.quote_number FROM crm_opportunities o LEFT JOIN employees e ON o.employee_id = e.id LEFT JOIN crm_leads l ON o.lead_id = l.id LEFT JOIN customers c ON o.customer_id = c.id LEFT JOIN quotations q ON o.quote_id = q.id WHERE o.id = ?`, args: [req.params.id] });
     if (!opp) return res.status(404).json({ error: 'Not found' });
+    if (req.employee?.is_salesperson && opp.employee_id !== req.employee.id) return res.status(403).json({ error: 'Not your opportunity' });
     const { rows: activities } = await db.execute({ sql: `SELECT a.*, e.first_name || ' ' || e.last_name as employee_name FROM crm_activities a LEFT JOIN employees e ON a.employee_id = e.id WHERE a.opportunity_id = ? ORDER BY a.due_date DESC`, args: [opp.id] });
     opp.activities = activities;
     res.json(opp);
@@ -227,7 +244,8 @@ router.get('/activities', async (req, res) => {
     let sql = `SELECT a.*, e.first_name || ' ' || e.last_name as employee_name, l.first_name || ' ' || l.last_name as lead_name, l.company as lead_company, o.title as opp_title, c.first_name || ' ' || c.last_name as customer_name FROM crm_activities a LEFT JOIN employees e ON a.employee_id = e.id LEFT JOIN crm_leads l ON a.lead_id = l.id LEFT JOIN crm_opportunities o ON a.opportunity_id = o.id LEFT JOIN customers c ON a.customer_id = c.id WHERE 1=1`;
     const params = [];
     if (completed !== undefined) { sql += ' AND a.completed = ?'; params.push(completed === 'true' ? 1 : 0); }
-    if (employee_id) { sql += ' AND a.employee_id = ?'; params.push(employee_id); }
+    if (req.employee?.is_salesperson) { sql += ' AND a.employee_id = ?'; params.push(req.employee.id); }
+    else if (employee_id) { sql += ' AND a.employee_id = ?'; params.push(employee_id); }
     if (lead_id) { sql += ' AND a.lead_id = ?'; params.push(lead_id); }
     if (opportunity_id) { sql += ' AND a.opportunity_id = ?'; params.push(opportunity_id); }
     if (overdue === 'true') { sql += " AND a.completed = 0 AND a.due_date < datetime('now')"; }

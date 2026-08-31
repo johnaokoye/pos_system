@@ -162,7 +162,10 @@ router.get('/records', async (req, res) => {
     const { employee_id, period, status } = req.query;
     let sql = `SELECT cr.*, e.first_name || ' ' || e.last_name as employee_name, e.employee_number, cp.name as plan_name, cp.type as plan_type FROM commission_records cr JOIN employees e ON cr.employee_id = e.id LEFT JOIN commission_plans cp ON cr.plan_id = cp.id WHERE 1=1`;
     const params = [];
-    if (employee_id) { sql += ' AND cr.employee_id = ?'; params.push(employee_id); }
+    // A salesperson only ever sees their own commission records, regardless
+    // of what employee_id filter the client asked for.
+    if (req.employee?.is_salesperson) { sql += ' AND cr.employee_id = ?'; params.push(req.employee.id); }
+    else if (employee_id) { sql += ' AND cr.employee_id = ?'; params.push(employee_id); }
     if (period) { sql += ' AND cr.period = ?'; params.push(period); }
     if (status) { sql += ' AND cr.status = ?'; params.push(status); }
     sql += ' ORDER BY cr.created_at DESC LIMIT 500';
@@ -240,11 +243,17 @@ router.get('/summary', async (req, res) => {
   try {
     const { period } = req.query;
     const p = period || new Date().toISOString().slice(0, 7);
+    // A salesperson only ever sees their own commission totals/status
+    // breakdown here, never the whole store's.
+    const mine = !!req.employee?.is_salesperson;
+    const empScope = mine ? ' AND cr.employee_id = ?' : '';
+    const empScopeUnaliased = mine ? ' AND employee_id = ?' : '';
+    const empArgs = mine ? [req.employee.id] : [];
 
-    const { rows: byEmployee } = await db.execute({ sql: `SELECT cr.employee_id, e.first_name || ' ' || e.last_name as employee_name, e.employee_number, COUNT(*) as record_count, COALESCE(SUM(cr.sale_amount),0) as total_sales, COALESCE(SUM(cr.commission_amount),0) as total_commission, COALESCE(SUM(CASE WHEN cr.status='pending' THEN cr.commission_amount ELSE 0 END),0) as pending, COALESCE(SUM(CASE WHEN cr.status='approved' THEN cr.commission_amount ELSE 0 END),0) as approved, COALESCE(SUM(CASE WHEN cr.status='paid' THEN cr.commission_amount ELSE 0 END),0) as paid FROM commission_records cr JOIN employees e ON cr.employee_id = e.id WHERE cr.period = ? GROUP BY cr.employee_id ORDER BY total_commission DESC`, args: [p] });
-    const { rows: [totals] } = await db.execute({ sql: `SELECT COALESCE(SUM(commission_amount),0) as total, COALESCE(SUM(CASE WHEN status='pending' THEN commission_amount ELSE 0 END),0) as pending, COALESCE(SUM(CASE WHEN status='approved' THEN commission_amount ELSE 0 END),0) as approved, COALESCE(SUM(CASE WHEN status='paid' THEN commission_amount ELSE 0 END),0) as paid, COUNT(*) as count FROM commission_records WHERE period = ?`, args: [p] });
-    const { rows: bySource } = await db.execute({ sql: `SELECT source_type, COUNT(*) as count, COALESCE(SUM(commission_amount),0) as total FROM commission_records WHERE period = ? GROUP BY source_type`, args: [p] });
-    const { rows: periodsRows } = await db.execute({ sql: `SELECT DISTINCT period FROM commission_records ORDER BY period DESC LIMIT 24`, args: [] });
+    const { rows: byEmployee } = await db.execute({ sql: `SELECT cr.employee_id, e.first_name || ' ' || e.last_name as employee_name, e.employee_number, COUNT(*) as record_count, COALESCE(SUM(cr.sale_amount),0) as total_sales, COALESCE(SUM(cr.commission_amount),0) as total_commission, COALESCE(SUM(CASE WHEN cr.status='pending' THEN cr.commission_amount ELSE 0 END),0) as pending, COALESCE(SUM(CASE WHEN cr.status='approved' THEN cr.commission_amount ELSE 0 END),0) as approved, COALESCE(SUM(CASE WHEN cr.status='paid' THEN cr.commission_amount ELSE 0 END),0) as paid FROM commission_records cr JOIN employees e ON cr.employee_id = e.id WHERE cr.period = ?${empScope} GROUP BY cr.employee_id ORDER BY total_commission DESC`, args: [p, ...empArgs] });
+    const { rows: [totals] } = await db.execute({ sql: `SELECT COALESCE(SUM(commission_amount),0) as total, COALESCE(SUM(CASE WHEN status='pending' THEN commission_amount ELSE 0 END),0) as pending, COALESCE(SUM(CASE WHEN status='approved' THEN commission_amount ELSE 0 END),0) as approved, COALESCE(SUM(CASE WHEN status='paid' THEN commission_amount ELSE 0 END),0) as paid, COUNT(*) as count FROM commission_records WHERE period = ?${empScopeUnaliased}`, args: [p, ...empArgs] });
+    const { rows: bySource } = await db.execute({ sql: `SELECT source_type, COUNT(*) as count, COALESCE(SUM(commission_amount),0) as total FROM commission_records WHERE period = ?${empScopeUnaliased} GROUP BY source_type`, args: [p, ...empArgs] });
+    const { rows: periodsRows } = await db.execute({ sql: `SELECT DISTINCT period FROM commission_records${mine ? ' WHERE employee_id = ?' : ''} ORDER BY period DESC LIMIT 24`, args: empArgs });
 
     res.json({ period: p, byEmployee, totals, bySource, periods: periodsRows.map(r => r.period) });
   } catch(e) { res.status(500).json({ error: e.message }); }

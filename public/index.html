@@ -1999,7 +1999,7 @@ const App = {
     const branches = this.currentUser.branches || [];
     document.getElementById('content').innerHTML = `
       <div class="section-header">
-        <h2>Dashboard</h2>
+        <h2>Dashboard ${this.currentUser.is_salesperson ? '<span style="font-size:12px;font-weight:normal;color:var(--text-muted);border:1px solid var(--border);border-radius:4px;padding:2px 8px;margin-left:8px;vertical-align:middle">My Sales Only</span>' : ''}</h2>
         <div>
           <select id="dash-branch" onchange="App.loadDashboard(this.value)" style="width:180px">
             <option value="">All Branches</option>
@@ -9827,7 +9827,7 @@ const App = {
 
     document.getElementById('content').innerHTML = `
       <div class="section-header">
-        <h2>Transactions</h2>
+        <h2>Transactions ${this.currentUser.is_salesperson ? '<span style="font-size:12px;font-weight:normal;color:var(--text-muted);border:1px solid var(--border);border-radius:4px;padding:2px 8px;margin-left:8px;vertical-align:middle">My Sales Only</span>' : ''}</h2>
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
           <label style="font-size:13px;text-transform:none;color:var(--text)">From</label>
           <input type="date" id="tx-start" value="${weekAgo}" style="width:150px">
@@ -10793,6 +10793,12 @@ const App = {
                 Security (verifies rental issue/return)
               </label>
             </div>
+            <div class="form-group">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:normal">
+                <input type="checkbox" id="ef-salesperson" ${emp.is_salesperson?'checked':''} style="width:16px;height:16px;cursor:pointer">
+                Salesperson (Dashboard/CRM/Commissions scoped to their own records only)
+              </label>
+            </div>
           </div>
           ${skills.length ? `<div style="border-top:1px solid var(--border);margin:8px 0 0;padding-top:12px">
             <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Technician Skills</div>
@@ -10828,6 +10834,7 @@ const App = {
       is_driver: document.getElementById('ef-driver').checked ? 1 : 0,
       is_operator: document.getElementById('ef-operator').checked ? 1 : 0,
       is_security: document.getElementById('ef-security').checked ? 1 : 0,
+      is_salesperson: document.getElementById('ef-salesperson').checked ? 1 : 0,
       skill_ids: Array.from(document.querySelectorAll('.ef-skill:checked')).map(el => parseInt(el.value)),
     };
     if (!data.pin) delete data.pin;
@@ -15122,7 +15129,7 @@ const App = {
   async renderCommissions() {
     document.getElementById('content').innerHTML = `
       <div class="section-header">
-        <h2>Commission Tracking</h2>
+        <h2>Commission Tracking ${this.currentUser.is_salesperson ? '<span style="font-size:12px;font-weight:normal;color:var(--text-muted);border:1px solid var(--border);border-radius:4px;padding:2px 8px;margin-left:8px;vertical-align:middle">My Commissions Only</span>' : ''}</h2>
         <div style="display:flex;gap:8px">
           <button class="btn btn-outline btn-sm" onclick="App.showPlanModal()">+ New Plan</button>
           <button class="btn btn-primary btn-sm" onclick="App.showManualCommModal()">+ Manual Entry</button>
@@ -15676,7 +15683,7 @@ const App = {
   async renderCRM() {
     document.getElementById('content').innerHTML = `
       <div class="section-header">
-        <h2>CRM &amp; Sales</h2>
+        <h2>CRM &amp; Sales ${this.currentUser.is_salesperson ? '<span style="font-size:12px;font-weight:normal;color:var(--text-muted);border:1px solid var(--border);border-radius:4px;padding:2px 8px;margin-left:8px;vertical-align:middle">My Leads &amp; Deals Only</span>' : ''}</h2>
         <div style="display:flex;gap:8px">
           <button class="btn btn-primary btn-sm" onclick="App.showLeadModal()">+ New Lead</button>
           <button class="btn btn-outline btn-sm" onclick="App.showActivityModal()">+ Activity</button>

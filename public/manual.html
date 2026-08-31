@@ -202,6 +202,7 @@
         <li>A per-branch breakdown, if you have multi-branch access</li>
       </ul>
       <div class="callout note"><strong>Low stock</strong>The low-stock count checks each product's stock at the branch level first, falling back to its overall stock figure only for products that have never been tracked per-branch. Rental items and services are never counted as "low stock" since they don't carry ordinary sale inventory.</div>
+      <div class="callout note"><strong>Salesperson view</strong>An employee flagged <strong>Salesperson</strong> (see <a href="#employees">Employees</a>) sees a "My Sales Only" Dashboard scoped to their own transactions — today's/month's totals, recent transactions, and the 7-day trend all cover just their own sales, and the per-branch breakdown is left off entirely. The same personal scoping applies to <a href="#transactions">Transactions</a>, <a href="#crm">CRM</a>, and <a href="#commissions">Commissions</a>.</div>
     </section>
 
     <section class="module" id="pos">
@@ -287,6 +288,7 @@
         <li><strong>Returns</strong> (needs <span class="perm-pill">transactions_returns</span>) — process a full or partial return against a completed sale; stock and any applicable fees are adjusted automatically.</li>
         <li><strong>Exporting</strong> transaction history needs <span class="perm-pill">transactions_export</span>.</li>
         <li><strong>Online Orders</strong> — sales that came in through the WooCommerce integration (or any API-key-authenticated channel) appear here tagged as online, with their own fulfillment status you can advance toward shipping.</li>
+        <li>An employee flagged <strong>Salesperson</strong> only ever sees transactions they personally rang up — a "My Sales Only" badge marks the list, and this is enforced server-side, not just hidden in the UI.</li>
       </ul>
       <div class="callout tip"><strong>Held orders</strong>A hold created by converting an accepted quotation is linked back to that quote — finishing the sale marks the quote "converted"; deleting the hold instead reverts the quote back to "accepted" so it isn't left stranded.</div>
     </section>
@@ -603,6 +605,7 @@
         <li><strong>Activities</strong> — calls, meetings, follow-up tasks logged against a lead or opportunity, each markable complete (or reopened). An activity can also attach straight to a customer with no lead or opportunity needed.</li>
         <li><strong>Rentals feed into a customer's Activities automatically</strong> — checkout, return, and cancellation each log a completed entry, so a rep can see a customer's rental history right in CRM. An <strong>overdue</strong> rental logs as an open (not completed) activity with the original due date, so it shows up in the Activities tab's Overdue bucket as something to follow up on — checked roughly every 30 minutes, not instantly.</li>
         <li>A CRM-specific dashboard summarizes pipeline health separately from the main Dashboard.</li>
+        <li>An employee flagged <strong>Salesperson</strong> (see <a href="#employees">Employees</a>) only sees leads assigned to them, opportunities/activities they own, and their own slice of the CRM dashboard — trying to open another rep's lead or opportunity directly is blocked.</li>
       </ul>
     </section>
 
@@ -616,6 +619,7 @@
         <li><strong>Rentals are commissioned on a delay, not at booking</strong> — the risk being commissioned against is different depending on how the rental was paid. A cash/card-paid rental earns commission once the item is fully returned; a credit-account rental earns commission once the customer actually pays off that rental's invoice (whether that happens before or after the item comes back). This is deliberate: it rewards staff for following up and closing the loop, not just for booking the rental.</li>
         <li>Records move through <strong>approval</strong> (<span class="perm-pill">commissions_approve</span>, individually or in bulk) before being marked <strong>paid</strong> (<span class="perm-pill">commissions_pay</span>, also available in bulk).</li>
         <li>A summary view totals commissions owed/paid across employees and time periods.</li>
+        <li>An employee flagged <strong>Salesperson</strong> (see <a href="#employees">Employees</a>) only sees their own commission records and their own row of the summary — never other employees' figures.</li>
       </ul>
     </section>
 
@@ -641,6 +645,7 @@
         <li>An employee can be assigned to more than one branch (see <a href="#branches">Branches</a>) if they need to work across locations.</li>
         <li>Editing salary/pay-rate information needs <span class="perm-pill">employees_salaries</span>, separate from ordinary profile edits (<span class="perm-pill">employees_edit</span>).</li>
         <li><span class="perm-pill">employees_add</span> / <span class="perm-pill">employees_delete</span> gate creating and removing accounts.</li>
+        <li>Checkboxes on the employee form flag special roles independent of the security group: <strong>Designated driver</strong> and <strong>Security</strong> feed the rental issue/return workflow (see <a href="#rentals">Rentals</a>), and <strong>Salesperson</strong> narrows that employee's own Dashboard, Transactions, CRM, and Commissions views down to just their own records — everything else about their account (permissions, branches) works exactly as before.</li>
       </ul>
     </section>
 

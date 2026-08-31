@@ -112,6 +112,10 @@ router.get('/', requirePermission('transactions'), async (req, res) => {
     if (fulfillment_status) { sql += ' AND t.fulfillment_status = ?'; params.push(fulfillment_status); }
     if (source === 'online') { sql += " AND t.source IN ('online','woocommerce')"; }
     else if (source) { sql += ' AND t.source = ?'; params.push(source); }
+    // A salesperson-flagged employee only ever sees their own sales here,
+    // regardless of what filters the client sent — see is_salesperson
+    // migration note in database.js.
+    if (req.employee?.is_salesperson) { sql += ' AND t.employee_id = ?'; params.push(req.employee.id); }
     sql += ' ORDER BY t.created_at DESC LIMIT ?';
     params.push(parseInt(limit));
     const { rows } = await db.execute({ sql, args: params });

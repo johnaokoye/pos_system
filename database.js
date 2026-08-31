@@ -1328,6 +1328,14 @@ async function _init() {
     // POST /transactions and the pos_discount_override permission).
     'ALTER TABLE transaction_items ADD COLUMN discount_percent REAL DEFAULT 0',
     'ALTER TABLE transaction_items ADD COLUMN discount_override_by INTEGER REFERENCES employees(id)',
+    // Mirrors is_driver/is_operator/is_security above: a flag rather than a
+    // security group, so it composes with whatever group (Cashier, Manager,
+    // ...) the employee already has. Routes that list transactions, CRM
+    // leads/opportunities/activities, and commission records force an
+    // employee_id/assigned_to scope to this employee when the flag is set,
+    // regardless of query params — see routes/transactions.js, routes/crm.js,
+    // routes/commissions.js, routes/reports.js.
+    'ALTER TABLE employees ADD COLUMN is_salesperson INTEGER DEFAULT 0',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

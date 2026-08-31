@@ -127,9 +127,14 @@ router.get('/dashboard', requireAuth, async (req, res) => {
     const bf = branch_id ? ' AND t.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
     const warehouseExclude = `AND t.branch_id NOT IN (SELECT id FROM branches WHERE is_warehouse = 1)`;
+    // A salesperson's dashboard shows only their own sales, not the store's —
+    // see is_salesperson migration note in database.js.
+    const mine = !!req.employee?.is_salesperson;
+    const ef = mine ? ' AND t.employee_id = ?' : '';
+    const ep = mine ? [req.employee.id] : [];
 
-    const { rows: [todayStats] } = await db.execute({ sql: `SELECT COUNT(*) as transactions, COALESCE(SUM(total),0) as sales FROM transactions t WHERE t.status='completed' AND date(t.created_at) = date(?) ${warehouseExclude}${bf}`, args: [today, ...bp] });
-    const { rows: [monthStats] } = await db.execute({ sql: `SELECT COUNT(*) as transactions, COALESCE(SUM(total),0) as sales FROM transactions t WHERE t.status='completed' AND date(t.created_at) >= date(?) ${warehouseExclude}${bf}`, args: [monthStart, ...bp] });
+    const { rows: [todayStats] } = await db.execute({ sql: `SELECT COUNT(*) as transactions, COALESCE(SUM(total),0) as sales FROM transactions t WHERE t.status='completed' AND date(t.created_at) = date(?) ${warehouseExclude}${bf}${ef}`, args: [today, ...bp, ...ep] });
+    const { rows: [monthStats] } = await db.execute({ sql: `SELECT COUNT(*) as transactions, COALESCE(SUM(total),0) as sales FROM transactions t WHERE t.status='completed' AND date(t.created_at) >= date(?) ${warehouseExclude}${bf}${ef}`, args: [monthStart, ...bp, ...ep] });
     const { rows: [totalCustomers] } = await db.execute({ sql: 'SELECT COUNT(*) as count FROM customers WHERE active=1', args: [] });
     // Mirrors the /inventory report's low-stock logic (branch_inventory rows,
     // falling back to products.stock_qty only for products with no branch
@@ -143,10 +148,12 @@ router.get('/dashboard', requireAuth, async (req, res) => {
         WHERE p.active=1 AND p.is_rental=0 AND p.is_service=0 AND p.stock_qty <= p.min_stock
           AND NOT EXISTS (SELECT 1 FROM branch_inventory bi2 JOIN branches b2 ON bi2.branch_id = b2.id WHERE bi2.product_id = p.id AND b2.active = 1)
       )`, args: [] });
-    const { rows: recentTx } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id WHERE t.branch_id NOT IN (SELECT id FROM branches WHERE is_warehouse = 1)${bf} ORDER BY t.created_at DESC LIMIT 5`, args: [...bp] });
-    const { rows: last7Days } = await db.execute({ sql: `SELECT date(t.created_at) as date, COALESCE(SUM(t.total),0) as sales, COUNT(*) as transactions FROM transactions t WHERE t.status='completed' AND date(t.created_at) >= date('now', '-6 days') ${warehouseExclude}${bf} GROUP BY date(t.created_at) ORDER BY date`, args: [...bp] });
+    const { rows: recentTx } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id WHERE t.branch_id NOT IN (SELECT id FROM branches WHERE is_warehouse = 1)${bf}${ef} ORDER BY t.created_at DESC LIMIT 5`, args: [...bp, ...ep] });
+    const { rows: last7Days } = await db.execute({ sql: `SELECT date(t.created_at) as date, COALESCE(SUM(t.total),0) as sales, COUNT(*) as transactions FROM transactions t WHERE t.status='completed' AND date(t.created_at) >= date('now', '-6 days') ${warehouseExclude}${bf}${ef} GROUP BY date(t.created_at) ORDER BY date`, args: [...bp, ...ep] });
 
-    const { rows: byLocation } = await db.execute({ sql: `SELECT b.id, b.name, b.city, b.state,
+    // Cross-branch/company performance has no place on a salesperson's
+    // personal view — only computed for everyone else.
+    const byLocation = mine ? [] : (await db.execute({ sql: `SELECT b.id, b.name, b.city, b.state,
         COALESCE(SUM(CASE WHEN date(t.created_at) = date(?) THEN t.total ELSE 0 END), 0) as today_sales,
         COUNT(CASE WHEN date(t.created_at) = date(?) THEN 1 END) as today_transactions,
         COALESCE(SUM(CASE WHEN date(t.created_at) >= date(?) THEN t.total ELSE 0 END), 0) as month_sales,
@@ -155,7 +162,7 @@ router.get('/dashboard', requireAuth, async (req, res) => {
       LEFT JOIN transactions t ON t.branch_id = b.id AND t.status = 'completed'
       WHERE b.active = 1 AND b.is_warehouse = 0
       GROUP BY b.id
-      ORDER BY b.name`, args: [today, today, monthStart, monthStart] });
+      ORDER BY b.name`, args: [today, today, monthStart, monthStart] })).rows;
 
     res.json({ todayStats, monthStats, totalCustomers, lowStock, recentTx, last7Days, byLocation });
   } catch(e) { res.status(500).json({ error: e.message }); }
