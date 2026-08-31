@@ -4836,7 +4836,7 @@ const App = {
 
   async loadRentalTab() {
     const hdr = document.getElementById('rental-header-actions');
-    if (hdr) hdr.innerHTML = `${this.can('rentals_issue') ? `<button class="btn btn-secondary btn-sm" style="margin-right:8px" onclick="App.showSection('rental-dispatch')">Rental Dispatch</button>` : ''}${this.can('rentals_checkout') ? `<button class="btn btn-primary btn-sm" onclick="App.showRentalCheckoutModal()">+ New Rental</button>` : ''}`;
+    if (hdr) hdr.innerHTML = `${this.can('quotations') ? `<button class="btn btn-secondary btn-sm" style="margin-right:8px" onclick="App.showQuoteForm(null,'rental')">Rental Quote</button>` : ''}${this.can('rentals_issue') ? `<button class="btn btn-secondary btn-sm" style="margin-right:8px" onclick="App.showSection('rental-dispatch')">Rental Dispatch</button>` : ''}${this.can('rentals_checkout') ? `<button class="btn btn-primary btn-sm" onclick="App.showRentalCheckoutModal()">+ New Rental</button>` : ''}`;
     await this.loadRentalAgreements();
   },
 
@@ -13629,7 +13629,7 @@ const App = {
     if (tbody) tbody.innerHTML = this.buildQuoteRows(filtered);
   },
 
-  async showQuoteForm(editId) {
+  async showQuoteForm(editId, initialType) {
     const [customers, employees, products] = await Promise.all([
       this.api('GET', '/customers?limit=200'),
       this.api('GET', '/employees'),
@@ -13749,6 +13749,10 @@ const App = {
       } else {
         this.addQuoteItem();
       }
+    } else if (initialType === 'rental') {
+      this._applyQuoteTypeVisibility('rental');
+      await this._refreshRentalQuoteBranch();
+      this.addRentalQuoteLine();
     } else {
       this._applyQuoteTypeVisibility('retail');
       this.addQuoteItem();
