@@ -15854,6 +15854,11 @@ const App = {
           <option value="">All Salespeople</option>
           ${employees.map(e => `<option value="${e.id}">${e.first_name} ${e.last_name}</option>`).join('')}
         </select>
+        <select id="crm-lead-sort" onchange="App.filterCrmLeads()" style="width:160px">
+          <option value="newest">Newest First</option>
+          <option value="name_asc">Name (A-Z)</option>
+          <option value="name_desc">Name (Z-A)</option>
+        </select>
       </div>
       <div class="card">
         <div class="table-wrap">
@@ -15873,7 +15878,7 @@ const App = {
 
   buildLeadRows(leads) {
     if (!leads.length) return `<tr><td colspan="9"><div class="empty-state">No leads found</div></td></tr>`;
-    const sourceLabel = s => ({ website:'Website', referral:'Referral', cold_call:'Cold Call', trade_show:'Trade Show', social_media:'Social Media', email_campaign:'Email', walk_in:'Walk-in', other:'Other' }[s] || s);
+    const sourceLabel = s => ({ website:'Website', referral:'Referral', cold_call:'Cold Call', trade_show:'Trade Show', social_media:'Social Media', email_campaign:'Email', walk_in:'Walk-in', bid:'Bid', other:'Other' }[s] || s);
     return leads.map(l => `
       <tr>
         <td style="font-family:monospace;font-size:12px">${l.lead_number}</td>
@@ -15895,12 +15900,17 @@ const App = {
     const search = (document.getElementById('crm-lead-search')?.value||'').toLowerCase();
     const status = document.getElementById('crm-lead-status')?.value||'';
     const assignedTo = document.getElementById('crm-lead-assigned')?.value||'';
+    const sort = document.getElementById('crm-lead-sort')?.value||'newest';
     const filtered = (this._crmAllLeads||[]).filter(l => {
       if (status && l.status !== status) return false;
       if (assignedTo && String(l.assigned_to) !== assignedTo) return false;
       if (search && !`${l.first_name} ${l.last_name} ${l.company||''} ${l.email||''}`.toLowerCase().includes(search)) return false;
       return true;
     });
+    if (sort === 'name_asc' || sort === 'name_desc') {
+      filtered.sort((a, b) => `${a.first_name} ${a.last_name}`.localeCompare(`${b.first_name} ${b.last_name}`));
+      if (sort === 'name_desc') filtered.reverse();
+    }
     const tbody = document.getElementById('crm-leads-tbody');
     if (tbody) tbody.innerHTML = this.buildLeadRows(filtered);
   },
@@ -16010,7 +16020,7 @@ const App = {
       id ? this.api('GET', `/crm/leads/${id}`) : Promise.resolve(null),
     ]);
     const l = lead || {};
-    const sources = ['website','referral','cold_call','trade_show','social_media','email_campaign','walk_in','other'];
+    const sources = ['website','referral','cold_call','trade_show','social_media','email_campaign','walk_in','bid','other'];
     const statuses = ['new','contacted','qualified','proposal','negotiation','won','lost'];
     this.showModal(`
       <div class="modal" style="max-width:600px">
@@ -16030,7 +16040,7 @@ const App = {
           </div>
           <div class="input-row">
             <div class="form-group"><label>Source</label>
-              <select id="l-src">${sources.map(s => `<option value="${s}" ${l.source===s?'selected':''}>${{website:'Website',referral:'Referral',cold_call:'Cold Call',trade_show:'Trade Show',social_media:'Social Media',email_campaign:'Email Campaign',walk_in:'Walk-in',other:'Other'}[s]}</option>`).join('')}</select>
+              <select id="l-src">${sources.map(s => `<option value="${s}" ${l.source===s?'selected':''}>${{website:'Website',referral:'Referral',cold_call:'Cold Call',trade_show:'Trade Show',social_media:'Social Media',email_campaign:'Email Campaign',walk_in:'Walk-in',bid:'Bid',other:'Other'}[s]}</option>`).join('')}</select>
             </div>
             <div class="form-group"><label>Status</label>
               <select id="l-st">${statuses.map(s => `<option value="${s}" ${(l.status||'new')===s?'selected':''}>${this.crmStatusLabel(s)}</option>`).join('')}</select>
@@ -16102,7 +16112,7 @@ const App = {
   async viewLead(id) {
     const lead = await this.api('GET', `/crm/leads/${id}`);
     const statusColors = { new:'info', contacted:'info', qualified:'teal', proposal:'warning', negotiation:'warning', won:'success', lost:'danger' };
-    const sourceLabel = s => ({ website:'Website',referral:'Referral',cold_call:'Cold Call',trade_show:'Trade Show',social_media:'Social Media',email_campaign:'Email Campaign',walk_in:'Walk-in',other:'Other' }[s]||s);
+    const sourceLabel = s => ({ website:'Website',referral:'Referral',cold_call:'Cold Call',trade_show:'Trade Show',social_media:'Social Media',email_campaign:'Email Campaign',walk_in:'Walk-in',bid:'Bid',other:'Other' }[s]||s);
     this.showModal(`
       <div class="modal" style="max-width:640px">
         <div class="modal-header">
