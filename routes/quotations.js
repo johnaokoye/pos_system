@@ -1,17 +1,26 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
-const { requirePermission } = require('../lib/permissions');
+const { requirePermission, requireAnyPermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { createTransfer } = require('../lib/transfers');
 const { feeFor, buildRentalLines, revalidateQuoteLines, insertPendingAgreement, assertRentalCustomerEligible } = require('../lib/rentals');
 
-router.use(requirePermission('quotations'));
+// Special Projects (quote_type='special_project') are gated by their own
+// `special_projects`/`special_projects_approve` permissions, deliberately
+// independent of `quotations` — "only a few people" per the business
+// requirement, not implied by ordinary Quotations access. Either permission
+// gets a request into this router; individual routes below enforce the
+// specific one they need (creating/editing needs special_projects,
+// approving needs special_projects_approve, viewing needs either).
+router.use(requireAnyPermission('quotations', 'special_projects'));
+
+const canSeeSpecialProjects = req => can(req.employee && req.employee.permissions, 'special_projects') || can(req.employee && req.employee.permissions, 'special_projects_approve');
 
 router.get('/', async (req, res) => {
   try {
     const { status, customer_id, quote_number, quote_type, start, end, limit = 100 } = req.query;
-    let sql = `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, e.first_name || ' ' || e.last_name as employee_name, oe.first_name || ' ' || oe.last_name as original_employee_name, b.name as branch_name, t.transaction_number as converted_tx_number, ra.agreement_number as converted_agreement_number, ra.status as converted_agreement_status FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN employees oe ON q.original_employee_id = oe.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id LEFT JOIN rental_agreements ra ON q.converted_to_agreement_id = ra.id WHERE 1=1`;
+    let sql = `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, e.first_name || ' ' || e.last_name as employee_name, oe.first_name || ' ' || oe.last_name as original_employee_name, ae.first_name || ' ' || ae.last_name as approved_by_name, re.first_name || ' ' || re.last_name as rejected_by_name, b.name as branch_name, t.transaction_number as converted_tx_number, ra.agreement_number as converted_agreement_number, ra.status as converted_agreement_status FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN employees oe ON q.original_employee_id = oe.id LEFT JOIN employees ae ON q.approved_by = ae.id LEFT JOIN employees re ON q.rejected_by = re.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id LEFT JOIN rental_agreements ra ON q.converted_to_agreement_id = ra.id WHERE 1=1`;
     const params = [];
     if (status) { sql += ' AND q.status = ?'; params.push(status); }
     if (quote_type) { sql += ' AND q.quote_type = ?'; params.push(quote_type); }
@@ -19,6 +28,13 @@ router.get('/', async (req, res) => {
     if (quote_number) { sql += ' AND q.quote_number LIKE ?'; params.push(`%${quote_number}%`); }
     if (start) { sql += ' AND date(q.created_at) >= ?'; params.push(start); }
     if (end) { sql += ' AND date(q.created_at) <= ?'; params.push(end); }
+    // Special Projects stay invisible to anyone without special_projects/
+    // special_projects_approve, even in the unfiltered list — "only a few
+    // people" means they don't show up at all, not just that they can't be
+    // opened. req.apiKey callers (e-commerce integrations) never have an
+    // employee/permissions object, so canSeeSpecialProjects is always false
+    // for them too — correct, they shouldn't see internal special projects.
+    if (!canSeeSpecialProjects(req)) { sql += " AND q.quote_type != 'special_project'"; }
     sql += ' ORDER BY q.created_at DESC LIMIT ?';
     params.push(parseInt(limit));
     const { rows } = await db.execute({ sql, args: params });
@@ -57,8 +73,9 @@ async function attachQuoteItemSources(items) {
 
 router.get('/:id', async (req, res) => {
   try {
-    const { rows: [quote] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, c.phone as customer_phone, e.first_name || ' ' || e.last_name as employee_name, oe.first_name || ' ' || oe.last_name as original_employee_name, b.name as branch_name, t.transaction_number as converted_tx_number, ra.agreement_number as converted_agreement_number, ra.status as converted_agreement_status FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN employees oe ON q.original_employee_id = oe.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id LEFT JOIN rental_agreements ra ON q.converted_to_agreement_id = ra.id WHERE q.id = ?`, args: [req.params.id] });
+    const { rows: [quote] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, c.phone as customer_phone, e.first_name || ' ' || e.last_name as employee_name, oe.first_name || ' ' || oe.last_name as original_employee_name, ae.first_name || ' ' || ae.last_name as approved_by_name, re.first_name || ' ' || re.last_name as rejected_by_name, b.name as branch_name, t.transaction_number as converted_tx_number, ra.agreement_number as converted_agreement_number, ra.status as converted_agreement_status FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN employees oe ON q.original_employee_id = oe.id LEFT JOIN employees ae ON q.approved_by = ae.id LEFT JOIN employees re ON q.rejected_by = re.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id LEFT JOIN rental_agreements ra ON q.converted_to_agreement_id = ra.id WHERE q.id = ?`, args: [req.params.id] });
     if (!quote) return res.status(404).json({ error: 'Not found' });
+    if (quote.quote_type === 'special_project' && !canSeeSpecialProjects(req)) return res.status(403).json({ error: 'Missing permission: special_projects' });
     const { rows: items } = await db.execute({ sql: QUOTE_ITEMS_SELECT, args: [req.params.id] });
     quote.items = await attachQuoteItemSources(items);
     res.json(quote);
@@ -99,6 +116,11 @@ async function processQuoteItems(items) {
     const lineDisc = parseFloat(item.discount || 0);
     subtotal += lineTotal;
     tax_amount += lineTax;
+    // Informational cost snapshot (margin/markup visibility on Special
+    // Projects lines) — explicit unit_cost wins, else defaults to the
+    // catalog product's cost, else null for a custom line with no cost
+    // entered. Never affects subtotal/tax/total.
+    const unit_cost = item.unit_cost != null && item.unit_cost !== '' ? parseFloat(item.unit_cost) : (product ? product.cost : null);
     let sources = null;
     if (product && Array.isArray(item.sources) && item.sources.length) {
       const sourcesSum = item.sources.reduce((s, src) => s + (parseInt(src.quantity) || 0), 0);
@@ -112,7 +134,7 @@ async function processQuoteItems(items) {
       is_temp_item: product ? 0 : 1,
       purchase_request_id: product ? null : (item.purchase_request_id || null),
       sources,
-      qty, unit_price, lineTotal, lineTax, lineDisc,
+      qty, unit_price, unit_cost, lineTotal, lineTax, lineDisc,
     });
   }
   return {
@@ -295,6 +317,10 @@ async function processQuoteTransfers(quote) {
 }
 
 async function processQuoteAcceptance(quote) {
+  // A Special Project's custom lines (labour, equipment rental fees, etc.)
+  // aren't catalog shortfalls to buy — they have no business spawning a
+  // Purchase Request or a branch transfer the way a retail "Q" item does.
+  if (quote.quote_type === 'special_project') return;
   await processQuoteTransfers(quote);
   await flagItemsForPurchasing(quote);
 }
@@ -307,6 +333,10 @@ router.post('/', async (req, res) => {
     } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in quotation' });
     const isRental = quote_type === 'rental';
+    const isSpecialProject = quote_type === 'special_project';
+    if (isSpecialProject && !req.apiKey && !can(req.employee && req.employee.permissions, 'special_projects')) {
+      return res.status(403).json({ error: 'Missing permission: special_projects' });
+    }
 
     const quote_number = await nextNumber(db, 'quotations', 'quote_number', 'QT-', 6);
 
@@ -330,7 +360,7 @@ router.post('/', async (req, res) => {
         (quote_number,customer_id,employee_id,original_employee_id,branch_id,subtotal,tax_amount,discount_amount,total,notes,valid_until,quote_type,due_date,
          delivery_required,delivery_cost,delivery_address,pickup_required,pickup_cost,operator_required,operator_fee)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        args: [quote_number, customer_id||null, employee_id||null, employee_id||null, branch_id||null, subtotal, tax_amount, disc, total, notes||null, valid_until||null, isRental ? 'rental' : 'retail', isRental ? due_date : null,
+        args: [quote_number, customer_id||null, employee_id||null, employee_id||null, branch_id||null, subtotal, tax_amount, disc, total, notes||null, valid_until||null, isRental ? 'rental' : (isSpecialProject ? 'special_project' : 'retail'), isRental ? due_date : null,
           isRental && delivery_required ? 1 : 0, isRental && delivery_required ? parseFloat(delivery_cost||0) : 0, isRental && delivery_required ? (delivery_address||null) : null,
           isRental && pickup_required ? 1 : 0, isRental && pickup_required ? parseFloat(pickup_cost||0) : 0,
           isRental && operator_required ? 1 : 0, isRental && operator_required ? parseFloat(operator_fee||0) : 0] });
@@ -352,8 +382,8 @@ router.post('/', async (req, res) => {
         }
       } else {
         for (const item of processedItems) {
-          const { product_id, product_name, sku, is_temp_item, purchase_request_id, sources, qty, unit_price, lineTotal, lineTax, lineDisc } = item;
-          const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,is_temp_item,purchase_request_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)', args: [quoteId, product_id, product_name, sku, qty, unit_price, lineDisc, lineTax, lineTotal, is_temp_item, purchase_request_id] });
+          const { product_id, product_name, sku, is_temp_item, purchase_request_id, sources, qty, unit_price, unit_cost, lineTotal, lineTax, lineDisc } = item;
+          const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,unit_cost,discount_amount,tax_amount,total,is_temp_item,purchase_request_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', args: [quoteId, product_id, product_name, sku, qty, unit_price, unit_cost, lineDisc, lineTax, lineTotal, is_temp_item, purchase_request_id] });
           item.id = Number(itemResult.lastInsertRowid);
           if (sources) {
             for (const src of sources) {
@@ -384,6 +414,14 @@ router.put('/:id', async (req, res) => {
     const { rows: [quote] } = await db.execute({ sql: 'SELECT * FROM quotations WHERE id = ?', args: [req.params.id] });
     if (!quote) return res.status(404).json({ error: 'Not found' });
     if (quote.status === 'converted') return res.status(400).json({ error: 'Cannot edit a quotation already converted to an invoice' });
+    if (quote.quote_type === 'special_project') {
+      if (!req.apiKey && !can(req.employee && req.employee.permissions, 'special_projects')) return res.status(403).json({ error: 'Missing permission: special_projects' });
+      // Editing after submission would silently invalidate an approval that
+      // was already granted on different numbers — a special project can
+      // only be edited while still a Draft. Rejecting it (back to Draft)
+      // reopens editing the normal way.
+      if (quote.status !== 'draft') return res.status(400).json({ error: `This special project is ${quote.status} — it can only be edited while in Draft` });
+    }
 
     const {
       customer_id, employee_id, branch_id, items, discount_amount, notes, valid_until, due_date,
@@ -424,8 +462,8 @@ router.put('/:id', async (req, res) => {
         }
       } else {
         for (const item of processedItems) {
-          const { product_id, product_name, sku, is_temp_item, purchase_request_id, sources, qty, unit_price, lineTotal, lineTax, lineDisc } = item;
-          const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,is_temp_item,purchase_request_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)', args: [quote.id, product_id, product_name, sku, qty, unit_price, lineDisc, lineTax, lineTotal, is_temp_item, purchase_request_id] });
+          const { product_id, product_name, sku, is_temp_item, purchase_request_id, sources, qty, unit_price, unit_cost, lineTotal, lineTax, lineDisc } = item;
+          const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,unit_cost,discount_amount,tax_amount,total,is_temp_item,purchase_request_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', args: [quote.id, product_id, product_name, sku, qty, unit_price, unit_cost, lineDisc, lineTax, lineTotal, is_temp_item, purchase_request_id] });
           item.id = Number(itemResult.lastInsertRowid);
           if (sources) {
             for (const src of sources) {
@@ -485,6 +523,56 @@ router.patch('/:id/reassign', requirePermission('sales_manager'), async (req, re
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ─── Special Projects: internal pricing approval ───────────────────────────
+// A Special Project can't be sent to the customer or converted straight from
+// Draft — a supervisor has to sign off on the pricing first. This is
+// deliberately separate from the customer's own accept/decline (the existing
+// status flow below), which still applies once a project is Approved.
+
+router.patch('/:id/submit-for-approval', requirePermission('special_projects'), async (req, res) => {
+  try {
+    const { rows: [q] } = await db.execute({ sql: 'SELECT * FROM quotations WHERE id = ?', args: [req.params.id] });
+    if (!q) return res.status(404).json({ error: 'Not found' });
+    if (q.quote_type !== 'special_project') return res.status(400).json({ error: 'Only Special Projects go through approval' });
+    if (q.status !== 'draft') return res.status(400).json({ error: `This special project is ${q.status}, not a draft` });
+    const { rows: [itemCount] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM quotation_items WHERE quote_id = ?', args: [req.params.id] });
+    if (!Number(itemCount.c)) return res.status(400).json({ error: 'Add at least one line item before submitting for approval' });
+    // Clears any earlier rejection so its banner doesn't linger on the
+    // resubmitted project — mirrors PO's "resubmitted clears the old
+    // rejection" pattern in PATCH /purchase-orders/:id/status.
+    await db.execute({ sql: `UPDATE quotations SET status = 'pending_approval', submitted_at = CURRENT_TIMESTAMP, rejected_by = NULL, rejected_at = NULL, rejection_reason = NULL WHERE id = ?`, args: [req.params.id] });
+    const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM quotations WHERE id = ?', args: [req.params.id] });
+    res.json(row);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.patch('/:id/approve', requirePermission('special_projects_approve'), async (req, res) => {
+  try {
+    const { employee_id } = req.body;
+    const { rows: [q] } = await db.execute({ sql: 'SELECT * FROM quotations WHERE id = ?', args: [req.params.id] });
+    if (!q) return res.status(404).json({ error: 'Not found' });
+    if (q.status !== 'pending_approval') return res.status(400).json({ error: `This special project is ${q.status}, not awaiting approval` });
+    await db.execute({ sql: `UPDATE quotations SET status = 'approved', approved_by = ?, approved_at = CURRENT_TIMESTAMP WHERE id = ?`, args: [employee_id || null, req.params.id] });
+    const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM quotations WHERE id = ?', args: [req.params.id] });
+    res.json(row);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Same permission as approving, since it's the other half of the same
+// decision — mirrors purchase_orders' reject-to-draft (routes/purchase-orders.js).
+router.patch('/:id/reject', requirePermission('special_projects_approve'), async (req, res) => {
+  try {
+    const { reason, employee_id } = req.body;
+    if (!reason || !reason.trim()) return res.status(400).json({ error: 'A rejection reason is required' });
+    const { rows: [q] } = await db.execute({ sql: 'SELECT * FROM quotations WHERE id = ?', args: [req.params.id] });
+    if (!q) return res.status(404).json({ error: 'Not found' });
+    if (q.status !== 'pending_approval') return res.status(400).json({ error: `This special project is ${q.status}, not awaiting approval` });
+    await db.execute({ sql: `UPDATE quotations SET status = 'draft', rejected_by = ?, rejected_at = CURRENT_TIMESTAMP, rejection_reason = ? WHERE id = ?`, args: [employee_id || null, reason.trim(), req.params.id] });
+    const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM quotations WHERE id = ?', args: [req.params.id] });
+    res.json(row);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Update quotation status
 router.patch('/:id/status', async (req, res) => {
   try {
@@ -493,6 +581,12 @@ router.patch('/:id/status', async (req, res) => {
     const { rows: [q] } = await db.execute({ sql: 'SELECT * FROM quotations WHERE id = ?', args: [req.params.id] });
     if (!q) return res.status(404).json({ error: 'Not found' });
     if (q.status === 'converted') return res.status(400).json({ error: 'Cannot change status of converted quotation' });
+    if (q.quote_type === 'special_project') {
+      if (!req.apiKey && !can(req.employee && req.employee.permissions, 'special_projects')) return res.status(403).json({ error: 'Missing permission: special_projects' });
+      if (status !== 'draft' && ['draft', 'pending_approval'].includes(q.status)) {
+        return res.status(400).json({ error: 'This special project must be approved before it can be sent to the customer' });
+      }
+    }
     await db.execute({ sql: 'UPDATE quotations SET status = ? WHERE id = ?', args: [status, req.params.id] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM quotations WHERE id = ?', args: [req.params.id] });
     // Customer has accepted the quote (their PO is in hand) — this is the
@@ -520,6 +614,12 @@ router.post('/:id/convert', async (req, res) => {
     if (quote.status === 'converted') return res.status(400).json({ error: 'Already converted to invoice' });
     if (quote.status === 'declined') return res.status(400).json({ error: 'Cannot convert declined quotation' });
     if (quote.status === 'cancelled') return res.status(400).json({ error: 'Cannot convert cancelled quotation' });
+    if (quote.quote_type === 'special_project') {
+      if (!req.apiKey && !can(req.employee && req.employee.permissions, 'special_projects')) return res.status(403).json({ error: 'Missing permission: special_projects' });
+      if (!['approved', 'sent', 'accepted'].includes(quote.status)) {
+        return res.status(400).json({ error: 'This special project must be approved before it can be converted to an invoice' });
+      }
+    }
 
     // ORDER BY id so parent lines precede their accessory children — required
     // for revalidateQuoteLines' parent_item_id -> lines-index remap below.

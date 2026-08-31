@@ -1389,6 +1389,23 @@ async function _init() {
     // needs no changes of its own — this flag is just the audit/display
     // marker that a surcharge was applied.
     'ALTER TABLE work_orders ADD COLUMN is_express INTEGER NOT NULL DEFAULT 0',
+    // Special Projects (quotations.quote_type='special_project'): an internal
+    // pricing approval step, separate from the customer's own accept/decline
+    // (quotations.status already covers that). Mirrors purchase_orders'
+    // approve/reject columns, minus a signature — this is an internal
+    // control, not a vendor-facing document. See routes/quotations.js's
+    // /:id/submit-for-approval, /:id/approve, /:id/reject.
+    'ALTER TABLE quotations ADD COLUMN submitted_at DATETIME',
+    'ALTER TABLE quotations ADD COLUMN approved_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE quotations ADD COLUMN approved_at DATETIME',
+    'ALTER TABLE quotations ADD COLUMN rejected_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE quotations ADD COLUMN rejected_at DATETIME',
+    'ALTER TABLE quotations ADD COLUMN rejection_reason TEXT',
+    // Optional cost snapshot per quote line, for margin/markup visibility on
+    // Special Projects lines (pre-filled from products.cost for catalog
+    // items, typed in for custom lines). Informational only — never affects
+    // subtotal/tax/total math.
+    'ALTER TABLE quotation_items ADD COLUMN unit_cost REAL',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
@@ -1717,6 +1734,22 @@ async function _init() {
     }
   } catch(e) {}
 
+  // Add special_projects / special_projects_approve to existing security
+  // groups — unlike every other module permission above, this does NOT
+  // default to Administrator-or-Manager: special projects are meant to stay
+  // restricted to a handful of people, so only Administrator gets it out of
+  // the box. A store grants it to specific staff via Security Groups.
+  try {
+    const { rows: groups } = await db.execute({ sql: 'SELECT id, name, permissions FROM security_groups', args: [] });
+    for (const g of groups) {
+      const perms = JSON.parse(g.permissions || '{}');
+      let changed = false;
+      if (!('special_projects' in perms)) { perms.special_projects = (g.name === 'Administrator'); changed = true; }
+      if (!('special_projects_approve' in perms)) { perms.special_projects_approve = (g.name === 'Administrator'); changed = true; }
+      if (changed) await db.execute({ sql: 'UPDATE security_groups SET permissions = ? WHERE id = ?', args: [JSON.stringify(perms), g.id] });
+    }
+  } catch(e) {}
+
   // One-time backfill: existing quotations never had original_employee_id,
   // so default it to whoever the quote is currently assigned to. Any quote
   // reassigned after this point keeps its true original via
@@ -1758,7 +1791,7 @@ async function _init() {
   // Seed security groups
   const { rows: [sgCount] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM security_groups', args: [] });
   if (Number(sgCount.c) === 0) {
-    await db.execute({ sql: 'INSERT INTO security_groups (name, description, permissions) VALUES (?,?,?)', args: ['Administrator','Full system access',JSON.stringify({dashboard:true,pos:true,inventory:true,customers:true,transactions:true,reports:true,employees:true,settings:true,purchasing:true,branches:true,security:true,accounts:true,quotations:true,suppliers:true,transfers:true,transfers_pickup:true,transfers_dropoff:true,crm:true,commissions:true,multi_branch_access:true,warehouse:true,shipping:true,'cycle-counts':true,drawers:true,void_transactions:true,promotions:true,process_returns:true,purchase_requests:true,services:true,rentals:true,rentals_issue:true,layaway:true,layaway_create:true,layaway_payments:true,layaway_cancel:true,'discount-cards':true,'cash-back-cards':true,work_orders:true,wo_intake:true,wo_assess:true,wo_assign_parts:true,wo_technician:true,wo_signoff:true})] });
+    await db.execute({ sql: 'INSERT INTO security_groups (name, description, permissions) VALUES (?,?,?)', args: ['Administrator','Full system access',JSON.stringify({dashboard:true,pos:true,inventory:true,customers:true,transactions:true,reports:true,employees:true,settings:true,purchasing:true,branches:true,security:true,accounts:true,quotations:true,suppliers:true,transfers:true,transfers_pickup:true,transfers_dropoff:true,crm:true,commissions:true,multi_branch_access:true,warehouse:true,shipping:true,'cycle-counts':true,drawers:true,void_transactions:true,promotions:true,process_returns:true,purchase_requests:true,services:true,rentals:true,rentals_issue:true,layaway:true,layaway_create:true,layaway_payments:true,layaway_cancel:true,'discount-cards':true,'cash-back-cards':true,work_orders:true,wo_intake:true,wo_assess:true,wo_assign_parts:true,wo_technician:true,wo_signoff:true,special_projects:true,special_projects_approve:true})] });
     await db.execute({ sql: 'INSERT INTO security_groups (name, description, permissions) VALUES (?,?,?)', args: ['Cashier','POS and basic operations',JSON.stringify({dashboard:true,pos:true,inventory:false,customers:true,transactions:true,reports:false,employees:false,settings:false,purchasing:false,branches:false,security:false,accounts:false,quotations:true,suppliers:false,transfers:false,transfers_pickup:false,transfers_dropoff:false,crm:false,commissions:false,multi_branch_access:false,warehouse:false,shipping:false,'cycle-counts':false,drawers:false,void_transactions:false,promotions:false,process_returns:false,purchase_requests:false,services:false,rentals:true,rentals_issue:false,layaway:true,layaway_create:false,layaway_payments:false,layaway_cancel:false,'discount-cards':false,'cash-back-cards':false,work_orders:true,wo_intake:false,wo_assess:false,wo_assign_parts:false,wo_technician:false,wo_signoff:false})] });
     await db.execute({ sql: 'INSERT INTO security_groups (name, description, permissions) VALUES (?,?,?)', args: ['Manager','Store management without admin',JSON.stringify({dashboard:true,pos:true,inventory:true,customers:true,transactions:true,reports:true,employees:true,settings:false,purchasing:true,branches:false,security:false,accounts:true,quotations:true,suppliers:true,transfers:true,transfers_pickup:true,transfers_dropoff:true,crm:true,commissions:true,multi_branch_access:true,warehouse:true,shipping:true,'cycle-counts':true,drawers:true,void_transactions:true,promotions:true,process_returns:true,purchase_requests:true,services:true,rentals:true,rentals_issue:true,layaway:true,layaway_create:true,layaway_payments:true,layaway_cancel:true,'discount-cards':true,'cash-back-cards':true,work_orders:true,wo_intake:true,wo_assess:true,wo_assign_parts:true,wo_technician:true,wo_signoff:true})] });
 

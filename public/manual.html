@@ -129,6 +129,7 @@
       <a href="#drawers">Cash Drawers</a>
       <a href="#transactions">Transactions &amp; Returns</a>
       <a href="#quotations">Quotations</a>
+      <a href="#special-projects">Special Projects</a>
       <a href="#layaway">Layaway</a>
       <a href="#rentals">Rentals</a>
       <a href="#work-orders">Work Orders</a>
@@ -317,6 +318,29 @@
       <p>Someone with the <span class="perm-pill">sales_manager</span> permission can hand an open quote (not yet converted or declined) to a different salesperson using the <strong>Reassign</strong> button on the quote's detail view. This is for handing off the follow-through work — the new assignee becomes who the quote shows as "Assigned to." Commission on the eventual sale still goes to whoever the quote was <em>originally</em> assigned to (shown as "Sale credited to" once a quote has been reassigned) — reassigning it again keeps tracing credit back to that same original salesperson, not whoever it was most recently passed from.</p>
       <p>The Quotations list marks any reassigned quote with a small "↪ reassigned" tag next to its current assignee, and a <strong>Reassigned only</strong> checkbox (alongside the Status filter) narrows the list down to just those — the quickest way to see everything currently out with someone other than the salesperson who'll be credited for it.</p>
       <p>An employee flagged <strong>Salesperson</strong> (see <a href="#employees">Employees</a>) sees two tabs at the top of Quotations: <strong>My Quotes</strong> (the default — everything currently assigned to them, including anything handed to them via Reassign) and <strong>All Quotes</strong>. This is a convenience filter only — it doesn't restrict which quotes they can open, unlike the hard scoping applied to Transactions, CRM, and Commissions.</p>
+    </section>
+
+    <section class="module" id="special-projects">
+      <h2 class="module">Special Projects <span class="tag">special_projects</span></h2>
+      <p class="module-intro">Custom quotes/invoices for one-off jobs — tree removal, a special install, anything that isn't a normal retail sale — where line items are typed in freely (labour, equipment rental, tools) with an optional catalog item mixed in, usually priced above cost. Its own button on the Sales hub, its own permissions, and its own screen — separate from Quotations even though it's built on the same underlying quote.</p>
+
+      <h3>Who can use it</h3>
+      <p>Deliberately restricted to a handful of people, independent of ordinary Quotations access: <span class="perm-pill">special_projects</span> to build, submit, and convert a project; <span class="perm-pill">special_projects_approve</span> to approve or reject one. Having <span class="perm-pill">quotations</span> alone does not grant either — a Special Project is invisible in both the Special Projects screen and the API to anyone without one of these two permissions, even in an unfiltered list.</p>
+
+      <h3>Line items and markup</h3>
+      <p>Each line is either a real catalog product or a free-typed custom item (same "pick a product OR type a description" builder Quotations uses) — but unlike a regular quote's custom line, a Special Project's custom items never generate a Purchasing "Q" flag or a Purchase Request; they're priced references and labour/service charges, not things the store needs to go buy. Every line also has an optional <strong>Cost</strong> field alongside <strong>Price</strong> (pre-filled from the catalog for a real product), with a live markup/margin percentage shown next to it — purely informational, it never changes what gets charged.</p>
+
+      <h3>Approval, before anything else</h3>
+      <ol class="steps">
+        <li><strong>Draft</strong> — build the project, add items, adjust pricing. Freely editable.</li>
+        <li><strong>Submit for Approval</strong> — locks the draft and hands it to whoever holds <span class="perm-pill">special_projects_approve</span>.</li>
+        <li><strong>Approved</strong> (or <strong>Rejected</strong>, back to Draft with a required reason, shown as a banner on the project until it's resubmitted) — a supervisor's pricing sign-off, weighing things like current workload and how difficult the job looks. There's no separate sign-off step beyond this — approving is the decision.</li>
+        <li><strong>Sent → Accepted → Converted</strong> — once approved, a Special Project behaves exactly like a retail quote: send it to the customer, record their acceptance, then Convert sends it to the POS as a held order for a cashier to collect payment on, the same "Recall Held Order" pattern every other invoice in this app uses.</li>
+      </ol>
+      <p>A Special Project can only be edited while still a Draft — editing after submission would silently invalidate a sign-off that was granted on different numbers. Sending, accepting, or converting is blocked with a clear error until it's Approved.</p>
+
+      <h3>Commission</h3>
+      <p>No separate commission setup needed — a converted Special Project becomes a real completed sale exactly like a converted retail quote, so it's picked up by whatever commission plan already applies to sales (see <a href="#commissions">Commissions</a>), crediting whoever the project is assigned to.</p>
     </section>
 
     <section class="module" id="layaway">
@@ -732,6 +756,7 @@
         <tr><td>transfers</td><td>transfers_create, transfers_approve, transfers_pickup, transfers_dropoff</td></tr>
         <tr><td>quotations</td><td>quotations_create, quotations_approve, quotations_convert</td></tr>
         <tr><td>sales_manager</td><td>(none)</td></tr>
+        <tr><td>special_projects</td><td>special_projects_approve</td></tr>
         <tr><td>accounts</td><td>accounts_create, accounts_payments, accounts_writeoff</td></tr>
         <tr><td>crm</td><td>crm_leads, crm_opportunities</td></tr>
         <tr><td>commissions</td><td>commissions_plans, commissions_approve, commissions_pay, commissions_delete</td></tr>
