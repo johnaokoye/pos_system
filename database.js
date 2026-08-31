@@ -1336,6 +1336,11 @@ async function _init() {
     // regardless of query params — see routes/transactions.js, routes/crm.js,
     // routes/commissions.js, routes/reports.js.
     'ALTER TABLE employees ADD COLUMN is_salesperson INTEGER DEFAULT 0',
+    // Captures who the quote is credited to for commission purposes,
+    // independent of quotations.employee_id (who's currently assigned to
+    // work/complete it) — see PATCH /quotations/:id/reassign and the
+    // sales_manager permission.
+    'ALTER TABLE quotations ADD COLUMN original_employee_id INTEGER REFERENCES employees(id)',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
@@ -1646,6 +1651,30 @@ async function _init() {
         await db.execute({ sql: 'UPDATE security_groups SET permissions = ? WHERE id = ?', args: [JSON.stringify(perms), g.id] });
       }
     }
+  } catch(e) {}
+
+  // Add sales_manager permission to existing security groups — gates
+  // PATCH /quotations/:id/reassign (see routes/quotations.js). Administrator
+  // and Manager get it by default like every other new module permission
+  // added this way; a dedicated "Sales Manager" group can be created (or an
+  // existing one edited) to grant it more narrowly.
+  try {
+    const { rows: groups } = await db.execute({ sql: 'SELECT id, name, permissions FROM security_groups', args: [] });
+    for (const g of groups) {
+      const perms = JSON.parse(g.permissions || '{}');
+      if (!('sales_manager' in perms)) {
+        perms.sales_manager = (g.name === 'Administrator' || g.name === 'Manager');
+        await db.execute({ sql: 'UPDATE security_groups SET permissions = ? WHERE id = ?', args: [JSON.stringify(perms), g.id] });
+      }
+    }
+  } catch(e) {}
+
+  // One-time backfill: existing quotations never had original_employee_id,
+  // so default it to whoever the quote is currently assigned to. Any quote
+  // reassigned after this point keeps its true original via
+  // PATCH /quotations/:id/reassign instead of this default.
+  try {
+    await db.execute({ sql: 'UPDATE quotations SET original_employee_id = employee_id WHERE original_employee_id IS NULL AND employee_id IS NOT NULL', args: [] });
   } catch(e) {}
 
   // Ensure admin always has a password — runs unconditionally on every boot

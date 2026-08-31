@@ -14045,7 +14045,7 @@ const App = {
           ${convertedBanner}
           <div class="two-col" style="margin-bottom:14px;font-size:13px">
             <div><strong>Customer:</strong> ${q.customer_name||'Walk-in'}<br><strong>Phone:</strong> ${q.customer_phone||'-'}<br><strong>Email:</strong> ${q.customer_email||'-'}</div>
-            <div><strong>Date:</strong> ${this.fmtDate(q.created_at)}<br><strong>${isRental?'Due Date':'Valid Until'}:</strong> ${(isRental?q.due_date:q.valid_until) ? this.fmtDate(isRental?q.due_date:q.valid_until) : 'N/A'}<br><strong>Branch:</strong> ${q.branch_name||'-'}<br><strong>Created by:</strong> ${q.employee_name||'-'}</div>
+            <div><strong>Date:</strong> ${this.fmtDate(q.created_at)}<br><strong>${isRental?'Due Date':'Valid Until'}:</strong> ${(isRental?q.due_date:q.valid_until) ? this.fmtDate(isRental?q.due_date:q.valid_until) : 'N/A'}<br><strong>Branch:</strong> ${q.branch_name||'-'}<br><strong>Assigned to:</strong> ${q.employee_name||'-'}${q.original_employee_name && q.employee_name !== q.original_employee_name ? `<br><strong>Sale credited to:</strong> ${q.original_employee_name} <span class="badge-pill badge-info" style="font-size:10px" title="Reassigned for completion — commission still goes to the original salesperson">reassigned</span>` : ''}</div>
           </div>
           ${itemsTable}
           ${isRental && (q.delivery_required || q.pickup_required || q.operator_required) ? `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-top:10px;font-size:12px">
@@ -14069,6 +14069,9 @@ const App = {
             <button class="btn btn-danger" onclick="App.updateQuoteStatus(${q.id},'declined')">Decline</button>
           ` : ''}
           <button class="btn btn-secondary" onclick="App.emailQuote(${q.id},'${(q.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email Quote</button>
+          ${q.status!=='converted'&&q.status!=='declined'&&this.can('sales_manager') ? `
+            <button class="btn btn-secondary" onclick="App.showReassignQuoteModal(${q.id},${q.employee_id||'null'})">Reassign</button>
+          ` : ''}
           ${q.status!=='converted'&&q.status!=='declined' ? `
             <button class="btn btn-primary" onclick="App.closeModal();App.showConvertQuote(${q.id})">${isRental?'Convert to Rental':'Convert to Invoice'}</button>
           ` : ''}
@@ -14083,6 +14086,39 @@ const App = {
       this.closeModal();
       this.alert(`Quotation ${status}`);
       this.renderQuotations();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async showReassignQuoteModal(id, currentEmployeeId) {
+    const employees = await this.api('GET', '/employees');
+    this.showModal(`
+      <div class="modal" style="max-width:420px">
+        <div class="modal-header">
+          <span class="modal-title">Reassign Quote</span>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px">Hands this quote to another salesperson to complete. The sale's commission still credits whoever originally owned it, not the new assignee.</p>
+          <div class="form-group"><label>Assign To</label>
+            <select id="qr-employee">
+              ${employees.filter(e => e.active !== 0).map(e => `<option value="${e.id}" ${e.id===currentEmployeeId?'selected':''}>${e.first_name} ${e.last_name}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.reassignQuote(${id})">Reassign</button>
+        </div>
+      </div>`);
+  },
+
+  async reassignQuote(id) {
+    const employee_id = parseInt(document.getElementById('qr-employee').value);
+    try {
+      await this.api('PATCH', `/quotations/${id}/reassign`, { employee_id });
+      this.closeModal();
+      this.alert('Quote reassigned');
+      this.viewQuote(id);
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
@@ -14882,6 +14918,7 @@ const App = {
       { key: 'quotations_approve', label: 'Approve Quotes' },
       { key: 'quotations_convert', label: 'Convert to Invoice' },
     ]},
+    { key: 'sales_manager', label: 'Sales Manager', subs: [] },
     { key: 'accounts', label: 'Accounts Receivable', subs: [
       { key: 'accounts_create', label: 'Create Invoices' },
       { key: 'accounts_payments', label: 'Record Payments' },

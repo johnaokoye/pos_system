@@ -342,8 +342,20 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       savedTx.items = txItems;
       const { rows: txPayments } = await db.execute({ sql: 'SELECT * FROM transaction_payments WHERE transaction_id = ? ORDER BY id', args: [txId] });
       savedTx.payments = txPayments;
+      // Commission normally credits whoever rang up the sale — but a sale
+      // completed from a quote credits the quote's original_employee_id
+      // instead, so a quote reassigned to another salesperson for completion
+      // (see PATCH /quotations/:id/reassign) still pays the salesperson who
+      // originally brought in the deal, not whoever finished the paperwork.
+      let commissionEmployeeId = savedTx.employee_id;
+      if (quote_id) {
+        try {
+          const { rows: [q] } = await db.execute({ sql: 'SELECT employee_id, original_employee_id FROM quotations WHERE id = ?', args: [quote_id] });
+          if (q) commissionEmployeeId = q.original_employee_id || q.employee_id || commissionEmployeeId;
+        } catch(e) {}
+      }
       // Auto-calculate commission (non-blocking, best-effort)
-      try { await calcCommission(savedTx.employee_id, savedTx.total, 'transaction', txId, savedTx.transaction_number); } catch(e) {}
+      try { await calcCommission(commissionEmployeeId, savedTx.total, 'transaction', txId, savedTx.transaction_number); } catch(e) {}
       res.status(201).json(savedTx);
     } catch(e) {
       // Once committed, the sale is saved — rolling back a closed transaction

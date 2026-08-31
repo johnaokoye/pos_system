@@ -11,7 +11,7 @@ router.use(requirePermission('quotations'));
 router.get('/', async (req, res) => {
   try {
     const { status, customer_id, quote_number, quote_type, start, end, limit = 100 } = req.query;
-    let sql = `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name, t.transaction_number as converted_tx_number, ra.agreement_number as converted_agreement_number, ra.status as converted_agreement_status FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id LEFT JOIN rental_agreements ra ON q.converted_to_agreement_id = ra.id WHERE 1=1`;
+    let sql = `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, e.first_name || ' ' || e.last_name as employee_name, oe.first_name || ' ' || oe.last_name as original_employee_name, b.name as branch_name, t.transaction_number as converted_tx_number, ra.agreement_number as converted_agreement_number, ra.status as converted_agreement_status FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN employees oe ON q.original_employee_id = oe.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id LEFT JOIN rental_agreements ra ON q.converted_to_agreement_id = ra.id WHERE 1=1`;
     const params = [];
     if (status) { sql += ' AND q.status = ?'; params.push(status); }
     if (quote_type) { sql += ' AND q.quote_type = ?'; params.push(quote_type); }
@@ -57,7 +57,7 @@ async function attachQuoteItemSources(items) {
 
 router.get('/:id', async (req, res) => {
   try {
-    const { rows: [quote] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, c.phone as customer_phone, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name, t.transaction_number as converted_tx_number, ra.agreement_number as converted_agreement_number, ra.status as converted_agreement_status FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id LEFT JOIN rental_agreements ra ON q.converted_to_agreement_id = ra.id WHERE q.id = ?`, args: [req.params.id] });
+    const { rows: [quote] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, c.phone as customer_phone, e.first_name || ' ' || e.last_name as employee_name, oe.first_name || ' ' || oe.last_name as original_employee_name, b.name as branch_name, t.transaction_number as converted_tx_number, ra.agreement_number as converted_agreement_number, ra.status as converted_agreement_status FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN employees oe ON q.original_employee_id = oe.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id LEFT JOIN rental_agreements ra ON q.converted_to_agreement_id = ra.id WHERE q.id = ?`, args: [req.params.id] });
     if (!quote) return res.status(404).json({ error: 'Not found' });
     const { rows: items } = await db.execute({ sql: QUOTE_ITEMS_SELECT, args: [req.params.id] });
     quote.items = await attachQuoteItemSources(items);
@@ -322,11 +322,15 @@ router.post('/', async (req, res) => {
     const tx = await db.transaction('write');
     let committed = false;
     try {
+      // original_employee_id starts equal to employee_id — it only ever
+      // diverges once PATCH /:id/reassign moves employee_id to someone else,
+      // at which point this stays put as the commission-credit target (see
+      // POST /transactions' quote_id handling).
       const result = await tx.execute({ sql: `INSERT INTO quotations
-        (quote_number,customer_id,employee_id,branch_id,subtotal,tax_amount,discount_amount,total,notes,valid_until,quote_type,due_date,
+        (quote_number,customer_id,employee_id,original_employee_id,branch_id,subtotal,tax_amount,discount_amount,total,notes,valid_until,quote_type,due_date,
          delivery_required,delivery_cost,delivery_address,pickup_required,pickup_cost,operator_required,operator_fee)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        args: [quote_number, customer_id||null, employee_id||null, branch_id||null, subtotal, tax_amount, disc, total, notes||null, valid_until||null, isRental ? 'rental' : 'retail', isRental ? due_date : null,
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        args: [quote_number, customer_id||null, employee_id||null, employee_id||null, branch_id||null, subtotal, tax_amount, disc, total, notes||null, valid_until||null, isRental ? 'rental' : 'retail', isRental ? due_date : null,
           isRental && delivery_required ? 1 : 0, isRental && delivery_required ? parseFloat(delivery_cost||0) : 0, isRental && delivery_required ? (delivery_address||null) : null,
           isRental && pickup_required ? 1 : 0, isRental && pickup_required ? parseFloat(pickup_cost||0) : 0,
           isRental && operator_required ? 1 : 0, isRental && operator_required ? parseFloat(operator_fee||0) : 0] });
@@ -452,6 +456,32 @@ router.put('/:id', async (req, res) => {
       if (!committed) await tx.rollback();
       res.status(committed ? 500 : 400).json({ error: e.message });
     }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Hand a quote off to a different salesperson to finish working it, while
+// keeping commission credit with whoever it's currently attributed to (see
+// POST /transactions' quote_id handling, which reads original_employee_id
+// off the quote instead of the completing cashier's own id). Deliberately
+// separate from the general PUT /:id edit — that one lets anyone who can
+// edit a quote reassign employee_id too, but without this credit guarantee.
+router.patch('/:id/reassign', requirePermission('sales_manager'), async (req, res) => {
+  try {
+    const { employee_id } = req.body;
+    if (!employee_id) return res.status(400).json({ error: 'employee_id is required' });
+    const { rows: [quote] } = await db.execute({ sql: 'SELECT * FROM quotations WHERE id = ?', args: [req.params.id] });
+    if (!quote) return res.status(404).json({ error: 'Not found' });
+    if (['converted', 'declined', 'cancelled'].includes(quote.status)) return res.status(400).json({ error: `Cannot reassign a quotation that is already ${quote.status}` });
+    const { rows: [newEmp] } = await db.execute({ sql: 'SELECT id FROM employees WHERE id = ? AND active = 1', args: [employee_id] });
+    if (!newEmp) return res.status(400).json({ error: 'Employee not found or inactive' });
+    // First reassignment establishes original_employee_id from whatever
+    // employee_id already was; subsequent reassignments leave it untouched
+    // so credit always traces back to the very first salesperson, not
+    // whoever it was most recently handed off from.
+    const originalEmployeeId = quote.original_employee_id || quote.employee_id;
+    await db.execute({ sql: 'UPDATE quotations SET employee_id = ?, original_employee_id = ? WHERE id = ?', args: [employee_id, originalEmployeeId, quote.id] });
+    const { rows: [row] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, e.first_name || ' ' || e.last_name as employee_name, oe.first_name || ' ' || oe.last_name as original_employee_name FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN employees oe ON q.original_employee_id = oe.id WHERE q.id = ?`, args: [quote.id] });
+    res.json(row);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

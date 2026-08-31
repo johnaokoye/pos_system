@@ -311,6 +311,9 @@
 
       <h3>Per-line discount</h3>
       <p>Each retail line — a real product or a free-typed custom item — has its own optional <strong>Discount</strong> field, separate from the whole-quote <strong>Discount ($)</strong> field. It's a record of how much was knocked off that specific line, shown next to the item wherever the line shows up; it doesn't itself change the price you type in — enter the already-discounted price there. If the line isn't in stock and gets bundled into a Purchase Request (or later a Purchase Order) at Accept, its discount comes along too, shown as a small tag on that line — so whoever approves the PR or PO can see the item is backing a discounted sale before signing off.</p>
+
+      <h3>Reassigning a quote</h3>
+      <p>Someone with the <span class="perm-pill">sales_manager</span> permission can hand an open quote (not yet converted or declined) to a different salesperson using the <strong>Reassign</strong> button on the quote's detail view. This is for handing off the follow-through work — the new assignee becomes who the quote shows as "Assigned to." Commission on the eventual sale still goes to whoever the quote was <em>originally</em> assigned to (shown as "Sale credited to" once a quote has been reassigned) — reassigning it again keeps tracing credit back to that same original salesperson, not whoever it was most recently passed from.</p>
     </section>
 
     <section class="module" id="layaway">
@@ -717,6 +720,7 @@
         <tr><td>purchasing</td><td>purchasing_create, purchasing_approve, purchasing_receive</td></tr>
         <tr><td>transfers</td><td>transfers_create, transfers_approve, transfers_pickup, transfers_dropoff</td></tr>
         <tr><td>quotations</td><td>quotations_create, quotations_approve, quotations_convert</td></tr>
+        <tr><td>sales_manager</td><td>(none)</td></tr>
         <tr><td>accounts</td><td>accounts_create, accounts_payments, accounts_writeoff</td></tr>
         <tr><td>crm</td><td>crm_leads, crm_opportunities</td></tr>
         <tr><td>commissions</td><td>commissions_plans, commissions_approve, commissions_pay</td></tr>
