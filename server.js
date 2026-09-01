@@ -91,6 +91,7 @@ app.use('/api/api-keys',       require('./routes/api-keys'));
 app.use('/api/rentals',        rentalsRouter);
 app.use('/api/layaway',        require('./routes/layaway'));
 app.use('/api/work-orders',    require('./routes/work-orders'));
+app.use('/api/sales-targets',  require('./routes/sales-targets'));
 
 // Any error under /api (oversized body, malformed JSON, etc.) must come back
 // as JSON — App.api()'s res.json() call otherwise chokes on Express's default

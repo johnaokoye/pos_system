@@ -10713,6 +10713,7 @@ const App = {
       ${(this.can('special_projects') || this.can('special_projects_approve')) ? this._reportButtonCard('Special Projects Margin Report', "Realized markup per Special Project, from each line's Cost vs. Price.", 'App.showSpecialProjectsMarginReport()') : ''}
       ${this._reportButtonCard('CRM Pipeline / Weighted Forecast', 'Open opportunities by stage, weighted by close probability.', 'App.showCrmPipelineReport()')}
       ${this._reportButtonCard('Rental Utilization', "Bookings and revenue per rental item, to spot under-used equipment vs. what's always out.", 'App.showRentalUtilizationReport()')}
+      ${this._reportButtonCard('Salesperson Targets', 'Hourly, daily, weekly, and monthly targets vs. current sales for every salesperson — see also CRM &amp; Sales → Targets.', 'App.showSalespersonTargetsReport()')}
       <p style="font-size:11px;color:var(--text-muted);margin-top:10px">Sales Summary, Top Products, and By Category still live on the general <a href="#" onclick="event.preventDefault();App.showSection('reports')">Reports &amp; Analytics</a> screen.</p>`;
   },
 
@@ -11194,6 +11195,59 @@ const App = {
           </table>
         </div>
       </div>`}`;
+  },
+
+  // ─── Salesperson Targets ────────────────────────────────────────────────
+  // No date-range filter — GET /sales-targets always answers "right now"
+  // for each period (current hour/day/week/month), same as the CRM & Sales
+  // → Targets tab this reuses the same endpoint (and scoping rules) from.
+  showSalespersonTargetsReport() {
+    this.showModal(`
+      <div class="modal" style="max-width:900px">
+        <div class="modal-header"><span class="modal-title">Salesperson Targets</span><button class="modal-close">✕</button></div>
+        <div class="modal-body" style="max-height:75vh;overflow-y:auto">
+          <div id="rpt-modal-content" data-report-title="Salesperson Targets"><div class="empty-state"><p>Loading...</p></div></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" onclick="App.printReport('rpt-modal-content')">🖨 Print</button>
+          <button class="btn btn-outline" onclick="App.exportReportCsv('rpt-modal-content')">⬇ Export CSV</button>
+          <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+        </div>
+      </div>`);
+    this.loadSalespersonTargetsReport();
+  },
+
+  async loadSalespersonTargetsReport() {
+    const content = document.getElementById('rpt-modal-content');
+    if (!content) return;
+    let data;
+    try { data = await this.api('GET', '/sales-targets'); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    if (!document.getElementById('rpt-modal-content')) return;
+
+    const periods = [['Hourly','hourly'], ['Daily','daily'], ['Weekly','weekly'], ['Monthly','monthly']];
+    const pctCell = (current, target) => {
+      if (!target) return '<span style="color:var(--text-muted)">—</span>';
+      const pct = Math.round(current / target * 100);
+      const color = pct >= 100 ? 'var(--success)' : pct >= 50 ? 'var(--warning)' : 'var(--danger)';
+      return `<span style="color:${color};font-weight:600">${pct}%</span>`;
+    };
+    content.innerHTML = !data.length ? '<div class="empty-state"><p>No employees flagged as a Salesperson yet.</p></div>' : `
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Salesperson</th>${periods.map(([label]) => `<th colspan="3">${label}</th>`).join('')}</tr>
+            <tr><th></th>${periods.map(() => '<th>Current</th><th>Target</th><th>%</th>').join('')}</tr></thead>
+            <tbody>${data.map(e => `
+              <tr>
+                <td class="fw-600">${e.employee_name}</td>
+                ${periods.map(([,key]) => `<td>${this.fmt(e[key+'_sales'])}</td><td>${e[key+'_target']>0?this.fmt(e[key+'_target']):'<span style="color:var(--text-muted)">—</span>'}</td><td>${pctCell(e[key+'_sales'], e[key+'_target'])}</td>`).join('')}
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <p style="font-size:11px;color:var(--text-muted);margin-top:8px">Current sales are transactions each salesperson personally rang up in the current hour/day/week/month — not the commission-credit chain a reassigned quote uses elsewhere. Targets are set from CRM &amp; Sales → Targets.</p>`;
   },
 
   // Shared modal shell for the report-with-filters pattern below — takes a
@@ -15326,6 +15380,11 @@ const App = {
           operator_required: operatorRequired ? 1 : 0,
           operator_fee: operatorRequired ? parseFloat(document.getElementById('qt-operator-fee').value) || 0 : 0,
         };
+        // Only on create — whoever creates the quote is the assignee. Never
+        // sent on edit, so editing someone else's quote (e.g. a manager
+        // fixing a line item) doesn't silently reassign it; that's what the
+        // dedicated Reassign action (PATCH /:id/reassign) is for.
+        if (!this._editingQuoteId) payload.employee_id = this.currentUser.id;
         if (this._editingQuoteId) {
           await this.api('PUT', `/quotations/${this._editingQuoteId}`, payload);
           this.alert('Rental quotation updated');
@@ -15386,6 +15445,8 @@ const App = {
     const isSpecialProject = this._quoteType === 'special_project';
     try {
       const payload = { customer_id: customer_id||null, branch_id: branch_id||null, discount_amount, notes, valid_until: valid_until||null, items };
+      // Only on create — see the matching comment on the rental branch above.
+      if (!this._editingQuoteId) payload.employee_id = this.currentUser.id;
       if (isSpecialProject && !this._editingQuoteId) payload.quote_type = 'special_project';
       if (this._editingQuoteId) {
         await this.api('PUT', `/quotations/${this._editingQuoteId}`, payload);
@@ -17279,6 +17340,7 @@ const App = {
         <button class="crm-tab ${this.crmTab==='leads'?'active':''}" onclick="App.switchCrmTab('leads')">Leads</button>
         <button class="crm-tab ${this.crmTab==='pipeline'?'active':''}" onclick="App.switchCrmTab('pipeline')">Pipeline</button>
         <button class="crm-tab ${this.crmTab==='activities'?'active':''}" onclick="App.switchCrmTab('activities')">Activities</button>
+        <button class="crm-tab ${this.crmTab==='targets'?'active':''}" onclick="App.switchCrmTab('targets')">Targets</button>
       </div>
       <div id="crm-tab-content"></div>`;
     await this.renderCrmTab();
@@ -17300,6 +17362,7 @@ const App = {
     else if (this.crmTab === 'leads') await this.renderCrmLeads(el);
     else if (this.crmTab === 'pipeline') await this.renderCrmPipeline(el);
     else if (this.crmTab === 'activities') await this.renderCrmActivities(el);
+    else if (this.crmTab === 'targets') await this.renderCrmTargets(el);
   },
 
   crmStatusLabel(s) {
@@ -17330,6 +17393,88 @@ const App = {
     if (!due) return '—';
     const d = new Date(due);
     return d.toLocaleDateString('en-US', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
+  },
+
+  // ─── Salesperson Targets ────────────────────────────────────────────────
+  // A single ratio against a limit (current sales / target) is a meter, not
+  // a bar/line chart: the fill carries severity (danger below 50%, warning
+  // 50–99%, success at/over 100%) and the unfilled track is a lighter tint
+  // of that same hue rather than a neutral gray, so status reads at a
+  // glance without needing the number. No legend needed — each meter is a
+  // single series, self-labeled by its own period name and figures.
+  _targetMeterHtml(label, current, target) {
+    if (!target || target <= 0) {
+      return `<div style="margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
+          <span style="font-weight:600">${label}</span>
+          <span style="color:var(--text-muted)">No target set</span>
+        </div>
+        <div style="background:var(--bg-secondary,#eee);border-radius:4px;height:18px"></div>
+      </div>`;
+    }
+    const pct = Math.round(current / target * 100);
+    const barPct = Math.min(100, Math.max(0, pct));
+    const c = pct >= 100 ? { fill: 'var(--success)', track: '#E8F5E9' } : pct >= 50 ? { fill: 'var(--warning)', track: '#FFF3E0' } : { fill: 'var(--danger)', track: '#FFEBEE' };
+    return `<div style="margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
+        <span style="font-weight:600">${label}</span>
+        <span style="color:var(--text-muted)">${this.fmt(current)} / ${this.fmt(target)} <strong style="color:${c.fill}">(${pct}%)</strong></span>
+      </div>
+      <div style="background:${c.track};border-radius:4px;height:18px;overflow:hidden">
+        <div style="width:${barPct}%;background:${c.fill};height:100%;border-radius:4px;transition:width .4s"></div>
+      </div>
+    </div>`;
+  },
+
+  async renderCrmTargets(el) {
+    let data = [];
+    try { data = await this.api('GET', '/sales-targets'); }
+    catch(e) { el.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    const canManage = this.can('sales_manager');
+    el.innerHTML = `
+      ${canManage ? `
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">Set Targets</span></div>
+        ${!data.length ? '<p style="padding:14px;color:var(--text-muted);font-size:13px">No employees flagged as a Salesperson yet — see Employees.</p>' : `
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Salesperson</th><th>Hourly</th><th>Daily</th><th>Weekly</th><th>Monthly</th><th></th></tr></thead>
+            <tbody>${data.map(e => `
+              <tr>
+                <td class="fw-600">${e.employee_name}</td>
+                <td><input type="number" min="0" step="0.01" id="tgt-hourly-${e.id}" value="${e.hourly_target}" style="width:90px"></td>
+                <td><input type="number" min="0" step="0.01" id="tgt-daily-${e.id}" value="${e.daily_target}" style="width:90px"></td>
+                <td><input type="number" min="0" step="0.01" id="tgt-weekly-${e.id}" value="${e.weekly_target}" style="width:100px"></td>
+                <td><input type="number" min="0" step="0.01" id="tgt-monthly-${e.id}" value="${e.monthly_target}" style="width:100px"></td>
+                <td><button class="btn btn-sm btn-primary" onclick="App.saveSalesTarget(${e.id})">Save</button></td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>`}
+      </div>` : ''}
+      ${!data.length ? (canManage ? '' : '<div class="empty-state"><p>No sales targets to show yet.</p></div>') : `
+      <div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
+        ${data.map(e => `
+          <div class="card">
+            <div class="card-header"><span class="card-title">${e.employee_name}</span></div>
+            ${this._targetMeterHtml('Hourly', e.hourly_sales, e.hourly_target)}
+            ${this._targetMeterHtml('Daily', e.daily_sales, e.daily_target)}
+            ${this._targetMeterHtml('Weekly', e.weekly_sales, e.weekly_target)}
+            ${this._targetMeterHtml('Monthly', e.monthly_sales, e.monthly_target)}
+          </div>`).join('')}
+      </div>`}`;
+  },
+
+  async saveSalesTarget(employeeId) {
+    const hourly_target = document.getElementById(`tgt-hourly-${employeeId}`).value;
+    const daily_target = document.getElementById(`tgt-daily-${employeeId}`).value;
+    const weekly_target = document.getElementById(`tgt-weekly-${employeeId}`).value;
+    const monthly_target = document.getElementById(`tgt-monthly-${employeeId}`).value;
+    try {
+      await this.api('PUT', `/sales-targets/${employeeId}`, { hourly_target, daily_target, weekly_target, monthly_target });
+      this.alert('Targets saved');
+      this.renderCrmTab();
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   async renderCrmOverview(el) {

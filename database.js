@@ -945,6 +945,24 @@ async function _init() {
       expires_at DATETIME NOT NULL,
       revoked_at DATETIME
     )` },
+    // One row per salesperson — current-value targets, not date-ranged
+    // history (matches how e.g. discount_card_types/cash_back_card_types
+    // hold a current rate, not a log). "Current sales" for each period is
+    // computed live from transactions.employee_id (who actually rang up
+    // the sale), not the commission-credit chain (quotations.
+    // original_employee_id) — a target is about a salesperson's own
+    // activity, a distinct question from who a sale's commission credits.
+    // See routes/sales-targets.js.
+    { sql: `CREATE TABLE IF NOT EXISTS sales_targets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL UNIQUE REFERENCES employees(id),
+      hourly_target REAL NOT NULL DEFAULT 0,
+      daily_target REAL NOT NULL DEFAULT 0,
+      weekly_target REAL NOT NULL DEFAULT 0,
+      monthly_target REAL NOT NULL DEFAULT 0,
+      updated_by INTEGER REFERENCES employees(id),
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
   ], 'write');
 
   // Migrations — each in its own try/catch
