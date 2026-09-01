@@ -203,6 +203,77 @@ router.post('/payments', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Write off (forgive) part or all of a customer's outstanding balance —
+// same shape as POST /payments above (same account_payments/
+// payment_allocations tables, same FIFO-oldest-first default allocation,
+// same balance decrement + runCreditCheck re-evaluation), just tagged
+// payment_method='writeoff' instead of a real tender, gated by the
+// stricter accounts_writeoff permission on top of the router-level
+// `accounts` gate, and requiring a reason. Deliberately skips the
+// rental-commission trigger POST /payments has — forgiven debt was never
+// actually collected, so it shouldn't pay out a salesperson's commission.
+router.post('/writeoff', requirePermission('accounts_writeoff'), async (req, res) => {
+  try {
+    const { customer_id, employee_id, branch_id, amount, reason, allocations } = req.body;
+    if (!customer_id || !amount || parseFloat(amount) <= 0) return res.status(400).json({ error: 'customer_id and positive amount required' });
+    if (!reason || !reason.trim()) return res.status(400).json({ error: 'A reason is required to write off a balance' });
+
+    const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [customer_id] });
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    const payment_number = await nextNumber(db, 'account_payments', 'payment_number', 'WO-', 6);
+    const amt = parseFloat(parseFloat(amount).toFixed(2));
+
+    let finalAllocations = [];
+    if (allocations && Array.isArray(allocations) && allocations.length > 0) {
+      finalAllocations = allocations.filter(a => parseFloat(a.amount) > 0).map(a => ({ transaction_id: parseInt(a.transaction_id), amount: parseFloat(parseFloat(a.amount).toFixed(2)) }));
+    } else {
+      const { rows: invoices } = await db.execute({
+        sql: `SELECT t.id, t.total, COALESCE(SUM(pa.amount), 0) as paid_amount
+              FROM transactions t
+              LEFT JOIN payment_allocations pa ON t.id = pa.transaction_id
+              WHERE t.customer_id = ? AND t.payment_method = 'credit' AND t.status = 'completed'
+                AND t.id NOT IN (SELECT checkout_transaction_id FROM rental_agreements WHERE status = 'returned' AND checkout_transaction_id IS NOT NULL)
+              GROUP BY t.id
+              HAVING t.total - COALESCE(SUM(pa.amount), 0) > 0.001
+              ORDER BY t.created_at ASC`,
+        args: [customer_id]
+      });
+      let remaining = amt;
+      for (const inv of invoices) {
+        if (remaining <= 0.001) break;
+        const balance = parseFloat((inv.total - inv.paid_amount).toFixed(2));
+        const apply = parseFloat(Math.min(remaining, balance).toFixed(2));
+        finalAllocations.push({ transaction_id: inv.id, amount: apply });
+        remaining = parseFloat((remaining - apply).toFixed(2));
+      }
+    }
+
+    const woTx = await db.transaction('write');
+    let committed = false;
+    try {
+      const result = await woTx.execute({ sql: 'INSERT INTO account_payments (payment_number,customer_id,employee_id,branch_id,amount,payment_method,notes) VALUES (?,?,?,?,?,?,?)', args: [payment_number, customer_id, employee_id||null, branch_id||null, amt, 'writeoff', reason.trim()] });
+      const woId = Number(result.lastInsertRowid);
+      for (const alloc of finalAllocations) {
+        await woTx.execute({ sql: 'INSERT INTO payment_allocations (payment_id, transaction_id, amount) VALUES (?,?,?)', args: [woId, alloc.transaction_id, alloc.amount] });
+      }
+      await woTx.execute({ sql: 'UPDATE customers SET account_balance = MAX(0, account_balance - ?) WHERE id = ?', args: [amt, customer_id] });
+      await woTx.commit();
+      committed = true;
+
+      const { rows: [woRow] } = await db.execute({ sql: `SELECT p.*, c.first_name || ' ' || c.last_name as customer_name FROM account_payments p LEFT JOIN customers c ON p.customer_id = c.id WHERE p.id = ?`, args: [woId] });
+      try { await runCreditCheck(customer_id); } catch(e) {}
+      res.status(201).json(woRow);
+    } catch(e) {
+      // Once committed, the write-off is saved — rolling back a closed
+      // transaction throws and would crash the process (unhandled
+      // rejection), so only roll back if the commit itself never happened.
+      if (!committed) await woTx.rollback();
+      res.status(committed ? 500 : 400).json({ error: e.message });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Payment statement data for a customer (payments + per-payment allocations)
 router.get('/statement/:customer_id', async (req, res) => {
   try {

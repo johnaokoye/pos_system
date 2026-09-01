@@ -587,7 +587,13 @@ router.patch('/:id/status', async (req, res) => {
         return res.status(400).json({ error: 'This special project must be approved before it can be sent to the customer' });
       }
     }
-    await db.execute({ sql: 'UPDATE quotations SET status = ? WHERE id = ?', args: [status, req.params.id] });
+    // Stamped only the first time a quote reaches that status — a quote
+    // bounced back to draft and re-sent keeps its original sent_at, so the
+    // Quote Funnel report's cycle time always measures from when it first
+    // left Draft, not the most recent resend.
+    const stampSent = status === 'sent' && !q.sent_at ? ', sent_at = CURRENT_TIMESTAMP' : '';
+    const stampAccepted = status === 'accepted' && !q.accepted_at ? ', accepted_at = CURRENT_TIMESTAMP' : '';
+    await db.execute({ sql: `UPDATE quotations SET status = ?${stampSent}${stampAccepted} WHERE id = ?`, args: [status, req.params.id] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM quotations WHERE id = ?', args: [req.params.id] });
     // Customer has accepted the quote (their PO is in hand) — this is the
     // point custom "Q" items actually get submitted to Purchasing, grouped

@@ -155,6 +155,7 @@
     </div>
     <div class="toc-group">
       <div class="toc-group-label">Reporting &amp; Admin</div>
+      <a href="#reports-hub">Reports (Marketing/Sales/Accounts)</a>
       <a href="#reports">Reports &amp; Analytics</a>
       <a href="#employees">Employees</a>
       <a href="#branches">Branches</a>
@@ -341,6 +342,9 @@
 
       <h3>Commission</h3>
       <p>No separate commission setup needed — a converted Special Project becomes a real completed sale exactly like a converted retail quote, so it's picked up by whatever commission plan already applies to sales (see <a href="#commissions">Commissions</a>), crediting whoever the project is assigned to.</p>
+
+      <h3>Margin Report</h3>
+      <p>The <strong>📊 Margin Report</strong> button opens a date-range/branch/status-filtered breakdown of every Special Project's revenue, cost, and margin — cost comes from each line's <strong>Cost</strong> field (see Line items and markup above). Two tables: <strong>By Project</strong> (each project's own margin, with a ⚠ next to any project that has a line with no cost entered — that project's margin is understated, treated as $0 cost on that line) and <strong>By Salesperson</strong> (the same figures rolled up by whoever the project is credited to, same as commission crediting). Gated by the same <span class="perm-pill">special_projects</span> / <span class="perm-pill">special_projects_approve</span> permissions as the rest of this screen — deliberately not folded into the main <a href="#reports">Reports &amp; Analytics</a> screen, since that one only needs the much more broadly-held <span class="perm-pill">reports</span> permission and this report exposes cost/margin data on individually-negotiated deals.</p>
     </section>
 
     <section class="module" id="layaway">
@@ -657,6 +661,39 @@
         <li>A summary view totals commissions owed/paid across employees and time periods.</li>
         <li>An employee flagged <strong>Salesperson</strong> (see <a href="#employees">Employees</a>) only sees their own commission records and their own row of the summary — never other employees' figures.</li>
         <li><strong>View-only access</strong>: giving a Security Group the base <span class="perm-pill">commissions</span> permission with none of its sub-permissions checked lets someone see the Dashboard and Records tabs (read-only — no Approve/Pay/Delete buttons appear) without granting any of those actions; unchecking <span class="perm-pill">commissions_plans</span> also hides the Plans &amp; Assignments tab entirely, so plan rate structures stay hidden from that group. All of this is enforced server-side too, not just hidden in the UI.</li>
+      </ul>
+    </section>
+
+    <section class="module" id="reports-hub">
+      <h2 class="module">Reports <span class="tag">reports</span></h2>
+      <p class="module-intro">A dedicated sidebar link, separate from the Sales/Accounts hubs it used to be buried inside one tile of — opens straight to three category tiles: <strong>Marketing</strong>, <strong>Sales</strong>, <strong>Accounts</strong>. Every report on all three tiles needs the same <span class="perm-pill">reports</span> permission the classic Reports &amp; Analytics screen below already uses (see that section for the export/financial sub-permissions) — none of the newer reports expose anything more sensitive than what's already visible elsewhere in CRM, Customers, or Transactions. The one exception is the Special Projects <a href="#special-projects">Margin Report</a> — linked from the Sales tab for convenience, but it stays gated by its own stricter <span class="perm-pill">special_projects</span> / <span class="perm-pill">special_projects_approve</span> permissions and is hidden from anyone who only has <span class="perm-pill">reports</span>.</p>
+      <p>AR Collections still lives on the general Reports &amp; Analytics screen below, and Customer Balances / Aging / Payment History stay on the <a href="#accounts">Accounts</a> screen — the Accounts tile's reports are the ones that didn't already have a home.</p>
+
+      <h3>Marketing reports</h3>
+      <ul>
+        <li><strong>Lead Source Performance</strong> — leads, opportunities, and wins per <code>crm_leads.source</code>, with lead→opportunity, opportunity→won, and blended lead→won conversion rates for each source.</li>
+        <li><strong>Customer Segment Report</strong> — revenue, discount given, and margin per Customer Category (see <a href="#customers">Customers</a>), plus a "No Category" row for comparison — shows whether a category's auto-discount is actually driving volume.</li>
+        <li><strong>Loyalty &amp; Cash-Back Engagement</strong> — points issued and cash back redeemed over a period, a redemption rate, and the top point earners in that range. There's no historical points ledger in this app (only each customer's running balance), so "points issued" is reconstructed by re-applying the same 0.5-point-per-$1 rate used at checkout over completed sales in range, rather than reading a stored log — noted directly on the report.</li>
+        <li><strong>Discount Card Utilization</strong> — cards issued vs. actually used in a sale per card type, plus a list of cardholders who haven't used theirs in the selected range. A card's use isn't tracked by a dedicated link to the transaction — it's detected the same way a Customer Category discount is (matching on the transaction's recorded discount description), which the report explains inline.</li>
+        <li><strong>New vs. Repeat Customer Rate</strong> — a customer counts as "new" if their first-ever completed sale falls inside the selected range, "repeat" if they bought again in range but their first-ever sale was earlier. Shows the split in both customer count and revenue.</li>
+      </ul>
+
+      <h3>Sales reports</h3>
+      <ul>
+        <li><strong>Salesperson Leaderboard</strong> — quotes created/converted, win rate, and credited sales per salesperson, keyed off <code>original_employee_id</code> — the same commission-credit field <a href="#quotations">Quotations</a>' Reassign and <a href="#commissions">Commissions</a> already use. Covers every quote type, including Special Projects.</li>
+        <li><strong>Quote Funnel &amp; Cycle Time</strong> — how many quotes currently sit in each status, plus the average days spent in Draft, Sent, and Accepted (and, for Special Projects, the extra Draft→Submitted and Submitted→Approved detour). Cycle time is only measured going forward from when this tracking was added — a quote created before then, or one that skipped a stage entirely (e.g. converted straight from Draft), simply isn't counted in that stage's average rather than showing a misleading 0.</li>
+        <li><strong>Special Projects Margin Report</strong> — the same report described under <a href="#special-projects">Special Projects</a>, linked here too for convenience; only shown to those who already hold <span class="perm-pill">special_projects</span> or <span class="perm-pill">special_projects_approve</span>.</li>
+        <li><strong>CRM Pipeline / Weighted Forecast</strong> — open opportunities (not yet won or lost) grouped by stage, with each stage's total value and probability-weighted forecast value. Defaults to opportunities expected to close in the next 90 days; opportunities with no expected close date are always included regardless of the range.</li>
+        <li><strong>Rental Utilization</strong> — bookings, quantity booked, and revenue per rental item (bundled/optional accessories aren't counted separately from their parent item), plus how many units of each are checked out on an active rental right now — sort by revenue to see what's carrying the rental book vs. what's rarely booked.</li>
+      </ul>
+
+      <h3>Accounts reports</h3>
+      <ul>
+        <li><strong>Cash Drawer Variance Trend</strong> — counted cash vs. expected cash (opening float + cash sales) on every reconciled drawer session in range, grouped by employee and branch — the same expected-cash formula the reconciliation screen itself uses, so this never disagrees with what staff saw when they counted. A running trend list (most recent first) sits underneath the summary tables.</li>
+        <li><strong>Credit Risk / Exposure</strong> — every credit-enabled customer currently carrying a balance: how much, what % of their credit limit, whether they're already blocked, and — for anyone not yet blocked — how many days remain before the same auto-block rule <a href="#customers">Customers</a> already uses (days overdue vs. their payment terms) would block them. A point-in-time snapshot, not date-ranged.</li>
+        <li><strong>Tax Collected</strong> — taxable sales and tax actually collected, by day and by branch, plus the effective rate — sized for handing to whoever files sales tax.</li>
+        <li><strong>Write-Off / Bad Debt</strong> (needs <span class="perm-pill">accounts_writeoff</span> — hidden from the report list entirely without it) — every balance forgiveness recorded, by customer and branch. Writing off a balance is a new action on the Accounts screen's Customer Balances table: a <strong>Write Off</strong> button next to Record Payment (shown only when a customer has an outstanding balance and the viewer holds <span class="perm-pill">accounts_writeoff</span>) that requires a reason and applies to the oldest outstanding invoices first, same as a normal payment — it just forgives the balance instead of collecting it, and never triggers rental commission the way an actual payment does.</li>
+        <li><strong>Gross Margin (COGS)</strong> — the store-wide sibling of the Special Projects Margin Report: <code>products.cost</code> vs. line price on every completed sale, broken down by category and branch.</li>
       </ul>
     </section>
 

@@ -507,6 +507,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M11.8 10.9c-2.27-.59-3-1.2-3-2.15 0-1.09 1.01-1.85 2.7-1.85 1.78 0 2.44.85 2.5 2.1h2.21c-.07-1.72-1.12-3.3-3.21-3.81V3h-3v2.16c-1.94.42-3.5 1.68-3.5 3.61 0 2.31 1.91 3.46 4.7 4.13 2.5.6 3 1.48 3 2.41 0 .69-.49 1.79-2.7 1.79-2.06 0-2.87-.92-2.98-2.1h-2.2c.12 2.19 1.76 3.42 3.68 3.83V21h3v-2.15c1.95-.37 3.5-1.5 3.5-3.55 0-2.84-2.43-3.81-4.7-4.4z"/></svg>
       Accounts
     </div>
+    <div class="nav-item" data-section="reports-hub">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z"/></svg>
+      Reports
+    </div>
     <div class="nav-item" data-section="warehouse-hub">
       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 4H4v2h16V4zm1 10v-2l-1-5H4l-1 5v2h1v6h10v-6h4v6h2v-6h1zm-9 4H6v-4h6v4z"/></svg>
       Warehouse
@@ -988,6 +992,11 @@ const App = {
       { section: 'drawers', label: 'Cash Drawers', color: '#00897B', icon: '<path d="M20 6H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 14H4v-6h16v6zm0-10H4V8h16v2zM6 14h2v2H6zm4 0h6v2h-6z"/>' },
       { section: 'reports', label: 'Reports', color: '#4CAF50', icon: '<path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z"/>' },
     ]},
+    'reports-hub': { title: 'Reports', children: [
+      { section: 'reports-marketing', label: 'Marketing', color: '#5c6bc0', icon: '<path d="M18 11v2h4v-2h-4zm-2 6.61c.96.71 2.21 1.65 3.2 2.39.4-.53.8-1.07 1.2-1.6-.99-.74-2.24-1.68-3.2-2.4-.4.54-.8 1.08-1.2 1.61zM20.4 5.6c-.4-.53-.8-1.07-1.2-1.6-.99.74-2.24 1.68-3.2 2.4.4.53.8 1.07 1.2 1.6.96-.72 2.21-1.65 3.2-2.4zM4 9c-1.1 0-2 .9-2 2v2c0 1.1.9 2 2 2h1v4h2v-4h1l5 3V6L8 9H4zm11.5 3c0-1.33-.58-2.53-1.5-3.35v6.69c.92-.81 1.5-2.01 1.5-3.34z"/>' },
+      { section: 'reports-sales', label: 'Sales', color: '#26a69a', icon: '<path d="M16 6l2.29 2.29-4.88 4.88-4-4L2 16.59 3.41 18l6-6 4 4 6.3-6.29L22 12V6z"/>' },
+      { section: 'reports-accounts', label: 'Accounts', color: '#2196F3', icon: '<path d="M11.8 10.9c-2.27-.59-3-1.2-3-2.15 0-1.09 1.01-1.85 2.7-1.85 1.78 0 2.44.85 2.5 2.1h2.21c-.07-1.72-1.12-3.3-3.21-3.81V3h-3v2.16c-1.94.42-3.5 1.68-3.5 3.61 0 2.31 1.91 3.46 4.7 4.13 2.5.6 3 1.48 3 2.41 0 .69-.49 1.79-2.7 1.79-2.06 0-2.87-.92-2.98-2.1h-2.2c.12 2.19 1.76 3.42 3.68 3.83V21h3v-2.15c1.95-.37 3.5-1.5 3.5-3.55 0-2.84-2.43-3.81-4.7-4.4z"/>' },
+    ]},
     'warehouse-hub': { title: 'Warehouse', children: [
       { section: 'inventory', label: 'Retail Inventory', color: '#2196F3', icon: '<path d="M20 4H4v2h16V4zm1 10v-2l-1-5H4l-1 5v2h1v6h10v-6h4v6h2v-6h1zm-9 4H6v-4h6v4z"/>' },
       { section: 'warehouse', label: 'Warehouse Mgmt', color: '#00897B', icon: '<path d="M20 8h-3V4H3c-1.1 0-2 .9-2 2v11h2c0 1.66 1.34 3 3 3s3-1.34 3-3h6c0 1.66 1.34 3 3 3s3-1.34 3-3h2v-5l-3-4zM3 7h12v7H3V7zm3 9.5c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm13.5-9l1.96 2.5H17V7.5h2.5zm-1.5 9c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/>' },
@@ -1019,6 +1028,11 @@ const App = {
     // Approvers who don't hold special_projects itself still need the tile
     // visible so they can reach the approval queue.
     if (section === 'special-projects') return this.can('special_projects') || this.can('special_projects_approve');
+    // The three report category tiles all gate on the same `reports`
+    // permission every other report endpoint already uses — none of them
+    // expose anything more sensitive than what's already visible elsewhere
+    // (CRM, Customers, Transactions).
+    if (section === 'reports-marketing' || section === 'reports-sales' || section === 'reports-accounts') return this.can('reports');
     return this.can(section);
   },
 
@@ -1200,7 +1214,7 @@ const App = {
 
   async showSection(name) {
     const perms = this.currentUser?.permissions;
-    const sectionAllowed = name === 'driver-dashboard' ? !!this.currentUser?.is_driver : name === 'guard-dashboard' ? !!this.currentUser?.is_security : name === 'online-orders' ? this.can('transactions') : name === 'rental-items' ? this.can('rentals') : name === 'rental-deposits' ? this.can('rentals') : name === 'rental-dispatch' ? this.can('rentals') : name === 'transfer-dispatch' ? this.can('transfers') : name === 'purchase-requests' ? this.can('purchase_requests') : name === 'work-orders' ? this.can('work_orders') : name === 'wo-schedule' ? this.can('work_orders') : name === 'special-projects' ? (this.can('special_projects') || this.can('special_projects_approve')) : this._hubGroups[name] ? this.canAccessHub(name) : this.can(name);
+    const sectionAllowed = name === 'driver-dashboard' ? !!this.currentUser?.is_driver : name === 'guard-dashboard' ? !!this.currentUser?.is_security : name === 'online-orders' ? this.can('transactions') : name === 'rental-items' ? this.can('rentals') : name === 'rental-deposits' ? this.can('rentals') : name === 'rental-dispatch' ? this.can('rentals') : name === 'transfer-dispatch' ? this.can('transfers') : name === 'purchase-requests' ? this.can('purchase_requests') : name === 'work-orders' ? this.can('work_orders') : name === 'wo-schedule' ? this.can('work_orders') : name === 'special-projects' ? (this.can('special_projects') || this.can('special_projects_approve')) : (name === 'reports-marketing' || name === 'reports-sales' || name === 'reports-accounts') ? this.can('reports') : this._hubGroups[name] ? this.canAccessHub(name) : this.can(name);
     if (perms && !sectionAllowed) return;
     this.section = name;
     this.closeModal();
@@ -1210,7 +1224,7 @@ const App = {
       const hub = this._hubGroups[ds];
       el.classList.toggle('active', ds === name || !!(hub && hub.children.some(c => c.section === name)));
     });
-    const titles = { dashboard: 'Dashboard', 'driver-dashboard': 'My Deliveries', 'guard-dashboard': 'My Verifications', pos: 'Point of Sale', inventory: 'Retail Inventory Management', services: 'Services & Non-Inventory Items', rentals: 'Rentals', 'rental-items': 'Rental Items', 'work-orders': 'Work Orders', 'wo-schedule': 'Technician Schedule', dispatch: 'Dispatch', 'rental-dispatch': 'Rental Dispatch', 'transfer-dispatch': 'Branch Transfer Dispatch', 'rental-deposits': 'Rental Deposits & Credit Notes', 'purchase-requests': 'Purchase Requests', layaway: 'Layaway', customers: 'Customers', transactions: 'Transactions', 'online-orders': 'Online Orders', reports: 'Reports & Analytics', employees: 'Employees', settings: 'Settings', suppliers: 'Suppliers', purchasing: 'Purchasing', quotations: 'Quotations', 'special-projects': 'Special Projects', accounts: 'Accounts Receivable', branches: 'Branch Management', security: 'Security Groups', transfers: 'Branch Transfers', crm: 'CRM & Sales', commissions: 'Commission Tracking', warehouse: 'Warehouse Management', shipping: 'Shipping', 'cycle-counts': 'Cycle Counts', drawers: 'Cash Drawers', promotions: 'Promotions', 'discount-cards': 'Discount Cards', 'cash-back-cards': 'Cash Back Cards', 'purchasing-hub': 'Purchasing', 'sales-hub': 'Sales', 'accounts-hub': 'Accounts', 'warehouse-hub': 'Warehouse', 'admin-hub': 'Admin' };
+    const titles = { dashboard: 'Dashboard', 'driver-dashboard': 'My Deliveries', 'guard-dashboard': 'My Verifications', pos: 'Point of Sale', inventory: 'Retail Inventory Management', services: 'Services & Non-Inventory Items', rentals: 'Rentals', 'rental-items': 'Rental Items', 'work-orders': 'Work Orders', 'wo-schedule': 'Technician Schedule', dispatch: 'Dispatch', 'rental-dispatch': 'Rental Dispatch', 'transfer-dispatch': 'Branch Transfer Dispatch', 'rental-deposits': 'Rental Deposits & Credit Notes', 'purchase-requests': 'Purchase Requests', layaway: 'Layaway', customers: 'Customers', transactions: 'Transactions', 'online-orders': 'Online Orders', reports: 'Reports & Analytics', employees: 'Employees', settings: 'Settings', suppliers: 'Suppliers', purchasing: 'Purchasing', quotations: 'Quotations', 'special-projects': 'Special Projects', accounts: 'Accounts Receivable', branches: 'Branch Management', security: 'Security Groups', transfers: 'Branch Transfers', crm: 'CRM & Sales', commissions: 'Commission Tracking', warehouse: 'Warehouse Management', shipping: 'Shipping', 'cycle-counts': 'Cycle Counts', drawers: 'Cash Drawers', promotions: 'Promotions', 'discount-cards': 'Discount Cards', 'cash-back-cards': 'Cash Back Cards', 'purchasing-hub': 'Purchasing', 'sales-hub': 'Sales', 'accounts-hub': 'Accounts', 'warehouse-hub': 'Warehouse', 'admin-hub': 'Admin', 'reports-hub': 'Reports', 'reports-marketing': 'Marketing Reports', 'reports-sales': 'Sales Reports', 'reports-accounts': 'Accounts Reports' };
     document.getElementById('topbar-title').innerHTML = this.buildBreadcrumb(name, titles[name] || name);
     const content = document.getElementById('content');
     content.style.padding = name === 'pos' ? '0' : '20px';
@@ -1220,7 +1234,7 @@ const App = {
     // `body.pos-kiosk` CSS) — removed so staff can navigate away without
     // using the in-page Exit button first. The content-area sizing above
     // still gives POS its own full-height layout within the remaining space.
-    const renders = { dashboard: () => this.renderDashboard(), 'driver-dashboard': () => this.renderDriverDashboard(), 'guard-dashboard': () => this.renderGuardDashboard(), pos: () => this.renderPOS(), inventory: () => this.renderInventory(), services: () => this.renderServices(), rentals: () => this.renderRentals(), 'rental-items': () => this.renderRentalItems(), 'work-orders': () => this.renderWorkOrders(), 'wo-schedule': () => this.renderWOSchedule(), dispatch: () => this.renderHub('dispatch'), 'rental-dispatch': () => this.renderRentalDispatch(), 'transfer-dispatch': () => this.renderTransferDispatch(), 'rental-deposits': () => this.renderRentalDeposits(), 'purchase-requests': () => this.renderPurchasing('requests'), layaway: () => this.renderLayaway(), customers: () => this.renderCustomers(), transactions: () => this.renderTransactions(), 'online-orders': () => this.renderOnlineOrders(), reports: () => this.renderReports(), employees: () => this.renderEmployees(), settings: () => this.renderSettings(), suppliers: () => this.renderSuppliers(), purchasing: () => this.renderPurchasing(), quotations: () => this.renderQuotations(), 'special-projects': () => this.renderSpecialProjects(), accounts: () => this.renderAccounts(), branches: () => this.renderBranches(), security: () => this.renderSecurity(), transfers: () => this.renderTransfers(), crm: () => this.renderCRM(), commissions: () => this.renderCommissions(), warehouse: () => this.renderWarehouse(), shipping: () => this.renderShipping(), 'cycle-counts': () => this.renderCycleCounts(), drawers: () => this.renderDrawers(), promotions: () => this.renderPromotions(), 'discount-cards': () => this.renderDiscountCards(), 'cash-back-cards': () => this.renderCashBackCards(), 'purchasing-hub': () => this.renderHub('purchasing-hub'), 'sales-hub': () => this.renderHub('sales-hub'), 'accounts-hub': () => this.renderHub('accounts-hub'), 'warehouse-hub': () => this.renderHub('warehouse-hub'), 'admin-hub': () => this.renderHub('admin-hub') };
+    const renders = { dashboard: () => this.renderDashboard(), 'driver-dashboard': () => this.renderDriverDashboard(), 'guard-dashboard': () => this.renderGuardDashboard(), pos: () => this.renderPOS(), inventory: () => this.renderInventory(), services: () => this.renderServices(), rentals: () => this.renderRentals(), 'rental-items': () => this.renderRentalItems(), 'work-orders': () => this.renderWorkOrders(), 'wo-schedule': () => this.renderWOSchedule(), dispatch: () => this.renderHub('dispatch'), 'rental-dispatch': () => this.renderRentalDispatch(), 'transfer-dispatch': () => this.renderTransferDispatch(), 'rental-deposits': () => this.renderRentalDeposits(), 'purchase-requests': () => this.renderPurchasing('requests'), layaway: () => this.renderLayaway(), customers: () => this.renderCustomers(), transactions: () => this.renderTransactions(), 'online-orders': () => this.renderOnlineOrders(), reports: () => this.renderReports(), employees: () => this.renderEmployees(), settings: () => this.renderSettings(), suppliers: () => this.renderSuppliers(), purchasing: () => this.renderPurchasing(), quotations: () => this.renderQuotations(), 'special-projects': () => this.renderSpecialProjects(), accounts: () => this.renderAccounts(), branches: () => this.renderBranches(), security: () => this.renderSecurity(), transfers: () => this.renderTransfers(), crm: () => this.renderCRM(), commissions: () => this.renderCommissions(), warehouse: () => this.renderWarehouse(), shipping: () => this.renderShipping(), 'cycle-counts': () => this.renderCycleCounts(), drawers: () => this.renderDrawers(), promotions: () => this.renderPromotions(), 'discount-cards': () => this.renderDiscountCards(), 'cash-back-cards': () => this.renderCashBackCards(), 'purchasing-hub': () => this.renderHub('purchasing-hub'), 'sales-hub': () => this.renderHub('sales-hub'), 'accounts-hub': () => this.renderHub('accounts-hub'), 'warehouse-hub': () => this.renderHub('warehouse-hub'), 'admin-hub': () => this.renderHub('admin-hub'), 'reports-hub': () => this.renderHub('reports-hub'), 'reports-marketing': () => this.renderReportsMarketing(), 'reports-sales': () => this.renderReportsSales(), 'reports-accounts': () => this.renderReportsAccounts() };
     if (renders[name]) await renders[name]();
   },
 
@@ -10665,6 +10679,783 @@ const App = {
   },
 
   // ─── Reports ──────────────────────────────────────────────
+  // ─── Reports hub: Marketing / Sales / Accounts ─────────────────────────
+  // The Sales and Accounts categories currently just point at the existing
+  // Reports & Analytics screen (below) rather than duplicating it — the
+  // Marketing category is the first one broken out into its own dedicated,
+  // purpose-built reports.
+
+  _reportButtonCard(title, description, onclick) {
+    return `<div class="card" style="margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;gap:16px;padding:16px 18px">
+      <div>
+        <div style="font-weight:600;font-size:15px;margin-bottom:3px">${title}</div>
+        <div style="font-size:12px;color:var(--text-muted)">${description}</div>
+      </div>
+      <button class="btn btn-primary" style="flex-shrink:0" onclick="${onclick}">View Report</button>
+    </div>`;
+  },
+
+  renderReportsMarketing() {
+    document.getElementById('content').innerHTML = `
+      <div class="section-header"><h2>Marketing Reports</h2></div>
+      ${this._reportButtonCard('Lead Source Performance', 'Conversion rate from lead source (Website, Referral, Bid, etc.) through to won opportunities.', 'App.showLeadSourceReport()')}
+      ${this._reportButtonCard('Customer Segment Report', 'Sales and margin by Customer Category, to see whether each category\'s auto-discount is driving volume.', 'App.showCustomerSegmentReport()')}
+      ${this._reportButtonCard('Loyalty & Cash-Back Engagement', 'Points issued vs. redeemed, redemption rate, and top point earners.', 'App.showLoyaltyEngagementReport()')}
+      ${this._reportButtonCard('Discount Card Utilization', 'Active discount cards vs. actually used in a sale, to spot cards issued but never redeemed.', 'App.showDiscountCardReport()')}
+      ${this._reportButtonCard('New vs. Repeat Customer Rate', 'New vs. returning customers over a period, and the revenue split between them.', 'App.showCustomerRetentionReport()')}`;
+  },
+
+  renderReportsSales() {
+    document.getElementById('content').innerHTML = `
+      <div class="section-header"><h2>Sales Reports</h2></div>
+      ${this._reportButtonCard('Salesperson Leaderboard', 'Quotes created/converted, win rate, and total credited sales per salesperson.', 'App.showSalesLeaderboardReport()')}
+      ${this._reportButtonCard('Quote Funnel &amp; Cycle Time', 'How many quotes sit in each status, and the average days spent between Draft, Sent, Accepted, and Converted.', 'App.showQuoteFunnelReport()')}
+      ${(this.can('special_projects') || this.can('special_projects_approve')) ? this._reportButtonCard('Special Projects Margin Report', "Realized markup per Special Project, from each line's Cost vs. Price.", 'App.showSpecialProjectsMarginReport()') : ''}
+      ${this._reportButtonCard('CRM Pipeline / Weighted Forecast', 'Open opportunities by stage, weighted by close probability.', 'App.showCrmPipelineReport()')}
+      ${this._reportButtonCard('Rental Utilization', "Bookings and revenue per rental item, to spot under-used equipment vs. what's always out.", 'App.showRentalUtilizationReport()')}
+      <p style="font-size:11px;color:var(--text-muted);margin-top:10px">Sales Summary, Top Products, and By Category still live on the general <a href="#" onclick="event.preventDefault();App.showSection('reports')">Reports &amp; Analytics</a> screen.</p>`;
+  },
+
+  renderReportsAccounts() {
+    document.getElementById('content').innerHTML = `
+      <div class="section-header"><h2>Accounts Reports</h2></div>
+      ${this._reportButtonCard('Cash Drawer Variance Trend', 'Over/short by employee and branch across reconciliations, to catch a pattern before it\'s a problem.', 'App.showCashVarianceReport()')}
+      ${this._reportButtonCard('Credit Risk / Exposure', 'Customers near or over their credit limit, blocked accounts, and days remaining before an unpaid balance auto-blocks.', 'App.showCreditRiskReport()')}
+      ${this._reportButtonCard('Tax Collected', 'Taxable sales and tax collected by day and branch, sized for filing.', 'App.showTaxCollectedReport()')}
+      ${this.can('accounts_writeoff') ? this._reportButtonCard('Write-Off / Bad Debt', 'Every balance written off, by customer and branch, over a period.', 'App.showWriteoffReport()') : ''}
+      ${this._reportButtonCard('Gross Margin (COGS)', 'Store-wide cost vs. price on completed sales, by category and branch — the sibling of the Special Projects margin report.', 'App.showGrossMarginReport()')}
+      <p style="font-size:11px;color:var(--text-muted);margin-top:10px">AR Collections still lives on the general <a href="#" onclick="event.preventDefault();App.showSection('reports')">Reports &amp; Analytics</a> screen; Customer Balances / Aging / Payment History are on the <a href="#" onclick="event.preventDefault();App.showSection('accounts')">Accounts</a> screen.</p>`;
+  },
+
+  // ─── Cash Drawer Variance Trend ─────────────────────────────────────────
+
+  showCashVarianceReport() {
+    this._showReportModal('Cash Drawer Variance Trend', this._reportDateRangeFilters('cv-start','cv-end'), 'loadCashVarianceReport');
+  },
+
+  async loadCashVarianceReport() {
+    const start = document.getElementById('cv-start')?.value || '';
+    const end = document.getElementById('cv-end')?.value || '';
+    const content = document.getElementById('rpt-modal-content');
+    if (!content) return;
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let data;
+    try { data = await this.api('GET', `/reports/cash-variance?start=${start}&end=${end}`); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    if (!document.getElementById('rpt-modal-content')) return;
+
+    const { summary, byEmployee, sessions } = data;
+    const varColor = v => v > 0.005 ? 'var(--success)' : v < -0.005 ? 'var(--danger)' : 'var(--text-muted)';
+    const varLabel = v => v > 0.005 ? `+${this.fmt(v)} over` : v < -0.005 ? `${this.fmt(v)} short` : 'exact';
+    content.innerHTML = `
+      <div class="stats-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:18px">
+        <div class="stat-card blue"><div class="stat-label">Reconciliations</div><div class="stat-value">${summary.session_count}</div></div>
+        <div class="stat-card ${summary.total_variance<0?'red':'green'}"><div class="stat-label">Net Variance</div><div class="stat-value">${varLabel(summary.total_variance)}</div></div>
+        <div class="stat-card green"><div class="stat-label">Over</div><div class="stat-value">${summary.over_count}</div></div>
+        <div class="stat-card red"><div class="stat-label">Short</div><div class="stat-value">${summary.short_count}</div></div>
+      </div>
+      ${!byEmployee.length ? '<div class="empty-state"><p>No reconciled sessions in this range.</p></div>' : `
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">By Employee</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Employee</th><th>Sessions</th><th>Over</th><th>Short</th><th>Net Variance</th><th>Avg / Session</th></tr></thead>
+            <tbody>${byEmployee.map(r => `
+              <tr>
+                <td class="fw-600">${r.name}</td>
+                <td>${r.session_count}</td>
+                <td>${r.over_count}</td>
+                <td>${r.short_count}</td>
+                <td style="color:${varColor(r.total_variance)};font-weight:600">${this.fmt(r.total_variance)}</td>
+                <td>${this.fmt(r.avg_variance)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">Trend (most recent first)</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Date</th><th>Employee</th><th>Branch</th><th>Expected</th><th>Counted</th><th>Variance</th></tr></thead>
+            <tbody>${sessions.map(r => `
+              <tr>
+                <td style="color:var(--text-muted)">${this.fmtDateTime(r.reconciled_at)}</td>
+                <td>${r.employee_name||'—'}</td>
+                <td>${r.branch_name||'—'}</td>
+                <td>${this.fmt(r.expected_cash)}</td>
+                <td>${this.fmt(r.cash_counted)}</td>
+                <td style="color:${varColor(r.variance)};font-weight:600">${this.fmt(r.variance)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`}`;
+  },
+
+  // ─── Credit Risk / Exposure ─────────────────────────────────────────────
+
+  showCreditRiskReport() {
+    this.showModal(`
+      <div class="modal" style="max-width:820px">
+        <div class="modal-header"><span class="modal-title">Credit Risk / Exposure</span><button class="modal-close">✕</button></div>
+        <div class="modal-body" style="max-height:75vh;overflow-y:auto">
+          <div id="rpt-modal-content"><div class="empty-state"><p>Loading...</p></div></div>
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">Close</button></div>
+      </div>`);
+    this.loadCreditRiskReport();
+  },
+
+  async loadCreditRiskReport() {
+    const content = document.getElementById('rpt-modal-content');
+    if (!content) return;
+    let data;
+    try { data = await this.api('GET', '/reports/credit-risk'); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    if (!document.getElementById('rpt-modal-content')) return;
+
+    const { summary, customers } = data;
+    const riskBadge = { blocked: 'badge-danger', over_limit: 'badge-danger', near_limit: 'badge-warning', ok: 'badge-success' };
+    const riskLabel = { blocked: 'Blocked', over_limit: 'Over Limit', near_limit: 'Near Limit', ok: 'OK' };
+    content.innerHTML = `
+      <div class="stats-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:18px">
+        <div class="stat-card blue"><div class="stat-label">Customers w/ Balance</div><div class="stat-value">${summary.at_risk_count}</div></div>
+        <div class="stat-card red"><div class="stat-label">Blocked</div><div class="stat-value">${summary.blocked_count}</div></div>
+        <div class="stat-card orange"><div class="stat-label">Over/Near Limit</div><div class="stat-value">${summary.over_limit_count + summary.near_limit_count}</div></div>
+        <div class="stat-card purple"><div class="stat-label">Total Exposure</div><div class="stat-value">${this.fmt(summary.total_exposure)}</div></div>
+      </div>
+      ${!customers.length ? '<div class="empty-state"><p>No outstanding credit balances.</p></div>' : `
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Customer</th><th>Balance</th><th>Limit</th><th>% of Limit</th><th>Status</th><th>Days to Block</th></tr></thead>
+            <tbody>${customers.map(c => `
+              <tr>
+                <td class="fw-600">${c.customer_name} <span style="color:var(--text-muted);font-size:11px">(${c.customer_number})</span></td>
+                <td>${this.fmt(c.account_balance)}</td>
+                <td>${c.credit_limit > 0 ? this.fmt(c.credit_limit) : '—'}</td>
+                <td>${c.pct_of_limit!=null?c.pct_of_limit+'%':'—'}</td>
+                <td><span class="badge-pill ${riskBadge[c.risk_level]}" style="font-size:10px">${riskLabel[c.risk_level]}</span></td>
+                <td>${c.days_to_block==null?'—':(c.days_to_block<=0?`<span style="color:var(--danger)">overdue ${-c.days_to_block}d</span>`:`${c.days_to_block}d`)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`}`;
+  },
+
+  // ─── Tax Collected ───────────────────────────────────────────────────────
+
+  showTaxCollectedReport() {
+    this._showReportModal('Tax Collected', this._reportDateRangeFilters('tc-start','tc-end'), 'loadTaxCollectedReport');
+  },
+
+  async loadTaxCollectedReport() {
+    const start = document.getElementById('tc-start')?.value || '';
+    const end = document.getElementById('tc-end')?.value || '';
+    const content = document.getElementById('rpt-modal-content');
+    if (!content) return;
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let data;
+    try { data = await this.api('GET', `/reports/tax-collected?start=${start}&end=${end}`); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    if (!document.getElementById('rpt-modal-content')) return;
+
+    const { summary, byDay, byBranch } = data;
+    content.innerHTML = `
+      <div class="stats-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:18px">
+        <div class="stat-card blue"><div class="stat-label">Taxable Sales</div><div class="stat-value">${this.fmt(summary.taxable_sales)}</div></div>
+        <div class="stat-card green"><div class="stat-label">Tax Collected</div><div class="stat-value">${this.fmt(summary.tax_collected)}</div></div>
+        <div class="stat-card purple"><div class="stat-label">Effective Rate</div><div class="stat-value">${summary.effective_rate==null?'—':summary.effective_rate+'%'}</div></div>
+      </div>
+      ${byBranch.length > 1 ? `
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">By Branch</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Branch</th><th>Taxable Sales</th><th>Tax Collected</th></tr></thead>
+            <tbody>${byBranch.map(r => `<tr><td class="fw-600">${r.branch_name||'—'}</td><td>${this.fmt(r.taxable_sales)}</td><td>${this.fmt(r.tax_collected)}</td></tr>`).join('')}</tbody>
+          </table>
+        </div>
+      </div>` : ''}
+      ${!byDay.length ? '<div class="empty-state"><p>No completed sales in this range.</p></div>' : `
+      <div class="card">
+        <div class="card-header"><span class="card-title">By Day</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Date</th><th>Taxable Sales</th><th>Tax Collected</th></tr></thead>
+            <tbody>${byDay.map(r => `<tr><td class="fw-600">${this.fmtDate(r.date)}</td><td>${this.fmt(r.taxable_sales)}</td><td>${this.fmt(r.tax_collected)}</td></tr>`).join('')}</tbody>
+          </table>
+        </div>
+      </div>`}`;
+  },
+
+  // ─── Write-Off / Bad Debt ───────────────────────────────────────────────
+
+  showWriteoffReport() {
+    this._showReportModal('Write-Off / Bad Debt', this._reportDateRangeFilters('wor-start','wor-end'), 'loadWriteoffReport');
+  },
+
+  async loadWriteoffReport() {
+    const start = document.getElementById('wor-start')?.value || '';
+    const end = document.getElementById('wor-end')?.value || '';
+    const content = document.getElementById('rpt-modal-content');
+    if (!content) return;
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let data;
+    try { data = await this.api('GET', `/reports/writeoffs?start=${start}&end=${end}`); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    if (!document.getElementById('rpt-modal-content')) return;
+
+    const { summary, byCustomer, records } = data;
+    content.innerHTML = `
+      <div class="stats-grid" style="grid-template-columns:repeat(2,1fr);margin-bottom:18px">
+        <div class="stat-card orange"><div class="stat-label">Write-Offs</div><div class="stat-value">${summary.writeoff_count}</div></div>
+        <div class="stat-card red"><div class="stat-label">Total Written Off</div><div class="stat-value">${this.fmt(summary.total_written_off)}</div></div>
+      </div>
+      ${!records.length ? '<div class="empty-state"><p>No write-offs in this range.</p></div>' : `
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">By Customer</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Customer</th><th>Write-Offs</th><th>Total</th></tr></thead>
+            <tbody>${byCustomer.map(r => `<tr><td class="fw-600">${r.customer_name} <span style="color:var(--text-muted);font-size:11px">(${r.customer_number})</span></td><td>${r.writeoff_count}</td><td>${this.fmt(r.total_written_off)}</td></tr>`).join('')}</tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">Records</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Date</th><th>Customer</th><th>Amount</th><th>Reason</th><th>By</th></tr></thead>
+            <tbody>${records.map(r => `
+              <tr>
+                <td style="color:var(--text-muted)">${this.fmtDate(r.created_at)}</td>
+                <td class="fw-600">${r.customer_name}</td>
+                <td>${this.fmt(r.amount)}</td>
+                <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${this.escapeAttr(r.reason)}">${r.reason||'—'}</td>
+                <td>${r.employee_name||'—'}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`}`;
+  },
+
+  // ─── Gross Margin (COGS) ─────────────────────────────────────────────────
+
+  showGrossMarginReport() {
+    this._showReportModal('Gross Margin (COGS)', this._reportDateRangeFilters('gm-start','gm-end'), 'loadGrossMarginReport');
+  },
+
+  async loadGrossMarginReport() {
+    const start = document.getElementById('gm-start')?.value || '';
+    const end = document.getElementById('gm-end')?.value || '';
+    const content = document.getElementById('rpt-modal-content');
+    if (!content) return;
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let data;
+    try { data = await this.api('GET', `/reports/gross-margin?start=${start}&end=${end}`); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    if (!document.getElementById('rpt-modal-content')) return;
+
+    const { summary, byCategory, byBranch } = data;
+    const marginColor = pct => pct == null ? 'var(--text-muted)' : pct < 0 ? 'var(--danger)' : pct < 15 ? 'var(--warning)' : 'var(--success)';
+    content.innerHTML = `
+      <div class="stats-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:18px">
+        <div class="stat-card blue"><div class="stat-label">Revenue</div><div class="stat-value">${this.fmt(summary.revenue)}</div></div>
+        <div class="stat-card orange"><div class="stat-label">Cost</div><div class="stat-value">${this.fmt(summary.cost)}</div></div>
+        <div class="stat-card green"><div class="stat-label">Margin</div><div class="stat-value" style="color:${marginColor(summary.margin_percent)}">${this.fmt(summary.margin)} <span style="font-size:13px">(${summary.margin_percent==null?'—':summary.margin_percent+'%'})</span></div></div>
+      </div>
+      ${byBranch.length > 1 ? `
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">By Branch</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Branch</th><th>Revenue</th><th>Cost</th><th>Margin</th></tr></thead>
+            <tbody>${byBranch.map(r => `<tr><td class="fw-600">${r.branch_name||'—'}</td><td>${this.fmt(r.revenue)}</td><td>${this.fmt(r.cost)}</td><td style="color:${marginColor(r.margin_percent)};font-weight:600">${this.fmt(r.margin)} (${r.margin_percent==null?'—':r.margin_percent+'%'})</td></tr>`).join('')}</tbody>
+          </table>
+        </div>
+      </div>` : ''}
+      ${!byCategory.length ? '<div class="empty-state"><p>No completed sales in this range.</p></div>' : `
+      <div class="card">
+        <div class="card-header"><span class="card-title">By Category</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Category</th><th>Revenue</th><th>Cost</th><th>Margin</th></tr></thead>
+            <tbody>${byCategory.map(r => `<tr><td class="fw-600">${r.category_name}</td><td>${this.fmt(r.revenue)}</td><td>${this.fmt(r.cost)}</td><td style="color:${marginColor(r.margin_percent)};font-weight:600">${this.fmt(r.margin)} (${r.margin_percent==null?'—':r.margin_percent+'%'})</td></tr>`).join('')}</tbody>
+          </table>
+        </div>
+      </div>`}`;
+  },
+
+  // ─── Salesperson Leaderboard ────────────────────────────────────────────
+
+  showSalesLeaderboardReport() {
+    this._showReportModal('Salesperson Leaderboard', this._reportDateRangeFilters('slb-start','slb-end'), 'loadSalesLeaderboardReport');
+  },
+
+  async loadSalesLeaderboardReport() {
+    const start = document.getElementById('slb-start')?.value || '';
+    const end = document.getElementById('slb-end')?.value || '';
+    const content = document.getElementById('rpt-modal-content');
+    if (!content) return;
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let data;
+    try { data = await this.api('GET', `/reports/salesperson-leaderboard?start=${start}&end=${end}`); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    if (!document.getElementById('rpt-modal-content')) return;
+
+    const { totals, rows } = data;
+    content.innerHTML = `
+      <div class="stats-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:18px">
+        <div class="stat-card blue"><div class="stat-label">Quotes Created</div><div class="stat-value">${totals.quotes_created}</div></div>
+        <div class="stat-card green"><div class="stat-label">Converted</div><div class="stat-value">${totals.quotes_converted} <span style="font-size:13px">(${totals.win_rate}%)</span></div></div>
+        <div class="stat-card purple"><div class="stat-label">Credited Sales</div><div class="stat-value">${this.fmt(totals.credited_sales)}</div></div>
+      </div>
+      ${!rows.length ? '<div class="empty-state"><p>No quotes in this range.</p></div>' : `
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Salesperson</th><th>Quotes Created</th><th>Converted</th><th>Win Rate</th><th>Credited Sales</th></tr></thead>
+            <tbody>${rows.map(r => `
+              <tr>
+                <td class="fw-600">${r.employee_name}</td>
+                <td>${r.quotes_created}</td>
+                <td>${r.quotes_converted}</td>
+                <td>${r.win_rate}%</td>
+                <td class="fw-600">${this.fmt(r.credited_sales)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`}`;
+  },
+
+  // ─── Quote Funnel & Cycle Time ──────────────────────────────────────────
+
+  showQuoteFunnelReport() {
+    this._showReportModal('Quote Funnel &amp; Cycle Time', this._reportDateRangeFilters('qf-start','qf-end'), 'loadQuoteFunnelReport');
+  },
+
+  async loadQuoteFunnelReport() {
+    const start = document.getElementById('qf-start')?.value || '';
+    const end = document.getElementById('qf-end')?.value || '';
+    const content = document.getElementById('rpt-modal-content');
+    if (!content) return;
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let data;
+    try { data = await this.api('GET', `/reports/quote-funnel?start=${start}&end=${end}`); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    if (!document.getElementById('rpt-modal-content')) return;
+
+    const { funnel, cycleTimes } = data;
+    const statusLabel = { draft:'Draft', sent:'Sent', accepted:'Accepted', declined:'Declined', converted:'Converted', cancelled:'Cancelled', pending_approval:'Pending Approval', approved:'Approved' };
+    const visibleCycle = cycleTimes.filter(c => c.sample_size > 0);
+    content.innerHTML = `
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">Current Funnel (by quote created date)</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Status</th><th>Count</th></tr></thead>
+            <tbody>${funnel.map(f => `<tr><td class="fw-600">${statusLabel[f.status]||f.status}</td><td>${f.count}</td></tr>`).join('')}</tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">Average Days Per Stage</span></div>
+        ${!visibleCycle.length ? '<p style="padding:14px;color:var(--text-muted);font-size:13px">No timed transitions yet in this range — stage timestamps only started being recorded recently, so older quotes won\'t show here.</p>' : `
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Stage</th><th>Avg. Days</th><th>Sample Size</th></tr></thead>
+            <tbody>${visibleCycle.map(c => `
+              <tr>
+                <td class="fw-600">${c.stage}</td>
+                <td>${c.avg_days} day${c.avg_days===1?'':'s'}</td>
+                <td style="color:var(--text-muted)">${c.sample_size}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>`}
+      </div>`;
+  },
+
+  // ─── CRM Pipeline / Weighted Forecast ───────────────────────────────────
+
+  showCrmPipelineReport() {
+    const today = new Date().toISOString().slice(0,10);
+    const in90 = new Date(Date.now() + 90*86400000).toISOString().slice(0,10);
+    const filters = `<input type="date" id="cp-start" value="${today}" style="width:150px"><span>to</span><input type="date" id="cp-end" value="${in90}" style="width:150px">`;
+    this._showReportModal('CRM Pipeline / Weighted Forecast', filters, 'loadCrmPipelineReport');
+  },
+
+  async loadCrmPipelineReport() {
+    const start = document.getElementById('cp-start')?.value || '';
+    const end = document.getElementById('cp-end')?.value || '';
+    const content = document.getElementById('rpt-modal-content');
+    if (!content) return;
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let data;
+    try { data = await this.api('GET', `/reports/crm-pipeline?start=${start}&end=${end}`); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    if (!document.getElementById('rpt-modal-content')) return;
+
+    const { totals, byStage, top } = data;
+    content.innerHTML = `
+      <div class="stats-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:8px">
+        <div class="stat-card blue"><div class="stat-label">Open Opportunities</div><div class="stat-value">${totals.opp_count}</div></div>
+        <div class="stat-card purple"><div class="stat-label">Total Value</div><div class="stat-value">${this.fmt(totals.total_value)}</div></div>
+        <div class="stat-card green"><div class="stat-label">Weighted Forecast</div><div class="stat-value">${this.fmt(totals.weighted_value)}</div></div>
+      </div>
+      <p style="font-size:11px;color:var(--text-muted);margin:0 0 16px">Opportunities with no expected close date are always included, regardless of the range above.</p>
+      ${!byStage.length ? '<div class="empty-state"><p>No open opportunities.</p></div>' : `
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">By Stage</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Stage</th><th>Opportunities</th><th>Avg. Probability</th><th>Total Value</th><th>Weighted Value</th></tr></thead>
+            <tbody>${byStage.map(r => `
+              <tr>
+                <td class="fw-600">${r.stage}</td>
+                <td>${r.opp_count}</td>
+                <td>${r.avg_probability}%</td>
+                <td>${this.fmt(r.total_value)}</td>
+                <td class="fw-600">${this.fmt(r.weighted_value)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">Top Weighted Opportunities</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Opportunity</th><th>Customer</th><th>Salesperson</th><th>Stage</th><th>Value</th><th>Prob.</th><th>Expected Close</th></tr></thead>
+            <tbody>${top.map(o => `
+              <tr>
+                <td class="fw-600">${o.title} <span style="color:var(--text-muted);font-size:11px">(${o.opp_number})</span></td>
+                <td>${o.customer_name||'—'}</td>
+                <td>${o.employee_name||'—'}</td>
+                <td>${o.stage}</td>
+                <td>${this.fmt(o.value)}</td>
+                <td>${o.probability}%</td>
+                <td>${o.expected_close?this.fmtDate(o.expected_close):'—'}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`}`;
+  },
+
+  // ─── Rental Utilization ─────────────────────────────────────────────────
+
+  showRentalUtilizationReport() {
+    this._showReportModal('Rental Utilization', this._reportDateRangeFilters('ru-start','ru-end'), 'loadRentalUtilizationReport');
+  },
+
+  async loadRentalUtilizationReport() {
+    const start = document.getElementById('ru-start')?.value || '';
+    const end = document.getElementById('ru-end')?.value || '';
+    const content = document.getElementById('rpt-modal-content');
+    if (!content) return;
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let data;
+    try { data = await this.api('GET', `/reports/rental-utilization?start=${start}&end=${end}`); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    if (!document.getElementById('rpt-modal-content')) return;
+
+    const { totals, items } = data;
+    content.innerHTML = `
+      <div class="stats-grid" style="grid-template-columns:repeat(2,1fr);margin-bottom:8px">
+        <div class="stat-card blue"><div class="stat-label">Total Bookings</div><div class="stat-value">${totals.booking_count}</div></div>
+        <div class="stat-card green"><div class="stat-label">Total Revenue</div><div class="stat-value">${this.fmt(totals.revenue)}</div></div>
+      </div>
+      <p style="font-size:11px;color:var(--text-muted);margin:0 0 16px">Sorted by revenue — scroll to the bottom for the least-booked items. "Out Now" is how many units of that item are on an active rental right now, regardless of the date range above.</p>
+      ${!items.length ? '<div class="empty-state"><p>No rental bookings in this range.</p></div>' : `
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Item</th><th>Owned</th><th>Out Now</th><th>Bookings</th><th>Qty Booked</th><th>Revenue</th></tr></thead>
+            <tbody>${items.map(i => `
+              <tr>
+                <td class="fw-600">${i.product_name}</td>
+                <td>${i.units_owned ?? '—'}</td>
+                <td>${i.currently_out > 0 ? `<span class="badge-pill badge-warning" style="font-size:10px">${i.currently_out} out</span>` : '—'}</td>
+                <td>${i.booking_count}</td>
+                <td>${i.total_quantity_booked}</td>
+                <td class="fw-600">${this.fmt(i.revenue)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`}`;
+  },
+
+  // Shared modal shell for the report-with-filters pattern below — takes a
+  // title, the filter controls' HTML (ids are the caller's responsibility),
+  // and the load function name to call for both the initial render and each
+  // "Generate" click.
+  _showReportModal(title, filtersHtml, loadFnName) {
+    this.showModal(`
+      <div class="modal" style="max-width:820px">
+        <div class="modal-header"><span class="modal-title">${title}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body" style="max-height:75vh;overflow-y:auto">
+          <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;align-items:center">
+            ${filtersHtml}
+            <button class="btn btn-primary" onclick="App.${loadFnName}()">Generate</button>
+          </div>
+          <div id="rpt-modal-content"><div class="empty-state"><p>Choose a range and click Generate.</p></div></div>
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">Close</button></div>
+      </div>`);
+    this[loadFnName]();
+  },
+
+  _reportDateRangeFilters(startId, endId, monthsBack = 1) {
+    const today = new Date().toISOString().slice(0,10);
+    const start = new Date(new Date().getFullYear(), new Date().getMonth() - (monthsBack - 1), 1).toISOString().slice(0,10);
+    return `<input type="date" id="${startId}" value="${start}" style="width:150px">
+      <span>to</span>
+      <input type="date" id="${endId}" value="${today}" style="width:150px">`;
+  },
+
+  // ─── Lead Source Performance ────────────────────────────────────────────
+
+  showLeadSourceReport() {
+    this._showReportModal('Lead Source Performance', this._reportDateRangeFilters('lsp-start','lsp-end'), 'loadLeadSourceReport');
+  },
+
+  async loadLeadSourceReport() {
+    const start = document.getElementById('lsp-start')?.value || '';
+    const end = document.getElementById('lsp-end')?.value || '';
+    const content = document.getElementById('rpt-modal-content');
+    if (!content) return;
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let data;
+    try { data = await this.api('GET', `/reports/lead-source-performance?start=${start}&end=${end}`); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    if (!document.getElementById('rpt-modal-content')) return;
+
+    const { totals, bySource } = data;
+    const pct = v => v == null ? '—' : `${v}%`;
+    content.innerHTML = `
+      <div class="stats-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:18px">
+        <div class="stat-card blue"><div class="stat-label">Leads</div><div class="stat-value">${totals.lead_count}</div></div>
+        <div class="stat-card purple"><div class="stat-label">Opportunities</div><div class="stat-value">${totals.opportunity_count}</div></div>
+        <div class="stat-card green"><div class="stat-label">Won</div><div class="stat-value">${totals.won_count}</div></div>
+        <div class="stat-card orange"><div class="stat-label">Won Value</div><div class="stat-value">${this.fmt(totals.won_value)}</div></div>
+      </div>
+      ${!bySource.length ? '<div class="empty-state"><p>No leads in this range.</p></div>' : `
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Source</th><th>Leads</th><th>Opportunities</th><th>Won</th><th>Won Value</th><th>Lead → Opp</th><th>Opp → Won</th><th>Lead → Won</th></tr></thead>
+            <tbody>${bySource.map(r => `
+              <tr>
+                <td class="fw-600">${r.source}</td>
+                <td>${r.lead_count}</td>
+                <td>${r.opportunity_count}</td>
+                <td>${r.won_count}</td>
+                <td>${this.fmt(r.won_value)}</td>
+                <td>${pct(r.lead_to_opp_rate)}</td>
+                <td>${pct(r.win_rate)}</td>
+                <td style="font-weight:600">${pct(r.lead_to_won_rate)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`}`;
+  },
+
+  // ─── Customer Segment Report ────────────────────────────────────────────
+
+  showCustomerSegmentReport() {
+    this._showReportModal('Customer Segment Report', this._reportDateRangeFilters('csr-start','csr-end'), 'loadCustomerSegmentReport');
+  },
+
+  async loadCustomerSegmentReport() {
+    const start = document.getElementById('csr-start')?.value || '';
+    const end = document.getElementById('csr-end')?.value || '';
+    const content = document.getElementById('rpt-modal-content');
+    if (!content) return;
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let data;
+    try { data = await this.api('GET', `/reports/customer-segments?start=${start}&end=${end}`); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    if (!document.getElementById('rpt-modal-content')) return;
+
+    const { segments } = data;
+    const marginColor = pct => pct == null ? 'var(--text-muted)' : pct < 0 ? 'var(--danger)' : pct < 15 ? 'var(--warning)' : 'var(--success)';
+    const totalRevenue = segments.reduce((s,r) => s + r.revenue, 0);
+    content.innerHTML = !segments.length ? '<div class="empty-state"><p>No customer categories set up yet.</p></div>' : `
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Category</th><th>Discount</th><th>Customers</th><th>Orders</th><th>Revenue</th><th>% of Total</th><th>Discount Given</th><th>Margin</th></tr></thead>
+            <tbody>${segments.map(r => `
+              <tr>
+                <td class="fw-600">${r.category_name}</td>
+                <td>${r.discount_percent > 0 ? `${r.discount_percent}%` : '—'}</td>
+                <td>${r.customer_count}</td>
+                <td>${r.order_count}</td>
+                <td>${this.fmt(r.revenue)}</td>
+                <td>${totalRevenue > 0 ? (r.revenue / totalRevenue * 100).toFixed(1) : '0.0'}%</td>
+                <td>${this.fmt(r.total_discount)}</td>
+                <td style="color:${marginColor(r.margin_percent)};font-weight:600">${this.fmt(r.margin)}${r.margin_percent!=null?` (${r.margin_percent}%)`:''}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <p style="font-size:11px;color:var(--text-muted);margin-top:8px">Revenue is net of ticket-level discounts, before tax. "No Category" is every completed sale from a customer with no category assigned, shown for comparison.</p>`;
+  },
+
+  // ─── Loyalty & Cash-Back Engagement ─────────────────────────────────────
+
+  showLoyaltyEngagementReport() {
+    this._showReportModal('Loyalty &amp; Cash-Back Engagement', this._reportDateRangeFilters('lye-start','lye-end'), 'loadLoyaltyEngagementReport');
+  },
+
+  async loadLoyaltyEngagementReport() {
+    const start = document.getElementById('lye-start')?.value || '';
+    const end = document.getElementById('lye-end')?.value || '';
+    const content = document.getElementById('rpt-modal-content');
+    if (!content) return;
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let data;
+    try { data = await this.api('GET', `/reports/loyalty-engagement?start=${start}&end=${end}`); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    if (!document.getElementById('rpt-modal-content')) return;
+
+    const { summary, topEarners } = data;
+    content.innerHTML = `
+      <div class="stats-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:8px">
+        <div class="stat-card blue"><div class="stat-label">Points Issued</div><div class="stat-value">${summary.points_issued.toLocaleString()}</div></div>
+        <div class="stat-card green"><div class="stat-label">Cash Back Redeemed</div><div class="stat-value">${this.fmt(summary.cash_redeemed)}</div></div>
+        <div class="stat-card purple"><div class="stat-label">Redemptions</div><div class="stat-value">${summary.redemption_count}</div></div>
+        <div class="stat-card orange"><div class="stat-label">Redemption Rate</div><div class="stat-value">${summary.redemption_rate==null?'—':summary.redemption_rate+'%'}</div></div>
+      </div>
+      <p style="font-size:11px;color:var(--text-muted);margin:0 0 16px">Points issued is calculated from completed sales in this range (0.5 pt per $1 spent) — there's no historical points ledger, so this reapplies the current earn rate rather than reading a stored log. Redemption rate compares that to cash-back redeemed, valued at each customer's current card type.</p>
+      ${!topEarners.length ? '<div class="empty-state"><p>No point-earning sales in this range.</p></div>' : `
+      <div class="card">
+        <div class="card-header"><span class="card-title">Top Point Earners (this range)</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Customer</th><th>Points Earned</th><th>Current Balance</th></tr></thead>
+            <tbody>${topEarners.map(r => `
+              <tr>
+                <td class="fw-600">${r.customer_name} <span style="color:var(--text-muted);font-size:11px">(${r.customer_number})</span></td>
+                <td>${r.points_earned.toLocaleString()}</td>
+                <td>${r.current_balance.toLocaleString()}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`}`;
+  },
+
+  // ─── Discount Card Utilization ──────────────────────────────────────────
+
+  showDiscountCardReport() {
+    this._showReportModal('Discount Card Utilization', this._reportDateRangeFilters('dcu-start','dcu-end'), 'loadDiscountCardReport');
+  },
+
+  async loadDiscountCardReport() {
+    const start = document.getElementById('dcu-start')?.value || '';
+    const end = document.getElementById('dcu-end')?.value || '';
+    const content = document.getElementById('rpt-modal-content');
+    if (!content) return;
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let data;
+    try { data = await this.api('GET', `/reports/discount-card-utilization?start=${start}&end=${end}`); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    if (!document.getElementById('rpt-modal-content')) return;
+
+    const { summary, byType, neverUsed } = data;
+    content.innerHTML = `
+      <div class="stats-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:8px">
+        <div class="stat-card blue"><div class="stat-label">Cards Issued</div><div class="stat-value">${summary.total_issued}</div></div>
+        <div class="stat-card green"><div class="stat-label">Used This Range</div><div class="stat-value">${summary.total_used}</div></div>
+        <div class="stat-card orange"><div class="stat-label">Utilization</div><div class="stat-value">${summary.utilization_rate==null?'—':summary.utilization_rate+'%'}</div></div>
+      </div>
+      <p style="font-size:11px;color:var(--text-muted);margin:0 0 16px">"Used" means a customer with that card had a completed sale with the card's discount applied in this range — cards are matched by name, not a dedicated link, since a card's use is recorded the same way a category discount is.</p>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">By Card Type</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Type</th><th>Discount</th><th>Status</th><th>Issued</th><th>Used</th><th>Utilization</th><th>Discount Given</th></tr></thead>
+            <tbody>${byType.map(t => `
+              <tr>
+                <td class="fw-600">${t.name}</td>
+                <td>${t.discount_percent}%</td>
+                <td><span class="badge-pill ${t.active?'badge-success':'badge-secondary'}" style="font-size:10px">${t.active?'Active':'Inactive'}</span></td>
+                <td>${t.cards_issued}</td>
+                <td>${t.customers_used}</td>
+                <td>${t.utilization_rate==null?'—':t.utilization_rate+'%'}</td>
+                <td>${this.fmt(t.total_discount_given)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">Issued but Not Used This Range (${summary.never_used_count})</span></div>
+        ${!neverUsed.length ? '<p style="padding:14px;color:var(--text-muted);font-size:13px">Every active cardholder used their card in this range.</p>' : `
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Customer</th><th>Card Type</th><th>Card #</th></tr></thead>
+            <tbody>${neverUsed.map(c => `
+              <tr>
+                <td class="fw-600">${c.customer_name} <span style="color:var(--text-muted);font-size:11px">(${c.customer_number})</span></td>
+                <td>${c.card_type}</td>
+                <td style="font-family:monospace">${c.discount_card_number}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+        ${summary.never_used_count > neverUsed.length ? `<p style="padding:8px 14px;color:var(--text-muted);font-size:12px">+${summary.never_used_count - neverUsed.length} more not shown</p>` : ''}`}
+      </div>`;
+  },
+
+  // ─── New vs. Repeat Customer Rate ───────────────────────────────────────
+
+  showCustomerRetentionReport() {
+    this._showReportModal('New vs. Repeat Customer Rate', this._reportDateRangeFilters('cret-start','cret-end'), 'loadCustomerRetentionReport');
+  },
+
+  async loadCustomerRetentionReport() {
+    const start = document.getElementById('cret-start')?.value || '';
+    const end = document.getElementById('cret-end')?.value || '';
+    const content = document.getElementById('rpt-modal-content');
+    if (!content) return;
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let data;
+    try { data = await this.api('GET', `/reports/customer-retention?start=${start}&end=${end}`); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    if (!document.getElementById('rpt-modal-content')) return;
+
+    const { summary } = data;
+    content.innerHTML = `
+      <div class="stats-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:8px">
+        <div class="stat-card blue"><div class="stat-label">New Customers</div><div class="stat-value">${summary.new_customers}</div></div>
+        <div class="stat-card green"><div class="stat-label">Repeat Customers</div><div class="stat-value">${summary.repeat_customers}</div></div>
+        <div class="stat-card purple"><div class="stat-label">New Revenue</div><div class="stat-value">${this.fmt(summary.new_revenue)}</div></div>
+        <div class="stat-card orange"><div class="stat-label">Repeat Revenue</div><div class="stat-value">${this.fmt(summary.repeat_revenue)}</div></div>
+      </div>
+      <p style="font-size:11px;color:var(--text-muted);margin:0 0 16px">"New" = a customer's first-ever completed sale falls inside this range. "Repeat" = they bought again in this range but their first-ever sale was earlier.</p>
+      <div class="card" style="padding:16px 18px">
+        <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px"><span>New</span><span class="fw-600">${summary.new_rate==null?'—':summary.new_rate+'%'}</span></div>
+        <div style="background:var(--bg-secondary,#eee);border-radius:6px;height:10px;overflow:hidden;margin-bottom:14px">
+          <div style="background:var(--accent);height:100%;width:${summary.new_rate||0}%"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px"><span>Repeat</span><span class="fw-600">${summary.repeat_rate==null?'—':summary.repeat_rate+'%'}</span></div>
+        <div style="background:var(--bg-secondary,#eee);border-radius:6px;height:10px;overflow:hidden">
+          <div style="background:var(--success);height:100%;width:${summary.repeat_rate||0}%"></div>
+        </div>
+      </div>`;
+  },
+
   async renderReports() {
     const today = new Date().toISOString().slice(0,10);
     const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0,10);
@@ -13715,7 +14506,10 @@ const App = {
     c.innerHTML = `
       <div class="section-header">
         <h2>Special Projects</h2>
-        ${this.can('special_projects') ? `<button class="btn btn-primary" onclick="App.showQuoteForm(null,'special_project')">+ New Special Project</button>` : ''}
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-secondary" onclick="App.showSpecialProjectsMarginReport()">📊 Margin Report</button>
+          ${this.can('special_projects') ? `<button class="btn btn-primary" onclick="App.showQuoteForm(null,'special_project')">+ New Special Project</button>` : ''}
+        </div>
       </div>
       <p style="font-size:12px;color:var(--text-muted);margin:-8px 0 14px">Custom quotes/invoices for one-off jobs — free-form pricing, needs a supervisor's approval before it can go to the customer.</p>
       <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;align-items:center">
@@ -13763,6 +14557,112 @@ const App = {
     const filtered = (this._specialProjectsAll||[]).filter(p => !status || p.status === status);
     const tbody = document.getElementById('sp-tbody');
     if (tbody) tbody.innerHTML = this.buildSpecialProjectRows(filtered);
+  },
+
+  // ─── Special Projects: margin report ────────────────────────────────────
+  // Realized/quoted margin per project (unit_cost vs unit_price on each
+  // line, see routes/quotations.js's processQuoteItems). Gated server-side
+  // by special_projects/special_projects_approve, same as the rest of this
+  // screen — cost data is exactly what this permission split is meant to
+  // protect, so it deliberately isn't folded into the general Reports
+  // screen (gated only by the much more broadly-held `reports` permission).
+  showSpecialProjectsMarginReport() {
+    const today = new Date().toISOString().slice(0,10);
+    const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0,10);
+    const branches = this.currentUser.branches || [];
+    this.showModal(`
+      <div class="modal" style="max-width:820px">
+        <div class="modal-header"><span class="modal-title">Special Projects — Margin Report</span><button class="modal-close">✕</button></div>
+        <div class="modal-body" style="max-height:75vh;overflow-y:auto">
+          <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;align-items:center">
+            <input type="date" id="spm-start" value="${monthStart}" style="width:150px">
+            <span>to</span>
+            <input type="date" id="spm-end" value="${today}" style="width:150px">
+            ${branches.length > 1 ? `<select id="spm-branch" style="width:160px">
+              <option value="">All Locations</option>
+              ${branches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
+            </select>` : ''}
+            <select id="spm-status" style="width:170px">
+              <option value="">All Statuses</option>
+              ${Object.entries(this._spStatusLabels).map(([k,l]) => `<option value="${k}">${l}</option>`).join('')}
+            </select>
+            <button class="btn btn-primary" onclick="App.loadSpecialProjectsMarginReport()">Generate</button>
+          </div>
+          <div id="spm-content"><div class="empty-state"><p>Choose a range and click Generate.</p></div></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+        </div>
+      </div>`);
+    this.loadSpecialProjectsMarginReport();
+  },
+
+  async loadSpecialProjectsMarginReport() {
+    const start = document.getElementById('spm-start')?.value || '';
+    const end = document.getElementById('spm-end')?.value || '';
+    const branchId = document.getElementById('spm-branch')?.value || '';
+    const status = document.getElementById('spm-status')?.value || '';
+    const params = new URLSearchParams({ start, end });
+    if (branchId) params.set('branch_id', branchId);
+    if (status) params.set('status', status);
+    const content = document.getElementById('spm-content');
+    if (!content) return;
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let data;
+    try { data = await this.api('GET', `/reports/special-projects-margin?${params}`); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    if (!document.getElementById('spm-content')) return; // modal closed while loading
+
+    const { summary, projects, bySalesperson } = data;
+    const marginColor = pct => pct == null ? 'var(--text-muted)' : pct < 0 ? 'var(--danger)' : pct < 15 ? 'var(--warning)' : 'var(--success)';
+    const fmtPct = pct => pct == null ? '—' : `${pct.toFixed(1)}%`;
+
+    content.innerHTML = `
+      <div class="stats-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:18px">
+        <div class="stat-card blue"><div class="stat-label">Projects</div><div class="stat-value">${summary.project_count}</div></div>
+        <div class="stat-card purple"><div class="stat-label">Revenue</div><div class="stat-value">${this.fmt(summary.total_revenue)}</div></div>
+        <div class="stat-card orange"><div class="stat-label">Cost</div><div class="stat-value">${this.fmt(summary.total_cost)}</div></div>
+        <div class="stat-card green"><div class="stat-label">Margin</div><div class="stat-value" style="color:${marginColor(summary.margin_percent)}">${this.fmt(summary.total_margin)} <span style="font-size:13px">(${fmtPct(summary.margin_percent)})</span></div></div>
+      </div>
+      ${summary.lines_missing_cost > 0 ? `<p style="font-size:12px;color:var(--warning);margin:-10px 0 14px">⚠ ${summary.lines_missing_cost} line item${summary.lines_missing_cost===1?'':'s'} in this range ${summary.lines_missing_cost===1?'has':'have'} no cost entered — margin for those projects is understated (treated as $0 cost on that line).</p>` : ''}
+      ${!projects.length ? '<div class="empty-state"><p>No Special Projects in this range.</p></div>' : `
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">By Project</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Project #</th><th>Customer</th><th>Salesperson</th><th>Status</th><th>Revenue</th><th>Cost</th><th>Margin</th><th>Date</th></tr></thead>
+            <tbody>${projects.map(p => `
+              <tr>
+                <td class="fw-600"><a href="#" style="color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.viewQuote(${p.id})">${p.quote_number}</a></td>
+                <td>${p.customer_name||'—'}</td>
+                <td>${p.original_employee_name||p.employee_name||'—'}</td>
+                <td><span class="badge-pill ${this._spStatusBadge[p.status]||'badge-info'}" style="font-size:10px">${this._spStatusLabels[p.status]||p.status}</span></td>
+                <td>${this.fmt(p.revenue)}</td>
+                <td>${this.fmt(p.cost)}${p.missing_cost_count > 0 ? ` <span title="${p.missing_cost_count} line(s) with no cost entered">⚠</span>` : ''}</td>
+                <td style="color:${marginColor(p.margin_percent)};font-weight:600">${this.fmt(p.margin)} <span style="font-size:11px">(${fmtPct(p.margin_percent)})</span></td>
+                <td style="color:var(--text-muted)">${this.fmtDate(p.created_at)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">By Salesperson</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Salesperson</th><th>Projects</th><th>Revenue</th><th>Cost</th><th>Margin</th></tr></thead>
+            <tbody>${bySalesperson.map(r => `
+              <tr>
+                <td class="fw-600">${r.employee_name}</td>
+                <td>${r.project_count}</td>
+                <td>${this.fmt(r.revenue)}</td>
+                <td>${this.fmt(r.cost)}</td>
+                <td style="color:${marginColor(r.margin_percent)};font-weight:600">${this.fmt(r.margin)} <span style="font-size:11px">(${fmtPct(r.margin_percent)})</span></td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`}`;
   },
 
   async showQuoteForm(editId, initialType) {
@@ -14704,6 +15604,7 @@ const App = {
                     <td class="${avail > 0 ? 'color-success' : 'color-danger'}">${this.fmt(avail)}</td>
                     <td>
                       <button class="btn btn-sm btn-primary" onclick="App.showPaymentModal(${a.id},'${a.first_name} ${a.last_name}',${a.account_balance||0})">Record Payment</button>
+                      ${this.can('accounts_writeoff') && a.account_balance > 0 ? `<button class="btn btn-sm btn-danger" onclick="App.showWriteoffModal(${a.id},'${a.first_name} ${a.last_name}',${a.account_balance||0})">Write Off</button>` : ''}
                       <button class="btn btn-sm btn-secondary" onclick="App.viewCustomerAccount(${a.id})">Details</button>
                     </td>
                   </tr>`;}).join('') : '<tr><td colspan="7" class="empty-state">No credit accounts. Enable credit for a customer to get started.</td></tr>'}
@@ -15059,6 +15960,40 @@ const App = {
       await this.api('POST', '/accounts/payments', { customer_id: customerId, amount, payment_method, branch_id: branch_id||null, notes, allocations: allocations.length ? allocations : undefined });
       this.closeModal();
       this.alert('Payment recorded');
+      this.renderAccounts();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // Forgives part or all of a balance instead of collecting it — same
+  // FIFO-oldest-first invoice allocation as Record Payment, minus the
+  // invoice-by-invoice override table (kept deliberately simpler, since a
+  // write-off is a rarer, blunter action than a normal payment).
+  showWriteoffModal(customerId, customerName, balance) {
+    this.showModal(`
+      <div class="modal" style="max-width:460px">
+        <div class="modal-header"><span class="modal-title">Write Off Balance</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="margin-bottom:14px;font-size:13px">Writing off balance for <strong>${customerName}</strong> &nbsp;|&nbsp; Outstanding Balance: <strong style="color:var(--danger)">${this.fmt(balance)}</strong></p>
+          <div class="form-group"><label>Amount to Write Off *</label><input id="wo-amount" type="number" step="0.01" min="0.01" max="${balance.toFixed(2)}" value="${balance.toFixed(2)}"></div>
+          <div class="form-group"><label>Reason *</label><textarea id="wo-reason" rows="3" placeholder="Why this balance is being written off (uncollectible, dispute resolved in customer's favor, etc.)"></textarea></div>
+          <p style="font-size:11px;color:var(--text-muted);margin-top:-4px">Applied to the oldest outstanding invoices first, same as a normal payment — this doesn't collect any money, it forgives it.</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-danger" onclick="App.saveWriteoff(${customerId})">Write Off</button>
+        </div>
+      </div>`);
+  },
+
+  async saveWriteoff(customerId) {
+    const amount = parseFloat(document.getElementById('wo-amount').value);
+    const reason = document.getElementById('wo-reason').value.trim();
+    if (!amount || amount <= 0) { this.alert('Enter a valid amount', 'error'); return; }
+    if (!reason) { this.alert('A reason is required', 'error'); return; }
+    try {
+      await this.api('POST', '/accounts/writeoff', { customer_id: customerId, amount, reason, employee_id: this.currentUser.id });
+      this.closeModal();
+      this.alert('Balance written off');
       this.renderAccounts();
     } catch(e) { this.alert(e.message, 'error'); }
   },

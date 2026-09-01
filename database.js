@@ -1406,6 +1406,15 @@ async function _init() {
     // items, typed in for custom lines). Informational only — never affects
     // subtotal/tax/total math.
     'ALTER TABLE quotation_items ADD COLUMN unit_cost REAL',
+    // Stage timestamps for the Quote Funnel & Cycle Time report (Reports →
+    // Sales). Set once, the first time a quote reaches that status (see
+    // PATCH /quotations/:id/status) — a quote bounced back and re-sent
+    // doesn't reset its original sent_at, so cycle time always measures
+    // from the first time it left Draft. "Converted" has no column of its
+    // own — that report derives it from the linked transaction/rental
+    // agreement's own created_at instead.
+    'ALTER TABLE quotations ADD COLUMN sent_at DATETIME',
+    'ALTER TABLE quotations ADD COLUMN accepted_at DATETIME',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
