@@ -3074,7 +3074,13 @@ const App = {
         employee_id: this.currentUser?.id || 1,
         branch_id: this.posBranch?.id || null,
         drawer_session_id: this.currentDrawerSession?.id || null,
-        items: this.cart.map(i => ({ product_id: i.product_id, variation_id: i.variation_id||null, quantity: i.quantity, discount_percent: i.discountPercent||0, discount_override_employee_id: i.discountOverrideEmployeeId||null })),
+        // A custom/temp line (no product_id — e.g. a Special Project's
+        // free-typed labour/equipment line) has no catalog product for the
+        // server to look up name/price/tax from, so those are sent through
+        // directly for that case only; a real product_id line still has its
+        // price/tax authoritatively re-derived server-side, never trusted
+        // from the client.
+        items: this.cart.map(i => ({ product_id: i.product_id, variation_id: i.variation_id||null, quantity: i.quantity, discount_percent: i.discountPercent||0, discount_override_employee_id: i.discountOverrideEmployeeId||null, ...(i.product_id ? {} : { product_name: i.name, unit_price: i.price, tax_rate: i.tax_rate||0 }) })),
         discount_amount: discount,
         promotion_code: this.appliedDiscountCard ? (this.appliedDiscountCard.card_number || null) : (this.appliedPromoCode?.code || null),
         promotion_name: this.appliedDiscountCard ? `${this.appliedDiscountCard.type_name} ${this.appliedDiscountCard.label || 'Discount Card'}` : (this.appliedPromoCode?.promo_name || this.autoAppliedPromo?.name || null),
@@ -3244,12 +3250,18 @@ const App = {
       }
       this.cart = held.items.map(item => {
         const product = this.allProducts?.find(p => p.id === item.product_id);
+        // A custom/temp line (no product_id — e.g. a Special Project's
+        // free-typed labour/equipment line) has no product to read a tax
+        // rate from — reconstruct the rate that was actually already
+        // charged on this line, from its own stored tax_amount/total,
+        // instead of silently dropping to 0% tax.
+        const derivedTaxRate = item.total > 0 ? parseFloat((item.tax_amount / item.total * 100).toFixed(4)) : 0;
         return {
           product_id: item.product_id,
           variation_id: item.variation_id || null,
           name: item.product_name,
           price: parseFloat(item.unit_price),
-          tax_rate: product?.tax_rate || 0,
+          tax_rate: product ? (product.tax_rate || 0) : derivedTaxRate,
           quantity: item.quantity,
           variation_name: item.variation_name || null,
           is_service: product?.product_type === 'service' ? 1 : 0,
@@ -3410,12 +3422,18 @@ const App = {
 
       this.cart = quote.items.map(item => {
         const product = this.allProducts?.find(p => p.id === item.product_id);
+        // A custom/temp line (no product_id — e.g. a Special Project's
+        // free-typed labour/equipment line, or a retail quote's "Q" item)
+        // has no product to read a tax rate from — reconstruct the rate
+        // that was actually already quoted, from its own stored
+        // tax_amount/total, instead of silently dropping to 0% tax.
+        const derivedTaxRate = item.total > 0 ? parseFloat((item.tax_amount / item.total * 100).toFixed(4)) : 0;
         return {
           product_id: item.product_id,
           variation_id: null,
           name: item.product_name,
           price: parseFloat(item.unit_price),
-          tax_rate: product?.tax_rate || 0,
+          tax_rate: product ? (product.tax_rate || 0) : derivedTaxRate,
           quantity: item.quantity,
           is_service: product?.product_type === 'service' ? 1 : 0,
           stock_qty: product?.stock_qty ?? 999,

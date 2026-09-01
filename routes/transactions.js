@@ -178,6 +178,26 @@ router.post('/', requirePermission('pos'), async (req, res) => {
     let subtotal = 0, tax_amount = 0;
     const processedItems = [];
     for (const item of items) {
+      // Custom/temp line item — no catalog product backs it (e.g. a Special
+      // Project's free-typed labour/equipment line, carried through from a
+      // converted quotation's is_temp_item row — see processQuoteItems() in
+      // routes/quotations.js, which trusts a temp item's price the same
+      // way). No stock to deduct and no discount-eligibility to check;
+      // price/tax are exactly what was already negotiated/approved, so
+      // they're trusted from the client instead of re-derived from a
+      // product row that doesn't exist.
+      if (!item.product_id) {
+        const product_name = (item.product_name || '').trim();
+        if (!product_name) throw new Error('A custom line item needs a name');
+        const quantity = parseInt(item.quantity) || 1;
+        const unit_price = parseFloat(item.unit_price) || 0;
+        const grossLineTotal = parseFloat((unit_price * quantity).toFixed(2));
+        const lineTax = isTaxExempt ? 0 : parseFloat((grossLineTotal * (parseFloat(item.tax_rate) || 0) / 100).toFixed(2));
+        subtotal += grossLineTotal;
+        tax_amount += lineTax;
+        processedItems.push({ product: null, variation: null, customName: product_name, quantity, unit_price, lineTotal: grossLineTotal, lineTax, discount: 0, discountPercent: 0, discountOverrideBy: null });
+        continue;
+      }
       const { rows: [product] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] });
       if (!product) throw new Error(`Product ${item.product_id} not found`);
       let variation = null, unit_price = product.price;
@@ -284,10 +304,12 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         await tx.execute({ sql: 'INSERT INTO transaction_payments (transaction_id, payment_method, amount, approval_code) VALUES (?,?,?,?)', args: [txId, leg.payment_method, leg.amount, leg.approval_code || null] });
       }
 
-      for (const { product, variation, quantity, unit_price, lineTotal, lineTax, discount, discountPercent, discountOverrideBy } of processedItems) {
-        const itemName = variation ? `${product.name} — ${variation.name}` : product.name;
-        const itemSku = variation ? variation.sku : product.sku;
-        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,discount_percent,discount_override_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [txId, product.id, itemName, itemSku, quantity, unit_price, discount, lineTax, lineTotal, variation?.id||null, variation?.name||null, discountPercent || 0, discountOverrideBy || null] });
+      for (const { product, variation, customName, quantity, unit_price, lineTotal, lineTax, discount, discountPercent, discountOverrideBy } of processedItems) {
+        const itemName = customName || (variation ? `${product.name} — ${variation.name}` : product.name);
+        const itemSku = customName ? '' : (variation ? variation.sku : product.sku);
+        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,discount_percent,discount_override_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [txId, product ? product.id : null, itemName, itemSku, quantity, unit_price, discount, lineTax, lineTotal, variation?.id||null, variation?.name||null, discountPercent || 0, discountOverrideBy || null] });
+        // A custom/temp line has no catalog product — nothing to deduct.
+        if (!product) continue;
         if (variation) {
           await tx.execute({ sql: 'UPDATE product_variations SET stock_qty = stock_qty - ? WHERE id = ?', args: [quantity, variation.id] });
         } else {
