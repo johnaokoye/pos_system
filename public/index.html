@@ -3965,9 +3965,10 @@ const App = {
 
     if (tab === 'non-inventory') return this.renderNonInventoryTab(tabsHtml);
 
-    const [products, categories, movements, branches] = await Promise.all([
+    const [products, categories, brands, movements, branches] = await Promise.all([
       this.api('GET', '/products?is_service=0&is_rental=0&is_non_inventory=0'),
       this.api('GET', '/categories'),
+      this.api('GET', '/brands'),
       this.api('GET', '/products/movements?limit=30'),
       // All branches, not just the ones this employee is individually assigned
       // to (this.currentUser.branches) — this is a browse/oversight filter, not
@@ -3988,6 +3989,7 @@ const App = {
           <input type="text" id="inv-search" placeholder="Search products..." style="width:220px">
         </div>
         <select id="inv-cat-filter" style="width:auto;min-width:140px"><option value="">All Categories</option>${categories.map(c => `<option value="${c.id}">${c.name}</option>`).join('')}</select>
+        <select id="inv-brand-filter" style="width:auto;min-width:140px"><option value="">All Brands</option>${brands.map(b => `<option value="${(b.name||'').replace(/"/g,'&quot;')}">${b.name}</option>`).join('')}</select>
         <select id="inv-branch-filter" style="width:auto;min-width:130px">
           <option value="">All Branches</option>
           ${branches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
@@ -3996,7 +3998,9 @@ const App = {
         <button class="btn btn-secondary btn-sm" onclick="App.exportInventoryCsv()" title="Export filtered products to CSV">&#8659; Export CSV</button>
         <a class="btn btn-secondary btn-sm" href="/api/products/export/template" download title="Download import template">&#8659; Template</a>
         <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import products from CSV">&#8657; Import<input type="file" accept=".csv" style="display:none" onchange="App.importProductsCsv(this)"></label>
+        <button class="btn btn-secondary btn-sm" onclick="App.scanProductImages()" title="Assign images already placed in uploads/products/ (named by SKU) to their matching products">Scan Images</button>
         <button class="btn btn-secondary btn-sm" onclick="App.showCategoriesManager()">Categories</button>
+        <button class="btn btn-secondary btn-sm" onclick="App.showBrandsManager()">Brands</button>
       </div>
       <div class="card">
         <div class="table-wrap" id="inv-table-wrap" style="max-height:65vh;overflow-y:auto">
@@ -4021,10 +4025,12 @@ const App = {
     const refilter = async () => {
       const q = document.getElementById('inv-search').value;
       const cat = document.getElementById('inv-cat-filter').value;
+      const brand = document.getElementById('inv-brand-filter').value;
       const branchId = document.getElementById('inv-branch-filter').value;
       let url = '/products?is_service=0&is_rental=0&is_non_inventory=0&';
       if (q) url += `search=${encodeURIComponent(q)}&`;
       if (cat) url += `category=${cat}&`;
+      if (brand) url += `brand=${encodeURIComponent(brand)}&`;
       if (branchId) url += `branch_id=${branchId}&`;
       const filtered = await this.api('GET', url);
       const branchName = branchId ? (branches.find(b => b.id == branchId) || {}).name || '' : '';
@@ -4033,6 +4039,7 @@ const App = {
 
     document.getElementById('inv-search').addEventListener('input', refilter);
     document.getElementById('inv-cat-filter').addEventListener('change', refilter);
+    document.getElementById('inv-brand-filter').addEventListener('change', refilter);
     document.getElementById('inv-branch-filter').addEventListener('change', () => { refilter(); refilterHistory(); });
   },
 
@@ -4302,8 +4309,9 @@ const App = {
   },
 
   async showProductForm(id) {
-    const [categories, branches, suppliers] = await Promise.all([
+    const [categories, brands, branches, suppliers] = await Promise.all([
       this.api('GET', '/categories'),
+      this.api('GET', '/brands'),
       this.api('GET', '/branches'),
       this.api('GET', '/suppliers'),
     ]);
@@ -4326,7 +4334,13 @@ const App = {
         <div class="form-group"><label>Supplier</label>
           <select id="pf-supplier"><option value="">— None —</option>${suppliers.map(s => `<option value="${s.id}" ${p.supplier_id==s.id?'selected':''}>${s.name}</option>`).join('')}</select>
         </div>
-        <div class="form-group"><label>Brand</label><input id="pf-brand" value="${p.brand||''}"></div>
+        <div class="form-group"><label>Brand</label>
+          <select id="pf-brand">
+            <option value="">— None —</option>
+            ${brands.map(b => `<option value="${b.name}" ${p.brand===b.name?'selected':''}>${b.name}</option>`).join('')}
+            ${p.brand && !brands.some(b => b.name === p.brand) ? `<option value="${p.brand}" selected>${p.brand} (not in Brands list)</option>` : ''}
+          </select>
+        </div>
       </div>
       <div class="input-row-3">
         <div class="form-group"><label>Price *</label><input type="number" id="pf-price" value="${p.price||0}" min="0" step="0.01"></div>
@@ -5066,45 +5080,10 @@ const App = {
     const rows = this._parseCsv(text);
     if (!rows.length) { this.alert('No data rows found in CSV', 'error'); return; }
 
-    const BATCH_SIZE = 25;
-    const batches = [];
-    for (let i = 0; i < rows.length; i += BATCH_SIZE) batches.push(rows.slice(i, i + BATCH_SIZE));
-
-    this.showModal(`
-      <div class="modal" style="max-width:420px">
-        <div class="modal-header"><span class="modal-title">Importing Rental Items</span></div>
-        <div class="modal-body">
-          <p id="ri-import-status" style="font-size:13px;color:var(--text-muted);margin-bottom:8px">Starting import of ${rows.length} row(s)…</p>
-          <div style="background:var(--border);border-radius:6px;overflow:hidden;height:10px">
-            <div id="ri-import-bar" style="background:var(--primary);height:100%;width:0%;transition:width .2s"></div>
-          </div>
-        </div>
-      </div>`);
-
-    let created = 0, updated = 0, processed = 0;
-    const errors = [];
-    for (const batch of batches) {
-      try {
-        const result = await this.api('POST', '/products/import/rentals', { rows: batch });
-        created += result.created;
-        updated += result.updated;
-        errors.push(...result.errors);
-      } catch (e) {
-        errors.push(e.message);
-      }
-      processed += batch.length;
-      const pct = Math.round((processed / rows.length) * 100);
-      const bar = document.getElementById('ri-import-bar');
-      const status = document.getElementById('ri-import-status');
-      if (bar) bar.style.width = pct + '%';
-      if (status) status.textContent = `Imported ${processed} of ${rows.length} row(s) (${pct}%)`;
-    }
-
-    this.closeModal();
-    let msg = `Import complete: ${created} created, ${updated} updated`;
-    if (errors.length) msg += `\n${errors.length} error(s):\n${errors.join('\n')}`;
-    this.alert(msg, errors.length ? 'error' : 'success');
-    this.renderRentalItems();
+    await this._runBatchedCsvImport({
+      rows, endpoint: '/products/import/rentals', title: 'Importing Rental Items',
+      onFinish: () => this.renderRentalItems(),
+    });
   },
 
   async loadRentalItems() {
@@ -9069,6 +9048,17 @@ const App = {
     this.renderInventory();
   },
 
+  async scanProductImages() {
+    if (!confirm('Scan uploads/products/ for image files named after a SKU (e.g. "ABC123.jpg") and assign each to its matching product? This replaces any image that product already has.')) return;
+    try {
+      const result = await this.api('POST', '/products/images/scan-folder');
+      let msg = `Scanned ${result.scanned} image file(s), matched ${result.matched} to a product.`;
+      if (result.matched) msg += `\n\n${result.details.map(d => `${d.sku} ← ${d.file}`).join('\n')}`;
+      this.alert(msg, result.matched ? 'success' : 'warning');
+      this.renderInventory();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
   // ─── CSV Import / Export ──────────────────────────────────
   async importProductsCsv(inputEl) {
     const file = inputEl.files[0];
@@ -9077,13 +9067,123 @@ const App = {
     const text = await file.text();
     const rows = this._parseCsv(text);
     if (!rows.length) { this.alert('No data rows found in CSV', 'error'); return; }
-    try {
-      const result = await this.api('POST', '/products/import', { rows });
-      let msg = `Import complete: ${result.created} created, ${result.updated} updated`;
-      if (result.errors.length) msg += `\n${result.errors.length} error(s):\n${result.errors.join('\n')}`;
-      this.alert(msg, result.errors.length ? 'error' : 'success');
-      this.renderInventory();
-    } catch (e) { this.alert(e.message, 'error'); }
+
+    const skipExisting = await this._askImportExistingSkuMode();
+    if (skipExisting === null) return; // dismissed without choosing
+
+    await this._runBatchedCsvImport({
+      rows, endpoint: '/products/import', title: 'Importing Products',
+      extraBody: { skip_existing: skipExisting },
+      onFinish: () => this.renderInventory(),
+    });
+  },
+
+  // Re-importing a stock list often re-sends SKUs that are already in the
+  // system unchanged — asks up front whether those rows should overwrite the
+  // existing product (the historical default) or be left untouched and just
+  // counted, so a re-import doesn't have to be all-or-nothing.
+  _askImportExistingSkuMode() {
+    return new Promise(resolve => {
+      document.querySelectorAll('.modal-overlay').forEach(el => el.remove());
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.innerHTML = `
+        <div class="modal" style="max-width:420px">
+          <div class="modal-header"><span class="modal-title">Existing SKUs</span></div>
+          <div class="modal-body">
+            <p style="font-size:13px;color:var(--text-muted)">This file may contain SKUs already in the system. What should happen to those rows?</p>
+          </div>
+          <div class="modal-footer" style="flex-wrap:wrap;gap:8px">
+            <button class="btn btn-secondary btn-sm" id="import-skumode-cancel">Cancel</button>
+            <button class="btn btn-secondary btn-sm" id="import-skumode-skip">Skip existing SKUs</button>
+            <button class="btn btn-primary btn-sm" id="import-skumode-update">Update existing SKUs</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      const finish = val => { overlay.remove(); resolve(val); };
+      overlay.querySelector('#import-skumode-cancel').addEventListener('click', () => finish(null));
+      overlay.querySelector('#import-skumode-skip').addEventListener('click', () => finish(true));
+      overlay.querySelector('#import-skumode-update').addEventListener('click', () => finish(false));
+    });
+  },
+
+  // Shared by importProductsCsv and importRentalItemsCsv — splits rows into
+  // batches, POSTs each in turn against `endpoint`, and updates a progress
+  // bar/status modal as batches complete. Each batch is its own committed API
+  // call, so Cancel can only stop the *next* batch from starting — whatever
+  // already posted stays imported, which is why the final message reports it
+  // as a partial count rather than pretending nothing happened.
+  //
+  // Built by hand rather than via this.showModal(): that helper's overlay
+  // dismisses on a backdrop click, which would let someone think they'd
+  // stopped the import while it kept posting batches invisibly in the
+  // background. Cancel is deliberately the only way out here.
+  async _runBatchedCsvImport({ rows, endpoint, title, extraBody, onFinish }) {
+    const BATCH_SIZE = 25;
+    const batches = [];
+    for (let i = 0; i < rows.length; i += BATCH_SIZE) batches.push(rows.slice(i, i + BATCH_SIZE));
+
+    document.querySelectorAll('.modal-overlay').forEach(el => el.remove());
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+      <div class="modal" style="max-width:420px">
+        <div class="modal-header"><span class="modal-title">${title}</span></div>
+        <div class="modal-body">
+          <p id="csv-import-status" style="font-size:13px;color:var(--text-muted);margin-bottom:8px">Starting import of ${rows.length} row(s)…</p>
+          <div style="background:var(--border);border-radius:6px;overflow:hidden;height:10px">
+            <div id="csv-import-bar" style="background:var(--primary);height:100%;width:0%;transition:width .2s"></div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary btn-sm" id="csv-import-cancel">Cancel</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    let cancelled = false;
+    overlay.querySelector('#csv-import-cancel').addEventListener('click', () => {
+      cancelled = true;
+      const btn = overlay.querySelector('#csv-import-cancel');
+      btn.disabled = true;
+      btn.textContent = 'Cancelling…';
+    });
+
+    let created = 0, updated = 0, skipped = 0, processed = 0;
+    const errors = [];
+    for (const batch of batches) {
+      if (cancelled) break;
+      try {
+        const result = await this.api('POST', endpoint, { rows: batch, ...extraBody });
+        created += result.created;
+        updated += result.updated;
+        skipped += result.skipped || 0;
+        errors.push(...result.errors);
+      } catch (e) {
+        errors.push(e.message);
+      }
+      processed += batch.length;
+      const pct = Math.round((processed / rows.length) * 100);
+      const bar = overlay.querySelector('#csv-import-bar');
+      const status = overlay.querySelector('#csv-import-status');
+      if (bar) bar.style.width = pct + '%';
+      if (status) status.textContent = `Imported ${processed} of ${rows.length} row(s) (${pct}%)`;
+    }
+
+    overlay.remove();
+    const counts = `${created} created, ${updated} updated${skipped ? `, ${skipped} skipped (already existed)` : ''}`;
+    let msg = cancelled
+      ? `Import cancelled after ${processed} of ${rows.length} row(s): ${counts}`
+      : `Import complete: ${counts}`;
+    if (errors.length) msg += `\n${errors.length} error(s):\n${errors.join('\n')}`;
+    this.alert(msg, errors.length ? 'error' : (cancelled ? 'warning' : 'success'));
+    if (onFinish) onFinish();
+  },
+
+  _cancelCsvImport() {
+    this._csvImportCancelled = true;
+    const btn = document.getElementById('csv-import-cancel');
+    if (btn) { btn.disabled = true; btn.textContent = 'Cancelling…'; }
   },
 
   _parseCsv(text) {
@@ -12629,6 +12729,75 @@ const App = {
       this.alert('Category deleted');
       if (fromInventory) { this.showCategoriesManager(); this.renderInventory(); }
       else { this.closeModal(); this.renderSettings(); }
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // ─── Brands ───────────────────────────────────────────────────────────
+  // Mirrors the Categories manager above — a managed picklist behind the
+  // Inventory "Brands" button, the product form's Brand dropdown, and the
+  // WooCommerce brand sync (routes/woocommerce.js ensureWcBrands).
+
+  async showBrandsManager() {
+    const brands = await this.api('GET', '/brands');
+    this.showModal(`
+      <div class="modal" style="max-width:520px">
+        <div class="modal-header"><span class="modal-title">Product Brands</span><button class="modal-close">✕</button></div>
+        <div class="modal-body" style="padding:0">
+          <div style="padding:12px 16px;border-bottom:1px solid var(--border,#e5e7eb);display:flex;justify-content:flex-end">
+            <button class="btn btn-primary btn-sm" onclick="App.showBrandForm(null,null,null)">+ Add Brand</button>
+          </div>
+          <table style="width:100%;border-collapse:collapse">
+            <thead><tr style="background:var(--bg-secondary,#f9fafb)"><th style="padding:8px 16px;text-align:left;font-size:13px">Name</th><th style="padding:8px 16px;text-align:left;font-size:13px">Description</th><th style="padding:8px 16px;text-align:center;font-size:13px">Products</th><th style="padding:8px 16px"></th></tr></thead>
+            <tbody>
+              ${brands.length ? brands.map(b => `<tr style="border-top:1px solid var(--border,#e5e7eb)">
+                <td style="padding:10px 16px;font-weight:600">${b.name}</td>
+                <td style="padding:10px 16px;color:var(--text-secondary,#6b7280);font-size:13px">${b.description || '—'}</td>
+                <td style="padding:10px 16px;text-align:center;font-size:13px">${b.product_count}</td>
+                <td style="padding:10px 16px;text-align:right">
+                  <button class="btn btn-secondary btn-sm" onclick="App.showBrandForm(${b.id},'${(b.name||'').replace(/'/g,"\\'")}','${(b.description||'').replace(/'/g,"\\'")}')">Edit</button>
+                </td>
+              </tr>`).join('') : '<tr><td colspan="4" style="padding:24px;text-align:center;color:var(--text-secondary,#6b7280)">No brands yet</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">Close</button></div>
+      </div>`);
+  },
+
+  showBrandForm(id, name = '', desc = '') {
+    this.showModal(`
+      <div class="modal" style="max-width:380px">
+        <div class="modal-header"><span class="modal-title">${id ? 'Edit Brand' : 'Add Brand'}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div class="form-group"><label>Name *</label><input id="brandf-name" value="${name||''}"></div>
+          <div class="form-group"><label>Description</label><input id="brandf-desc" value="${desc||''}"></div>
+        </div>
+        <div class="modal-footer">
+          ${id ? `<button class="btn btn-danger" onclick="App.deleteBrand(${id})">Delete</button>` : ''}
+          <button class="btn btn-secondary" onclick="App.showBrandsManager()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.saveBrand(${id||'null'})">Save</button>
+        </div>
+      </div>`);
+  },
+
+  async saveBrand(id) {
+    const data = { name: document.getElementById('brandf-name').value.trim(), description: document.getElementById('brandf-desc').value.trim() };
+    if (!data.name) { this.alert('Name required', 'error'); return; }
+    try {
+      if (id) await this.api('PUT', `/brands/${id}`, data);
+      else await this.api('POST', '/brands', data);
+      this.alert('Brand saved');
+      this.showBrandsManager();
+      this.renderInventory();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async deleteBrand(id) {
+    try {
+      await this.api('DELETE', `/brands/${id}`);
+      this.alert('Brand deleted');
+      this.showBrandsManager();
+      this.renderInventory();
     } catch(e) { this.alert(e.message, 'error'); }
   },
 

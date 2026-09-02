@@ -22,6 +22,14 @@ const parseNum = v => {
   return cleaned === '' || cleaned === '-' ? NaN : parseFloat(cleaned);
 };
 
+// Product images are named after the SKU (both the upload route below and the
+// folder-scan endpoint), but a SKU can contain characters that aren't safe in
+// a filename or a Cloudinary public_id (seen in real data: "/", spaces) — so
+// anything outside this set collapses to "_". Kept case-sensitive on purpose:
+// the scan endpoint matches case-insensitively so "abc123.jpg" still finds
+// SKU "ABC123", but this is what a *new* upload actually writes to disk.
+const sanitizeSkuForFilename = sku => String(sku).trim().replace(/[^A-Za-z0-9_.-]/g, '_');
+
 // POST/PUT/DELETE on /products are shared by three frontend forms (Inventory,
 // Services, Rentals), but a product's *type* determines the one permission
 // that should actually govern it — a Manager with general `inventory` access
@@ -60,7 +68,7 @@ const upload = multer({
 // GET all products
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const { search, category, active, low_stock, branch_id, supplier_id, is_service, is_rental, is_accessory, is_layaway_eligible, is_non_inventory, online, for_sale } = req.query;
+    const { search, category, brand, active, low_stock, branch_id, supplier_id, is_service, is_rental, is_accessory, is_layaway_eligible, is_non_inventory, online, for_sale } = req.query;
     const params = [];
     let sql;
 
@@ -141,6 +149,7 @@ router.get('/', requireAuth, async (req, res) => {
       params.push(`%${search}%`, `%${search}%`, `%${search}%`);
     }
     if (category) { sql += ` AND p.category_id = ?`; params.push(category); }
+    if (brand) { sql += ` AND p.brand = ?`; params.push(brand); }
     if (supplier_id) { sql += ` AND p.supplier_id = ?`; params.push(supplier_id); }
     if (active !== undefined) { sql += ` AND p.active = ?`; params.push(active); }
     if (is_service !== undefined) { sql += ` AND p.is_service = ?`; params.push(is_service); }
@@ -283,7 +292,7 @@ router.get('/export/template', requirePermission('inventory'), (req, res) => {
 // POST import products from CSV rows
 router.post('/import', requirePermission('inventory'), async (req, res) => {
   try {
-    const { rows } = req.body;
+    const { rows, skip_existing } = req.body;
     if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ error: 'No rows provided' });
 
     const { rows: catRows } = await db.execute({ sql: 'SELECT id, name FROM categories', args: [] });
@@ -291,7 +300,7 @@ router.post('/import', requirePermission('inventory'), async (req, res) => {
     const catMap = Object.fromEntries(catRows.map(c => [c.name.toLowerCase(), c.id]));
     const supMap = Object.fromEntries(supRows.map(s => [s.name.toLowerCase(), s.id]));
 
-    let created = 0, updated = 0;
+    let created = 0, updated = 0, skipped = 0;
     const errors = [];
 
     for (let i = 0; i < rows.length; i++) {
@@ -304,7 +313,9 @@ router.post('/import', requirePermission('inventory'), async (req, res) => {
       const vals = [barcode||null, name, description||null, category_id, parseNum(price)||0, parseNum(cost)||0, parseNum(tax_rate)||8.5, parseNum(stock_qty)||0, parseNum(min_stock)||5, active === '' || active == null ? 1 : (parseNum(active) ? 1 : 0), supplier_id];
       try {
         const { rows: [existing] } = await db.execute({ sql: 'SELECT id FROM products WHERE sku = ?', args: [sku] });
-        if (existing) {
+        if (existing && skip_existing) {
+          skipped++;
+        } else if (existing) {
           await db.execute({ sql: 'UPDATE products SET barcode=?,name=?,description=?,category_id=?,price=?,cost=?,tax_rate=?,stock_qty=?,min_stock=?,active=?,supplier_id=? WHERE sku=?', args: [...vals, sku] });
           updated++;
         } else {
@@ -314,7 +325,7 @@ router.post('/import', requirePermission('inventory'), async (req, res) => {
       } catch (e) { errors.push(`Row ${rowNum} (${sku}): ${e.message}`); }
     }
 
-    res.json({ created, updated, errors, total: rows.length });
+    res.json({ created, updated, skipped, errors, total: rows.length });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -588,6 +599,23 @@ router.put('/:id', async (req, res, next) => {
           args: [req.params.id, branch_id, stock_qty||0, min_stock||5, stock_qty||0, min_stock||5],
         });
       }
+    } else if (!svc && !rnt) {
+      // The edit form has no branch picker for existing products, so a plain
+      // Stock Qty change here only ever touched the global products.stock_qty
+      // column — branch_inventory (what POS availability and branch-filtered
+      // views actually read) stayed stale until something else, like a
+      // transfer, happened to write to it. When the item lives at exactly one
+      // branch (the common case — assigned once at creation, never split by
+      // a transfer), keep that row in sync so the new stock is actually
+      // sellable there. A product already split across multiple branches is
+      // left alone since there's no way to tell which branch the edit meant.
+      const { rows: biRows } = await db.execute({ sql: 'SELECT branch_id FROM branch_inventory WHERE product_id = ?', args: [req.params.id] });
+      if (biRows.length === 1) {
+        await db.execute({
+          sql: 'UPDATE branch_inventory SET stock_qty = ?, min_stock = ?, updated_at = CURRENT_TIMESTAMP WHERE product_id = ? AND branch_id = ?',
+          args: [stock_qty||0, min_stock||5, req.params.id, biRows[0].branch_id],
+        });
+      }
     }
     const { rows: [prod] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [req.params.id] });
     res.json(prod);
@@ -669,8 +697,9 @@ router.delete('/:id', async (req, res, next) => {
 router.post('/:id/image', requirePermission('inventory'), upload.single('image'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No image uploaded' });
   try {
-    const { rows: [existing] } = await db.execute({ sql: 'SELECT image_path FROM products WHERE id = ?', args: [req.params.id] });
-    if (existing?.image_path) {
+    const { rows: [existing] } = await db.execute({ sql: 'SELECT sku, image_path FROM products WHERE id = ?', args: [req.params.id] });
+    if (!existing) return res.status(404).json({ error: 'Product not found' });
+    if (existing.image_path) {
       if (existing.image_path.startsWith('https://')) {
         await cloudDestroy(existing.image_path);
       } else {
@@ -679,9 +708,10 @@ router.post('/:id/image', requirePermission('inventory'), upload.single('image')
       }
     }
 
+    const skuSlug = sanitizeSkuForFilename(existing.sku);
     const result = await cloudUpload(req.file.buffer, {
       folder: 'pos-system/products',
-      public_id: `product-${req.params.id}`,
+      public_id: skuSlug,
       overwrite: true,
       resource_type: 'image',
     });
@@ -694,13 +724,72 @@ router.post('/:id/image', requirePermission('inventory'), upload.single('image')
       const dir = path.join(__dirname, '../uploads/products');
       fs.mkdirSync(dir, { recursive: true });
       const ext = path.extname(req.file.originalname).toLowerCase();
-      const filename = `product-${req.params.id}-${Date.now()}${ext}`;
+      const filename = `${skuSlug}${ext}`;
       fs.writeFileSync(path.join(dir, filename), req.file.buffer);
       imagePath = `/uploads/products/${filename}`;
     }
 
     await db.execute({ sql: 'UPDATE products SET image_path = ? WHERE id = ?', args: [imagePath, req.params.id] });
     res.json({ image_path: imagePath });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST scan uploads/products/ for image files already named after a SKU
+// (e.g. someone FTP'd a batch of product photos in bulk) and assign each to
+// its matching product. Matching is case-insensitive against the same
+// sanitizeSkuForFilename() slug the upload route above writes, so "abc/123"
+// (SKU) matches a file named "abc_123.jpg" or "ABC_123.PNG". Runs the file
+// through Cloudinary when configured — same as a normal upload — so a scan
+// on a Vercel deployment doesn't leave the image on ephemeral local disk.
+router.post('/images/scan-folder', requirePermission('inventory'), async (req, res) => {
+  try {
+    const dir = path.join(__dirname, '../uploads/products');
+    if (!fs.existsSync(dir)) return res.json({ matched: 0, scanned: 0, details: [] });
+
+    const files = fs.readdirSync(dir).filter(f => /\.(jpe?g|png|gif|webp|bmp)$/i.test(f));
+    const { rows: products } = await db.execute({ sql: 'SELECT id, sku, image_path FROM products', args: [] });
+    const bySlug = new Map();
+    for (const p of products) bySlug.set(sanitizeSkuForFilename(p.sku).toLowerCase(), p);
+
+    let matched = 0;
+    const details = [];
+    for (const file of files) {
+      const base = path.parse(file).name;
+      const product = bySlug.get(base.toLowerCase());
+      if (!product) continue;
+      if (product.image_path === `/uploads/products/${file}`) continue; // already assigned to this exact file
+
+      const buffer = fs.readFileSync(path.join(dir, file));
+      if (product.image_path) {
+        if (product.image_path.startsWith('https://')) await cloudDestroy(product.image_path);
+        else {
+          const old = path.join(__dirname, '..', product.image_path);
+          if (fs.existsSync(old) && old !== path.join(dir, file)) fs.unlinkSync(old);
+        }
+      }
+
+      const skuSlug = sanitizeSkuForFilename(product.sku);
+      const result = await cloudUpload(buffer, {
+        folder: 'pos-system/products',
+        public_id: skuSlug,
+        overwrite: true,
+        resource_type: 'image',
+      });
+
+      let imagePath;
+      if (result) {
+        imagePath = result.secure_url;
+        fs.unlinkSync(path.join(dir, file)); // pushed to Cloudinary — don't leave a stale local copy
+      } else {
+        imagePath = `/uploads/products/${file}`;
+      }
+
+      await db.execute({ sql: 'UPDATE products SET image_path = ? WHERE id = ?', args: [imagePath, product.id] });
+      matched++;
+      details.push({ sku: product.sku, file });
+    }
+
+    res.json({ matched, scanned: files.length, details });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

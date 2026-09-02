@@ -140,9 +140,10 @@ function normalise(str) {
   return decodeHtmlEntities(str).toLowerCase().trim();
 }
 
-function buildCatNameMap(wcCats) {
+// Shared by categories and brands — both are flat WC taxonomies keyed by name.
+function buildNameMap(wcTerms) {
   const m = {};
-  wcCats.forEach(c => { m[normalise(c.name)] = c.id; });
+  wcTerms.forEach(c => { m[normalise(c.name)] = c.id; });
   return m;
 }
 
@@ -157,7 +158,7 @@ async function ensureWcCategories(s) {
   const alreadyMapped = {};
   mapped.forEach(r => { alreadyMapped[r.local_id] = r.woo_id; });
 
-  let wcCatByName = buildCatNameMap(await wcGetAll(s, '/products/categories'));
+  let wcCatByName = buildNameMap(await wcGetAll(s, '/products/categories'));
 
   const idMap = {};
   for (const cat of posCategories) {
@@ -192,6 +193,56 @@ async function ensureWcCategories(s) {
   return idMap;
 }
 
+// products.brand is a free-text name (see database.js), not a brand_id FK, so
+// unlike ensureWcCategories this returns a map keyed by normalised brand
+// name, not local id — that's how syncProducts below has to look brands up.
+// Relies on WooCommerce core's native Product Brands feature (wc/v3
+// /products/brands); if the store doesn't have it enabled, wcGetAll 404s and
+// brand sync is skipped for this run rather than failing every product.
+async function ensureWcBrands(s) {
+  const { rows: posBrands } = await db.execute({ sql: 'SELECT id, name FROM brands', args: [] });
+  if (!posBrands.length) return {};
+
+  const { rows: mapped } = await db.execute({
+    sql: "SELECT local_id, woo_id FROM woo_sync_map WHERE entity_type = 'brand'",
+    args: [],
+  });
+  const alreadyMapped = {};
+  mapped.forEach(r => { alreadyMapped[r.local_id] = r.woo_id; });
+
+  let wcBrandByName;
+  try {
+    wcBrandByName = buildNameMap(await wcGetAll(s, '/products/brands'));
+  } catch (e) {
+    return {};
+  }
+
+  const nameToWcId = {};
+  for (const brand of posBrands) {
+    let wcId = alreadyMapped[brand.id] || wcBrandByName[normalise(brand.name)];
+
+    if (!wcId) {
+      try {
+        const { data: created } = await wcRequest(s, 'POST', '/products/brands', { name: brand.name });
+        wcId = created.id;
+      } catch (e) {
+        if (e.message.includes('already exists')) {
+          wcBrandByName = buildNameMap(await wcGetAll(s, '/products/brands'));
+          wcId = wcBrandByName[normalise(brand.name)];
+        } else {
+          continue; // don't let one bad brand abort the whole product sync
+        }
+      }
+    }
+
+    if (wcId) {
+      nameToWcId[normalise(brand.name)] = wcId;
+      await upsertMap('brand', brand.id, wcId);
+    }
+  }
+  return nameToWcId;
+}
+
 // ── Products: POS → WooCommerce ──────────────────────────────────────────────
 
 async function syncProducts() {
@@ -201,6 +252,7 @@ async function syncProducts() {
   try {
     const s = await getWcSettings();
     const catMap = await ensureWcCategories(s);
+    const brandMap = await ensureWcBrands(s);
 
     const { rows: [branchRow] } = await db.execute({
       sql: "SELECT value FROM settings WHERE key = 'woo_sync_branch_id'",
@@ -245,6 +297,9 @@ async function syncProducts() {
         tax_status: p.tax_rate > 0 ? 'taxable' : 'none',
         ...(p.category_id && catMap[p.category_id]
           ? { categories: [{ id: catMap[p.category_id] }] }
+          : {}),
+        ...(p.brand && brandMap[normalise(p.brand)]
+          ? { brands: [{ id: brandMap[normalise(p.brand)] }] }
           : {}),
         ...(p.image_path && s.woo_pos_url
           ? { images: [{ src: `${s.woo_pos_url}${p.image_path}` }] }

@@ -56,6 +56,18 @@ async function _init() {
       description TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // products.brand (below) stays a free-text column rather than a brand_id
+    // FK — promotions.js and pos_discount_excluded_brands already match
+    // brands by name text, so this table is just the managed picklist behind
+    // the Inventory "Brands" UI and the WooCommerce brand sync; renaming a
+    // brand here cascades into products.brand (see routes/brands.js) so
+    // those name-based lookups keep matching.
+    { sql: `CREATE TABLE IF NOT EXISTS brands (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      description TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS products (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       sku TEXT UNIQUE NOT NULL,
