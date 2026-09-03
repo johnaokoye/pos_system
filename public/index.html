@@ -4453,6 +4453,31 @@ const App = {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
+  // Same endpoint as uploadProductImage/deleteProductImage above, but reloads
+  // the Rental Item form (not the retail Product form) afterward.
+  async uploadRentalItemImage(productId, input) {
+    const file = input.files[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append('image', file);
+    try {
+      const res = await fetch(`/api/products/${productId}/image`, { method: 'POST', body: fd });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Upload failed');
+      this.alert('Image uploaded');
+      this.showRentalItemForm(productId);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async deleteRentalItemImage(productId) {
+    if (!confirm('Remove rental item image?')) return;
+    try {
+      await this.api('DELETE', `/products/${productId}/image`);
+      this.alert('Image removed');
+      this.showRentalItemForm(productId);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
   async saveProduct(id) {
     const data = {
       sku: document.getElementById('pf-sku').value.trim(),
@@ -5112,10 +5137,11 @@ const App = {
       <div class="card">
         <div class="table-wrap" style="max-height:65vh;overflow-y:auto">
           <table class="sticky-table">
-            <thead><tr><th>SKU</th><th>Name</th><th>Branch</th><th>Class</th><th>Daily</th><th>Weekly</th><th>Monthly</th><th>Hourly</th><th>Stock</th><th>Available</th><th>Status</th><th></th></tr></thead>
+            <thead><tr><th style="width:52px"></th><th>SKU</th><th>Name</th><th>Branch</th><th>Class</th><th>Daily</th><th>Weekly</th><th>Monthly</th><th>Hourly</th><th>Stock</th><th>Available</th><th>Status</th><th></th></tr></thead>
             <tbody>${filtered.map(p => `<tr>
+              <td style="width:52px">${p.image_path ? `<img src="${p.image_path}" class="prod-img-thumb" alt="">` : `<div class="prod-img-placeholder" onclick="App.showRentalItemForm(${p.id})">📷</div>`}</td>
               <td class="fw-600">${p.sku}${p.is_accessory?' <span class="badge-pill badge-secondary" style="font-size:10px">accessory</span>':''}</td>
-              <td>${p.name}${p.rental_allow_sale ? ` <span class="badge-pill badge-teal" style="font-size:10px" title="Also sellable/quotable outright at ${this.fmt(p.price)}">For Sale · ${this.fmt(p.price)}</span>` : ''}</td>
+              <td>${p.name}${p.rental_allow_sale ? ` <span class="badge-pill badge-teal" style="font-size:10px" title="Also sellable/quotable outright at ${this.fmt(p.price)}">For Sale · ${this.fmt(p.price)}</span>` : ''}${p.online_available ? ` <span class="badge-pill badge-info" style="font-size:10px" title="Visible on the website's Rentals catalog">Online</span>` : ''}</td>
               <td>${p.assigned_branch_name || '—'}</td>
               <td><span class="badge-pill ${p.rental_classification==='equipment'?'badge-info':'badge-secondary'}">${p.rental_classification==='equipment'?'Equipment':'Tool'}</span></td>
               <td>${this.fmt(p.rental_rate)}</td>
@@ -5194,6 +5220,21 @@ const App = {
             <label>Selling Price *</label>
             <input type="number" id="rf-sale-price" value="${p.price||0}" min="0" step="0.01">
           </div>
+          <div class="form-group" style="border:1px solid var(--border);border-radius:6px;padding:12px">
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:500;margin:0">
+              <input type="checkbox" id="rf-online" ${p.online_available?'checked':''} style="width:auto"> Available for Online Rental Requests
+            </label>
+            <p style="font-size:11px;color:var(--text-muted);margin:4px 0 0">Shows this item on the website's Rentals catalog, where customers can request a rental period. Requests still come to sales as a lead — nothing books automatically.</p>
+          </div>
+          ${id ? `<div class="form-group" style="margin-top:4px"><label>Rental Item Image</label>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:4px">
+          ${p.image_path ? `<img src="${p.image_path}" class="prod-img-thumb" id="rf-img-preview" alt="">` : `<div class="prod-img-placeholder" id="rf-img-preview" onclick="document.getElementById('rf-img-input').click()">📷</div>`}
+          <div>
+            <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0">Upload Image<input type="file" id="rf-img-input" accept="image/*" style="display:none" onchange="App.uploadRentalItemImage(${id},this)"></label>
+            ${p.image_path ? `<button class="btn btn-danger btn-sm" style="margin-left:6px" onclick="App.deleteRentalItemImage(${id})">Remove</button>` : ''}
+          </div>
+        </div>
+      </div>` : ''}
           <div class="input-row-3">
             <div class="form-group"><label>Stock Qty *</label><input type="number" id="rf-stock" value="${p.stock_qty??0}" min="0"></div>
             <div class="form-group"><label>Min Stock</label><input type="number" id="rf-minstock" value="${p.min_stock??1}" min="0"></div>
@@ -5346,6 +5387,7 @@ const App = {
       is_rental: 1,
       rental_allow_sale: allowSale ? 1 : 0,
       price: allowSale ? salePrice : 0,
+      online_available: document.getElementById('rf-online').checked ? 1 : 0,
     };
     data.branch_id = document.getElementById('rf-branch')?.value || null;
     const selectedMandatoryIds = Array.from(document.querySelectorAll('.rf-mandatory-acc:checked')).map(cb => parseInt(cb.value));

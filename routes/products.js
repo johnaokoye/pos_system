@@ -57,6 +57,25 @@ function requireProductPermission(isRental, isService) {
   };
 }
 
+// Same idea as requireProductPermission above, but for routes keyed by
+// :id with no is_rental/is_service in the body (image upload/delete) — looks
+// the product's type up first so a rentals-only staffer (rentals_manage_items
+// but not inventory) can manage a rental item's photo without also being
+// granted the broader Inventory permission.
+async function requireImagePermission(req, res, next) {
+  if (req.apiKey) return next();
+  if (!req.employee) return res.status(401).json({ error: 'Authentication required' });
+  try {
+    const { rows: [product] } = await db.execute({ sql: 'SELECT is_rental, is_service FROM products WHERE id = ?', args: [req.params.id] });
+    if (!product) return res.status(404).json({ error: 'Product not found' });
+    const key = requiredProductPermission(!!product.is_rental, !!product.is_service);
+    if (!can(req.employee.permissions, key)) {
+      return res.status(403).json({ error: `Missing permission: ${key}` });
+    }
+    next();
+  } catch(e) { res.status(500).json({ error: e.message }); }
+}
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
@@ -86,7 +105,7 @@ router.get('/', requireAuth, async (req, res) => {
         stockExpr = `CASE WHEN p.web_allotment IS NOT NULL THEN MIN(COALESCE(p.stock_qty, 0), p.web_allotment) ELSE COALESCE(p.stock_qty, 0) END`;
       }
       let onlineSql = `SELECT p.id, p.sku, p.name, p.description, p.category_id, p.price, p.cost,
-        p.tax_rate, p.active, p.image_path, p.is_service, p.unit,
+        p.tax_rate, p.active, p.image_path, p.is_service, p.unit, p.is_rental,
         p.online_available, p.web_allotment, p.stock_qty as global_stock_qty,
         ${stockExpr} as stock_qty,
         c.name as category_name,
@@ -96,6 +115,10 @@ router.get('/', requireAuth, async (req, res) => {
         WHERE p.active = 1 AND p.online_available = 1`;
       if (search) { onlineSql += ` AND (p.name LIKE ? OR p.sku LIKE ?)`; onlineParams.push(`%${search}%`, `%${search}%`); }
       if (category) { onlineSql += ` AND p.category_id = ?`; onlineParams.push(category); }
+      // Lets a storefront exclude (or isolate) rental items from the general
+      // online feed — added because rentals carry their own rate fields this
+      // slim SELECT doesn't project, so they need a dedicated online query.
+      if (is_rental !== undefined) { onlineSql += ` AND p.is_rental = ?`; onlineParams.push(is_rental === '1' || is_rental === 'true' ? 1 : 0); }
       onlineSql += ` ORDER BY p.name`;
       const { rows: onlineRows } = await db.execute({ sql: onlineSql, args: onlineParams });
       return res.json(onlineRows);
@@ -745,7 +768,7 @@ router.delete('/:id', async (req, res, next) => {
 });
 
 // POST upload product image
-router.post('/:id/image', requirePermission('inventory'), upload.single('image'), async (req, res) => {
+router.post('/:id/image', requireImagePermission, upload.single('image'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No image uploaded' });
   try {
     const { rows: [existing] } = await db.execute({ sql: 'SELECT sku, image_path FROM products WHERE id = ?', args: [req.params.id] });
@@ -845,7 +868,7 @@ router.post('/images/scan-folder', requirePermission('inventory'), async (req, r
 });
 
 // DELETE product image
-router.delete('/:id/image', requirePermission('inventory'), async (req, res) => {
+router.delete('/:id/image', requireImagePermission, async (req, res) => {
   try {
     const { rows: [product] } = await db.execute({ sql: 'SELECT image_path FROM products WHERE id = ?', args: [req.params.id] });
     if (product?.image_path) {
