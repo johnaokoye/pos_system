@@ -1117,6 +1117,148 @@ router.post('/send-work-order-ready/:id', requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ─── Full work-order invoice (print / email) ────────────────────────────────
+// Distinct from buildWorkOrderReadyHtml above (a short "ready for pickup"
+// notice) — this is the itemized document: assessment fee, estimate, parts,
+// deposit, balance due, everything a customer or cashier needs to see what's
+// owed. routes/work-orders.js has its own richer GET /:id (tasks, status log,
+// item sourcing) for the management UI; this only needs items, so it re-queries
+// directly rather than importing that route's private helpers.
+async function loadWorkOrderForInvoice(id) {
+  const { rows: [wo] } = await db.execute({ sql: `SELECT wo.*, c.first_name || ' ' || c.last_name as customer_name, c.phone as customer_phone, c.email as customer_email, b.name as branch_name
+    FROM work_orders wo
+    LEFT JOIN customers c ON wo.customer_id = c.id
+    LEFT JOIN branches b ON wo.branch_id = b.id
+    WHERE wo.id = ?`, args: [id] });
+  if (!wo) return null;
+  const { rows: items } = await db.execute({ sql: 'SELECT * FROM work_order_items WHERE work_order_id = ? ORDER BY id', args: [id] });
+  wo.items = items;
+  return wo;
+}
+
+const WO_STATUS_LABELS = {
+  intake: 'Intake', assessed: 'Assessed', pending_deposit: 'Pending Deposit', in_progress: 'In Progress',
+  awaiting_signoff: 'Awaiting Sign-Off', awaiting_parts: 'Awaiting Parts', complete: 'Complete',
+  awaiting_pickup: 'Awaiting Pickup', picked_up: 'Picked Up', cancelled: 'Cancelled', not_worth_fixing: 'Not Worth Fixing',
+};
+
+function buildWorkOrderInvoiceHtml(wo, s) {
+  const storeName = s.store_name || 'My Store';
+  const storeAddr = s.store_address || '';
+  const storePhone = s.store_phone || '';
+  const footer = s.receipt_footer || 'Thank you for your business!';
+
+  // Same balance-due math as the frontend's viewWorkOrder()/
+  // showWOFinalPaymentModal() — kept in sync manually since there's no
+  // shared module between routes/ and public/index.html.
+  const estimateTotal = (parseFloat(wo.estimate_labor) || 0) + (parseFloat(wo.estimate_consumables) || 0);
+  const partsTotal = (wo.items || []).reduce((sum, i) => sum + (parseFloat(i.total) || 0), 0);
+  const balanceDue = Math.max(0, estimateTotal + partsTotal - (parseFloat(wo.deposit_amount) || 0));
+
+  const partRows = (wo.items || []).map(i => `
+    <tr>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku || ''}</span></td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${i.quantity}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${fmt(i.unit_price)}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(i.total)}</td>
+    </tr>`).join('');
+
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Work Order Invoice ${wo.wo_number}</title></head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
+<tr><td align="center">
+  <table width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+    <tr><td style="background:#1a56db;padding:24px;text-align:center">
+      <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
+      ${wo.branch_name ? `<div style="color:#bcd4ff;font-size:13px;margin-top:4px">${wo.branch_name}</div>` : ''}
+      ${storeAddr ? `<div style="color:#bcd4ff;font-size:12px;margin-top:2px">${storeAddr}</div>` : ''}
+      ${storePhone ? `<div style="color:#bcd4ff;font-size:12px">${storePhone}</div>` : ''}
+    </td></tr>
+    <tr><td style="padding:20px 24px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px">
+        <div>
+          <div style="font-size:20px;font-weight:700;color:#111">WORK ORDER INVOICE</div>
+          <div style="font-size:13px;color:#888;margin-top:2px">${wo.wo_number}</div>
+        </div>
+        <div style="text-align:right;font-size:13px;color:#444">
+          <div><strong>Status:</strong> ${WO_STATUS_LABELS[wo.status] || wo.status}${wo.is_express ? ' (Express)' : ''}</div>
+          <div><strong>Opened:</strong> ${new Date(wo.created_at).toLocaleDateString()}</div>
+          ${wo.pickup_due_date ? `<div><strong>Pickup Due:</strong> ${new Date(wo.pickup_due_date + 'T00:00:00').toLocaleDateString()}</div>` : ''}
+        </div>
+      </div>
+      ${wo.customer_name ? `<div style="background:#f9fafb;border:1px solid #e8e8e8;border-radius:6px;padding:12px;margin-bottom:16px;font-size:13px">
+        <strong>Customer:</strong><br>${wo.customer_name}${wo.customer_phone ? `<br>${wo.customer_phone}` : ''}${wo.customer_email ? `<br>${wo.customer_email}` : ''}
+      </div>` : ''}
+      <div style="font-size:13px;color:#444;margin-bottom:16px">
+        <strong>Description:</strong> ${wo.description}
+        ${wo.item_label ? `<br><strong>Item:</strong> ${wo.item_label}` : ''}
+      </div>
+      ${partRows ? `<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px">
+        <thead><tr style="background:#f9fafb">
+          <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Part</th>
+          <th style="padding:8px;text-align:center;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Qty</th>
+          <th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Unit Price</th>
+          <th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Total</th>
+        </tr></thead>
+        <tbody>${partRows}</tbody>
+      </table>` : ''}
+      <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-top:12px">
+        <tr><td style="padding:3px 0">Assessment Fee</td><td style="text-align:right">${fmt(wo.assessment_fee)}${wo.assessment_transaction_id ? ' <span style="color:#16a34a;font-size:11px">(paid)</span>' : ''}</td></tr>
+        ${wo.status !== 'intake' ? `<tr><td style="padding:3px 0">Estimate (labor + consumables)${wo.is_express ? ' — express +25%' : ''}</td><td style="text-align:right">${fmt(estimateTotal)}</td></tr>` : ''}
+        ${partsTotal > 0 ? `<tr><td style="padding:3px 0">Parts</td><td style="text-align:right">${fmt(partsTotal)}</td></tr>` : ''}
+        ${parseFloat(wo.deposit_amount) > 0 ? `<tr><td style="padding:3px 0">Deposit Paid</td><td style="text-align:right">-${fmt(wo.deposit_amount)}${wo.deposit_transaction_id ? ' <span style="color:#16a34a;font-size:11px">(paid)</span>' : ''}</td></tr>` : ''}
+        <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
+        <tr><td style="font-size:16px;font-weight:700;color:#111">BALANCE DUE</td><td style="font-size:16px;font-weight:700;color:#111;text-align:right">${fmt(balanceDue)}${wo.final_transaction_id ? ' <span style="color:#16a34a;font-size:11px;font-weight:400">(paid)</span>' : ''}</td></tr>
+      </table>
+      ${wo.estimate_notes ? `<div style="margin-top:16px;font-size:13px;color:#444"><strong>Estimate Notes:</strong> ${wo.estimate_notes}</div>` : ''}
+      <div style="text-align:center;margin-top:20px;font-size:13px;color:#666;font-style:italic">${footer}</div>
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body>
+</html>`;
+}
+
+// Work order invoice print preview — opened directly in a browser tab
+// (Print button on the WO detail view and the cashier's final-payment
+// modal), same shared-template pattern as po-preview/statement-preview.
+router.get('/work-order-preview/:id', requireAuth, async (req, res) => {
+  try {
+    const wo = await loadWorkOrderForInvoice(req.params.id);
+    if (!wo) return res.status(404).send('<p>Work order not found</p>');
+    const s = await getSettings();
+    res.setHeader('Content-Type', 'text/html');
+    res.send(buildWorkOrderInvoiceHtml(wo, s));
+  } catch(e) { res.status(500).send(`<p>Error: ${e.message}</p>`); }
+});
+
+router.post('/send-work-order-invoice/:id', requireAuth, async (req, res) => {
+  const { to } = req.body;
+  if (!to) return res.status(400).json({ error: 'Recipient email is required' });
+  try {
+    const wo = await loadWorkOrderForInvoice(req.params.id);
+    if (!wo) return res.status(404).json({ error: 'Work order not found' });
+    const s = await getSettings();
+    try {
+      const transporter = createTransporter(s);
+      const fromName = s.email_from_name || s.store_name || 'POS System';
+      const fromAddr = s.email_smtp_user || s.store_email || '';
+      await transporter.sendMail({
+        from: `"${fromName}" <${fromAddr}>`,
+        to,
+        subject: `Work Order Invoice ${wo.wo_number} from ${s.store_name || 'Our Store'}`,
+        html: buildWorkOrderInvoiceHtml(wo, s),
+      });
+      res.json({ success: true, message: `Work order invoice sent to ${to}` });
+    } catch (e) {
+      res.status(500).json({ error: `Failed to send email: ${e.message}` });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ─── Missed pickup: outreach + decision confirmation ───────────────────────
 // Two distinct emails for the missed-pickup workflow (see routes/rentals.js):
 // one to actually reach the customer when dispatch can't get to them, one to

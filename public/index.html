@@ -7617,6 +7617,8 @@ const App = {
           ${wo.status==='complete' && this.can('work_orders') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showWONotifyModal(${wo.id})">Notify Customer</button>` : ''}
           ${wo.status==='awaiting_pickup' ? `<span class="badge-pill badge-warning" style="align-self:center;padding:6px 10px" title="Collected at the register — open Hold Recall in POS to take payment">On hold — awaiting cashier</span>` : ''}
           ${['intake','assessed','pending_deposit'].includes(wo.status) && this.can('work_orders') ? `<button class="btn btn-danger" onclick="App.closeModal();App.showWOCancelModal(${wo.id})">Cancel Work Order</button>` : ''}
+          <button class="btn btn-secondary" onclick="App.printWorkOrderInvoice(${wo.id})">🖨️ Print Invoice</button>
+          <button class="btn btn-secondary" onclick="App.emailWorkOrderInvoice(${wo.id}, '${(wo.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email Invoice</button>
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
@@ -8373,6 +8375,8 @@ const App = {
             </div>` : `<p style="font-size:13px;color:var(--text-muted)">No balance due — the deposit already covers the final cost.</p>`}
           </div>
           <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="App.printWorkOrderInvoice(${id})">🖨️ Print Invoice</button>
+            <button class="btn btn-secondary" onclick="App.emailWorkOrderInvoice(${id}, '${(wo.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email Invoice</button>
             <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
             <button class="btn btn-primary" onclick="App.confirmWOFinalPayment(${id})">${balance > 0 ? 'Confirm Payment' : 'Complete Pickup'}</button>
           </div>
@@ -14432,6 +14436,25 @@ const App = {
       try {
         await this.api('POST', `/email/send-po/${id}`, { to });
         this.alert(`Purchase order sent to ${to}`);
+      } catch(e) { this.alert(e.message, 'error'); }
+    });
+  },
+
+  // Same GET-preview-opened-in-a-tab pattern as printApprovedPO — available
+  // from the WO detail view (viewWorkOrder) and the cashier's final-payment
+  // modal (showWOFinalPaymentModal), not gated on WO status since a partial
+  // invoice (assessment fee only, no estimate yet) is still valid to hand over.
+  printWorkOrderInvoice(id) {
+    const win = window.open(`/api/email/work-order-preview/${id}`, '_blank', 'width=820,height=700');
+    win.addEventListener('load', () => win.print());
+  },
+
+  emailWorkOrderInvoice(id, customerEmail) {
+    this.showEmailModal('Email Work Order Invoice', customerEmail, async (to) => {
+      this.closeModal();
+      try {
+        await this.api('POST', `/email/send-work-order-invoice/${id}`, { to });
+        this.alert(`Work order invoice sent to ${to}`);
       } catch(e) { this.alert(e.message, 'error'); }
     });
   },
