@@ -623,6 +623,17 @@ const App = {
   async init() {
     this.updateClock();
     setInterval(() => this.updateClock(), 1000);
+    // The 8h session cookie survives a page reload even though this.currentUser
+    // (in-memory only) doesn't — a backgrounded tab getting discarded/reloaded
+    // by the browser, or a plain refresh, used to always bounce straight to the
+    // login screen even with a still-valid session. Try to restore it first.
+    try {
+      const emp = await this.api('GET', '/employees/me');
+      this.currentUser = emp;
+      if (emp.must_change_password) this.showChangePasswordModal(emp.id, true);
+      else this.enterApp();
+      return;
+    } catch (e) { /* no valid session — fall through to the login screen */ }
     // Show the login form (and bind its handlers) before the branding fetch,
     // not after — otherwise showLoginScreen()'s field-clearing/focus setup
     // races anyone who starts typing while that request is still in flight.

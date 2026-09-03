@@ -13,6 +13,26 @@ function isBcryptHash(value) {
   return typeof value === 'string' && value.startsWith('$2');
 }
 
+// Shared by POST /login and GET /me — mutates emp with the branch list the
+// frontend's branch picker expects. `emp.permissions` must already be the
+// parsed object (not the raw JSON string) by the time this runs.
+async function attachBranches(emp) {
+  if (emp.permissions && emp.permissions.multi_branch_access) {
+    // multi_branch_access on the security group is the whole gate — every
+    // active branch is available, not just whatever happens to be in
+    // employee_branches (that join table has no UI to manage beyond
+    // "Default Branch," so it was never a reliable per-employee allowlist).
+    // The employee's own default_branch_id still drives which one is
+    // pre-selected in every branch picker that reads is_default.
+    const { rows: branches } = await db.execute({ sql: `SELECT b.id, b.branch_code, b.name, b.currency, CASE WHEN b.id = ? THEN 1 ELSE 0 END as is_default FROM branches b WHERE b.active = 1 ORDER BY b.name`, args: [emp.default_branch_id || null] });
+    emp.branches = branches;
+  } else {
+    emp.branches = emp.default_branch_id
+      ? (await db.execute({ sql: `SELECT b.id, b.branch_code, b.name, b.currency, 1 as is_default FROM branches b WHERE b.id = ?`, args: [emp.default_branch_id] })).rows
+      : [];
+  }
+}
+
 // requireAuth only, not requirePermission('employees') — this list is used
 // as a general employee-picker lookup across ~13 unrelated features (CRM,
 // commissions, security groups, etc.), not just the Employees management
@@ -179,22 +199,21 @@ router.post('/login', async (req, res) => {
     }
     if (!emp) return res.status(401).json({ error: 'Invalid credentials' });
     if (emp.permissions) emp.permissions = JSON.parse(emp.permissions);
-    if (emp.permissions && emp.permissions.multi_branch_access) {
-      // multi_branch_access on the security group is the whole gate — every
-      // active branch is available, not just whatever happens to be in
-      // employee_branches (that join table has no UI to manage beyond
-      // "Default Branch," so it was never a reliable per-employee allowlist).
-      // The employee's own default_branch_id still drives which one is
-      // pre-selected in every branch picker that reads is_default.
-      const { rows: branches } = await db.execute({ sql: `SELECT b.id, b.branch_code, b.name, b.currency, CASE WHEN b.id = ? THEN 1 ELSE 0 END as is_default FROM branches b WHERE b.active = 1 ORDER BY b.name`, args: [emp.default_branch_id || null] });
-      emp.branches = branches;
-    } else {
-      emp.branches = emp.default_branch_id
-        ? (await db.execute({ sql: `SELECT b.id, b.branch_code, b.name, b.currency, 1 as is_default FROM branches b WHERE b.id = ?`, args: [emp.default_branch_id] })).rows
-        : [];
-    }
+    await attachBranches(emp);
     const token = await createSession(emp.id);
     setSessionCookie(req, res, token);
+    res.json(emp);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Restores a session on page load: sessionAuth already validated the cookie
+// and populated req.employee, so this just adds branches to match /login's
+// response shape. Frontend calls this once from init() before ever falling
+// back to the login screen.
+router.get('/me', requireAuth, async (req, res) => {
+  try {
+    const emp = { ...req.employee };
+    await attachBranches(emp);
     res.json(emp);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
