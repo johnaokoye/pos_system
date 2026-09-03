@@ -975,6 +975,40 @@ async function _init() {
       updated_by INTEGER REFERENCES employees(id),
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // One row per CSV import run (see routes/product-imports.js). The
+    // frontend's batched importProductsCsv() opens one of these before
+    // POSTing its row-chunks, so every chunk's product_import_batch_items
+    // rows below share a single id to review or reverse the whole import as
+    // one unit, even though it was sent to the server in many small requests.
+    { sql: `CREATE TABLE IF NOT EXISTS product_import_batches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER REFERENCES employees(id),
+      status TEXT NOT NULL DEFAULT 'running',
+      started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      finished_at DATETIME,
+      reversed_at DATETIME,
+      reversed_by INTEGER REFERENCES employees(id)
+    )` },
+    // One row per CSV row processed by an import batch. previous_values is a
+    // JSON snapshot of the full product row *before* an 'updated' row
+    // overwrote it — the only way Reverse can restore it later, since the
+    // import itself doesn't otherwise keep any history. product_id has ON
+    // DELETE SET NULL (not the usual REFERENCES products(id) used
+    // elsewhere) because Reverse's whole job is to delete the very products
+    // these rows point at — a normal FK would make that delete fail; sku is
+    // stored redundantly so the row still means something once product_id
+    // goes null.
+    { sql: `CREATE TABLE IF NOT EXISTS product_import_batch_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id INTEGER NOT NULL REFERENCES product_import_batches(id),
+      product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+      sku TEXT NOT NULL,
+      action TEXT NOT NULL,
+      previous_values TEXT,
+      error_message TEXT,
+      reverse_outcome TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
   ], 'write');
 
   // Migrations — each in its own try/catch
@@ -2146,6 +2180,8 @@ async function _init() {
     'CREATE INDEX IF NOT EXISTS idx_stock_movements_product_id ON stock_movements(product_id)',
     'CREATE INDEX IF NOT EXISTS idx_crm_activities_lead_id ON crm_activities(lead_id)',
     'CREATE INDEX IF NOT EXISTS idx_crm_opportunities_lead_id ON crm_opportunities(lead_id)',
+    'CREATE INDEX IF NOT EXISTS idx_product_import_batch_items_batch_id ON product_import_batch_items(batch_id)',
+    'CREATE INDEX IF NOT EXISTS idx_product_import_batch_items_product_id ON product_import_batch_items(product_id)',
   ];
   for (const sql of indexes) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

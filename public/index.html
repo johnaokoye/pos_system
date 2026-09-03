@@ -3996,8 +3996,10 @@ const App = {
         </select>
         <div style="flex:1"></div>
         <button class="btn btn-secondary btn-sm" onclick="App.exportInventoryCsv()" title="Export filtered products to CSV">&#8659; Export CSV</button>
+        <a class="btn btn-secondary btn-sm" href="/api/products/export/issues" download title="Export active products with $0 price, negative stock, or missing category/supplier/barcode">&#8659; Missing Data</a>
         <a class="btn btn-secondary btn-sm" href="/api/products/export/template" download title="Download import template">&#8659; Template</a>
         <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import products from CSV">&#8657; Import<input type="file" accept=".csv" style="display:none" onchange="App.importProductsCsv(this)"></label>
+        <button class="btn btn-secondary btn-sm" onclick="App.showImportHistory()" title="Review or reverse past CSV imports">Import History</button>
         <button class="btn btn-secondary btn-sm" onclick="App.scanProductImages()" title="Assign images already placed in uploads/products/ (named by SKU) to their matching products">Scan Images</button>
         <button class="btn btn-secondary btn-sm" onclick="App.showCategoriesManager()">Categories</button>
         <button class="btn btn-secondary btn-sm" onclick="App.showBrandsManager()">Brands</button>
@@ -9071,10 +9073,19 @@ const App = {
     const skipExisting = await this._askImportExistingSkuMode();
     if (skipExisting === null) return; // dismissed without choosing
 
+    // Opened before the row-chunks start so every chunk's outcomes log under
+    // one batch id — that id is what makes this import reviewable and
+    // reversible afterward (Import History button).
+    const { id: batchId } = await this.api('POST', '/product-imports');
+
     await this._runBatchedCsvImport({
       rows, endpoint: '/products/import', title: 'Importing Products',
-      extraBody: { skip_existing: skipExisting },
-      onFinish: () => this.renderInventory(),
+      extraBody: { skip_existing: skipExisting, batch_id: batchId },
+      onFinish: async () => {
+        await this.api('PATCH', `/product-imports/${batchId}/finish`).catch(() => {});
+        this.renderInventory();
+        this.showImportBatchDetail(batchId);
+      },
     });
   },
 
@@ -9105,6 +9116,94 @@ const App = {
       overlay.querySelector('#import-skumode-skip').addEventListener('click', () => finish(true));
       overlay.querySelector('#import-skumode-update').addEventListener('click', () => finish(false));
     });
+  },
+
+  // ─── Import History / Review / Reverse ──────────────────────────────
+  async showImportHistory() {
+    const batches = await this.api('GET', '/product-imports');
+    const fmtDate = d => d ? new Date(d).toLocaleString('en-US', { month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit' }) : '—';
+    this.showModal(`
+      <div class="modal" style="max-width:760px">
+        <div class="modal-header"><span class="modal-title">Import History</span><button class="modal-close">✕</button></div>
+        <div class="modal-body" style="padding:0">
+          <table style="width:100%;border-collapse:collapse">
+            <thead><tr style="background:var(--bg-secondary,#f9fafb)">
+              <th style="padding:8px 12px;text-align:left;font-size:12px">Started</th>
+              <th style="padding:8px 12px;text-align:left;font-size:12px">By</th>
+              <th style="padding:8px 12px;text-align:center;font-size:12px">Created</th>
+              <th style="padding:8px 12px;text-align:center;font-size:12px">Updated</th>
+              <th style="padding:8px 12px;text-align:center;font-size:12px">Skipped</th>
+              <th style="padding:8px 12px;text-align:center;font-size:12px">Errors</th>
+              <th style="padding:8px 12px;text-align:left;font-size:12px">Status</th>
+              <th style="padding:8px 12px"></th>
+            </tr></thead>
+            <tbody>
+              ${batches.length ? batches.map(b => `<tr style="border-top:1px solid var(--border,#e5e7eb)">
+                <td style="padding:8px 12px;font-size:12px;white-space:nowrap">${fmtDate(b.started_at)}</td>
+                <td style="padding:8px 12px;font-size:12px">${b.employee_name || '—'}</td>
+                <td style="padding:8px 12px;text-align:center;font-size:12px">${b.created_count || 0}</td>
+                <td style="padding:8px 12px;text-align:center;font-size:12px">${b.updated_count || 0}</td>
+                <td style="padding:8px 12px;text-align:center;font-size:12px">${b.skipped_count || 0}</td>
+                <td style="padding:8px 12px;text-align:center;font-size:12px;${b.error_count ? 'color:var(--danger);font-weight:600' : ''}">${b.error_count || 0}</td>
+                <td style="padding:8px 12px;font-size:12px"><span class="badge-pill ${b.status==='reversed'?'badge-danger':b.status==='completed'?'badge-success':'badge-warning'}">${b.status}</span></td>
+                <td style="padding:8px 12px;text-align:right;white-space:nowrap"><button class="btn btn-secondary btn-sm" onclick="App.showImportBatchDetail(${b.id})">Review</button></td>
+              </tr>`).join('') : '<tr><td colspan="8" style="padding:24px;text-align:center;color:var(--text-muted)">No imports logged yet</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">Close</button></div>
+      </div>`);
+  },
+
+  async showImportBatchDetail(batchId) {
+    const { batch, counts, issue_count, issues } = await this.api('GET', `/product-imports/${batchId}`);
+    const fmtDate = d => d ? new Date(d).toLocaleString('en-US', { month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit' }) : '—';
+    const c = counts || {};
+    const canReverse = batch.status !== 'reversed';
+    this.showModal(`
+      <div class="modal" style="max-width:640px">
+        <div class="modal-header"><span class="modal-title">Import #${batch.id} Review</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">
+            Started ${fmtDate(batch.started_at)} by ${batch.employee_name || 'unknown'}
+            ${batch.status === 'reversed' ? ` · reversed ${fmtDate(batch.reversed_at)}` : ''}
+          </p>
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px">
+            <div class="card" style="padding:10px;text-align:center"><div style="font-size:20px;font-weight:700">${c.created||0}</div><div style="font-size:11px;color:var(--text-muted)">Created</div></div>
+            <div class="card" style="padding:10px;text-align:center"><div style="font-size:20px;font-weight:700">${c.updated||0}</div><div style="font-size:11px;color:var(--text-muted)">Updated</div></div>
+            <div class="card" style="padding:10px;text-align:center"><div style="font-size:20px;font-weight:700">${c.skipped||0}</div><div style="font-size:11px;color:var(--text-muted)">Skipped</div></div>
+            <div class="card" style="padding:10px;text-align:center"><div style="font-size:20px;font-weight:700;${c.error?'color:var(--danger)':''}">${c.error||0}</div><div style="font-size:11px;color:var(--text-muted)">Errors</div></div>
+          </div>
+          <div style="padding:12px;border:1px solid var(--border,#e5e7eb);border-radius:6px;margin-bottom:12px">
+            <div style="font-weight:600;font-size:13px;margin-bottom:4px">${issue_count} product(s) with missing/questionable data</div>
+            <div style="font-size:12px;color:var(--text-muted)">$0 price, negative stock, or no category/supplier/barcode among the rows this import touched.</div>
+            ${issue_count ? `<div style="margin-top:8px;max-height:160px;overflow-y:auto;font-size:12px">
+              ${issues.slice(0,25).map(i => `<div style="padding:3px 0;border-top:1px solid var(--border,#e5e7eb)">${i.sku} — ${i.name} <span style="color:var(--text-muted)">(${i.issue})</span></div>`).join('')}
+              ${issues.length > 25 ? `<div style="padding:4px 0;color:var(--text-muted)">…and ${issues.length - 25} more, see the export</div>` : ''}
+            </div>` : ''}
+          </div>
+        </div>
+        <div class="modal-footer" style="flex-wrap:wrap;gap:8px">
+          <button class="btn btn-secondary" onclick="App.showImportHistory()">Back</button>
+          ${issue_count ? `<a class="btn btn-secondary" href="/api/product-imports/${batch.id}/export-issues" download>Export Issues CSV</a>` : ''}
+          ${canReverse ? `<button class="btn btn-danger" onclick="App.reverseImportBatch(${batch.id})">Reverse This Import</button>` : ''}
+        </div>
+      </div>`);
+  },
+
+  async reverseImportBatch(batchId) {
+    if (!confirm('Reverse this import? Newly created products will be permanently deleted (unless already sold/ordered/counted elsewhere, which are left alone and reported), and updated products will be restored to their prior values. This cannot be undone.')) return;
+    try {
+      const result = await this.api('POST', `/product-imports/${batchId}/reverse`);
+      let msg = `Reversed: ${result.deleted} product(s) deleted, ${result.restored} restored.`;
+      if (result.kept.length) {
+        msg += `\n\n${result.kept.length} kept because they're already in use elsewhere:\n` +
+          result.kept.map(k => `${k.sku} (${k.reasons.join(', ')})`).join('\n');
+      }
+      this.alert(msg, result.kept.length ? 'warning' : 'success');
+      this.renderInventory();
+      this.showImportBatchDetail(batchId);
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   // Shared by importProductsCsv and importRentalItemsCsv — splits rows into

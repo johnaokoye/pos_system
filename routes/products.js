@@ -9,6 +9,7 @@ const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 const { requireAuth, requirePermission, can } = require('../lib/permissions');
 const { getOutstandingQty } = require('../lib/rentalAvailability');
 const { mergeProducts } = require('../lib/productMerge');
+const { HAS_ISSUE_SQL, ISSUE_LABEL_SQL, rowsToCsv } = require('../lib/productIssues');
 
 // CSV cells for money/quantity fields often carry currency symbols, thousands
 // separators, or stray whitespace (e.g. "$15.00", "1,000") — bare parseFloat/
@@ -279,6 +280,32 @@ router.get('/export', requirePermission('inventory'), async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// GET export active products with missing/questionable data — zero price
+// (flagged worse when cost > 0, since that's an active product that would
+// ring up free), negative stock, or no category/supplier/barcode. Same
+// checks (lib/productIssues.js) used by the per-import-batch review, but
+// scoped to the whole active catalog rather than one import.
+router.get('/export/issues', requirePermission('inventory'), async (req, res) => {
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT p.id, p.sku, p.name, p.price, p.cost, p.stock_qty,
+        c.name as category_name, s.name as supplier_name, p.barcode,
+        ${ISSUE_LABEL_SQL} as issue
+        FROM products p
+        LEFT JOIN categories c ON p.category_id = c.id
+        LEFT JOIN suppliers s ON p.supplier_id = s.id
+        WHERE p.active = 1 AND ${HAS_ISSUE_SQL}
+        ORDER BY p.sku`,
+      args: [],
+    });
+    const csv = rowsToCsv(rows, ['id','sku','name','price','cost','stock_qty','category_name','supplier_name','barcode','issue']);
+    const timestamp = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="products_missing_data_${timestamp}.csv"`);
+    res.send(csv);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET CSV template for bulk import
 router.get('/export/template', requirePermission('inventory'), (req, res) => {
   const headers = ['sku','barcode','name','description','category_name','price','cost','tax_rate','stock_qty','min_stock','active','supplier_name'];
@@ -290,9 +317,15 @@ router.get('/export/template', requirePermission('inventory'), (req, res) => {
 });
 
 // POST import products from CSV rows
+// `batch_id` (from POST /product-imports) is optional — when present, every
+// row's outcome is logged to product_import_batch_items so the batch can
+// later be reviewed (routes/product-imports.js GET /:id) or reversed
+// (POST /:id/reverse). 'updated' rows log a full snapshot of the row *before*
+// the overwrite (previous_values) since that's the only way Reverse can put
+// it back — the UPDATE below doesn't otherwise keep any history.
 router.post('/import', requirePermission('inventory'), async (req, res) => {
   try {
-    const { rows, skip_existing } = req.body;
+    const { rows, skip_existing, batch_id } = req.body;
     if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ error: 'No rows provided' });
 
     const { rows: catRows } = await db.execute({ sql: 'SELECT id, name FROM categories', args: [] });
@@ -302,27 +335,45 @@ router.post('/import', requirePermission('inventory'), async (req, res) => {
 
     let created = 0, updated = 0, skipped = 0;
     const errors = [];
+    const logItem = async (sku, product_id, action, previous_values, error_message) => {
+      if (!batch_id) return;
+      await db.execute({
+        sql: 'INSERT INTO product_import_batch_items (batch_id, product_id, sku, action, previous_values, error_message) VALUES (?,?,?,?,?,?)',
+        args: [batch_id, product_id || null, sku || '', action, previous_values ? JSON.stringify(previous_values) : null, error_message || null],
+      });
+    };
 
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       const rowNum = i + 2;
       const { sku, barcode, name, description, category_name, price, cost, tax_rate, stock_qty, min_stock, active, supplier_name } = row;
-      if (!sku || !name) { errors.push(`Row ${rowNum}: SKU and name are required`); continue; }
+      if (!sku || !name) {
+        const msg = `Row ${rowNum}: SKU and name are required`;
+        errors.push(msg);
+        await logItem(sku, null, 'error', null, msg);
+        continue;
+      }
       const category_id = category_name ? (catMap[category_name.toLowerCase()] ?? null) : null;
       const supplier_id = supplier_name ? (supMap[supplier_name.toLowerCase()] ?? null) : null;
       const vals = [barcode||null, name, description||null, category_id, parseNum(price)||0, parseNum(cost)||0, parseNum(tax_rate)||8.5, parseNum(stock_qty)||0, parseNum(min_stock)||5, active === '' || active == null ? 1 : (parseNum(active) ? 1 : 0), supplier_id];
       try {
-        const { rows: [existing] } = await db.execute({ sql: 'SELECT id FROM products WHERE sku = ?', args: [sku] });
+        const { rows: [existing] } = await db.execute({ sql: 'SELECT * FROM products WHERE sku = ?', args: [sku] });
         if (existing && skip_existing) {
           skipped++;
+          await logItem(sku, existing.id, 'skipped', null, null);
         } else if (existing) {
           await db.execute({ sql: 'UPDATE products SET barcode=?,name=?,description=?,category_id=?,price=?,cost=?,tax_rate=?,stock_qty=?,min_stock=?,active=?,supplier_id=? WHERE sku=?', args: [...vals, sku] });
           updated++;
+          await logItem(sku, existing.id, 'updated', existing, null);
         } else {
-          await db.execute({ sql: 'INSERT INTO products (sku,barcode,name,description,category_id,price,cost,tax_rate,stock_qty,min_stock,active,supplier_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', args: [sku, ...vals] });
+          const result = await db.execute({ sql: 'INSERT INTO products (sku,barcode,name,description,category_id,price,cost,tax_rate,stock_qty,min_stock,active,supplier_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', args: [sku, ...vals] });
           created++;
+          await logItem(sku, Number(result.lastInsertRowid), 'created', null, null);
         }
-      } catch (e) { errors.push(`Row ${rowNum} (${sku}): ${e.message}`); }
+      } catch (e) {
+        errors.push(`Row ${rowNum} (${sku}): ${e.message}`);
+        await logItem(sku, null, 'error', null, e.message);
+      }
     }
 
     res.json({ created, updated, skipped, errors, total: rows.length });

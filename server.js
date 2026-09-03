@@ -62,6 +62,7 @@ app.use('/api', apiKeyAuth);
 app.use('/api', sessionAuth);
 
 app.use('/api/products',         require('./routes/products'));
+app.use('/api/product-imports',  require('./routes/product-imports'));
 app.use('/api/categories',       require('./routes/categories'));
 app.use('/api/brands',           require('./routes/brands'));
 app.use('/api/customers',        require('./routes/customers'));
