@@ -3,6 +3,8 @@ const router = express.Router();
 const crypto = require('crypto');
 const { db } = require('../database');
 const { requirePermission } = require('../lib/permissions');
+const { nextNumber } = require('../lib/nextNumber');
+const { findDuplicateCustomers } = require('./customers');
 
 // ── WC API helpers ───────────────────────────────────────────────────────────
 
@@ -425,6 +427,31 @@ async function syncCustomers() {
 
 // ── Orders: WooCommerce → POS transactions ───────────────────────────────────
 
+// Resolves an incoming order's billing info to a local customer id, or null
+// if the order carries no usable billing info at all. Same email/phone/
+// full-name duplicate check as adding a customer by hand or via CSV import
+// (routes/customers.js's findDuplicateCustomers) — a match links the order
+// to that existing customer; no match creates a new one from the order's
+// billing info, rather than always leaving guest/first-time orders with no
+// customer attached.
+async function resolveOrderCustomer(order) {
+  const billing = order.billing || {};
+  if (!billing.email && !billing.phone && !(billing.first_name && billing.last_name)) return null;
+
+  const matches = await findDuplicateCustomers({
+    email: billing.email, phone: billing.phone,
+    first_name: billing.first_name, last_name: billing.last_name,
+  });
+  if (matches.length) return matches[0].id;
+
+  const customer_number = await nextNumber(db, 'customers', 'customer_number', 'CUST-', 4);
+  const result = await db.execute({
+    sql: `INSERT INTO customers (customer_number, first_name, last_name, email, phone, address, city, state, zip, notes) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    args: [customer_number, billing.first_name || 'WooCommerce', billing.last_name || 'Customer', billing.email || null, billing.phone || null, billing.address_1 || null, billing.city || null, billing.state || null, billing.postcode || null, `Auto-created from WooCommerce order #${order.number}`],
+  });
+  return Number(result.lastInsertRowid);
+}
+
 async function syncOrders() {
   const logId = await createLog('orders');
   const counts = { processed: 0, created: 0, updated: 0, failed: 0, errors: [] };
@@ -452,14 +479,7 @@ async function syncOrders() {
       counts.processed++;
 
       try {
-        let customerId = null;
-        if (order.billing?.email) {
-          const { rows: [cust] } = await db.execute({
-            sql: 'SELECT id FROM customers WHERE email = ?',
-            args: [order.billing.email],
-          });
-          customerId = cust?.id || null;
-        }
+        const customerId = await resolveOrderCustomer(order);
 
         const txNum = `WC-${String(order.id).padStart(6, '0')}`;
         const subtotal = parseFloat(order.subtotal || 0);
@@ -604,4 +624,4 @@ router.get('/logs', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-module.exports = { router, runSyncAll, getWcSettings, wcRequest };
+module.exports = { router, runSyncAll, getWcSettings, wcRequest, resolveOrderCustomer };

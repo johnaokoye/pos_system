@@ -776,7 +776,7 @@
           <ul>
             <li><strong>Email/SMTP</strong> — credentials for sending receipts, statements, and notifications by email.</li>
             <li><strong>Cloudinary</strong> — optional cloud image storage for product photos and PO attachments; recommended (and required on Vercel-hosted deployments, where local file storage doesn't persist).</li>
-            <li><strong>WooCommerce</strong> — two-way sync of products and orders with a WooCommerce store. Once configured, the app syncs automatically on an interval you set, and you can trigger a manual sync or review the sync log here too.</li>
+            <li><strong>WooCommerce</strong> — two-way sync of products and orders with a WooCommerce store. Once configured, the app syncs automatically on an interval you set, and you can trigger a manual sync or review the sync log here too. Pulling in an order runs it through the same email/phone/full-name duplicate check used everywhere else customers are created (<a href="#customers">Customers</a>): a match links the order to that existing customer, otherwise a new one is created from the order's billing info — a guest or first-time WooCommerce order is no longer left with no customer attached, and a repeat buyer under the same billing details never ends up duplicated.</li>
           </ul>
         </li>
         <li><strong>Customer Categories</strong> — a Categories-style manager (name, discount %, active) for classifying customers as Individual, Company, Contractor, or whatever fits — see <a href="#customers">Customers</a> for how the discount applies at checkout.</li>
