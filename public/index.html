@@ -9171,8 +9171,9 @@ const App = {
     const rows = this._parseCsv(text);
     if (!rows.length) { this.alert('No data rows found in CSV', 'error'); return; }
 
-    const skipExisting = await this._askImportExistingSkuMode();
-    if (skipExisting === null) return; // dismissed without choosing
+    const choice = await this._askImportExistingSkuMode();
+    if (choice === null) return; // dismissed without choosing
+    const { skipExisting, branchId } = choice;
 
     // Opened before the row-chunks start so every chunk's outcomes log under
     // one batch id — that id is what makes this import reviewable and
@@ -9181,7 +9182,7 @@ const App = {
 
     await this._runBatchedCsvImport({
       rows, endpoint: '/products/import', title: 'Importing Products',
-      extraBody: { skip_existing: skipExisting, batch_id: batchId },
+      extraBody: { skip_existing: skipExisting, batch_id: batchId, branch_id: branchId },
       onFinish: async () => {
         await this.api('PATCH', `/product-imports/${batchId}/finish`).catch(() => {});
         this.renderInventory();
@@ -9193,16 +9194,29 @@ const App = {
   // Re-importing a stock list often re-sends SKUs that are already in the
   // system unchanged — asks up front whether those rows should overwrite the
   // existing product (the historical default) or be left untouched and just
-  // counted, so a re-import doesn't have to be all-or-nothing.
-  _askImportExistingSkuMode() {
+  // counted, so a re-import doesn't have to be all-or-nothing. Also asks
+  // which branch (if any) the imported quantities should be assigned to —
+  // a plain import only ever sets the overall stock level (see Bulk Assign
+  // to Branch above), so picking one here sets that branch's stock too,
+  // in the same pass, instead of needing a separate bulk-assign afterward.
+  async _askImportExistingSkuMode() {
+    const branches = await this.api('GET', '/branches');
     return new Promise(resolve => {
       document.querySelectorAll('.modal-overlay').forEach(el => el.remove());
       const overlay = document.createElement('div');
       overlay.className = 'modal-overlay';
       overlay.innerHTML = `
         <div class="modal" style="max-width:420px">
-          <div class="modal-header"><span class="modal-title">Existing SKUs</span></div>
+          <div class="modal-header"><span class="modal-title">Import Options</span></div>
           <div class="modal-body">
+            <div class="form-group">
+              <label>Assign imported stock to branch</label>
+              <select id="import-branch">
+                <option value="">Don't assign — "All Branches" total only</option>
+                ${branches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
+              </select>
+              <p style="font-size:12px;color:var(--text-muted);margin-top:4px">Sets each row's stock at that branch too, not just the overall total — otherwise every branch-filtered view (and POS with a branch selected) shows 0 for everything just imported.</p>
+            </div>
             <p style="font-size:13px;color:var(--text-muted)">This file may contain SKUs already in the system. What should happen to those rows?</p>
           </div>
           <div class="modal-footer" style="flex-wrap:wrap;gap:8px">
@@ -9212,7 +9226,12 @@ const App = {
           </div>
         </div>`;
       document.body.appendChild(overlay);
-      const finish = val => { overlay.remove(); resolve(val); };
+      const finish = skipExisting => {
+        if (skipExisting === null) { overlay.remove(); resolve(null); return; }
+        const branchId = overlay.querySelector('#import-branch').value || null;
+        overlay.remove();
+        resolve({ skipExisting, branchId });
+      };
       overlay.querySelector('#import-skumode-cancel').addEventListener('click', () => finish(null));
       overlay.querySelector('#import-skumode-skip').addEventListener('click', () => finish(true));
       overlay.querySelector('#import-skumode-update').addEventListener('click', () => finish(false));

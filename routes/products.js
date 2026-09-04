@@ -348,7 +348,7 @@ router.get('/export/template', requirePermission('inventory'), (req, res) => {
 // it back — the UPDATE below doesn't otherwise keep any history.
 router.post('/import', requirePermission('inventory'), async (req, res) => {
   try {
-    const { rows, skip_existing, batch_id } = req.body;
+    const { rows, skip_existing, batch_id, branch_id } = req.body;
     if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ error: 'No rows provided' });
 
     const { rows: catRows } = await db.execute({ sql: 'SELECT id, name FROM categories', args: [] });
@@ -378,20 +378,43 @@ router.post('/import', requirePermission('inventory'), async (req, res) => {
       }
       const category_id = category_name ? (catMap[category_name.toLowerCase()] ?? null) : null;
       const supplier_id = supplier_name ? (supMap[supplier_name.toLowerCase()] ?? null) : null;
-      const vals = [barcode||null, name, description||null, category_id, parseNum(price)||0, parseNum(cost)||0, parseNum(tax_rate)||8.5, parseNum(stock_qty)||0, parseNum(min_stock)||5, active === '' || active == null ? 1 : (parseNum(active) ? 1 : 0), supplier_id];
+      const qty = parseNum(stock_qty) || 0;
+      const minStk = parseNum(min_stock) || 5;
+      const vals = [barcode||null, name, description||null, category_id, parseNum(price)||0, parseNum(cost)||0, parseNum(tax_rate)||8.5, qty, minStk, active === '' || active == null ? 1 : (parseNum(active) ? 1 : 0), supplier_id];
       try {
         const { rows: [existing] } = await db.execute({ sql: 'SELECT * FROM products WHERE sku = ?', args: [sku] });
+        let productId = null;
         if (existing && skip_existing) {
           skipped++;
           await logItem(sku, existing.id, 'skipped', null, null);
         } else if (existing) {
           await db.execute({ sql: 'UPDATE products SET barcode=?,name=?,description=?,category_id=?,price=?,cost=?,tax_rate=?,stock_qty=?,min_stock=?,active=?,supplier_id=? WHERE sku=?', args: [...vals, sku] });
           updated++;
+          productId = existing.id;
           await logItem(sku, existing.id, 'updated', existing, null);
         } else {
           const result = await db.execute({ sql: 'INSERT INTO products (sku,barcode,name,description,category_id,price,cost,tax_rate,stock_qty,min_stock,active,supplier_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', args: [sku, ...vals] });
+          productId = Number(result.lastInsertRowid);
           created++;
-          await logItem(sku, Number(result.lastInsertRowid), 'created', null, null);
+          await logItem(sku, productId, 'created', null, null);
+        }
+
+        // Optional branch chosen up front for the whole import (see
+        // App.importProductsCsv) — a plain import only ever sets the
+        // overall stock_qty above, so this additionally upserts that one
+        // branch's row to match, the same fix Bulk Assign to Branch applies
+        // after the fact. Retail products can legitimately be stocked at
+        // several branches (unlike rentals' single-branch model), so this
+        // only ever touches the chosen branch's own row — it never removes
+        // or overwrites stock the product already has at any other branch.
+        if (productId && branch_id) {
+          const { rows: [existingBI] } = await db.execute({ sql: 'SELECT stock_qty FROM branch_inventory WHERE product_id = ? AND branch_id = ?', args: [productId, branch_id] });
+          await db.execute({
+            sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock) VALUES (?,?,?,?)
+                  ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = ?, min_stock = ?, updated_at = CURRENT_TIMESTAMP`,
+            args: [productId, branch_id, qty, minStk, qty, minStk],
+          });
+          await syncBinQty(db, productId, branch_id, qty - (existingBI?.stock_qty || 0));
         }
       } catch (e) {
         errors.push(`Row ${rowNum} (${sku}): ${e.message}`);
