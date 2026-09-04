@@ -10037,7 +10037,7 @@ const App = {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
-  async saveCustomer(id) {
+  async saveCustomer(id, opts = {}) {
     const customerType = document.getElementById('cf-type')?.value || 'cash';
     const taxExempt = document.getElementById('cf-tax-exempt')?.checked ? 1 : 0;
     const isRentalCustomer = document.getElementById('cf-rental-customer')?.checked ? 1 : 0;
@@ -10078,11 +10078,63 @@ const App = {
     };
     if (!data.first_name || !data.last_name) { this.alert('First and last name required', 'error'); return; }
     if (data.customer_type === 'credit' && data.credit_terms_days < 1) { this.alert('Credit terms must be at least 1 day', 'error'); return; }
+    if (opts.force) data.force = true;
     try {
       if (id) await this.api('PUT', `/customers/${id}`, data);
       else await this.api('POST', '/customers', data);
       this.closeModal();
       this.alert(id ? 'Customer updated' : 'Customer created');
+      this.renderCustomers();
+    } catch (e) {
+      // The customer form's inputs are gone once the duplicate-picker modal
+      // replaces it, so stash the already-collected data for "Create Anyway"
+      // to resubmit directly rather than re-reading (now-missing) DOM fields.
+      if (!id && e.status === 409 && e.data && e.data.matches) { this._pendingCustomerData = data; return this.showCustomerDuplicateModal(e.data.matches); }
+      this.alert(e.message, 'error');
+    }
+  },
+
+  // Shown when creating a customer would duplicate one that already matches
+  // by email, phone, or name — lets the user view the existing record or
+  // confirm they really do want a separate one.
+  showCustomerDuplicateModal(matches) {
+    this.showModal(`
+      <div class="modal" style="max-width:520px">
+        <div class="modal-header">
+          <span class="modal-title">Possible Duplicate Customer</span>
+          <button class="modal-close" onclick="App.closeModal()">✕</button>
+        </div>
+        <div class="modal-body">
+          <p>A customer with the same name, phone, or email already exists:</p>
+          <div style="display:flex;flex-direction:column;gap:8px;margin:12px 0">
+            ${matches.map(c => `
+              <div style="display:flex;justify-content:space-between;align-items:center;padding:8px;border:1px solid var(--border);border-radius:6px">
+                <div>
+                  <div><strong>${c.first_name} ${c.last_name}</strong> (${c.customer_number})</div>
+                  <div style="font-size:12px;color:var(--text-muted)">${c.email || ''} ${c.phone ? '· ' + c.phone : ''}</div>
+                </div>
+                <button class="btn btn-outline btn-sm" onclick="App.closeModal();App.viewCustomer(${c.id})">View</button>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" onclick="App.closeModal();App.showCustomerForm(null)">Cancel</button>
+          <button class="btn btn-danger" onclick="App.forceCreateCustomer()">Create New Customer Anyway</button>
+        </div>
+      </div>
+    `);
+  },
+
+  async forceCreateCustomer() {
+    const data = this._pendingCustomerData;
+    if (!data) return this.closeModal();
+    data.force = true;
+    try {
+      await this.api('POST', '/customers', data);
+      this._pendingCustomerData = null;
+      this.closeModal();
+      this.alert('Customer created');
       this.renderCustomers();
     } catch (e) { this.alert(e.message, 'error'); }
   },

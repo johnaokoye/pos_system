@@ -186,6 +186,19 @@ router.post('/', requirePermission('customers'), async (req, res) => {
   } = req.body;
   if (!first_name || !last_name) return res.status(400).json({ error: 'First and last name required' });
   try {
+    // Guard against creating a duplicate customer record: match on email,
+    // phone, or full name against active customers. `force` skips this once
+    // the caller has already confirmed they want a separate record anyway.
+    if (!req.body.force) {
+      const { rows: matches } = await db.execute({
+        sql: `SELECT * FROM customers WHERE active = 1 AND (
+          (email IS NOT NULL AND email != '' AND LOWER(email) = LOWER(?))
+          OR (phone IS NOT NULL AND phone != '' AND phone = ?)
+          OR (LOWER(first_name) = LOWER(?) AND LOWER(last_name) = LOWER(?)))`,
+        args: [email || '', phone || '', first_name, last_name],
+      });
+      if (matches.length) return res.status(409).json({ error: 'Possible duplicate customer', matches });
+    }
     const cardError = await validateDiscountCard(discount_card_type_id, discount_card_number, null);
     if (cardError) return res.status(400).json({ error: cardError });
     const cashBackCardError = await validateCashBackCard(cash_back_card_type_id, cash_back_card_number, null);
