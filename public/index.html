@@ -1276,7 +1276,10 @@ const App = {
         this.currentUser = null;
         this.showLoginScreen();
       }
-      throw new Error(json.error || 'Request failed');
+      const err = new Error(json.error || 'Request failed');
+      err.status = res.status;
+      err.data = json;
+      throw err;
     }
     return json;
   },
@@ -18175,14 +18178,49 @@ const App = {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
-  async convertLead(id) {
-    if (!confirm('Convert this lead to a customer record?')) return;
+  async convertLead(id, opts = {}) {
+    if (!opts.force && !opts.link_customer_id && !confirm('Convert this lead to a customer record?')) return;
     try {
-      const res = await this.api('POST', `/crm/leads/${id}/convert`);
-      this.alert(`Converted to customer ${res.customer.customer_number}`);
+      const res = await this.api('POST', `/crm/leads/${id}/convert`, opts);
+      this.alert(`${opts.link_customer_id ? 'Linked to' : 'Converted to'} customer ${res.customer.customer_number}`);
       this.closeModal();
       this.renderCrmTab();
-    } catch(e) { this.alert(e.message, 'error'); }
+    } catch(e) {
+      if (e.status === 409 && e.data && e.data.matches) return this.showLeadDuplicateModal(id, e.data.matches);
+      this.alert(e.message, 'error');
+    }
+  },
+
+  // Shown when converting a lead would create a customer that matches an
+  // existing one by email, phone, or name — lets the user link to the
+  // existing record instead of creating a duplicate.
+  showLeadDuplicateModal(leadId, matches) {
+    this.showModal(`
+      <div class="modal" style="max-width:520px">
+        <div class="modal-header">
+          <span class="modal-title">Possible Duplicate Customer</span>
+          <button class="modal-close" onclick="App.closeModal()">✕</button>
+        </div>
+        <div class="modal-body">
+          <p>A customer with the same name, phone, or email already exists. Link this lead to an existing customer instead of creating a duplicate?</p>
+          <div style="display:flex;flex-direction:column;gap:8px;margin:12px 0">
+            ${matches.map(c => `
+              <div style="display:flex;justify-content:space-between;align-items:center;padding:8px;border:1px solid var(--border);border-radius:6px">
+                <div>
+                  <div><strong>${c.first_name} ${c.last_name}</strong> (${c.customer_number})</div>
+                  <div style="font-size:12px;color:var(--text-muted)">${c.email || ''} ${c.phone ? '· ' + c.phone : ''}</div>
+                </div>
+                <button class="btn btn-outline btn-sm" onclick="App.convertLead(${leadId}, {link_customer_id:${c.id}})">Link</button>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-danger" onclick="App.convertLead(${leadId}, {force:true})">Create New Customer Anyway</button>
+        </div>
+      </div>
+    `);
   },
 
   async viewLead(id) {

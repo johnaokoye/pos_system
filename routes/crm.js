@@ -125,6 +125,29 @@ router.post('/leads/:id/convert', async (req, res) => {
     if (!lead) return res.status(404).json({ error: 'Not found' });
     if (lead.customer_id) return res.status(400).json({ error: 'Already converted to customer' });
 
+    const { link_customer_id, force } = req.body || {};
+
+    // Guard against creating a duplicate customer record: match on email,
+    // phone, or full name. Skipped once the caller has already chosen how
+    // to proceed (linking to a specific match, or forcing a new record).
+    if (!link_customer_id && !force) {
+      const { rows: matches } = await db.execute({
+        sql: `SELECT * FROM customers WHERE active = 1 AND (
+          (email IS NOT NULL AND email != '' AND LOWER(email) = LOWER(?))
+          OR (phone IS NOT NULL AND phone != '' AND phone = ?)
+          OR (LOWER(first_name) = LOWER(?) AND LOWER(last_name) = LOWER(?)))`,
+        args: [lead.email || '', lead.phone || '', lead.first_name, lead.last_name],
+      });
+      if (matches.length) return res.status(409).json({ error: 'Possible duplicate customer', matches });
+    }
+
+    if (link_customer_id) {
+      const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [link_customer_id] });
+      if (!customer) return res.status(404).json({ error: 'Customer to link not found' });
+      await db.execute({ sql: "UPDATE crm_leads SET customer_id=?,status='won',updated_at=datetime('now') WHERE id=?", args: [customer.id, lead.id] });
+      return res.json({ customer, message: 'Lead linked to existing customer' });
+    }
+
     const convTx = await db.transaction('write');
     let committed = false;
     try {
