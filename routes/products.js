@@ -403,6 +403,58 @@ router.post('/import', requirePermission('inventory'), async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// GET how many active retail products have no branch_inventory row at all —
+// the gap a plain CSV import (POST /import above) leaves behind, since it
+// only ever writes products.stock_qty. A branch-filtered view (or POS with
+// a branch selected) reads branch_inventory, so these show 0 stock
+// everywhere until something assigns them to a branch. Shown in the Bulk
+// Assign to Branch modal before it runs, and re-checked after so the modal
+// can confirm the gap is actually closed.
+router.get('/unbranched-count', requirePermission('inventory'), async (req, res) => {
+  try {
+    const { rows: [row] } = await db.execute({
+      sql: `SELECT COUNT(*) as c FROM products
+        WHERE active = 1 AND is_service = 0 AND is_rental = 0 AND is_non_inventory = 0
+        AND id NOT IN (SELECT product_id FROM branch_inventory)`,
+      args: [],
+    });
+    res.json({ count: row.c });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST bulk-assign every unbranched active retail product's current
+// products.stock_qty to one branch's branch_inventory in one action — the
+// fix for the gap GET /unbranched-count reports. Scoped to products with NO
+// branch_inventory row yet; a product already assigned to (or split across)
+// any branch is left untouched, same caution PUT /:id's single-branch sync
+// already takes — this only ever fills in the gap, never reassigns or
+// overwrites existing branch stock.
+router.post('/bulk-assign-branch', requirePermission('inventory'), async (req, res) => {
+  try {
+    const { branch_id } = req.body;
+    if (!branch_id) return res.status(400).json({ error: 'branch_id is required' });
+    const { rows: [branch] } = await db.execute({ sql: 'SELECT id FROM branches WHERE id = ?', args: [branch_id] });
+    if (!branch) return res.status(404).json({ error: 'Branch not found' });
+
+    const { rows: eligible } = await db.execute({
+      sql: `SELECT id, stock_qty, min_stock FROM products
+        WHERE active = 1 AND is_service = 0 AND is_rental = 0 AND is_non_inventory = 0
+        AND id NOT IN (SELECT product_id FROM branch_inventory)`,
+      args: [],
+    });
+
+    for (const p of eligible) {
+      await db.execute({
+        sql: 'INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock) VALUES (?,?,?,?)',
+        args: [p.id, branch_id, p.stock_qty || 0, p.min_stock || 5],
+      });
+      await syncBinQty(db, p.id, branch_id, p.stock_qty || 0);
+    }
+
+    res.json({ assigned: eligible.length });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET export rental items as CSV — same shared shape/escaping as the general
 // product export above, but scoped to is_rental=1 with rental-specific
 // columns (rates, classification, replacement value) instead of cost/supplier.

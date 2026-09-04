@@ -4015,6 +4015,7 @@ const App = {
         <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import products from CSV">&#8657; Import<input type="file" accept=".csv" style="display:none" onchange="App.importProductsCsv(this)"></label>
         <button class="btn btn-secondary btn-sm" onclick="App.showImportHistory()" title="Review or reverse past CSV imports">Import History</button>
         <button class="btn btn-secondary btn-sm" onclick="App.scanProductImages()" title="Assign images already placed in uploads/products/ (named by SKU) to their matching products">Scan Images</button>
+        <button class="btn btn-secondary btn-sm" onclick="App.showBulkAssignBranchModal()" title="Assign every product with no branch stock yet (e.g. after a CSV import) to one branch">Bulk Assign to Branch</button>
         <button class="btn btn-secondary btn-sm" onclick="App.showCategoriesManager()">Categories</button>
         <button class="btn btn-secondary btn-sm" onclick="App.showBrandsManager()">Brands</button>
       </div>
@@ -9117,6 +9118,46 @@ const App = {
       let msg = `Scanned ${result.scanned} image file(s), matched ${result.matched} to a product.`;
       if (result.matched) msg += `\n\n${result.details.map(d => `${d.sku} ← ${d.file}`).join('\n')}`;
       this.alert(msg, result.matched ? 'success' : 'warning');
+      this.renderInventory();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // A plain CSV import only ever sets products.stock_qty (the "All
+  // Branches" figure) — it never touches branch_inventory, so every
+  // branch-filtered view (and POS with a branch selected) shows 0 stock for
+  // everything just imported. This bulk-assigns that stock to one chosen
+  // branch in one action instead of editing each product by hand.
+  async showBulkAssignBranchModal() {
+    const [{ count }, branches] = await Promise.all([
+      this.api('GET', '/products/unbranched-count'),
+      this.api('GET', '/branches'),
+    ]);
+    this.showModal(`
+      <div class="modal" style="max-width:420px">
+        <div class="modal-header"><span class="modal-title">Bulk Assign to Branch</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          ${count > 0
+            ? `<p style="font-size:13px;color:var(--text-muted);margin-bottom:12px"><strong>${count}</strong> active retail product(s) have no branch stock assigned yet (their quantity currently only shows under "All Branches"). Choose a branch to assign all of it to:</p>
+               <div class="form-group"><label>Branch</label><select id="bab-branch"><option value="">Select a branch...</option>${branches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}</select></div>
+               <p style="font-size:12px;color:var(--text-muted)">Products already assigned to (or split across) a branch are left untouched — this only fills in the gap.</p>`
+            : `<p style="font-size:13px;color:var(--text-muted)">Every active retail product already has branch stock assigned — nothing to do.</p>`}
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">${count > 0 ? 'Cancel' : 'Close'}</button>
+          ${count > 0 ? `<button class="btn btn-primary" onclick="App.runBulkAssignBranch(${count})">Assign</button>` : ''}
+        </div>
+      </div>`);
+  },
+
+  async runBulkAssignBranch(count) {
+    const branch_id = document.getElementById('bab-branch').value;
+    if (!branch_id) { this.alert('Select a branch first', 'error'); return; }
+    const branchName = document.getElementById('bab-branch').selectedOptions[0].textContent;
+    if (!confirm(`Assign all ${count} unbranched product(s)' current stock quantity to ${branchName}?`)) return;
+    try {
+      const result = await this.api('POST', '/products/bulk-assign-branch', { branch_id });
+      this.alert(`Assigned ${result.assigned} product(s) to ${branchName}.`, 'success');
+      this.closeModal();
       this.renderInventory();
     } catch(e) { this.alert(e.message, 'error'); }
   },

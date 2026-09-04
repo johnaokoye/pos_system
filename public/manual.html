@@ -528,6 +528,7 @@
 
       <h3>Stock — two numbers to know about</h3>
       <p>Every product has a single overall <strong>stock level</strong>, and separately a <strong>per-branch stock level</strong> once it's been touched by a branch-specific action (a sale, a received PO, a transfer, etc.). Most day-to-day stock changes update both automatically. If you ever see a stock number that looks "off" compared to what a branch report shows, this is usually why — see the note under <a href="#reports">Reports</a>.</p>
+      <p><strong>Bulk Assign to Branch</strong> button fixes the most common cause of this: a plain CSV import (below) only ever sets the overall stock level, never a branch-specific one, so right after a big import every branch-filtered view (and POS with a branch selected) shows 0 stock for everything just brought in, even though the overall total is correct. Click it to see how many active retail products currently have no branch assigned at all, pick one branch, and it copies each of those products' current overall quantity into that branch in one action. It only ever fills in this gap — a product that already has stock at any branch (or split across several) is left completely untouched, so it's safe to run more than once.</p>
 
       <h3>Adjusting stock and stock movements</h3>
       <p>Manual stock adjustments (needs <span class="perm-pill">inventory_adjust</span>) and every automatic change (sales, receiving, transfers, cycle-count corrections) are logged as stock movements you can review per product, so you can always trace why a number changed.</p>
