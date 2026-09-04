@@ -1009,6 +1009,37 @@ async function _init() {
       reverse_outcome TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // Same reviewable/reversible batch pattern as product_import_batches,
+    // for CSV customer imports (routes/customer-imports.js).
+    { sql: `CREATE TABLE IF NOT EXISTS customer_import_batches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER REFERENCES employees(id),
+      status TEXT NOT NULL DEFAULT 'running',
+      started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      finished_at DATETIME,
+      reversed_at DATETIME,
+      reversed_by INTEGER REFERENCES employees(id)
+    )` },
+    // One row per CSV row processed. Unlike the product import, there's no
+    // stable business key to upsert by, so a row either creates a new
+    // customer or is skipped as a likely duplicate (matched on email/phone/
+    // full name, same check as POST /customers) — never updates an existing
+    // one. duplicate_of_customer_id records which existing customer a
+    // skipped row matched, for review. Unlike product_id above, customer_id
+    // stays a normal FK (no ON DELETE SET NULL needed): Reverse only
+    // deactivates the customers it created (same soft-delete DELETE
+    // /customers/:id already uses), it never hard-deletes them.
+    { sql: `CREATE TABLE IF NOT EXISTS customer_import_batch_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id INTEGER NOT NULL REFERENCES customer_import_batches(id),
+      customer_id INTEGER REFERENCES customers(id),
+      row_label TEXT NOT NULL,
+      action TEXT NOT NULL,
+      duplicate_of_customer_id INTEGER REFERENCES customers(id),
+      error_message TEXT,
+      reverse_outcome TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
   ], 'write');
 
   // Migrations — each in its own try/catch
@@ -2182,6 +2213,8 @@ async function _init() {
     'CREATE INDEX IF NOT EXISTS idx_crm_opportunities_lead_id ON crm_opportunities(lead_id)',
     'CREATE INDEX IF NOT EXISTS idx_product_import_batch_items_batch_id ON product_import_batch_items(batch_id)',
     'CREATE INDEX IF NOT EXISTS idx_product_import_batch_items_product_id ON product_import_batch_items(product_id)',
+    'CREATE INDEX IF NOT EXISTS idx_customer_import_batch_items_batch_id ON customer_import_batch_items(batch_id)',
+    'CREATE INDEX IF NOT EXISTS idx_customer_import_batch_items_customer_id ON customer_import_batch_items(customer_id)',
   ];
   for (const sql of indexes) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

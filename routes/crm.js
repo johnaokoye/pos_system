@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { calcCommission } = require('./commissions');
+const { findDuplicateCustomers } = require('./customers');
 const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 
@@ -131,13 +132,7 @@ router.post('/leads/:id/convert', async (req, res) => {
     // phone, or full name. Skipped once the caller has already chosen how
     // to proceed (linking to a specific match, or forcing a new record).
     if (!link_customer_id && !force) {
-      const { rows: matches } = await db.execute({
-        sql: `SELECT * FROM customers WHERE active = 1 AND (
-          (email IS NOT NULL AND email != '' AND LOWER(email) = LOWER(?))
-          OR (phone IS NOT NULL AND phone != '' AND phone = ?)
-          OR (LOWER(first_name) = LOWER(?) AND LOWER(last_name) = LOWER(?)))`,
-        args: [lead.email || '', lead.phone || '', lead.first_name, lead.last_name],
-      });
+      const matches = await findDuplicateCustomers({ email: lead.email, phone: lead.phone, first_name: lead.first_name, last_name: lead.last_name });
       if (matches.length) return res.status(409).json({ error: 'Possible duplicate customer', matches });
     }
 

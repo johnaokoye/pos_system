@@ -66,6 +66,7 @@ app.use('/api/product-imports',  require('./routes/product-imports'));
 app.use('/api/categories',       require('./routes/categories'));
 app.use('/api/brands',           require('./routes/brands'));
 app.use('/api/customers',        require('./routes/customers'));
+app.use('/api/customer-imports', require('./routes/customer-imports'));
 app.use('/api/transactions',     require('./routes/transactions'));
 app.use('/api/employees',        require('./routes/employees'));
 app.use('/api/reports',          require('./routes/reports'));

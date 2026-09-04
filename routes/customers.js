@@ -22,6 +22,20 @@ const uploadDoc = multer({
   fileFilter: (req, file, cb) => cb(null, /^image\//.test(file.mimetype) || file.mimetype === 'application/pdf'),
 });
 
+// Shared by POST / (single create) and POST /import (CSV bulk create):
+// active customers matching the given email, phone, or full name — used to
+// warn about/block a likely duplicate before a new customer is inserted.
+async function findDuplicateCustomers({ email, phone, first_name, last_name }) {
+  const { rows } = await db.execute({
+    sql: `SELECT * FROM customers WHERE active = 1 AND (
+      (email IS NOT NULL AND email != '' AND LOWER(email) = LOWER(?))
+      OR (phone IS NOT NULL AND phone != '' AND phone = ?)
+      OR (LOWER(first_name) = LOWER(?) AND LOWER(last_name) = LOWER(?)))`,
+    args: [email || '', phone || '', first_name || '', last_name || ''],
+  });
+  return rows;
+}
+
 // Check if a credit customer has exceeded their payment terms and block/unblock accordingly
 async function runCreditCheck(customerId) {
   try {
@@ -92,6 +106,45 @@ router.get('/', requireAuth, async (req, res) => {
     sql += ' ORDER BY last_name, first_name';
     const { rows } = await db.execute({ sql, args: params });
     res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── CSV import/export ─────────────────────────────────────
+// Registered before GET /:id so "export"/"template" aren't swallowed as a
+// customer id (same ordering as routes/products.js's /export routes).
+const CSV_COLUMNS = ['first_name','last_name','email','phone','address','city','state','zip','customer_type','credit_terms_days','credit_limit','tax_exempt','tax_exemption_number','customer_category_name','notes'];
+
+function escapeCsv(v) {
+  if (v == null) return '';
+  const s = String(v);
+  return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+// GET CSV template for bulk import
+router.get('/export/template', requirePermission('customers'), (req, res) => {
+  const example = ['Jane','Doe','jane.doe@example.com','555-0100','123 Main St','Springfield','IL','62701','cash','30','0','0','','Individual','Prefers email contact'];
+  const csv = [CSV_COLUMNS.join(','), example.join(',')].join('\r\n');
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="customer_import_template.csv"');
+  res.send(csv);
+});
+
+// GET export active customers as CSV — same column shape as the import
+// template/POST /import, so an export can be edited and re-imported.
+router.get('/export', requirePermission('customers'), async (req, res) => {
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT c.*, cc.name as customer_category_name FROM customers c
+        LEFT JOIN customer_categories cc ON c.customer_category_id = cc.id
+        WHERE c.active = 1 ORDER BY c.first_name, c.last_name`,
+      args: [],
+    });
+    const csvRows = [CSV_COLUMNS.join(',')];
+    for (const c of rows) csvRows.push(CSV_COLUMNS.map(h => escapeCsv(c[h])).join(','));
+    const timestamp = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="customers_export_${timestamp}.csv"`);
+    res.send(csvRows.join('\r\n'));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -190,13 +243,7 @@ router.post('/', requirePermission('customers'), async (req, res) => {
     // phone, or full name against active customers. `force` skips this once
     // the caller has already confirmed they want a separate record anyway.
     if (!req.body.force) {
-      const { rows: matches } = await db.execute({
-        sql: `SELECT * FROM customers WHERE active = 1 AND (
-          (email IS NOT NULL AND email != '' AND LOWER(email) = LOWER(?))
-          OR (phone IS NOT NULL AND phone != '' AND phone = ?)
-          OR (LOWER(first_name) = LOWER(?) AND LOWER(last_name) = LOWER(?)))`,
-        args: [email || '', phone || '', first_name, last_name],
-      });
+      const matches = await findDuplicateCustomers({ email, phone, first_name, last_name });
       if (matches.length) return res.status(409).json({ error: 'Possible duplicate customer', matches });
     }
     const cardError = await validateDiscountCard(discount_card_type_id, discount_card_number, null);
@@ -283,6 +330,75 @@ router.delete('/:id', requirePermission('customers'), async (req, res) => {
   try {
     await db.execute({ sql: 'UPDATE customers SET active = 0 WHERE id = ?', args: [req.params.id] });
     res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST import customers from CSV rows.
+// `batch_id` (from POST /customer-imports) is optional — when present, every
+// row's outcome is logged to customer_import_batch_items so the batch can
+// later be reviewed (routes/customer-imports.js GET /:id) or reversed
+// (POST /:id/reverse). Every row runs through the same duplicate check as
+// POST / (email/phone/full name against active customers): by default a
+// match skips the row instead of creating it — pass `duplicate_mode:
+// 'force'` to create every row regardless of matches.
+router.post('/import', requirePermission('customers'), async (req, res) => {
+  try {
+    const { rows, batch_id, duplicate_mode } = req.body;
+    if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ error: 'No rows provided' });
+    const force = duplicate_mode === 'force';
+
+    const { rows: catRows } = await db.execute({ sql: 'SELECT id, name FROM customer_categories', args: [] });
+    const catMap = Object.fromEntries(catRows.map(c => [c.name.toLowerCase(), c.id]));
+
+    let created = 0, skipped = 0;
+    const errors = [];
+    const duplicates = [];
+    const logItem = async (rowLabel, customer_id, action, duplicate_of_customer_id, error_message) => {
+      if (!batch_id) return;
+      await db.execute({
+        sql: 'INSERT INTO customer_import_batch_items (batch_id, customer_id, row_label, action, duplicate_of_customer_id, error_message) VALUES (?,?,?,?,?,?)',
+        args: [batch_id, customer_id || null, rowLabel || '', action, duplicate_of_customer_id || null, error_message || null],
+      });
+    };
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const rowNum = i + 2;
+      const { first_name, last_name, email, phone, address, city, state, zip, customer_type, credit_terms_days, credit_limit, tax_exempt, tax_exemption_number, customer_category_name, notes } = row;
+      const rowLabel = `${first_name || ''} ${last_name || ''}`.trim() || email || phone || `row ${rowNum}`;
+      if (!first_name || !last_name) {
+        const msg = `Row ${rowNum}: first and last name are required`;
+        errors.push(msg);
+        await logItem(rowLabel, null, 'error', null, msg);
+        continue;
+      }
+      try {
+        if (!force) {
+          const matches = await findDuplicateCustomers({ email, phone, first_name, last_name });
+          if (matches.length) {
+            skipped++;
+            duplicates.push({ row: rowLabel, matches: matches.map(m => ({ id: m.id, customer_number: m.customer_number, name: `${m.first_name} ${m.last_name}` })) });
+            await logItem(rowLabel, null, 'skipped_duplicate', matches[0].id, null);
+            continue;
+          }
+        }
+        const category_id = customer_category_name ? (catMap[customer_category_name.toLowerCase()] ?? null) : null;
+        const type = customer_type || 'cash';
+        const customer_number = await nextNumber(db, 'customers', 'customer_number', 'CUST-', 4);
+        const result = await db.execute({
+          sql: `INSERT INTO customers (customer_number,first_name,last_name,email,phone,address,city,state,zip,customer_type,credit_terms_days,credit_limit,credit_enabled,tax_exempt,tax_exemption_number,customer_category_id,notes)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          args: [customer_number, first_name, last_name, email||null, phone||null, address||null, city||null, state||null, zip||null, type, parseInt(credit_terms_days)||30, parseFloat(credit_limit)||0, type === 'credit' ? 1 : 0, tax_exempt ? 1 : 0, tax_exemption_number||null, category_id, notes||null],
+        });
+        created++;
+        await logItem(rowLabel, Number(result.lastInsertRowid), 'created', null, null);
+      } catch (e) {
+        errors.push(`Row ${rowNum} (${rowLabel}): ${e.message}`);
+        await logItem(rowLabel, null, 'error', null, e.message);
+      }
+    }
+
+    res.json({ created, skipped, errors, duplicates, total: rows.length });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -460,3 +576,4 @@ router.delete('/:id/address-proof', requirePermission('customers'), async (req, 
 
 module.exports = router;
 module.exports.runCreditCheck = runCreditCheck;
+module.exports.findDuplicateCustomers = findDuplicateCustomers;

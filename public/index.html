@@ -9277,7 +9277,7 @@ const App = {
   // dismisses on a backdrop click, which would let someone think they'd
   // stopped the import while it kept posting batches invisibly in the
   // background. Cancel is deliberately the only way out here.
-  async _runBatchedCsvImport({ rows, endpoint, title, extraBody, onFinish }) {
+  async _runBatchedCsvImport({ rows, endpoint, title, extraBody, onFinish, summarize }) {
     const BATCH_SIZE = 25;
     const batches = [];
     for (let i = 0; i < rows.length; i += BATCH_SIZE) batches.push(rows.slice(i, i + BATCH_SIZE));
@@ -9308,16 +9308,23 @@ const App = {
       btn.textContent = 'Cancelling…';
     });
 
-    let created = 0, updated = 0, skipped = 0, processed = 0;
+    // Totals are summed generically from whatever numeric fields each
+    // endpoint's response happens to carry (created/updated/skipped/...) so
+    // this stays shared across products, rentals, and customers even though
+    // their per-row outcome shapes differ — a caller that cares how its
+    // counts read passes `summarize`; otherwise the created/updated/skipped
+    // wording below (the original product-import phrasing) is used as-is.
+    let processed = 0;
+    const totals = {};
     const errors = [];
     for (const batch of batches) {
       if (cancelled) break;
       try {
         const result = await this.api('POST', endpoint, { rows: batch, ...extraBody });
-        created += result.created;
-        updated += result.updated;
-        skipped += result.skipped || 0;
-        errors.push(...result.errors);
+        for (const key of Object.keys(result)) {
+          if (typeof result[key] === 'number') totals[key] = (totals[key] || 0) + result[key];
+        }
+        errors.push(...(result.errors || []));
       } catch (e) {
         errors.push(e.message);
       }
@@ -9330,7 +9337,7 @@ const App = {
     }
 
     overlay.remove();
-    const counts = `${created} created, ${updated} updated${skipped ? `, ${skipped} skipped (already existed)` : ''}`;
+    const counts = summarize ? summarize(totals) : `${totals.created||0} created, ${totals.updated||0} updated${totals.skipped ? `, ${totals.skipped} skipped (already existed)` : ''}`;
     let msg = cancelled
       ? `Import cancelled after ${processed} of ${rows.length} row(s): ${counts}`
       : `Import complete: ${counts}`;
@@ -9720,6 +9727,9 @@ const App = {
             <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
             <input type="text" id="cust-search" placeholder="Search customers..." style="width:260px">
           </div>
+          <a class="btn btn-secondary btn-sm" href="/api/customers/export/template" download title="Download import template">&#8659; Template</a>
+          <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import customers from CSV">&#8657; Import<input type="file" accept=".csv" style="display:none" onchange="App.importCustomersCsv(this)"></label>
+          <button class="btn btn-secondary btn-sm" onclick="App.showCustomerImportHistory()" title="Review or reverse past CSV imports">Import History</button>
           <button class="btn btn-primary" onclick="App.showCustomerForm()">+ Add Customer</button>
         </div>
       </div>
@@ -10137,6 +10147,147 @@ const App = {
       this.alert('Customer created');
       this.renderCustomers();
     } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  // ─── Customer CSV Import / Export ────────────────────────
+  async importCustomersCsv(inputEl) {
+    const file = inputEl.files[0];
+    inputEl.value = '';
+    if (!file) return;
+    const text = await file.text();
+    const rows = this._parseCsv(text);
+    if (!rows.length) { this.alert('No data rows found in CSV', 'error'); return; }
+
+    const duplicateMode = await this._askCustomerDuplicateMode();
+    if (duplicateMode === null) return; // dismissed without choosing
+
+    // Opened before the row-chunks start so every chunk's outcomes log under
+    // one batch id — that id is what makes this import reviewable and
+    // reversible afterward (Import History button).
+    const { id: batchId } = await this.api('POST', '/customer-imports');
+
+    await this._runBatchedCsvImport({
+      rows, endpoint: '/customers/import', title: 'Importing Customers',
+      extraBody: { duplicate_mode: duplicateMode, batch_id: batchId },
+      summarize: totals => `${totals.created||0} created${totals.skipped ? `, ${totals.skipped} skipped (possible duplicate)` : ''}`,
+      onFinish: async () => {
+        await this.api('PATCH', `/customer-imports/${batchId}/finish`).catch(() => {});
+        this.renderCustomers();
+        this.showCustomerImportBatchDetail(batchId);
+      },
+    });
+  },
+
+  // Same email/phone/full-name duplicate check as adding one customer at a
+  // time (POST /customers) — asks up front whether a row matching an
+  // existing active customer should be skipped (the default) or created
+  // anyway, since a bulk import can't pause per-row for a Link/Create choice
+  // the way the single Add Customer form does.
+  _askCustomerDuplicateMode() {
+    return new Promise(resolve => {
+      document.querySelectorAll('.modal-overlay').forEach(el => el.remove());
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.innerHTML = `
+        <div class="modal" style="max-width:420px">
+          <div class="modal-header"><span class="modal-title">Possible Duplicate Customers</span></div>
+          <div class="modal-body">
+            <p style="font-size:13px;color:var(--text-muted)">Any row matching an existing active customer's email, phone, or full name is checked before import. What should happen to those rows?</p>
+          </div>
+          <div class="modal-footer" style="flex-wrap:wrap;gap:8px">
+            <button class="btn btn-secondary btn-sm" id="import-dupmode-cancel">Cancel</button>
+            <button class="btn btn-primary btn-sm" id="import-dupmode-skip">Skip likely duplicates</button>
+            <button class="btn btn-secondary btn-sm" id="import-dupmode-force">Import all rows anyway</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      const finish = val => { overlay.remove(); resolve(val); };
+      overlay.querySelector('#import-dupmode-cancel').addEventListener('click', () => finish(null));
+      overlay.querySelector('#import-dupmode-skip').addEventListener('click', () => finish('skip'));
+      overlay.querySelector('#import-dupmode-force').addEventListener('click', () => finish('force'));
+    });
+  },
+
+  async showCustomerImportHistory() {
+    const batches = await this.api('GET', '/customer-imports');
+    const fmtDate = d => d ? new Date(d).toLocaleString('en-US', { month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit' }) : '—';
+    this.showModal(`
+      <div class="modal" style="max-width:720px">
+        <div class="modal-header"><span class="modal-title">Customer Import History</span><button class="modal-close">✕</button></div>
+        <div class="modal-body" style="padding:0">
+          <table style="width:100%;border-collapse:collapse">
+            <thead><tr style="background:var(--bg-secondary,#f9fafb)">
+              <th style="padding:8px 12px;text-align:left;font-size:12px">Started</th>
+              <th style="padding:8px 12px;text-align:left;font-size:12px">By</th>
+              <th style="padding:8px 12px;text-align:center;font-size:12px">Created</th>
+              <th style="padding:8px 12px;text-align:center;font-size:12px">Skipped Dupes</th>
+              <th style="padding:8px 12px;text-align:center;font-size:12px">Errors</th>
+              <th style="padding:8px 12px;text-align:left;font-size:12px">Status</th>
+              <th style="padding:8px 12px"></th>
+            </tr></thead>
+            <tbody>
+              ${batches.length ? batches.map(b => `<tr style="border-top:1px solid var(--border,#e5e7eb)">
+                <td style="padding:8px 12px;font-size:12px;white-space:nowrap">${fmtDate(b.started_at)}</td>
+                <td style="padding:8px 12px;font-size:12px">${b.employee_name || '—'}</td>
+                <td style="padding:8px 12px;text-align:center;font-size:12px">${b.created_count || 0}</td>
+                <td style="padding:8px 12px;text-align:center;font-size:12px">${b.skipped_count || 0}</td>
+                <td style="padding:8px 12px;text-align:center;font-size:12px;${b.error_count ? 'color:var(--danger);font-weight:600' : ''}">${b.error_count || 0}</td>
+                <td style="padding:8px 12px;font-size:12px"><span class="badge-pill ${b.status==='reversed'?'badge-danger':b.status==='completed'?'badge-success':'badge-warning'}">${b.status}</span></td>
+                <td style="padding:8px 12px;text-align:right;white-space:nowrap"><button class="btn btn-secondary btn-sm" onclick="App.showCustomerImportBatchDetail(${b.id})">Review</button></td>
+              </tr>`).join('') : '<tr><td colspan="7" style="padding:24px;text-align:center;color:var(--text-muted)">No imports logged yet</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">Close</button></div>
+      </div>`);
+  },
+
+  async showCustomerImportBatchDetail(batchId) {
+    const { batch, counts, duplicates, errors } = await this.api('GET', `/customer-imports/${batchId}`);
+    const fmtDate = d => d ? new Date(d).toLocaleString('en-US', { month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit' }) : '—';
+    const c = counts || {};
+    const canReverse = batch.status !== 'reversed';
+    this.showModal(`
+      <div class="modal" style="max-width:640px">
+        <div class="modal-header"><span class="modal-title">Import #${batch.id} Review</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">
+            Started ${fmtDate(batch.started_at)} by ${batch.employee_name || 'unknown'}
+            ${batch.status === 'reversed' ? ` · reversed ${fmtDate(batch.reversed_at)}` : ''}
+          </p>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px">
+            <div class="card" style="padding:10px;text-align:center"><div style="font-size:20px;font-weight:700">${c.created||0}</div><div style="font-size:11px;color:var(--text-muted)">Created</div></div>
+            <div class="card" style="padding:10px;text-align:center"><div style="font-size:20px;font-weight:700">${c.skipped_duplicate||0}</div><div style="font-size:11px;color:var(--text-muted)">Skipped (Duplicate)</div></div>
+            <div class="card" style="padding:10px;text-align:center"><div style="font-size:20px;font-weight:700;${c.error?'color:var(--danger)':''}">${c.error||0}</div><div style="font-size:11px;color:var(--text-muted)">Errors</div></div>
+          </div>
+          ${duplicates.length ? `<div style="padding:12px;border:1px solid var(--border,#e5e7eb);border-radius:6px;margin-bottom:12px">
+            <div style="font-weight:600;font-size:13px;margin-bottom:8px">Skipped as likely duplicates of an existing customer</div>
+            <div style="max-height:180px;overflow-y:auto;font-size:12px">
+              ${duplicates.map(d => `<div style="padding:3px 0;border-top:1px solid var(--border,#e5e7eb)">${d.row_label} → matched <strong>${d.first_name} ${d.last_name}</strong> (${d.customer_number})</div>`).join('')}
+            </div>
+          </div>` : ''}
+          ${errors.length ? `<div style="padding:12px;border:1px solid var(--border,#e5e7eb);border-radius:6px;margin-bottom:12px">
+            <div style="font-weight:600;font-size:13px;margin-bottom:8px;color:var(--danger)">Row errors</div>
+            <div style="max-height:180px;overflow-y:auto;font-size:12px">
+              ${errors.map(e => `<div style="padding:3px 0;border-top:1px solid var(--border,#e5e7eb)">${e.row_label} — ${e.error_message}</div>`).join('')}
+            </div>
+          </div>` : ''}
+        </div>
+        <div class="modal-footer" style="flex-wrap:wrap;gap:8px">
+          <button class="btn btn-secondary" onclick="App.showCustomerImportHistory()">Back</button>
+          ${canReverse ? `<button class="btn btn-danger" onclick="App.reverseCustomerImportBatch(${batch.id})">Reverse This Import</button>` : ''}
+        </div>
+      </div>`);
+  },
+
+  async reverseCustomerImportBatch(batchId) {
+    if (!confirm('Reverse this import? Every customer this batch created will be deactivated (same as deleting a customer). This cannot be undone.')) return;
+    try {
+      const result = await this.api('POST', `/customer-imports/${batchId}/reverse`);
+      this.alert(`Reversed: ${result.deactivated} customer(s) deactivated.`, 'success');
+      this.renderCustomers();
+      this.showCustomerImportBatchDetail(batchId);
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   async deleteCustomer(id) {
