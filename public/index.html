@@ -9730,6 +9730,7 @@ const App = {
           <a class="btn btn-secondary btn-sm" href="/api/customers/export/template" download title="Download import template">&#8659; Template</a>
           <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import customers from CSV">&#8657; Import<input type="file" accept=".csv" style="display:none" onchange="App.importCustomersCsv(this)"></label>
           <button class="btn btn-secondary btn-sm" onclick="App.showCustomerImportHistory()" title="Review or reverse past CSV imports">Import History</button>
+          <button class="btn btn-secondary btn-sm" onclick="App.showCustomerBalancesExport()" title="Export AR balance, credit note total, and status by customer type">Export Balances</button>
           <button class="btn btn-primary" onclick="App.showCustomerForm()">+ Add Customer</button>
         </div>
       </div>
@@ -10206,6 +10207,26 @@ const App = {
       overlay.querySelector('#import-dupmode-skip').addEventListener('click', () => finish('skip'));
       overlay.querySelector('#import-dupmode-force').addEventListener('click', () => finish('force'));
     });
+  },
+
+  // Lets the user pick which customer type to export a balances CSV for —
+  // AR balance, outstanding credit note total, and status per customer
+  // (GET /customers/export/balances). A plain link per option so the
+  // browser handles the download; no need to round-trip through this.api().
+  showCustomerBalancesExport() {
+    this.showModal(`
+      <div class="modal" style="max-width:380px">
+        <div class="modal-header"><span class="modal-title">Export Customer Balances</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">Includes AR balance, outstanding credit note total, and status. Choose which customers to include:</p>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <a class="btn btn-secondary" href="/api/customers/export/balances" download onclick="App.closeModal()">All Customers</a>
+            <a class="btn btn-secondary" href="/api/customers/export/balances?type=retail" download onclick="App.closeModal()">Retail Only</a>
+            <a class="btn btn-secondary" href="/api/customers/export/balances?type=rental" download onclick="App.closeModal()">Rental Only</a>
+          </div>
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button></div>
+      </div>`);
   },
 
   async showCustomerImportHistory() {

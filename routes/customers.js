@@ -148,6 +148,50 @@ router.get('/export', requirePermission('customers'), async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// GET export a customer balances report as CSV — filterable by type (retail
+// vs. rental, via is_rental_customer), with AR balance, outstanding credit
+// note total, and account status. Unlike GET /export above (a re-importable
+// dump of every editable field), this is report-shaped and derives its two
+// money columns from the one account_balance field: a positive balance is
+// what the customer owes (AR), a negative balance is store credit the
+// business owes them (issued via a return's "credit note" resolution or a
+// rental deposit credit note — see routes/transactions.js POST /:id/return
+// and routes/rentals.js POST /agreements/:id/credit-note, both of which
+// only ever move this same field). Includes inactive/blocked customers
+// (unlike other exports) since status is one of the requested columns.
+router.get('/export/balances', requirePermission('customers'), async (req, res) => {
+  try {
+    const { type } = req.query; // 'retail' | 'rental' | omitted for both
+    let sql = `SELECT c.customer_number, c.first_name, c.last_name, c.email, c.phone,
+      c.is_rental_customer, c.customer_type, c.active, c.account_blocked,
+      MAX(c.account_balance, 0) as ar_balance,
+      MAX(-c.account_balance, 0) as credit_note_total
+      FROM customers c WHERE 1=1`;
+    const args = [];
+    if (type === 'retail') sql += ' AND c.is_rental_customer = 0';
+    else if (type === 'rental') sql += ' AND c.is_rental_customer = 1';
+    sql += ' ORDER BY c.last_name, c.first_name';
+
+    const { rows } = await db.execute({ sql, args });
+    const headers = ['customer_number','first_name','last_name','email','phone','type','customer_type','ar_balance','credit_note_total','status'];
+    const csvRows = [headers.join(',')];
+    for (const c of rows) {
+      const status = !c.active ? 'Inactive' : c.account_blocked ? 'Blocked' : 'Active';
+      const row = {
+        ...c,
+        type: c.is_rental_customer ? 'Rental' : 'Retail',
+        customer_type: c.customer_type === 'credit' ? 'Credit' : 'Cash',
+        status,
+      };
+      csvRows.push(headers.map(h => escapeCsv(row[h])).join(','));
+    }
+    const timestamp = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="customer_balances_${type || 'all'}_${timestamp}.csv"`);
+    res.send(csvRows.join('\r\n'));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Discount card fields (name/percent/active) come from a LEFT JOIN so the
 // POS can decide whether to auto-apply it (discount_card_type_active must
 // also be true — deactivating a type retires it for every customer holding
