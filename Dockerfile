@@ -1,3 +1,19 @@
+# ---- Stage 1: resolve the build's git commit ----
+# Only this stage ever sees .git (needed to read the current commit) — the
+# runtime stage below copies its filesystem from here *after* .git is
+# deleted, so .git itself never lands in any layer that actually ships.
+# Works automatically for both a local `docker compose build` and
+# Portainer's Git-repository stacks (which clone the real repo, .git
+# included) — no env var or command-line flag to remember either way.
+# Building from a source with no .git (e.g. GitHub's "Download ZIP") just
+# yields "unknown" here, same as any other build-info-unavailable case.
+FROM node:20-alpine AS build
+WORKDIR /app
+COPY . .
+RUN apk add --no-cache git \
+    && (git rev-parse --short HEAD > .build-commit 2>/dev/null || echo unknown > .build-commit) \
+    && rm -rf .git
+
 FROM node:20-alpine
 
 # su-exec drops from root to the `app` user in the entrypoint, after fixing
@@ -10,7 +26,11 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-COPY . .
+# Pulls in the rest of the source (and .build-commit) from the build stage
+# above, whose .git is already gone — this never touches node_modules just
+# installed above, since the build stage has no node_modules of its own for
+# this copy to overwrite.
+COPY --from=build /app /app
 
 # Persisted data lives here — mounted as volumes in docker-compose.yml
 RUN mkdir -p /app/data /app/uploads/products /app/uploads/po-attachments
@@ -24,13 +44,6 @@ RUN chmod +x /app/docker-entrypoint.sh
 ENV NODE_ENV=production
 ENV PORT=3001
 EXPOSE 3001
-
-# Baked in at build time (see docker-compose.yml/README) so the running app
-# can report exactly which commit it's running — Settings and the login
-# screen both show this. Defaults to "unknown" if the build didn't pass it,
-# which is itself the signal that a deploy skipped the version-stamping step.
-ARG GIT_COMMIT=unknown
-ENV GIT_COMMIT=${GIT_COMMIT}
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -q -O- http://localhost:3001/ || exit 1

@@ -6,6 +6,7 @@ const multer = require('multer');
 const { db } = require('../database');
 const { requireAuth, requirePermission } = require('../lib/permissions');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
+const { getBuildCommit } = require('../lib/buildInfo');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -20,7 +21,7 @@ router.get('/', requireAuth, async (req, res) => {
     const { rows } = await db.execute({ sql: 'SELECT * FROM settings', args: [] });
     const settings = {};
     rows.forEach(r => { settings[r.key] = r.value; });
-    settings.build_commit = process.env.GIT_COMMIT || 'unknown';
+    settings.build_commit = getBuildCommit();
     res.json(settings);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -29,15 +30,15 @@ router.get('/', requireAuth, async (req, res) => {
 // signed in, and this is the only pair of settings values safe to expose
 // unauthenticated (everything else in the table, e.g. SMTP credentials,
 // stays behind GET / above). build_commit isn't from the settings table at
-// all — see Dockerfile/docker-compose.yml — but is just as safe to show
-// pre-login: it's how to tell at a glance which commit a Docker deployment
-// is actually running, without needing to shell into the container.
+// all — see lib/buildInfo.js and the Dockerfile's build stage — but is just
+// as safe to show pre-login: it's how to tell at a glance which commit a
+// Docker deployment is actually running, without shelling into the container.
 router.get('/public', async (req, res) => {
   try {
     const { rows } = await db.execute({ sql: "SELECT key, value FROM settings WHERE key IN ('store_name','company_logo_url')", args: [] });
     const settings = {};
     rows.forEach(r => { settings[r.key] = r.value; });
-    settings.build_commit = process.env.GIT_COMMIT || 'unknown';
+    settings.build_commit = getBuildCommit();
     res.json(settings);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

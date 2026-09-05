@@ -5,10 +5,19 @@
 `docker-compose.yml` runs the app against local SQLite by default, persisted via a bind-mounted `./data` volume (`TURSO_DATABASE_URL: file:/app/data/pos.db`). Product images and PO attachments persist separately under `./uploads`. To use Turso instead, remove that env line and set `TURSO_DATABASE_URL` to a real `libsql://` URL plus `TURSO_AUTH_TOKEN`.
 
 ```bash
-GIT_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build
+docker compose up -d --build
 ```
 
-`GIT_COMMIT` gets baked into the image and shown in Settings and on the login screen, so you can confirm at a glance which commit a running deployment is actually on — handy since `--build` only rebuilds from whatever's already on disk in this directory. **Always `git pull` (or `git fetch && git reset --hard origin/master`) before running this** — rebuilding without updating the checkout first will happily produce an image with old code and no error. Plain `docker compose up -d --build` (without `GIT_COMMIT=...`) still works, it'll just show "unknown" as the build — a sign the version wasn't stamped, not that anything's broken.
+**Always update the checkout before rebuilding** — `--build` only rebuilds from whatever source is already on disk in this directory; it does not pull anything. Run `git pull` (or `git fetch && git reset --hard origin/master`) first, every time.
+
+The running app shows exactly which commit it was built from — in Settings and on the login screen (`Build: <short sha>`) — so a stale deploy is obvious instead of silently running old code. This is detected automatically at build time from `.git` (see the Dockerfile's `build` stage), no env var or extra flag needed; it only shows "unknown" if the image was built from a source with no `.git` at all (e.g. GitHub's "Download ZIP" instead of a clone).
+
+### Deploying via Portainer
+
+This repo is deployed as a Portainer **Git repository** stack (Repository URL + branch, not a pasted/uploaded `docker-compose.yml`) — that's what makes "redeploy" actually fetch new code instead of reusing whatever Portainer cloned last time:
+
+1. When updating the stack, make sure whatever action you take actually re-pulls and rebuilds — Portainer's wording varies by version, but look for something like "Pull latest image"/"Re-clone repository" combined with a rebuild, not just "restart"/"redeploy existing containers". Enabling GitOps auto-updates (webhook, or polling on an interval) on the stack removes the manual step entirely — every push to `master` redeploys on its own.
+2. After it comes up, open the app and check `Build: <sha>` (Settings, or the login screen before signing in) against the latest commit on GitHub's `master` branch. If it doesn't match, the stack didn't actually pick up the new code — re-check step 1.
 
 ### Resetting the database
 
