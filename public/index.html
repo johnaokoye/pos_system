@@ -477,6 +477,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
     </div>
     <button class="btn btn-primary login-btn" onclick="App.doLogin()">Sign In</button>
     <div class="login-error" id="login-error"></div>
+    <div id="login-build-version" style="text-align:center;font-size:11px;color:var(--text-muted);margin-top:16px"></div>
   </div>
 </div>
 
@@ -644,7 +645,18 @@ const App = {
     try {
       const pub = await this.api('GET', '/settings/public');
       this.applyBranding(pub.company_logo_url, pub.store_name);
+      this._showBuildVersion(pub.build_commit, 'login-build-version');
     } catch(e) {}
+  },
+
+  // Shown on the login screen (pre-auth, from /settings/public) and in
+  // Settings (post-auth, from /settings) — same value either way, just two
+  // places someone would think to look to answer "is this Docker deployment
+  // actually running the latest code?" without shelling into the container.
+  _showBuildVersion(commit, elId) {
+    const el = document.getElementById(elId);
+    if (!el || !commit) return;
+    el.textContent = `Build: ${commit}`;
   },
 
   // Swaps the "RetailPOS" wordmark for an uploaded logo image, both on the
@@ -12514,7 +12526,7 @@ const App = {
     if (this.section !== 'settings') return;
 
     document.getElementById('content').innerHTML = `
-      <div class="section-header"><h2>Settings</h2></div>
+      <div class="section-header"><h2>Settings</h2><span style="font-size:11px;color:var(--text-muted)">Build: ${s.build_commit || 'unknown'}</span></div>
       <div class="two-col">
         <div>
           <div class="card" style="margin-bottom:16px">

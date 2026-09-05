@@ -25,6 +25,13 @@ ENV NODE_ENV=production
 ENV PORT=3001
 EXPOSE 3001
 
+# Baked in at build time (see docker-compose.yml/README) so the running app
+# can report exactly which commit it's running — Settings and the login
+# screen both show this. Defaults to "unknown" if the build didn't pass it,
+# which is itself the signal that a deploy skipped the version-stamping step.
+ARG GIT_COMMIT=unknown
+ENV GIT_COMMIT=${GIT_COMMIT}
+
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -q -O- http://localhost:3001/ || exit 1
 

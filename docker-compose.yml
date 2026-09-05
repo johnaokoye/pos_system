@@ -1,6 +1,14 @@
 services:
   app:
-    build: .
+    build:
+      context: .
+      # Set by the `GIT_COMMIT=$(git rev-parse --short HEAD) docker compose
+      # up -d --build` command in the README — bakes the exact commit this
+      # image was built from into the running app (Settings/login screen),
+      # so a stale deploy is obvious instead of silently running old code.
+      # Falls back to "unknown" if built without setting the env var.
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     restart: unless-stopped
     environment:
       NODE_ENV: production

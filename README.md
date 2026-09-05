@@ -5,8 +5,10 @@
 `docker-compose.yml` runs the app against local SQLite by default, persisted via a bind-mounted `./data` volume (`TURSO_DATABASE_URL: file:/app/data/pos.db`). Product images and PO attachments persist separately under `./uploads`. To use Turso instead, remove that env line and set `TURSO_DATABASE_URL` to a real `libsql://` URL plus `TURSO_AUTH_TOKEN`.
 
 ```bash
-docker compose up -d --build
+GIT_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build
 ```
+
+`GIT_COMMIT` gets baked into the image and shown in Settings and on the login screen, so you can confirm at a glance which commit a running deployment is actually on — handy since `--build` only rebuilds from whatever's already on disk in this directory. **Always `git pull` (or `git fetch && git reset --hard origin/master`) before running this** — rebuilding without updating the checkout first will happily produce an image with old code and no error. Plain `docker compose up -d --build` (without `GIT_COMMIT=...`) still works, it'll just show "unknown" as the build — a sign the version wasn't stamped, not that anything's broken.
 
 ### Resetting the database
 
