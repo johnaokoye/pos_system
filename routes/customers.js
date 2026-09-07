@@ -7,6 +7,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
+const { getMissingRentalFields } = require('../lib/rentals');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -114,16 +115,33 @@ router.get('/', requireAuth, async (req, res) => {
 // customer id (same ordering as routes/products.js's /export routes).
 const CSV_COLUMNS = ['first_name','last_name','email','phone','address','city','state','zip','customer_type','credit_terms_days','credit_limit','tax_exempt','tax_exemption_number','customer_category_name','notes'];
 
+// Text-only rental compliance fields (see lib/rentals.js RENTAL_REQUIREMENTS)
+// — a migrated rental customer still needs the ID scan, proof-of-address
+// scan, and reference-1 ID scan uploaded one-at-a-time per customer (POST
+// /:id/id-scan, /:id/address-proof, /:id/reference-id below) since a CSV
+// row can't carry a file, but everything else can be bulk-loaded here.
+const RENTAL_CSV_COLUMNS = ['is_rental_customer','rental_id_type','rental_id_number','rental_address_proof_type',
+  'rental_reference_name','rental_reference_phone','rental_reference_relationship','rental_reference_address',
+  'rental_reference2_name','rental_reference2_phone','rental_reference2_relationship',
+  'rental_reference3_name','rental_reference3_phone','rental_reference3_relationship'];
+CSV_COLUMNS.push(...RENTAL_CSV_COLUMNS);
+
 function escapeCsv(v) {
   if (v == null) return '';
   const s = String(v);
   return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
+// Accepts the same truthy spellings a spreadsheet is likely to contain.
+function csvBool(v) {
+  return ['1', 'true', 'yes', 'y'].includes(String(v ?? '').trim().toLowerCase());
+}
+
 // GET CSV template for bulk import
 router.get('/export/template', requirePermission('customers'), (req, res) => {
-  const example = ['Jane','Doe','jane.doe@example.com','555-0100','123 Main St','Springfield','IL','62701','cash','30','0','0','','Individual','Prefers email contact'];
-  const csv = [CSV_COLUMNS.join(','), example.join(',')].join('\r\n');
+  const example = ['Jane','Doe','jane.doe@example.com','555-0100','123 Main St','Springfield','IL','62701','cash','30','0','0','','Individual','Prefers email contact',
+    '1','drivers_license','D1234567','utility_bill','John Smith','555-0101','Brother','456 Oak St','Mary Jones','555-0102','Friend','Bob White','555-0103','Coworker'];
+  const csv = [CSV_COLUMNS.join(','), example.map(escapeCsv).join(',')].join('\r\n');
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename="customer_import_template.csv"');
   res.send(csv);
@@ -189,6 +207,29 @@ router.get('/export/balances', requirePermission('customers'), async (req, res) 
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', `attachment; filename="customer_balances_${type || 'all'}_${timestamp}.csv"`);
     res.send(csvRows.join('\r\n'));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET rental customers whose compliance record is incomplete — the same
+// requirements lib/rentals.js's assertRentalCustomerEligible enforces before
+// a new rental can be created, surfaced here as a reviewable list instead of
+// a per-rental error. Meant for cleaning up customers bulk-imported from a
+// previous system (see POST /import above) that are flagged as rental
+// customers but are missing the ID/reference/document fields a legacy export
+// wouldn't have carried. Registered before GET /:id so "rental-incomplete"
+// isn't swallowed as a customer id (same reasoning as the /export routes).
+router.get('/rental-incomplete', requirePermission('customers'), async (req, res) => {
+  try {
+    const { rows } = await db.execute({ sql: 'SELECT * FROM customers WHERE is_rental_customer = 1 AND active = 1 ORDER BY last_name, first_name', args: [] });
+    const results = rows
+      .map(c => ({ c, missing: getMissingRentalFields(c) }))
+      .filter(r => r.missing.length)
+      .map(({ c, missing }) => ({
+        id: c.id, customer_number: c.customer_number, first_name: c.first_name, last_name: c.last_name,
+        email: c.email, phone: c.phone,
+        missing: missing.map(m => m.label),
+      }));
+    res.json(results);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -408,7 +449,11 @@ router.post('/import', requirePermission('customers'), async (req, res) => {
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       const rowNum = i + 2;
-      const { first_name, last_name, email, phone, address, city, state, zip, customer_type, credit_terms_days, credit_limit, tax_exempt, tax_exemption_number, customer_category_name, notes } = row;
+      const { first_name, last_name, email, phone, address, city, state, zip, customer_type, credit_terms_days, credit_limit, tax_exempt, tax_exemption_number, customer_category_name, notes,
+        is_rental_customer, rental_id_type, rental_id_number, rental_address_proof_type,
+        rental_reference_name, rental_reference_phone, rental_reference_relationship, rental_reference_address,
+        rental_reference2_name, rental_reference2_phone, rental_reference2_relationship,
+        rental_reference3_name, rental_reference3_phone, rental_reference3_relationship } = row;
       const rowLabel = `${first_name || ''} ${last_name || ''}`.trim() || email || phone || `row ${rowNum}`;
       if (!first_name || !last_name) {
         const msg = `Row ${rowNum}: first and last name are required`;
@@ -429,10 +474,21 @@ router.post('/import', requirePermission('customers'), async (req, res) => {
         const category_id = customer_category_name ? (catMap[customer_category_name.toLowerCase()] ?? null) : null;
         const type = customer_type || 'cash';
         const customer_number = await nextNumber(db, 'customers', 'customer_number', 'CUST-', 4);
+        // Rental fields only get stored when the row actually flags the
+        // customer as a rental customer — same as POST / (single create).
+        const isRentalCust = csvBool(is_rental_customer);
         const result = await db.execute({
-          sql: `INSERT INTO customers (customer_number,first_name,last_name,email,phone,address,city,state,zip,customer_type,credit_terms_days,credit_limit,credit_enabled,tax_exempt,tax_exemption_number,customer_category_id,notes)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          args: [customer_number, first_name, last_name, email||null, phone||null, address||null, city||null, state||null, zip||null, type, parseInt(credit_terms_days)||30, parseFloat(credit_limit)||0, type === 'credit' ? 1 : 0, tax_exempt ? 1 : 0, tax_exemption_number||null, category_id, notes||null],
+          sql: `INSERT INTO customers (customer_number,first_name,last_name,email,phone,address,city,state,zip,customer_type,credit_terms_days,credit_limit,credit_enabled,tax_exempt,tax_exemption_number,customer_category_id,notes,
+                is_rental_customer,rental_id_type,rental_id_number,rental_address_proof_type,
+                rental_reference_name,rental_reference_phone,rental_reference_relationship,rental_reference_address,
+                rental_reference2_name,rental_reference2_phone,rental_reference2_relationship,
+                rental_reference3_name,rental_reference3_phone,rental_reference3_relationship)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          args: [customer_number, first_name, last_name, email||null, phone||null, address||null, city||null, state||null, zip||null, type, parseInt(credit_terms_days)||30, parseFloat(credit_limit)||0, type === 'credit' ? 1 : 0, tax_exempt ? 1 : 0, tax_exemption_number||null, category_id, notes||null,
+            isRentalCust ? 1 : 0, isRentalCust ? (rental_id_type||null) : null, isRentalCust ? (rental_id_number||null) : null, isRentalCust ? (rental_address_proof_type||null) : null,
+            isRentalCust ? (rental_reference_name||null) : null, isRentalCust ? (rental_reference_phone||null) : null, isRentalCust ? (rental_reference_relationship||null) : null, isRentalCust ? (rental_reference_address||null) : null,
+            isRentalCust ? (rental_reference2_name||null) : null, isRentalCust ? (rental_reference2_phone||null) : null, isRentalCust ? (rental_reference2_relationship||null) : null,
+            isRentalCust ? (rental_reference3_name||null) : null, isRentalCust ? (rental_reference3_phone||null) : null, isRentalCust ? (rental_reference3_relationship||null) : null],
         });
         created++;
         await logItem(rowLabel, Number(result.lastInsertRowid), 'created', null, null);

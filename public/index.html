@@ -9803,6 +9803,7 @@ const App = {
           <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import customers from CSV">&#8657; Import<input type="file" accept=".csv" style="display:none" onchange="App.importCustomersCsv(this)"></label>
           <button class="btn btn-secondary btn-sm" onclick="App.showCustomerImportHistory()" title="Review or reverse past CSV imports">Import History</button>
           <button class="btn btn-secondary btn-sm" onclick="App.showCustomerBalancesExport()" title="Export AR balance, credit note total, and status by customer type">Export Balances</button>
+          <button class="btn btn-secondary btn-sm" onclick="App.showRentalIncompleteReport()" title="Rental customers missing the ID/reference/document info required to create a rental">🔑 Missing Rental Info</button>
           <button class="btn btn-primary" onclick="App.showCustomerForm()">+ Add Customer</button>
         </div>
       </div>
@@ -10298,6 +10299,43 @@ const App = {
           </div>
         </div>
         <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button></div>
+      </div>`);
+  },
+
+  // Lists rental customers (is_rental_customer = 1) failing the same
+  // eligibility check lib/rentals.js runs before a new rental can be
+  // created (GET /customers/rental-incomplete) — meant for working through
+  // customers bulk-imported from a previous system a row at a time via
+  // "Edit", since the ID/reference/document requirements can't be satisfied
+  // from a CSV alone (the three scanned documents need an upload).
+  async showRentalIncompleteReport() {
+    const rows = await this.api('GET', '/customers/rental-incomplete');
+    this.showModal(`
+      <div class="modal" style="max-width:720px">
+        <div class="modal-header"><span class="modal-title">Rental Customers Missing Info</span><button class="modal-close">✕</button></div>
+        <div class="modal-body" style="padding:0">
+          ${!rows.length ? '<div class="empty-state" style="padding:20px"><p>Every rental customer has a complete compliance record.</p></div>' : `
+          <p style="font-size:12px;color:var(--text-muted);margin:12px 12px 0">${rows.length} rental customer${rows.length === 1 ? '' : 's'} can't be rented to yet until the listed info is added.</p>
+          <table style="width:100%;border-collapse:collapse;margin-top:8px">
+            <thead><tr style="background:var(--bg-secondary,#f9fafb)">
+              <th style="padding:8px 12px;text-align:left;font-size:12px">Customer #</th>
+              <th style="padding:8px 12px;text-align:left;font-size:12px">Name</th>
+              <th style="padding:8px 12px;text-align:left;font-size:12px">Phone</th>
+              <th style="padding:8px 12px;text-align:left;font-size:12px">Missing</th>
+              <th style="padding:8px 12px"></th>
+            </tr></thead>
+            <tbody>
+              ${rows.map(r => `<tr style="border-top:1px solid var(--border,#e5e7eb)">
+                <td style="padding:8px 12px;font-size:12px;font-family:monospace">${r.customer_number}</td>
+                <td style="padding:8px 12px;font-size:12px">${r.first_name} ${r.last_name}</td>
+                <td style="padding:8px 12px;font-size:12px">${r.phone || '—'}</td>
+                <td style="padding:8px 12px;font-size:12px">${r.missing.map(m => `<span class="badge-pill badge-danger" style="margin:2px">${m}</span>`).join(' ')}</td>
+                <td style="padding:8px 12px"><button class="btn btn-secondary btn-sm" onclick="App.closeModal();App.showCustomerForm(${r.id})">Edit</button></td>
+              </tr>`).join('')}
+            </tbody>
+          </table>`}
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">Close</button></div>
       </div>`);
   },
 
