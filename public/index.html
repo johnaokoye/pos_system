@@ -12899,21 +12899,25 @@ const App = {
       { value: 'orders:write',    label: 'Orders — Write' },
     ];
     this.showModal(`
-      <h3 style="margin:0 0 16px">Create API Key</h3>
-      <div class="form-group"><label>Name <span style="color:var(--text-muted);font-weight:400">(e.g. "E-commerce Site")</span></label>
-        <input id="ak-name" placeholder="My Integration" autofocus>
-      </div>
-      <div class="form-group">
-        <label>Scopes</label>
-        <p style="font-size:12px;color:var(--text-muted);margin:0 0 8px">Select what this key is allowed to do. For a full e-commerce integration, "Full Access" is simplest.</p>
-        ${scopeOptions.map(o => `<label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;cursor:pointer;font-weight:400">
-          <input type="checkbox" class="ak-scope" value="${o.value}" style="width:auto" ${o.value==='*'?'checked':''}>
-          <span><strong style="font-family:monospace;font-size:11px">${o.value}</strong> — ${o.label}</span>
-        </label>`).join('')}
-      </div>
-      <div style="display:flex;gap:8px;margin-top:16px">
-        <button class="btn btn-primary" onclick="App.createApiKey()">Generate Key</button>
-        <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+      <div class="modal" style="max-width:480px">
+        <div class="modal-header"><span class="modal-title">Create API Key</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div class="form-group"><label>Name <span style="color:var(--text-muted);font-weight:400">(e.g. "E-commerce Site")</span></label>
+            <input id="ak-name" placeholder="My Integration" autofocus>
+          </div>
+          <div class="form-group">
+            <label>Scopes</label>
+            <p style="font-size:12px;color:var(--text-muted);margin:0 0 8px">Select what this key is allowed to do. For a full e-commerce integration, "Full Access" is simplest.</p>
+            ${scopeOptions.map(o => `<label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;cursor:pointer;font-weight:400">
+              <input type="checkbox" class="ak-scope" value="${o.value}" style="width:auto" ${o.value==='*'?'checked':''}>
+              <span><strong style="font-family:monospace;font-size:11px">${o.value}</strong> — ${o.label}</span>
+            </label>`).join('')}
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.createApiKey()">Generate Key</button>
+        </div>
       </div>`);
   },
 
@@ -12925,12 +12929,18 @@ const App = {
     try {
       const result = await this.api('POST', '/api-keys', { name, scopes });
       this.showModal(`
-        <h3 style="margin:0 0 8px">API Key Created</h3>
-        <p style="font-size:13px;color:var(--danger);margin:0 0 12px">Copy this key now — it will <strong>never be shown again</strong>.</p>
-        <div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;font-family:monospace;font-size:13px;word-break:break-all;margin-bottom:12px">${result.key}</div>
-        <p style="font-size:12px;color:var(--text-muted);margin:0 0 16px">Send it in the <code>X-API-Key</code> header or as <code>Authorization: Bearer &lt;key&gt;</code></p>
-        <button class="btn btn-primary" onclick="navigator.clipboard.writeText('${result.key}').then(()=>App.alert('Copied!','success'))">Copy to Clipboard</button>
-        <button class="btn btn-secondary" style="margin-left:8px" onclick="App.closeModal();App.loadApiKeys()">Done</button>`);
+        <div class="modal" style="max-width:480px">
+          <div class="modal-header"><span class="modal-title">API Key Created</span></div>
+          <div class="modal-body">
+            <p style="font-size:13px;color:var(--danger);margin:0 0 12px">Copy this key now — it will <strong>never be shown again</strong>.</p>
+            <div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;font-family:monospace;font-size:13px;word-break:break-all;color:var(--text)">${result.key}</div>
+            <p style="font-size:12px;color:var(--text-muted);margin:12px 0 0">Send it in the <code>X-API-Key</code> header or as <code>Authorization: Bearer &lt;key&gt;</code></p>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="App.closeModal();App.loadApiKeys()">Done</button>
+            <button class="btn btn-primary" onclick="navigator.clipboard.writeText('${result.key}').then(()=>App.alert('Copied!','success'))">Copy to Clipboard</button>
+          </div>
+        </div>`);
     } catch(e) { this.alert(e.message, 'error'); }
   },
 

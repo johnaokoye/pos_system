@@ -126,7 +126,11 @@ router.get('/dashboard', requireAuth, async (req, res) => {
     const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10);
     const bf = branch_id ? ' AND t.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
-    const warehouseExclude = `AND t.branch_id NOT IN (SELECT id FROM branches WHERE is_warehouse = 1)`;
+    // t.branch_id IS NULL first: SQL's `NULL NOT IN (...)` is NULL (not true),
+    // so without this a branchless transaction (e.g. an online order with no
+    // branch assigned) silently dropped out of every stat below instead of
+    // counting as "not a warehouse sale".
+    const warehouseExclude = `AND (t.branch_id IS NULL OR t.branch_id NOT IN (SELECT id FROM branches WHERE is_warehouse = 1))`;
     // A salesperson's dashboard shows only their own sales, not the store's —
     // see is_salesperson migration note in database.js.
     const mine = !!req.employee?.is_salesperson;
@@ -148,7 +152,7 @@ router.get('/dashboard', requireAuth, async (req, res) => {
         WHERE p.active=1 AND p.is_rental=0 AND p.is_service=0 AND p.stock_qty <= p.min_stock
           AND NOT EXISTS (SELECT 1 FROM branch_inventory bi2 JOIN branches b2 ON bi2.branch_id = b2.id WHERE bi2.product_id = p.id AND b2.active = 1)
       )`, args: [] });
-    const { rows: recentTx } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id WHERE t.branch_id NOT IN (SELECT id FROM branches WHERE is_warehouse = 1)${bf}${ef} ORDER BY t.created_at DESC LIMIT 5`, args: [...bp, ...ep] });
+    const { rows: recentTx } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id WHERE 1=1 ${warehouseExclude}${bf}${ef} ORDER BY t.created_at DESC LIMIT 5`, args: [...bp, ...ep] });
     const { rows: last7Days } = await db.execute({ sql: `SELECT date(t.created_at) as date, COALESCE(SUM(t.total),0) as sales, COUNT(*) as transactions FROM transactions t WHERE t.status='completed' AND date(t.created_at) >= date('now', '-6 days') ${warehouseExclude}${bf}${ef} GROUP BY date(t.created_at) ORDER BY date`, args: [...bp, ...ep] });
 
     // Cross-branch/company performance has no place on a salesperson's
