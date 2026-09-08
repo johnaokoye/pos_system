@@ -9,6 +9,7 @@ const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { uploadSignature } = require('../lib/signatures');
+const { getSetting } = require('../lib/settings');
 
 // Items joined with the quotation/work order they trace back to (a PR's "Q"
 // line converted into this PO) — lets the PO detail view click straight
@@ -358,6 +359,7 @@ router.post('/:id/items/:itemId/link-product', async (req, res) => {
     if (item.product_id) return res.status(400).json({ error: 'Item is already linked to a product' });
 
     const { product_id, sku, name, category_id, price, cost, tax_rate } = req.body;
+    const defaultTaxRate = tax_rate ?? (parseFloat(await getSetting('tax_rate', 8.5)) || 8.5);
 
     const tx = await db.transaction('write');
     let committed = false;
@@ -378,7 +380,7 @@ router.post('/:id/items/:itemId/link-product', async (req, res) => {
         const nonInventory = (item.quotation_item_id || item.work_order_item_id) ? 1 : 0;
         const result = await tx.execute({
           sql: 'INSERT INTO products (sku,barcode,name,category_id,price,cost,tax_rate,stock_qty,min_stock,active,supplier_id,is_non_inventory) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-          args: [sku, null, name, category_id||null, parseFloat(price)||0, parseFloat(cost)||item.unit_cost||0, tax_rate??8.5, qty, 5, 1, po.supplier_id||null, nonInventory]
+          args: [sku, null, name, category_id||null, parseFloat(price)||0, parseFloat(cost)||item.unit_cost||0, defaultTaxRate, qty, 5, 1, po.supplier_id||null, nonInventory]
         });
         productId = Number(result.lastInsertRowid);
       }

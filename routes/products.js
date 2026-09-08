@@ -10,6 +10,7 @@ const { requireAuth, requirePermission, can } = require('../lib/permissions');
 const { getOutstandingQty } = require('../lib/rentalAvailability');
 const { mergeProducts } = require('../lib/productMerge');
 const { HAS_ISSUE_SQL, ISSUE_LABEL_SQL, rowsToCsv } = require('../lib/productIssues');
+const { getSetting } = require('../lib/settings');
 
 // CSV cells for money/quantity fields often carry currency symbols, thousands
 // separators, or stray whitespace (e.g. "$15.00", "1,000") — bare parseFloat/
@@ -355,6 +356,10 @@ router.post('/import', requirePermission('inventory'), async (req, res) => {
     const { rows: supRows } = await db.execute({ sql: 'SELECT id, name FROM suppliers', args: [] });
     const catMap = Object.fromEntries(catRows.map(c => [c.name.toLowerCase(), c.id]));
     const supMap = Object.fromEntries(supRows.map(s => [s.name.toLowerCase(), s.id]));
+    // Company's own configured rate (Settings → Default Tax Rate), not the
+    // 8.5 schema/seed default — a row with no tax_rate column/value should
+    // pick up what this store actually charges.
+    const defaultTaxRate = parseFloat(await getSetting('tax_rate', 8.5)) || 8.5;
 
     let created = 0, updated = 0, skipped = 0;
     const errors = [];
@@ -380,7 +385,7 @@ router.post('/import', requirePermission('inventory'), async (req, res) => {
       const supplier_id = supplier_name ? (supMap[supplier_name.toLowerCase()] ?? null) : null;
       const qty = parseNum(stock_qty) || 0;
       const minStk = parseNum(min_stock) || 5;
-      const vals = [barcode||null, name, description||null, category_id, parseNum(price)||0, parseNum(cost)||0, parseNum(tax_rate)||8.5, qty, minStk, active === '' || active == null ? 1 : (parseNum(active) ? 1 : 0), supplier_id];
+      const vals = [barcode||null, name, description||null, category_id, parseNum(price)||0, parseNum(cost)||0, parseNum(tax_rate)||defaultTaxRate, qty, minStk, active === '' || active == null ? 1 : (parseNum(active) ? 1 : 0), supplier_id];
       try {
         const { rows: [existing] } = await db.execute({ sql: 'SELECT * FROM products WHERE sku = ?', args: [sku] });
         let productId = null;
@@ -478,6 +483,45 @@ router.post('/bulk-assign-branch', requirePermission('inventory'), async (req, r
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// GET count of active products stocked at a branch (branch_inventory has a
+// row for them there) — powers the bulk tax-rate modal's preview before the
+// user commits, same pattern as GET /unbranched-count above.
+router.get('/branch-count/:branchId', requirePermission('inventory'), async (req, res) => {
+  try {
+    const { rows: [row] } = await db.execute({
+      sql: `SELECT COUNT(*) as c FROM products
+        WHERE active = 1 AND id IN (SELECT product_id FROM branch_inventory WHERE branch_id = ?)`,
+      args: [req.params.branchId],
+    });
+    res.json({ count: row.c });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST bulk-overwrite tax_rate on every active product stocked at one
+// branch (i.e. it has a branch_inventory row there) — covers retail, rental,
+// and non-inventory items alike, since branch_inventory is the one place
+// all three record a branch assignment. tax_rate lives on `products`, not
+// per-branch, so a product stocked at more than one branch gets its single
+// rate overwritten regardless of which of those branches this was run for.
+router.post('/bulk-tax-rate', requirePermission('inventory'), async (req, res) => {
+  try {
+    const { branch_id, tax_rate } = req.body;
+    if (!branch_id) return res.status(400).json({ error: 'branch_id is required' });
+    const rate = parseFloat(tax_rate);
+    if (!Number.isFinite(rate) || rate < 0) return res.status(400).json({ error: 'tax_rate must be a non-negative number' });
+    const { rows: [branch] } = await db.execute({ sql: 'SELECT id FROM branches WHERE id = ?', args: [branch_id] });
+    if (!branch) return res.status(404).json({ error: 'Branch not found' });
+
+    const result = await db.execute({
+      sql: `UPDATE products SET tax_rate = ?
+        WHERE active = 1 AND id IN (SELECT product_id FROM branch_inventory WHERE branch_id = ?)`,
+      args: [rate, branch_id],
+    });
+
+    res.json({ updated: result.rowsAffected ?? 0 });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET export rental items as CSV — same shared shape/escaping as the general
 // product export above, but scoped to is_rental=1 with rental-specific
 // columns (rates, classification, replacement value) instead of cost/supplier.
@@ -530,6 +574,7 @@ router.post('/import/rentals', requirePermission('rentals_manage_items'), async 
     const { rows: branchRows } = await db.execute({ sql: 'SELECT id, name FROM branches', args: [] });
     const catMap = Object.fromEntries(catRows.map(c => [c.name.toLowerCase(), c.id]));
     const branchMap = Object.fromEntries(branchRows.map(b => [b.name.toLowerCase(), b.id]));
+    const defaultTaxRate = parseFloat(await getSetting('tax_rate', 8.5)) || 8.5;
 
     let created = 0, updated = 0;
     const errors = [];
@@ -554,7 +599,7 @@ router.post('/import/rentals', requirePermission('rentals_manage_items'), async 
       try {
         const { rows: [existing] } = await db.execute({ sql: 'SELECT id FROM products WHERE sku = ?', args: [sku] });
         const vals = [
-          name, description||null, model_number||null, size||null, category_id, parseNum(tax_rate)||8.5,
+          name, description||null, model_number||null, size||null, category_id, parseNum(tax_rate)||defaultTaxRate,
           taxable === '' || taxable == null ? 1 : (parseNum(taxable) ? 1 : 0), qty, minStk,
           classification, parseNum(daily_rate)||0, parseNum(weekly_rate)||0, parseNum(monthly_rate)||0, parseNum(hourly_rate)||0,
           parseNum(replacement_value)||0, parseNum(is_accessory) ? 1 : 0, active === '' || active == null ? 1 : (parseNum(active) ? 1 : 0),
@@ -686,7 +731,12 @@ router.post('/', (req, res, next) => requireProductPermission(!!req.body.is_rent
     const lay = is_layaway_eligible ? 1 : 0;
     const tax = taxable === undefined ? 1 : (taxable ? 1 : 0);
     const allowSale = rental_allow_sale ? 1 : 0;
-    const result = await db.execute({ sql: `INSERT INTO products (sku,barcode,name,description,category_id,price,cost,tax_rate,stock_qty,min_stock,active,supplier_id,is_service,unit,online_available,web_allotment,is_rental,rental_rate_type,rental_rate,rental_deposit,rental_late_fee_rate,replacement_value,rental_classification,rental_weekly_rate,rental_monthly_rate,rental_hourly_rate,rental_allow_sale,is_accessory,is_layaway_eligible,model_number,size,brand,taxable) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, tax_rate??8.5, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null, rnt, rental_rate_type||'daily', rental_rate||0, rental_deposit||0, rental_late_fee_rate||0, replacement_value||0, rental_classification||'tool', rental_weekly_rate||0, rental_monthly_rate||0, rental_hourly_rate||0, allowSale, acc, lay, model_number||null, size||null, brand||null, tax] });
+    // The API-key e-commerce path and any caller that omits tax_rate should
+    // land on this store's own configured rate (Settings → Default Tax
+    // Rate), not the 8.5 schema default — the frontend's own product forms
+    // already send it explicitly, so this only matters for those callers.
+    const taxRateFinal = tax_rate ?? (parseFloat(await getSetting('tax_rate', 8.5)) || 8.5);
+    const result = await db.execute({ sql: `INSERT INTO products (sku,barcode,name,description,category_id,price,cost,tax_rate,stock_qty,min_stock,active,supplier_id,is_service,unit,online_available,web_allotment,is_rental,rental_rate_type,rental_rate,rental_deposit,rental_late_fee_rate,replacement_value,rental_classification,rental_weekly_rate,rental_monthly_rate,rental_hourly_rate,rental_allow_sale,is_accessory,is_layaway_eligible,model_number,size,brand,taxable) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, taxRateFinal, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null, rnt, rental_rate_type||'daily', rental_rate||0, rental_deposit||0, rental_late_fee_rate||0, replacement_value||0, rental_classification||'tool', rental_weekly_rate||0, rental_monthly_rate||0, rental_hourly_rate||0, allowSale, acc, lay, model_number||null, size||null, brand||null, tax] });
     const productId = Number(result.lastInsertRowid);
     if (!svc && branch_id && (parseInt(stock_qty) || 0) > 0) {
       await db.execute({ sql: 'INSERT OR IGNORE INTO branch_inventory (product_id, branch_id, stock_qty, min_stock) VALUES (?, ?, ?, ?)', args: [productId, branch_id, parseInt(stock_qty) || 0, parseInt(min_stock) || 5] });
@@ -720,6 +770,7 @@ router.put('/:id', async (req, res, next) => {
     const lay = is_layaway_eligible ? 1 : 0;
     const tax = taxable === undefined ? 1 : (taxable ? 1 : 0);
     const allowSale = rental_allow_sale ? 1 : 0;
+    const taxRateFinal = tax_rate ?? (parseFloat(await getSetting('tax_rate', 8.5)) || 8.5);
     // Rental items live at a single branch — reassigning the dropdown moves
     // the stock there instantly, with no audit trail or driver hand-off.
     // That's fine for a never-rented item, but moving it out from under units
@@ -738,7 +789,7 @@ router.put('/:id', async (req, res, next) => {
         }
       }
     }
-    await db.execute({ sql: `UPDATE products SET sku=?,barcode=?,name=?,description=?,category_id=?,price=?,cost=?,tax_rate=?,stock_qty=?,min_stock=?,active=?,supplier_id=?,is_service=?,unit=?,online_available=?,web_allotment=?,is_rental=?,rental_rate_type=?,rental_rate=?,rental_deposit=?,rental_late_fee_rate=?,replacement_value=?,rental_classification=?,rental_weekly_rate=?,rental_monthly_rate=?,rental_hourly_rate=?,rental_allow_sale=?,is_accessory=?,is_layaway_eligible=?,model_number=?,size=?,brand=?,taxable=? WHERE id=?`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, tax_rate??8.5, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null, rnt, rental_rate_type||'daily', rental_rate||0, rental_deposit||0, rental_late_fee_rate||0, replacement_value||0, rental_classification||'tool', rental_weekly_rate||0, rental_monthly_rate||0, rental_hourly_rate||0, allowSale, acc, lay, model_number||null, size||null, brand||null, tax, req.params.id] });
+    await db.execute({ sql: `UPDATE products SET sku=?,barcode=?,name=?,description=?,category_id=?,price=?,cost=?,tax_rate=?,stock_qty=?,min_stock=?,active=?,supplier_id=?,is_service=?,unit=?,online_available=?,web_allotment=?,is_rental=?,rental_rate_type=?,rental_rate=?,rental_deposit=?,rental_late_fee_rate=?,replacement_value=?,rental_classification=?,rental_weekly_rate=?,rental_monthly_rate=?,rental_hourly_rate=?,rental_allow_sale=?,is_accessory=?,is_layaway_eligible=?,model_number=?,size=?,brand=?,taxable=? WHERE id=?`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, taxRateFinal, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null, rnt, rental_rate_type||'daily', rental_rate||0, rental_deposit||0, rental_late_fee_rate||0, replacement_value||0, rental_classification||'tool', rental_weekly_rate||0, rental_monthly_rate||0, rental_hourly_rate||0, allowSale, acc, lay, model_number||null, size||null, brand||null, tax, req.params.id] });
     if (rnt && branch_id !== undefined) {
       await db.execute({ sql: 'DELETE FROM branch_inventory WHERE product_id = ? AND branch_id != ?', args: [req.params.id, branch_id || 0] });
       if (branch_id) {

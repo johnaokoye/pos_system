@@ -4033,6 +4033,7 @@ const App = {
         <button class="btn btn-secondary btn-sm" onclick="App.showImportHistory()" title="Review or reverse past CSV imports">Import History</button>
         <button class="btn btn-secondary btn-sm" onclick="App.scanProductImages()" title="Assign images already placed in uploads/products/ (named by SKU) to their matching products">Scan Images</button>
         <button class="btn btn-secondary btn-sm" onclick="App.showBulkAssignBranchModal()" title="Assign every product with no branch stock yet (e.g. after a CSV import) to one branch">Bulk Assign to Branch</button>
+        <button class="btn btn-secondary btn-sm" onclick="App.showBulkTaxRateModal()" title="Set the tax rate on every product stocked at one branch">Bulk Tax Rate Change</button>
         <button class="btn btn-secondary btn-sm" onclick="App.showCategoriesManager()">Categories</button>
         <button class="btn btn-secondary btn-sm" onclick="App.showBrandsManager()">Brands</button>
       </div>
@@ -9179,6 +9180,59 @@ const App = {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
+  // Branch-scoped bulk tax-rate override — every active product stocked at
+  // the chosen branch (retail, rental, or non-inventory — anything with a
+  // branch_inventory row there) gets its tax_rate overwritten in one shot.
+  // The product count only refreshes on branch change so it stays accurate
+  // even if the modal's left open a while.
+  async showBulkTaxRateModal() {
+    const branches = await this.api('GET', '/branches');
+    this.showModal(`
+      <div class="modal" style="max-width:420px">
+        <div class="modal-header"><span class="modal-title">Bulk Tax Rate Change</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">Overwrite the tax rate on every active product currently stocked at one branch — retail, rental, and non-inventory items alike.</p>
+          <div class="form-group"><label>Branch</label>
+            <select id="btr-branch" onchange="App._refreshBulkTaxRateCount()"><option value="">Select a branch...</option>${branches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}</select>
+          </div>
+          <div class="form-group"><label>New Tax Rate %</label><input type="number" id="btr-rate" min="0" step="0.1" value="${this.settings?.tax_rate ?? 8.5}"></div>
+          <p id="btr-count" style="font-size:12px;color:var(--text-muted)">Select a branch to see how many products this affects.</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.runBulkTaxRate()">Apply</button>
+        </div>
+      </div>`);
+  },
+
+  async _refreshBulkTaxRateCount() {
+    const branch_id = document.getElementById('btr-branch')?.value;
+    const countEl = document.getElementById('btr-count');
+    if (!countEl) return;
+    if (!branch_id) { countEl.textContent = 'Select a branch to see how many products this affects.'; return; }
+    countEl.textContent = 'Loading…';
+    try {
+      const { count } = await this.api('GET', `/products/branch-count/${branch_id}`);
+      countEl.textContent = `${count} active product(s) are stocked at this branch and will be updated.`;
+    } catch(e) { countEl.textContent = ''; }
+  },
+
+  async runBulkTaxRate() {
+    const branchSel = document.getElementById('btr-branch');
+    const branch_id = branchSel.value;
+    const tax_rate = document.getElementById('btr-rate').value;
+    if (!branch_id) { this.alert('Select a branch first', 'error'); return; }
+    if (tax_rate === '' || parseFloat(tax_rate) < 0) { this.alert('Enter a valid tax rate', 'error'); return; }
+    const branchName = branchSel.selectedOptions[0].textContent;
+    if (!confirm(`Set every product stocked at ${branchName} to ${tax_rate}% tax? This overwrites their current tax rate and can't be undone in bulk.`)) return;
+    try {
+      const result = await this.api('POST', '/products/bulk-tax-rate', { branch_id, tax_rate });
+      this.alert(`Updated tax rate on ${result.updated} product(s) at ${branchName}.`, 'success');
+      this.closeModal();
+      this.renderInventory();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
   // ─── CSV Import / Export ──────────────────────────────────
   async importProductsCsv(inputEl) {
     const file = inputEl.files[0];
@@ -14279,7 +14333,7 @@ const App = {
           <div class="input-row-3">
             <div class="form-group"><label>Price</label><input type="number" id="npf-price" value="0" min="0" step="0.01"></div>
             <div class="form-group"><label>Cost</label><input type="number" id="npf-cost" value="0" min="0" step="0.01"></div>
-            <div class="form-group"><label>Tax Rate %</label><input type="number" id="npf-tax" value="8.5" min="0" step="0.1"></div>
+            <div class="form-group"><label>Tax Rate %</label><input type="number" id="npf-tax" value="${this.settings?.tax_rate ?? 8.5}" min="0" step="0.1"></div>
           </div>
           <div class="input-row">
             <div class="form-group"><label>Stock Qty</label><input type="number" id="npf-stock" value="0" min="0"></div>
@@ -15073,7 +15127,12 @@ const App = {
       await this.api('POST', '/transfers', { from_branch_id, to_branch_id, notes, items });
       this.closeModal();
       this.alert('Transfer created — stock deducted from source branch');
-      this.renderTransfers();
+      // Not renderTransfers() directly — it can be opened from other
+      // sections (e.g. Rental Items' "Transfer" quick action), and
+      // renderTransfers() bails out after its own "Loading..." placeholder
+      // if this.section isn't already 'transfers' by the time its fetch
+      // resolves, leaving the screen stuck. showSection() sets that first.
+      this.showSection('transfers');
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
