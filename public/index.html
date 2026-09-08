@@ -263,8 +263,13 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 /* Print */
 @media print {
   @page { size: 72mm auto; margin: 3mm 2mm; }
-  #sidebar, #topbar, .no-print { display: none !important; }
-  #content { padding: 0; }
+  /* #content (the active section behind the receipt modal — POS grid, cart,
+     etc.) isn't part of the modal and must never appear in the printed
+     output; the modal-overlay is appended as a sibling of #content on
+     <body> (see showModal), so hiding #sidebar/#topbar alone left it
+     showing through once print mode drops the overlay's fixed positioning
+     and opaque backdrop below. */
+  #sidebar, #topbar, #content, .no-print { display: none !important; }
   .modal-overlay { position: relative; background: none; }
   .modal { box-shadow: none; max-height: none; max-width: 72mm !important; width: 72mm !important; padding: 0 !important; }
   .modal-header { display: none; }
