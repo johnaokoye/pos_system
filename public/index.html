@@ -2265,24 +2265,24 @@ const App = {
     // Buttons the current employee can't use are simply omitted rather than
     // shown disabled, matching how e.g. Hold/Recall are already gated today.
     const gridButtons = [
-      `<button class="pos-grid-btn" onclick="App.selectCustomer()">Cust Lookup</button>`,
-      `<button class="pos-grid-btn" onclick="App.posCustZoom()">Cust Zoom</button>`,
-      `<button class="pos-grid-btn" onclick="App.showItemLookupModal()">Item Lookup</button>`,
-      `<button class="pos-grid-btn" onclick="App.posItemZoom()">Item Zoom</button>`,
-      `<button class="pos-grid-btn" onclick="App.showTicketDiscountModal()">Ticket Discount</button>`,
-      `<button class="pos-grid-btn" onclick="App.showTaxExemptModal()">Tax Exempt</button>`,
+      this.can('pos_customer_lookup') ? `<button class="pos-grid-btn" onclick="App.selectCustomer()">Cust Lookup</button>` : '',
+      this.can('pos_customer_lookup') ? `<button class="pos-grid-btn" onclick="App.posCustZoom()">Cust Zoom</button>` : '',
+      this.can('pos_item_lookup') ? `<button class="pos-grid-btn" onclick="App.showItemLookupModal()">Item Lookup</button>` : '',
+      this.can('pos_item_lookup') ? `<button class="pos-grid-btn" onclick="App.posItemZoom()">Item Zoom</button>` : '',
+      this.can('pos_discounts') ? `<button class="pos-grid-btn" onclick="App.showTicketDiscountModal()">Ticket Discount</button>` : '',
+      this.can('pos_tax_exempt') ? `<button class="pos-grid-btn" onclick="App.showTaxExemptModal()">Tax Exempt</button>` : '',
       this.can('layaway_create') ? `<button class="pos-grid-btn" onclick="App.posCreateLayawayFromCart()">Create Layaway</button>` : '',
       this.can('quotations') ? `<button class="pos-grid-btn" onclick="App.posCreateQuoteFromCart()">Create Quote</button>` : '',
       this.can('quotations') ? `<button class="pos-grid-btn" onclick="App.showQuoteSearch()">Quote Recall</button>` : '',
       this.can('pos_hold') ? `<button class="pos-grid-btn hold" onclick="App.holdOrder()">Hold</button>` : '',
       this.can('pos_hold') ? `<button class="pos-grid-btn hold" onclick="App.recallOrder()">Hold Recall <span id="hold-count-badge" style="display:none;background:rgba(0,0,0,0.15);border-radius:10px;padding:0 5px;font-size:10px;margin-left:2px"></span></button>` : '',
-      `<button class="pos-grid-btn" onclick="App.posReprintTicket()">Reprint Ticket</button>`,
+      this.can('pos_reprint_ticket') ? `<button class="pos-grid-btn" onclick="App.posReprintTicket()">Reprint Ticket</button>` : '',
       this.can('transactions') ? `<button class="pos-grid-btn" onclick="App.showSection('transactions')">Returns</button>` : '',
-      `<button class="pos-grid-btn pay-acct" onclick="App.processPayment('credit')">Pay On Acct</button>`,
-      `<button class="pos-grid-btn void" onclick="App.posVoidSelectedLine()">Void Line</button>`,
-      `<button class="pos-grid-btn" onclick="App.posQuantitySelectedLine()">Quantity</button>`,
-      `<button class="pos-grid-btn void" onclick="App.posCancelTicket()">Cancel Ticket</button>`,
-      `<button class="pos-grid-btn payment" style="grid-column:1 / -1" onclick="App.showPOSPaymentModal()">PAYMENT</button>`,
+      this.can('pos_pay_on_account') ? `<button class="pos-grid-btn pay-acct" onclick="App.processPayment('credit')">Pay On Acct</button>` : '',
+      this.can('pos_void_items') ? `<button class="pos-grid-btn void" onclick="App.posVoidSelectedLine()">Void Line</button>` : '',
+      this.can('pos_change_quantity') ? `<button class="pos-grid-btn" onclick="App.posQuantitySelectedLine()">Quantity</button>` : '',
+      this.can('pos_cancel_ticket') ? `<button class="pos-grid-btn void" onclick="App.posCancelTicket()">Cancel Ticket</button>` : '',
+      this.can('pos_payment') ? `<button class="pos-grid-btn payment" style="grid-column:1 / -1" onclick="App.showPOSPaymentModal()">PAYMENT</button>` : '',
     ].filter(Boolean).join('');
 
     const cashierName = this.currentUser ? `${this.currentUser.first_name} ${this.currentUser.last_name}` : '';
@@ -2925,7 +2925,7 @@ const App = {
         <td style="text-align:right;font-weight:600">${item.discountPercent > 0 ? `<span style="text-decoration:line-through;color:var(--text-muted);font-weight:400;font-size:11px">${this.fmt(lineGross)}</span> ${this.fmt(lineNet)}` : this.fmt(lineGross)}</td>
         <td style="white-space:nowrap">
           ${this.can('pos_discounts') ? `<button class="btn-secondary" style="padding:2px 8px;font-size:11px" title="Line Discount" onclick="event.stopPropagation();App.showLineDiscountModal(${idx})">%</button>` : ''}
-          <button class="btn-void-line" title="Void Line" onclick="App.voidCartLine(${idx})">VOID</button>
+          ${this.can('pos_void_items') ? `<button class="btn-void-line" title="Void Line" onclick="App.voidCartLine(${idx})">VOID</button>` : ''}
           <button class="btn-remove" onclick="App.removeFromCart(${idx})">×</button>
         </td>
       </tr>`;
@@ -17206,6 +17206,14 @@ const App = {
       { key: 'pos_refunds', label: 'Process Refunds' },
       { key: 'pos_void_items', label: 'Void Line Items' },
       { key: 'pos_hold', label: 'Hold & Recall Orders' },
+      { key: 'pos_customer_lookup', label: 'Customer Lookup & Zoom' },
+      { key: 'pos_item_lookup', label: 'Item Lookup & Zoom' },
+      { key: 'pos_tax_exempt', label: 'Tax Exempt' },
+      { key: 'pos_reprint_ticket', label: 'Reprint Ticket' },
+      { key: 'pos_pay_on_account', label: 'Pay On Account' },
+      { key: 'pos_change_quantity', label: 'Change Quantity' },
+      { key: 'pos_cancel_ticket', label: 'Cancel Ticket' },
+      { key: 'pos_payment', label: 'Take Payment' },
     ]},
     { key: 'drawers', label: 'Cash Drawers', subs: [
       { key: 'drawers_manage', label: 'Manage Drawers & Sessions' },
