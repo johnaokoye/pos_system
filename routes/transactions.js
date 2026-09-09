@@ -468,6 +468,10 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
     const { items, resolution, notes, employee_id } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items selected for return' });
     if (!['refund', 'replacement', 'credit_note'].includes(resolution)) return res.status(400).json({ error: 'Invalid resolution type' });
+    if (!req.apiKey) {
+      if (resolution === 'refund' && !can(req.employee?.permissions, 'transactions_refund')) return res.status(403).json({ error: 'Missing permission: transactions_refund' });
+      if (resolution === 'credit_note' && !can(req.employee?.permissions, 'transactions_credit_note')) return res.status(403).json({ error: 'Missing permission: transactions_credit_note' });
+    }
 
     const { rows: [tx] } = await db.execute({ sql: 'SELECT * FROM transactions WHERE id = ?', args: [req.params.id] });
     if (!tx) return res.status(404).json({ error: 'Transaction not found' });

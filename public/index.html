@@ -5682,11 +5682,12 @@ const App = {
       const reqMethod = esc(a.required_deposit_return_method);
       const reqReason = esc(a.required_deposit_return_reason);
       const policyHint = a.required_deposit_return_method ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">Policy: ${methodLabels[a.required_deposit_return_method]}</div>` : '';
+      const depositActions = [
+        this.can('rentals_deposit_refund') ? `<button class="btn btn-sm btn-outline" onclick="App.recordDepositReturn(${a.id},${refundDue},'${custName}','${reqMethod}','${reqReason}')">Record Refund</button>` : '',
+        this.can('rentals_credit_note') ? `<button class="btn btn-sm btn-outline" onclick="App.issueRentalCreditNote(${a.id},${refundDue},'${custName}')">Issue Credit Note</button>` : '',
+      ].filter(Boolean).join('');
       creditCell = `<span class="badge-pill badge-warning">Refund Due</span> ${this.fmt(refundDue)}${policyHint}
-        ${this.can('rentals_returns') ? `<div style="margin-top:4px;display:flex;gap:6px">
-          <button class="btn btn-sm btn-outline" onclick="App.recordDepositReturn(${a.id},${refundDue},'${custName}','${reqMethod}','${reqReason}')">Record Refund</button>
-          <button class="btn btn-sm btn-outline" onclick="App.issueRentalCreditNote(${a.id},${refundDue},'${custName}')">Issue Credit Note</button>
-        </div>` : ''}`;
+        ${depositActions ? `<div style="margin-top:4px;display:flex;gap:6px">${depositActions}</div>` : ''}`;
     } else {
       creditCell = '<span style="color:var(--text-muted)">—</span>';
     }
@@ -11080,7 +11081,10 @@ const App = {
     });
 
     const hasCustomer = !!tx.customer_id;
-    const canCreditNote = hasCustomer;
+    const canRefund = this.can('transactions_refund');
+    const canIssueCreditNote = this.can('transactions_credit_note');
+    const canCreditNote = hasCustomer && canIssueCreditNote;
+    const firstResolution = canRefund ? 'refund' : (canCreditNote ? 'credit_note' : 'replacement');
 
     const itemRows = tx.items.map(item => {
       const alreadyRet = returnedQtyMap[item.id] || 0;
@@ -11121,16 +11125,16 @@ const App = {
           <div style="margin-bottom:14px">
             <p style="font-size:13px;font-weight:600;margin-bottom:8px">Resolution:</p>
             <div style="display:flex;flex-direction:column;gap:8px">
-              <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px">
-                <input type="radio" name="ret-resolution" value="refund" checked style="margin-top:2px">
+              ${canRefund ? `<label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px">
+                <input type="radio" name="ret-resolution" value="refund" ${firstResolution==='refund'?'checked':''} style="margin-top:2px">
                 <span><strong>Refund</strong> — return cash or reverse the original payment method</span>
-              </label>
-              <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px${canCreditNote?'':';opacity:0.45'}">
-                <input type="radio" name="ret-resolution" value="credit_note" ${canCreditNote?'':'disabled'} style="margin-top:2px">
-                <span><strong>Credit Note</strong> — add return value to customer's store credit account${canCreditNote?'':' <em style="color:var(--text-muted)">(requires customer)</em>'}</span>
-              </label>
+              </label>` : ''}
+              ${canIssueCreditNote ? `<label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px${hasCustomer?'':';opacity:0.45'}">
+                <input type="radio" name="ret-resolution" value="credit_note" ${hasCustomer?(firstResolution==='credit_note'?'checked':''):'disabled'} style="margin-top:2px">
+                <span><strong>Credit Note</strong> — add return value to customer's store credit account${hasCustomer?'':' <em style="color:var(--text-muted)">(requires customer)</em>'}</span>
+              </label>` : ''}
               <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px">
-                <input type="radio" name="ret-resolution" value="replacement" style="margin-top:2px">
+                <input type="radio" name="ret-resolution" value="replacement" ${firstResolution==='replacement'?'checked':''} style="margin-top:2px">
                 <span><strong>Replacement / Exchange</strong> — process return then open POS with credit pre-applied</span>
               </label>
             </div>
@@ -17252,6 +17256,7 @@ const App = {
     { key: 'transactions', label: 'Transactions', subs: [
       { key: 'transactions_export', label: 'Export Transactions' },
       { key: 'transactions_refund', label: 'Issue Refunds' },
+      { key: 'transactions_credit_note', label: 'Issue Credit Notes' },
       { key: 'transactions_returns', label: 'Process Returns' },
     ]},
     { key: 'reports', label: 'Reports', subs: [
@@ -17277,6 +17282,8 @@ const App = {
       { key: 'rentals_issue', label: 'Issue / Dispatch Rentals' },
       { key: 'rentals_pause', label: 'Authorize Rental Pauses' },
       { key: 'rentals_confirm_pickup', label: 'Confirm Rental Pickups (Driver)' },
+      { key: 'rentals_deposit_refund', label: 'Record Deposit Refunds' },
+      { key: 'rentals_credit_note', label: 'Issue Credit Notes' },
     ]},
     { key: 'work_orders', label: 'Work Orders', subs: [
       { key: 'wo_intake', label: 'Open Work Orders' },

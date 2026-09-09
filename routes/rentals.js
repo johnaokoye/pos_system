@@ -1219,7 +1219,7 @@ router.patch('/agreements/:id/collect-balance', requireAnyPermission('pos', 'ren
 // return time). Unlike a purchase (which increases account_balance, a
 // receivable), a credit note DECREASES it — allowed to go negative to
 // represent credit the store now owes the customer.
-router.post('/agreements/:id/credit-note', requirePermission('rentals_returns'), async (req, res) => {
+router.post('/agreements/:id/credit-note', requirePermission('rentals_credit_note'), async (req, res) => {
   try {
     const { amount, employee_id } = req.body;
     const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
@@ -1274,7 +1274,7 @@ router.post('/agreements/:id/credit-note', requirePermission('rentals_returns'),
 // .../credit-note instead (it actually moves money — account_balance — so it
 // keeps its own endpoint); a credit-checkout rental's refund is stamped
 // 'account_credit' automatically at return time and never reaches here.
-router.patch('/agreements/:id/deposit-return', requirePermission('rentals_returns'), async (req, res) => {
+router.patch('/agreements/:id/deposit-return', requirePermission('rentals_deposit_refund'), async (req, res) => {
   try {
     const { method, reference, notes, employee_id } = req.body;
     const validMethods = ['cash', 'bank_transfer', 'original_card'];
