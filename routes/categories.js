@@ -14,7 +14,10 @@ router.get('/', requireAuth, async (req, res) => {
 
 // Category management is reachable from both the Settings and Inventory
 // screens — either permission is sufficient, matching the frontend.
-router.post('/', requireAnyPermission('settings', 'inventory'), async (req, res) => {
+// requireAnyPermission's OR falls back to the parent 'inventory' module too
+// (see can()'s bidirectional check), so a group with just the module
+// checked — not the specific inventory_categories sub-key — still works.
+router.post('/', requireAnyPermission('settings', 'inventory_categories'), async (req, res) => {
   const { name, description } = req.body;
   if (!name) return res.status(400).json({ error: 'Name required' });
   try {
@@ -24,7 +27,7 @@ router.post('/', requireAnyPermission('settings', 'inventory'), async (req, res)
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/:id', requireAnyPermission('settings', 'inventory'), async (req, res) => {
+router.put('/:id', requireAnyPermission('settings', 'inventory_categories'), async (req, res) => {
   const { name, description } = req.body;
   try {
     await db.execute({ sql: 'UPDATE categories SET name=?, description=? WHERE id=?', args: [name, description || null, req.params.id] });
@@ -33,7 +36,7 @@ router.put('/:id', requireAnyPermission('settings', 'inventory'), async (req, re
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/:id', requireAnyPermission('settings', 'inventory'), async (req, res) => {
+router.delete('/:id', requireAnyPermission('settings', 'inventory_categories'), async (req, res) => {
   try {
     const { rows: [inUse] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM products WHERE category_id = ?', args: [req.params.id] });
     if (Number(inUse.c) > 0) return res.status(400).json({ error: 'Category in use by products' });

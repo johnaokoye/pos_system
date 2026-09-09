@@ -76,7 +76,7 @@ The `security_groups.permissions` JSON blob uses these keys (all boolean). Modul
 **Sub-permission keys** (stored and checked via `App.can()` exactly as shown):
 - `pos` → `pos_discounts`, `pos_refunds`, `pos_void_items`, `pos_hold`
 - `drawers` → `drawers_manage`, `drawers_open`, `drawers_close`, `void_transactions`
-- `inventory` → `inventory_add`, `inventory_edit`, `inventory_delete`, `inventory_adjust`
+- `inventory` → `inventory_add`, `inventory_edit`, `inventory_delete`, `inventory_adjust`, `inventory_print_labels`, `inventory_merge`, `inventory_export`, `inventory_missing_data`, `inventory_template`, `inventory_import`, `inventory_import_history`, `inventory_scan_images`, `inventory_categories`, `inventory_brands`
 - `customers` → `customers_add`, `customers_edit`, `customers_delete`, `customers_credit`
 - `transactions` → `transactions_export`, `transactions_refund`, `transactions_returns`
 - `reports` → `reports_export`, `reports_financial`

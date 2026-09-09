@@ -9,7 +9,7 @@ const { HAS_ISSUE_SQL, ISSUE_LABEL_SQL, rowsToCsv } = require('../lib/productIss
 // starts POSTing CSV row-chunks to /products/import with this id, so every
 // chunk's product_import_batch_items rows land under one reviewable/
 // reversible unit even though the browser sends them as many small requests.
-router.post('/', requirePermission('inventory'), async (req, res) => {
+router.post('/', requirePermission('inventory_import'), async (req, res) => {
   try {
     const result = await db.execute({
       sql: 'INSERT INTO product_import_batches (employee_id, status) VALUES (?, ?)',
@@ -22,7 +22,7 @@ router.post('/', requirePermission('inventory'), async (req, res) => {
 // PATCH mark a batch finished (all chunks posted) or cancelled — purely
 // informational for the list view; reverse works on a batch regardless of
 // this status.
-router.patch('/:id/finish', requirePermission('inventory'), async (req, res) => {
+router.patch('/:id/finish', requirePermission('inventory_import'), async (req, res) => {
   try {
     await db.execute({
       sql: "UPDATE product_import_batches SET status = 'completed', finished_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'running'",
@@ -33,7 +33,7 @@ router.patch('/:id/finish', requirePermission('inventory'), async (req, res) => 
 });
 
 // GET list recent batches with counts aggregated from their logged items.
-router.get('/', requirePermission('inventory'), async (req, res) => {
+router.get('/', requirePermission('inventory_import_history'), async (req, res) => {
   try {
     const { rows } = await db.execute({
       sql: `SELECT b.id, b.status, b.started_at, b.finished_at, b.reversed_at,
@@ -58,7 +58,7 @@ router.get('/', requirePermission('inventory'), async (req, res) => {
 // breakdown (lib/productIssues.js) scoped to just the products this batch
 // created or updated — the same checks used to review the 2026-09-02 import,
 // now re-runnable for any batch at any time.
-router.get('/:id', requirePermission('inventory'), async (req, res) => {
+router.get('/:id', requirePermission('inventory_import_history'), async (req, res) => {
   try {
     const { rows: [batch] } = await db.execute({
       sql: `SELECT b.*, e.first_name || ' ' || e.last_name as employee_name
@@ -90,7 +90,7 @@ router.get('/:id', requirePermission('inventory'), async (req, res) => {
 
 // GET export this batch's flagged (created/updated) products as CSV — same
 // shape as GET /products/export/issues, just scoped to one batch.
-router.get('/:id/export-issues', requirePermission('inventory'), async (req, res) => {
+router.get('/:id/export-issues', requirePermission('inventory_import_history'), async (req, res) => {
   try {
     const { rows } = await db.execute({
       sql: `SELECT p.id, p.sku, p.name, p.price, p.cost, p.stock_qty,
@@ -122,7 +122,7 @@ router.get('/:id/export-issues', requirePermission('inventory'), async (req, res
 //    before the import overwrote them.
 //  - 'skipped'/'error' rows: nothing to undo.
 // Mirrors exactly the manual process used to reverse the 2026-09-02 import.
-router.post('/:id/reverse', requirePermission('inventory'), async (req, res) => {
+router.post('/:id/reverse', requirePermission('inventory_import_history'), async (req, res) => {
   try {
     const { rows: [batch] } = await db.execute({ sql: 'SELECT * FROM product_import_batches WHERE id = ?', args: [req.params.id] });
     if (!batch) return res.status(404).json({ error: 'Import batch not found' });

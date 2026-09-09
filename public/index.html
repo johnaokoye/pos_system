@@ -4026,16 +4026,16 @@ const App = {
           ${branches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
         </select>
         <div style="flex:1"></div>
-        <button class="btn btn-secondary btn-sm" onclick="App.exportInventoryCsv()" title="Export filtered products to CSV">&#8659; Export CSV</button>
-        <a class="btn btn-secondary btn-sm" href="/api/products/export/issues" download title="Export active products with $0 price, negative stock, or missing category/supplier/barcode">&#8659; Missing Data</a>
-        <a class="btn btn-secondary btn-sm" href="/api/products/export/template" download title="Download import template">&#8659; Template</a>
-        <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import products from CSV">&#8657; Import<input type="file" accept=".csv" style="display:none" onchange="App.importProductsCsv(this)"></label>
-        <button class="btn btn-secondary btn-sm" onclick="App.showImportHistory()" title="Review or reverse past CSV imports">Import History</button>
-        <button class="btn btn-secondary btn-sm" onclick="App.scanProductImages()" title="Assign images already placed in uploads/products/ (named by SKU) to their matching products">Scan Images</button>
+        ${this.can('inventory_export') ? `<button class="btn btn-secondary btn-sm" onclick="App.exportInventoryCsv()" title="Export filtered products to CSV">&#8659; Export CSV</button>` : ''}
+        ${this.can('inventory_missing_data') ? `<a class="btn btn-secondary btn-sm" href="/api/products/export/issues" download title="Export active products with $0 price, negative stock, or missing category/supplier/barcode">&#8659; Missing Data</a>` : ''}
+        ${this.can('inventory_template') ? `<a class="btn btn-secondary btn-sm" href="/api/products/export/template" download title="Download import template">&#8659; Template</a>` : ''}
+        ${this.can('inventory_import') ? `<label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import products from CSV">&#8657; Import<input type="file" accept=".csv" style="display:none" onchange="App.importProductsCsv(this)"></label>` : ''}
+        ${this.can('inventory_import_history') ? `<button class="btn btn-secondary btn-sm" onclick="App.showImportHistory()" title="Review or reverse past CSV imports">Import History</button>` : ''}
+        ${this.can('inventory_scan_images') ? `<button class="btn btn-secondary btn-sm" onclick="App.scanProductImages()" title="Assign images already placed in uploads/products/ (named by SKU) to their matching products">Scan Images</button>` : ''}
         <button class="btn btn-secondary btn-sm" onclick="App.showBulkAssignBranchModal()" title="Assign every product with no branch stock yet (e.g. after a CSV import) to one branch">Bulk Assign to Branch</button>
         <button class="btn btn-secondary btn-sm" onclick="App.showBulkTaxRateModal()" title="Set the tax rate on every product stocked at one branch">Bulk Tax Rate Change</button>
-        <button class="btn btn-secondary btn-sm" onclick="App.showCategoriesManager()">Categories</button>
-        <button class="btn btn-secondary btn-sm" onclick="App.showBrandsManager()">Brands</button>
+        ${this.can('inventory_categories') ? `<button class="btn btn-secondary btn-sm" onclick="App.showCategoriesManager()">Categories</button>` : ''}
+        ${this.can('inventory_brands') ? `<button class="btn btn-secondary btn-sm" onclick="App.showBrandsManager()">Brands</button>` : ''}
       </div>
       <div class="card">
         <div class="table-wrap" id="inv-table-wrap" style="max-height:65vh;overflow-y:auto">
@@ -4205,14 +4205,14 @@ const App = {
           <td><span class="badge-pill ${p.active ? 'badge-success' : 'badge-danger'}">${p.active ? 'Active' : 'Inactive'}</span></td>
           <td style="white-space:nowrap">
             <button class="btn btn-secondary btn-sm" onclick="App.showProductForm(${p.id})">Edit</button>
-            <button class="btn btn-outline btn-sm" onclick="App.showStockAdjust(${p.id},'${p.name}',${p.stock_qty}${branchId ? `,${branchId},'${branchName}'` : ''})">Stock</button>
+            ${this.can('inventory_adjust') ? `<button class="btn btn-outline btn-sm" onclick="App.showStockAdjust(${p.id},'${p.name}',${p.stock_qty}${branchId ? `,${branchId},'${branchName}'` : ''})">Stock</button>` : ''}
             <button class="btn btn-secondary btn-sm" id="inv-hist-btn-${p.id}" onclick="App.toggleProductHistory(${p.id})" title="Stock history" style="padding:4px 7px">
               <svg viewBox="0 0 24 24" fill="currentColor" width="13" height="13"><path d="M13 3a9 9 0 1 0 9 9h-2a7 7 0 1 1-7-7v2l4-4-4-4v2zm-1 5v5l4.25 2.52.77-1.28-3.52-2.09V8z"/></svg>
             </button>
-            <button class="btn btn-secondary btn-sm" onclick="App.showLabelPrint(${p.id})" title="Print Labels" style="padding:4px 7px">
+            ${this.can('inventory_print_labels') ? `<button class="btn btn-secondary btn-sm" onclick="App.showLabelPrint(${p.id})" title="Print Labels" style="padding:4px 7px">
               <svg viewBox="0 0 24 24" fill="currentColor" width="13" height="13"><path d="M19 8H5c-1.66 0-3 1.34-3 3v6h4v4h12v-4h4v-6c0-1.66-1.34-3-3-3zm-3 11H8v-5h8v5zm3-7c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm-1-9H6v4h12V3z"/></svg>
-            </button>
-            ${!p.merged_into_product_id && !p.is_rental && !(p.has_variations > 0) && this.can('inventory_edit') ? `<button class="btn btn-outline btn-sm" onclick="App.showMergeProductModal(${p.id})" title="Merge this duplicate into another product">Merge</button>` : ''}
+            </button>` : ''}
+            ${!p.merged_into_product_id && !p.is_rental && !(p.has_variations > 0) && this.can('inventory_merge') ? `<button class="btn btn-outline btn-sm" onclick="App.showMergeProductModal(${p.id})" title="Merge this duplicate into another product">Merge</button>` : ''}
           </td>
         </tr>
         <tr id="inv-hist-${p.id}" style="display:none">
@@ -8926,7 +8926,7 @@ const App = {
       <td><span class="badge-pill ${v.active ? 'badge-success' : 'badge-danger'}">${v.active ? 'Yes' : 'No'}</span></td>
       <td style="white-space:nowrap">
         <button class="btn btn-secondary btn-sm" onclick="App._inlineEditVariation(${productId},${v.id})">Edit</button>
-        <button class="btn btn-outline btn-sm" onclick="App._varStockAdjust(${productId},${v.id},'${v.name.replace(/'/g,"\\'")}',${v.stock_qty})">Stock</button>
+        ${this.can('inventory_adjust') ? `<button class="btn btn-outline btn-sm" onclick="App._varStockAdjust(${productId},${v.id},'${v.name.replace(/'/g,"\\'")}',${v.stock_qty})">Stock</button>` : ''}
         <button class="btn btn-danger btn-sm" onclick="App._deleteVariation(${productId},${v.id})">✕</button>
       </td>
     </tr>`;
@@ -17207,6 +17207,16 @@ const App = {
       { key: 'inventory_edit', label: 'Edit Products' },
       { key: 'inventory_delete', label: 'Delete Products' },
       { key: 'inventory_adjust', label: 'Manual Stock Adjustments' },
+      { key: 'inventory_print_labels', label: 'Print Labels' },
+      { key: 'inventory_merge', label: 'Merge Duplicate Products' },
+      { key: 'inventory_export', label: 'Export Products CSV' },
+      { key: 'inventory_missing_data', label: 'Export Missing Data CSV' },
+      { key: 'inventory_template', label: 'Download Import Template' },
+      { key: 'inventory_import', label: 'Import Products CSV' },
+      { key: 'inventory_import_history', label: 'Review & Reverse Imports' },
+      { key: 'inventory_scan_images', label: 'Scan Product Images' },
+      { key: 'inventory_categories', label: 'Manage Categories' },
+      { key: 'inventory_brands', label: 'Manage Brands' },
     ]},
     { key: 'customers', label: 'Customers', subs: [
       { key: 'customers_add', label: 'Add Customers' },

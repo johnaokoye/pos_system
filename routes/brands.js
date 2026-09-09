@@ -14,7 +14,7 @@ router.get('/', requireAuth, async (req, res) => {
 
 // Brand management is reachable from Inventory — same permission story as
 // categories.js.
-router.post('/', requireAnyPermission('settings', 'inventory'), async (req, res) => {
+router.post('/', requireAnyPermission('settings', 'inventory_brands'), async (req, res) => {
   const { name, description } = req.body;
   if (!name) return res.status(400).json({ error: 'Name required' });
   try {
@@ -27,7 +27,7 @@ router.post('/', requireAnyPermission('settings', 'inventory'), async (req, res)
   }
 });
 
-router.put('/:id', requireAnyPermission('settings', 'inventory'), async (req, res) => {
+router.put('/:id', requireAnyPermission('settings', 'inventory_brands'), async (req, res) => {
   const { name, description } = req.body;
   if (!name) return res.status(400).json({ error: 'Name required' });
   try {
@@ -49,7 +49,7 @@ router.put('/:id', requireAnyPermission('settings', 'inventory'), async (req, re
   }
 });
 
-router.delete('/:id', requireAnyPermission('settings', 'inventory'), async (req, res) => {
+router.delete('/:id', requireAnyPermission('settings', 'inventory_brands'), async (req, res) => {
   try {
     const { rows: [brand] } = await db.execute({ sql: 'SELECT name FROM brands WHERE id = ?', args: [req.params.id] });
     if (!brand) return res.status(404).json({ error: 'Brand not found' });

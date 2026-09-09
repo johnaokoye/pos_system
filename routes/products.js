@@ -238,7 +238,7 @@ router.get('/movements', requirePermission('inventory'), async (req, res) => {
 });
 
 // GET export filtered products as CSV
-router.get('/export', requirePermission('inventory'), async (req, res) => {
+router.get('/export', requirePermission('inventory_export'), async (req, res) => {
   try {
     const { search, category, active, low_stock, branch_id, supplier_id, is_rental, is_service, is_non_inventory } = req.query;
     const params = [];
@@ -309,7 +309,7 @@ router.get('/export', requirePermission('inventory'), async (req, res) => {
 // ring up free), negative stock, or no category/supplier/barcode. Same
 // checks (lib/productIssues.js) used by the per-import-batch review, but
 // scoped to the whole active catalog rather than one import.
-router.get('/export/issues', requirePermission('inventory'), async (req, res) => {
+router.get('/export/issues', requirePermission('inventory_missing_data'), async (req, res) => {
   try {
     const { rows } = await db.execute({
       sql: `SELECT p.id, p.sku, p.name, p.price, p.cost, p.stock_qty,
@@ -331,7 +331,7 @@ router.get('/export/issues', requirePermission('inventory'), async (req, res) =>
 });
 
 // GET CSV template for bulk import
-router.get('/export/template', requirePermission('inventory'), (req, res) => {
+router.get('/export/template', requirePermission('inventory_template'), (req, res) => {
   const headers = ['sku','barcode','name','description','category_name','price','cost','tax_rate','stock_qty','min_stock','active','supplier_name'];
   const example = ['PROD-001','0001234567890','Example Product','Product description','Electronics','19.99','9.99','8.5','100','10','1','TechSupply Co'];
   const csv = [headers.join(','), example.join(',')].join('\r\n');
@@ -347,7 +347,7 @@ router.get('/export/template', requirePermission('inventory'), (req, res) => {
 // (POST /:id/reverse). 'updated' rows log a full snapshot of the row *before*
 // the overwrite (previous_values) since that's the only way Reverse can put
 // it back — the UPDATE below doesn't otherwise keep any history.
-router.post('/import', requirePermission('inventory'), async (req, res) => {
+router.post('/import', requirePermission('inventory_import'), async (req, res) => {
   try {
     const { rows, skip_existing, batch_id, branch_id } = req.body;
     if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ error: 'No rows provided' });
@@ -828,7 +828,7 @@ router.put('/:id', async (req, res, next) => {
 // and repoints every table that references the duplicate, then deactivates
 // it rather than deleting it. See lib/productMerge.js for the full list of
 // what moves and why it's not a hard delete.
-router.post('/:id/merge', requirePermission('inventory_edit'), async (req, res) => {
+router.post('/:id/merge', requirePermission('inventory_merge'), async (req, res) => {
   try {
     const { target_id } = req.body;
     if (!target_id) return res.status(400).json({ error: 'A product to merge into is required' });
@@ -838,7 +838,7 @@ router.post('/:id/merge', requirePermission('inventory_edit'), async (req, res) 
 });
 
 // PATCH adjust stock (global or branch-specific)
-router.patch('/:id/stock', requirePermission('inventory'), async (req, res) => {
+router.patch('/:id/stock', requirePermission('inventory_adjust'), async (req, res) => {
   try {
     const { adjustment, reason, branch_id } = req.body;
     const { rows: [product] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [req.params.id] });
@@ -941,7 +941,7 @@ router.post('/:id/image', requireImagePermission, upload.single('image'), async 
 // (SKU) matches a file named "abc_123.jpg" or "ABC_123.PNG". Runs the file
 // through Cloudinary when configured — same as a normal upload — so a scan
 // on a Vercel deployment doesn't leave the image on ephemeral local disk.
-router.post('/images/scan-folder', requirePermission('inventory'), async (req, res) => {
+router.post('/images/scan-folder', requirePermission('inventory_scan_images'), async (req, res) => {
   try {
     const dir = path.join(__dirname, '../uploads/products');
     if (!fs.existsSync(dir)) return res.json({ matched: 0, scanned: 0, details: [] });
@@ -1075,7 +1075,7 @@ router.delete('/:id/variations/:vid', requirePermission('inventory'), async (req
 });
 
 // PATCH adjust stock for a variation
-router.patch('/:id/variations/:vid/stock', requirePermission('inventory'), async (req, res) => {
+router.patch('/:id/variations/:vid/stock', requirePermission('inventory_adjust'), async (req, res) => {
   try {
     const { adjustment } = req.body;
     const adj = parseInt(adjustment) || 0;
