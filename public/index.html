@@ -10715,10 +10715,7 @@ const App = {
     ]);
     if (this.section !== 'online-orders') return;
     this._onlineCompanyName = (Array.isArray(settingRows) ? settingRows : []).find(s => s.key==='company_name')?.value || 'Store';
-    const todayStr = today;
-    const todayTxs = txs.filter(t => t.created_at && t.created_at.slice(0,10) === todayStr);
-    const todayRevenue = todayTxs.reduce((s,t)=>s+(t.total||0),0);
-    const cnt = st => txs.filter(t=>(t.fulfillment_status||'pending')===st).length;
+    const todayTxs = txs.filter(t => t.created_at && t.created_at.slice(0,10) === today);
     document.getElementById('content').innerHTML = `
       <div class="section-header">
         <h2>Online Orders</h2>
@@ -10740,22 +10737,32 @@ const App = {
           <button class="btn btn-primary" onclick="App.loadOnlineOrders()">Search</button>
         </div>
       </div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-bottom:20px">
-        ${[
-          {label:"Today's Revenue", val:this.fmt(todayRevenue), color:'var(--primary)'},
-          {label:"Today's Orders",  val:todayTxs.length,        color:'var(--primary)'},
-          {label:'Pending',         val:cnt('pending'),          color:'#f59e0b'},
-          {label:'Processing',      val:cnt('processing'),       color:'#3b82f6'},
-          {label:'Shipped',         val:cnt('shipped'),          color:'#8b5cf6'},
-          {label:'Delivered',       val:cnt('delivered'),        color:'#22c55e'},
-        ].map(s=>`<div class="card" style="padding:16px;text-align:center">
-          <div style="font-size:22px;font-weight:700;color:${s.color}">${s.val}</div>
-          <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-top:3px">${s.label}</div>
-        </div>`).join('')}
+      <div id="oo-stats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-bottom:20px">
+        ${this.buildOnlineOrdersStats(todayTxs, true)}
       </div>
       <div class="card">
         <div class="table-wrap" id="oo-table">${this.buildOnlineOrdersTable(txs)}</div>
       </div>`;
+  },
+
+  // `isDefault` labels the revenue/count cards as "Today's ..." (the
+  // unfiltered landing view); once the user runs a Search, loadOnlineOrders()
+  // passes false so the same cards read as filtered totals instead — the
+  // status-count cards always reflect whatever `txs` was actually passed in.
+  buildOnlineOrdersStats(txs, isDefault) {
+    const revenue = txs.reduce((s,t)=>s+(t.total||0),0);
+    const cnt = st => txs.filter(t=>(t.fulfillment_status||'pending')===st).length;
+    return [
+      {label:isDefault ? "Today's Revenue" : 'Revenue (Filtered)', val:this.fmt(revenue), color:'var(--primary)'},
+      {label:isDefault ? "Today's Orders" : 'Orders (Filtered)',   val:txs.length,         color:'var(--primary)'},
+      {label:'Pending',         val:cnt('pending'),          color:'#f59e0b'},
+      {label:'Processing',      val:cnt('processing'),       color:'#3b82f6'},
+      {label:'Shipped',         val:cnt('shipped'),          color:'#8b5cf6'},
+      {label:'Delivered',       val:cnt('delivered'),        color:'#22c55e'},
+    ].map(s=>`<div class="card" style="padding:16px;text-align:center">
+      <div style="font-size:22px;font-weight:700;color:${s.color}">${s.val}</div>
+      <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-top:3px">${s.label}</div>
+    </div>`).join('');
   },
 
   buildOnlineOrdersTable(txs) {
@@ -10791,12 +10798,14 @@ const App = {
     const customer = document.getElementById('oo-customer').value.trim();
     const txnum = document.getElementById('oo-txnum').value.trim();
     let url = `/transactions?source=online&start=${start}&end=${end}`;
+    if (fulfillment) url += `&fulfillment_status=${encodeURIComponent(fulfillment)}`;
     if (customer) url += `&customer_name=${encodeURIComponent(customer)}`;
     if (txnum) url += `&transaction_number=${encodeURIComponent(txnum)}`;
-    let txs = await this.api('GET', url);
-    if (fulfillment) txs = txs.filter(t=>(t.fulfillment_status||'pending')===fulfillment);
+    const txs = await this.api('GET', url);
     const ooTable = document.getElementById('oo-table');
     if (ooTable) ooTable.innerHTML = this.buildOnlineOrdersTable(txs);
+    const ooStats = document.getElementById('oo-stats');
+    if (ooStats) ooStats.innerHTML = this.buildOnlineOrdersStats(txs, false);
   },
 
   async viewOnlineOrder(id) {
