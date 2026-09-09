@@ -74,10 +74,10 @@ The `security_groups.permissions` JSON blob uses these keys (all boolean). Modul
 **Module keys:** `dashboard`, `pos`, `drawers`, `inventory`, `customers`, `transactions`, `reports`, `employees`, `suppliers`, `services`, `purchase_requests`, `purchasing`, `transfers`, `quotations`, `accounts`, `crm`, `commissions`, `warehouse`, `shipping`, `cycle-counts`, `branches`, `security`, `promotions`, `settings`
 
 **Sub-permission keys** (stored and checked via `App.can()` exactly as shown):
-- `pos` → `pos_discounts`, `pos_refunds`, `pos_void_items`, `pos_hold`
+- `pos` → `pos_discounts`, `pos_discount_override`, `pos_refunds`, `pos_void_items`, `pos_hold`, `pos_customer_lookup`, `pos_item_lookup`, `pos_tax_exempt`, `pos_reprint_ticket`, `pos_pay_on_account`, `pos_change_quantity`, `pos_cancel_ticket`, `pos_payment`
 - `drawers` → `drawers_manage`, `drawers_open`, `drawers_close`, `void_transactions`
 - `inventory` → `inventory_add`, `inventory_edit`, `inventory_delete`, `inventory_adjust`, `inventory_print_labels`, `inventory_merge`, `inventory_export`, `inventory_missing_data`, `inventory_template`, `inventory_import`, `inventory_import_history`, `inventory_scan_images`, `inventory_categories`, `inventory_brands`
-- `customers` → `customers_add`, `customers_edit`, `customers_delete`, `customers_credit`
+- `customers` → `customers_add`, `customers_edit`, `customers_delete`, `customers_credit`, `customers_import`, `customers_import_history`, `customers_export`, `customers_export_balances`, `customers_missing_rental_info`, `customers_print_history`
 - `transactions` → `transactions_export`, `transactions_refund`, `transactions_returns`
 - `reports` → `reports_export`, `reports_financial`
 - `employees` → `employees_add`, `employees_edit`, `employees_delete`, `employees_salaries`

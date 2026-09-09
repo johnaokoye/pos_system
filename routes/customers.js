@@ -138,7 +138,7 @@ function csvBool(v) {
 }
 
 // GET CSV template for bulk import
-router.get('/export/template', requirePermission('customers'), (req, res) => {
+router.get('/export/template', requirePermission('customers_import'), (req, res) => {
   const example = ['Jane','Doe','jane.doe@example.com','555-0100','123 Main St','Springfield','IL','62701','cash','30','0','0','','Individual','Prefers email contact',
     '1','drivers_license','D1234567','utility_bill','John Smith','555-0101','Brother','456 Oak St','Mary Jones','555-0102','Friend','Bob White','555-0103','Coworker'];
   const csv = [CSV_COLUMNS.join(','), example.map(escapeCsv).join(',')].join('\r\n');
@@ -149,7 +149,7 @@ router.get('/export/template', requirePermission('customers'), (req, res) => {
 
 // GET export active customers as CSV — same column shape as the import
 // template/POST /import, so an export can be edited and re-imported.
-router.get('/export', requirePermission('customers'), async (req, res) => {
+router.get('/export', requirePermission('customers_export'), async (req, res) => {
   try {
     const { rows } = await db.execute({
       sql: `SELECT c.*, cc.name as customer_category_name FROM customers c
@@ -177,7 +177,7 @@ router.get('/export', requirePermission('customers'), async (req, res) => {
 // and routes/rentals.js POST /agreements/:id/credit-note, both of which
 // only ever move this same field). Includes inactive/blocked customers
 // (unlike other exports) since status is one of the requested columns.
-router.get('/export/balances', requirePermission('customers'), async (req, res) => {
+router.get('/export/balances', requirePermission('customers_export_balances'), async (req, res) => {
   try {
     const { type } = req.query; // 'retail' | 'rental' | omitted for both
     let sql = `SELECT c.customer_number, c.first_name, c.last_name, c.email, c.phone,
@@ -218,7 +218,7 @@ router.get('/export/balances', requirePermission('customers'), async (req, res) 
 // customers but are missing the ID/reference/document fields a legacy export
 // wouldn't have carried. Registered before GET /:id so "rental-incomplete"
 // isn't swallowed as a customer id (same reasoning as the /export routes).
-router.get('/rental-incomplete', requirePermission('customers'), async (req, res) => {
+router.get('/rental-incomplete', requirePermission('customers_missing_rental_info'), async (req, res) => {
   try {
     const { rows } = await db.execute({ sql: 'SELECT * FROM customers WHERE is_rental_customer = 1 AND active = 1 ORDER BY last_name, first_name', args: [] });
     const results = rows
@@ -311,7 +311,7 @@ async function validateCashBackCard(cash_back_card_type_id, cash_back_card_numbe
   return null;
 }
 
-router.post('/', requirePermission('customers'), async (req, res) => {
+router.post('/', requirePermission('customers_add'), async (req, res) => {
   const {
     first_name, last_name, email, phone, address, city, state, zip, notes, customer_type, credit_terms_days, credit_limit, tax_exempt, tax_exemption_number,
     is_rental_customer, rental_id_type, rental_id_number, rental_address_proof_type,
@@ -365,7 +365,7 @@ router.post('/', requirePermission('customers'), async (req, res) => {
   }
 });
 
-router.put('/:id', requirePermission('customers'), async (req, res) => {
+router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
   const {
     first_name, last_name, email, phone, address, city, state, zip, notes, active, customer_type, credit_terms_days, credit_limit, tax_exempt, tax_exemption_number,
     is_rental_customer, rental_id_type, rental_id_number, rental_address_proof_type,
@@ -411,7 +411,7 @@ router.put('/:id', requirePermission('customers'), async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/:id', requirePermission('customers'), async (req, res) => {
+router.delete('/:id', requirePermission('customers_delete'), async (req, res) => {
   try {
     await db.execute({ sql: 'UPDATE customers SET active = 0 WHERE id = ?', args: [req.params.id] });
     res.json({ success: true });
@@ -426,7 +426,7 @@ router.delete('/:id', requirePermission('customers'), async (req, res) => {
 // POST / (email/phone/full name against active customers): by default a
 // match skips the row instead of creating it — pass `duplicate_mode:
 // 'force'` to create every row regardless of matches.
-router.post('/import', requirePermission('customers'), async (req, res) => {
+router.post('/import', requirePermission('customers_import'), async (req, res) => {
   try {
     const { rows, batch_id, duplicate_mode } = req.body;
     if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ error: 'No rows provided' });
@@ -504,7 +504,7 @@ router.post('/import', requirePermission('customers'), async (req, res) => {
 
 // POST upload rental customer's ID scan — same Cloudinary-or-local fallback
 // pattern as product images (see routes/products.js POST /:id/image).
-router.post('/:id/id-scan', requirePermission('customers'), upload.single('id_scan'), async (req, res) => {
+router.post('/:id/id-scan', requirePermission('customers_edit'), upload.single('id_scan'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   try {
     const { rows: [existing] } = await db.execute({ sql: 'SELECT rental_id_scan_path FROM customers WHERE id = ?', args: [req.params.id] });
@@ -543,7 +543,7 @@ router.post('/:id/id-scan', requirePermission('customers'), upload.single('id_sc
 });
 
 // DELETE rental customer's ID scan
-router.delete('/:id/id-scan', requirePermission('customers'), async (req, res) => {
+router.delete('/:id/id-scan', requirePermission('customers_edit'), async (req, res) => {
   try {
     const { rows: [customer] } = await db.execute({ sql: 'SELECT rental_id_scan_path FROM customers WHERE id = ?', args: [req.params.id] });
     if (customer?.rental_id_scan_path) {
@@ -562,7 +562,7 @@ router.delete('/:id/id-scan', requirePermission('customers'), async (req, res) =
 // POST upload a photo ID for reference 1 (the "main" reference — the one
 // with an address on file) — same Cloudinary-or-local pattern and image-only
 // restriction as the customer's own ID scan above.
-router.post('/:id/reference-id', requirePermission('customers'), upload.single('reference_id'), async (req, res) => {
+router.post('/:id/reference-id', requirePermission('customers_edit'), upload.single('reference_id'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   try {
     const { rows: [existing] } = await db.execute({ sql: 'SELECT rental_reference_id_path FROM customers WHERE id = ?', args: [req.params.id] });
@@ -600,7 +600,7 @@ router.post('/:id/reference-id', requirePermission('customers'), upload.single('
 });
 
 // DELETE reference 1's photo ID
-router.delete('/:id/reference-id', requirePermission('customers'), async (req, res) => {
+router.delete('/:id/reference-id', requirePermission('customers_edit'), async (req, res) => {
   try {
     const { rows: [customer] } = await db.execute({ sql: 'SELECT rental_reference_id_path FROM customers WHERE id = ?', args: [req.params.id] });
     if (customer?.rental_reference_id_path) {
@@ -621,7 +621,7 @@ router.delete('/:id/reference-id', requirePermission('customers'), async (req, r
 // PDF too (bank statements/utility bills are usually PDFs, not photos), so
 // resource_type is 'auto' at upload time and destroy needs the stored mime
 // to know whether Cloudinary filed it as 'image' or 'raw'.
-router.post('/:id/address-proof', requirePermission('customers'), uploadDoc.single('address_proof'), async (req, res) => {
+router.post('/:id/address-proof', requirePermission('customers_edit'), uploadDoc.single('address_proof'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded, or file type not allowed (images and PDF only)' });
   try {
     const { rows: [existing] } = await db.execute({ sql: 'SELECT rental_address_proof_path, rental_address_proof_mime FROM customers WHERE id = ?', args: [req.params.id] });
@@ -658,7 +658,7 @@ router.post('/:id/address-proof', requirePermission('customers'), uploadDoc.sing
 });
 
 // DELETE rental customer's proof-of-address document
-router.delete('/:id/address-proof', requirePermission('customers'), async (req, res) => {
+router.delete('/:id/address-proof', requirePermission('customers_edit'), async (req, res) => {
   try {
     const { rows: [customer] } = await db.execute({ sql: 'SELECT rental_address_proof_path, rental_address_proof_mime FROM customers WHERE id = ?', args: [req.params.id] });
     if (customer?.rental_address_proof_path) {

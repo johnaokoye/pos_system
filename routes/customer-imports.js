@@ -8,7 +8,7 @@ const { requirePermission } = require('../lib/permissions');
 // chunk's customer_import_batch_items rows land under one reviewable/
 // reversible unit even though the browser sends them as many small requests.
 // Mirrors routes/product-imports.js.
-router.post('/', requirePermission('customers'), async (req, res) => {
+router.post('/', requirePermission('customers_import'), async (req, res) => {
   try {
     const result = await db.execute({
       sql: 'INSERT INTO customer_import_batches (employee_id, status) VALUES (?, ?)',
@@ -20,7 +20,7 @@ router.post('/', requirePermission('customers'), async (req, res) => {
 
 // PATCH mark a batch finished (all chunks posted) — purely informational for
 // the list view; reverse works on a batch regardless of this status.
-router.patch('/:id/finish', requirePermission('customers'), async (req, res) => {
+router.patch('/:id/finish', requirePermission('customers_import'), async (req, res) => {
   try {
     await db.execute({
       sql: "UPDATE customer_import_batches SET status = 'completed', finished_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'running'",
@@ -31,7 +31,7 @@ router.patch('/:id/finish', requirePermission('customers'), async (req, res) => 
 });
 
 // GET list recent batches with counts aggregated from their logged items.
-router.get('/', requirePermission('customers'), async (req, res) => {
+router.get('/', requirePermission('customers_import_history'), async (req, res) => {
   try {
     const { rows } = await db.execute({
       sql: `SELECT b.id, b.status, b.started_at, b.finished_at, b.reversed_at,
@@ -53,7 +53,7 @@ router.get('/', requirePermission('customers'), async (req, res) => {
 // GET one batch's detail: metadata, per-action counts, and the list of rows
 // skipped as likely duplicates (with which existing customer they matched)
 // so the import can be reviewed before deciding whether to reverse it.
-router.get('/:id', requirePermission('customers'), async (req, res) => {
+router.get('/:id', requirePermission('customers_import_history'), async (req, res) => {
   try {
     const { rows: [batch] } = await db.execute({
       sql: `SELECT b.*, e.first_name || ' ' || e.last_name as employee_name
@@ -89,7 +89,7 @@ router.get('/:id', requirePermission('customers'), async (req, res) => {
 // so a reversed row behaves exactly like any other deactivated customer
 // (no hard delete, no dependency bookkeeping needed). Skipped/error rows
 // have nothing to undo.
-router.post('/:id/reverse', requirePermission('customers'), async (req, res) => {
+router.post('/:id/reverse', requirePermission('customers_import_history'), async (req, res) => {
   try {
     const { rows: [batch] } = await db.execute({ sql: 'SELECT * FROM customer_import_batches WHERE id = ?', args: [req.params.id] });
     if (!batch) return res.status(404).json({ error: 'Import batch not found' });

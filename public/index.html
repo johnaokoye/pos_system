@@ -9869,12 +9869,12 @@ const App = {
             <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
             <input type="text" id="cust-search" placeholder="Search customers..." style="width:260px">
           </div>
-          <a class="btn btn-secondary btn-sm" href="/api/customers/export/template" download title="Download import template">&#8659; Template</a>
-          <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import customers from CSV">&#8657; Import<input type="file" accept=".csv" style="display:none" onchange="App.importCustomersCsv(this)"></label>
-          <button class="btn btn-secondary btn-sm" onclick="App.showCustomerImportHistory()" title="Review or reverse past CSV imports">Import History</button>
-          <button class="btn btn-secondary btn-sm" onclick="App.showCustomerBalancesExport()" title="Export AR balance, credit note total, and status by customer type">Export Balances</button>
-          <button class="btn btn-secondary btn-sm" onclick="App.showRentalIncompleteReport()" title="Rental customers missing the ID/reference/document info required to create a rental">🔑 Missing Rental Info</button>
-          <button class="btn btn-primary" onclick="App.showCustomerForm()">+ Add Customer</button>
+          ${this.can('customers_import') ? `<a class="btn btn-secondary btn-sm" href="/api/customers/export/template" download title="Download import template">&#8659; Template</a>` : ''}
+          ${this.can('customers_import') ? `<label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import customers from CSV">&#8657; Import<input type="file" accept=".csv" style="display:none" onchange="App.importCustomersCsv(this)"></label>` : ''}
+          ${this.can('customers_import_history') ? `<button class="btn btn-secondary btn-sm" onclick="App.showCustomerImportHistory()" title="Review or reverse past CSV imports">Import History</button>` : ''}
+          ${this.can('customers_export_balances') ? `<button class="btn btn-secondary btn-sm" onclick="App.showCustomerBalancesExport()" title="Export AR balance, credit note total, and status by customer type">Export Balances</button>` : ''}
+          ${this.can('customers_missing_rental_info') ? `<button class="btn btn-secondary btn-sm" onclick="App.showRentalIncompleteReport()" title="Rental customers missing the ID/reference/document info required to create a rental">🔑 Missing Rental Info</button>` : ''}
+          ${this.can('customers_add') ? `<button class="btn btn-primary" onclick="App.showCustomerForm()">+ Add Customer</button>` : ''}
         </div>
       </div>
       <div class="card">
@@ -9913,7 +9913,7 @@ const App = {
         <td><span class="badge-pill badge-info">🏆 ${c.loyalty_points}</span></td>
         <td class="fw-600">${this.fmt(c.total_spent)}</td>
         <td>
-          <button class="btn btn-secondary btn-sm" onclick="App.showCustomerForm(${c.id})">Edit</button>
+          ${this.can('customers_edit') ? `<button class="btn btn-secondary btn-sm" onclick="App.showCustomerForm(${c.id})">Edit</button>` : ''}
           <button class="btn btn-outline btn-sm" onclick="App.viewCustomer(${c.id})">History</button>
         </td>
       </tr>`;}).join('')}</tbody>
@@ -10100,7 +10100,7 @@ const App = {
           </div>
         </div>
         <div class="modal-footer">
-          ${id ? `<button class="btn btn-danger" onclick="App.deleteCustomer(${id})">Delete</button>` : ''}
+          ${id && this.can('customers_delete') ? `<button class="btn btn-danger" onclick="App.deleteCustomer(${id})">Delete</button>` : ''}
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
           <button class="btn btn-primary" onclick="App.saveCustomer(${id||'null'})">Save</button>
         </div>
@@ -10476,7 +10476,7 @@ const App = {
         </div>
         <div class="modal-footer" style="flex-wrap:wrap;gap:8px">
           <button class="btn btn-secondary" onclick="App.showCustomerImportHistory()">Back</button>
-          ${canReverse ? `<button class="btn btn-danger" onclick="App.reverseCustomerImportBatch(${batch.id})">Reverse This Import</button>` : ''}
+          ${canReverse && this.can('customers_import_history') ? `<button class="btn btn-danger" onclick="App.reverseCustomerImportBatch(${batch.id})">Reverse This Import</button>` : ''}
         </div>
       </div>`);
   },
@@ -10542,7 +10542,7 @@ const App = {
             <label style="font-size:12px">To</label>
             <input type="date" id="ch-end" value="${today}" style="width:140px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;font-size:13px">
             <button class="btn btn-primary btn-sm" onclick="App.filterCustomerHistory(${c.id})">Filter</button>
-            <button class="btn btn-secondary btn-sm" onclick="App.printCustomerHistory(${c.id},'${c.first_name} ${c.last_name}')">Print</button>
+            ${this.can('customers_print_history') ? `<button class="btn btn-secondary btn-sm" onclick="App.printCustomerHistory(${c.id},'${c.first_name} ${c.last_name}')">Print</button>` : ''}
           </div>
           <div id="ch-table">${this._buildCustomerTxHTML(txs)}</div>
           <div id="ch-payments" style="margin-top:16px">${this._buildCustomerPmtHTML(pmts)}</div>
@@ -17242,6 +17242,12 @@ const App = {
       { key: 'customers_edit', label: 'Edit Customers' },
       { key: 'customers_delete', label: 'Delete Customers' },
       { key: 'customers_credit', label: 'Manage Credit Limits' },
+      { key: 'customers_import', label: 'Import Customers (CSV)' },
+      { key: 'customers_import_history', label: 'View & Reverse Import History' },
+      { key: 'customers_export', label: 'Export Customers (CSV)' },
+      { key: 'customers_export_balances', label: 'Export Balances' },
+      { key: 'customers_missing_rental_info', label: 'Missing Rental Info Report' },
+      { key: 'customers_print_history', label: 'Print Customer History' },
     ]},
     { key: 'transactions', label: 'Transactions', subs: [
       { key: 'transactions_export', label: 'Export Transactions' },
