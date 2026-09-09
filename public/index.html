@@ -9144,12 +9144,15 @@ const App = {
   // Branches" figure) — it never touches branch_inventory, so every
   // branch-filtered view (and POS with a branch selected) shows 0 stock for
   // everything just imported. This bulk-assigns that stock to one chosen
-  // branch in one action instead of editing each product by hand.
+  // branch — batched with a progress bar (_runBatchedCsvImport) rather than
+  // one request for potentially thousands of products — instead of editing
+  // each product by hand.
   async showBulkAssignBranchModal() {
-    const [{ count }, branches] = await Promise.all([
+    const [{ count, ids }, branches] = await Promise.all([
       this.api('GET', '/products/unbranched-count'),
       this.api('GET', '/branches'),
     ]);
+    this._bulkAssignIds = ids;
     this.showModal(`
       <div class="modal" style="max-width:420px">
         <div class="modal-header"><span class="modal-title">Bulk Assign to Branch</span><button class="modal-close">✕</button></div>
@@ -9172,12 +9175,15 @@ const App = {
     if (!branch_id) { this.alert('Select a branch first', 'error'); return; }
     const branchName = document.getElementById('bab-branch').selectedOptions[0].textContent;
     if (!confirm(`Assign all ${count} unbranched product(s)' current stock quantity to ${branchName}?`)) return;
-    try {
-      const result = await this.api('POST', '/products/bulk-assign-branch', { branch_id });
-      this.alert(`Assigned ${result.assigned} product(s) to ${branchName}.`, 'success');
-      this.closeModal();
-      this.renderInventory();
-    } catch(e) { this.alert(e.message, 'error'); }
+    await this._runBatchedCsvImport({
+      rows: this._bulkAssignIds || [],
+      endpoint: '/products/bulk-assign-branch',
+      title: 'Assigning Products to Branch',
+      extraBody: { branch_id },
+      actionVerb: 'Assignment', actionVerbPast: 'Assigned', itemLabel: 'product(s)',
+      summarize: totals => `${totals.assigned || 0} product(s) assigned to ${branchName}`,
+      onFinish: () => this.renderInventory(),
+    });
   },
 
   // Branch-scoped bulk tax-rate override — every active product stocked at
@@ -9408,7 +9414,12 @@ const App = {
   // dismisses on a backdrop click, which would let someone think they'd
   // stopped the import while it kept posting batches invisibly in the
   // background. Cancel is deliberately the only way out here.
-  async _runBatchedCsvImport({ rows, endpoint, title, extraBody, onFinish, summarize }) {
+  // actionVerb/actionVerbPast/itemLabel default to the original CSV-import
+  // wording ("Import"/"Imported"/"row(s)") — override them for a batched
+  // operation that isn't a CSV import (e.g. Bulk Assign to Branch passes
+  // 'Assignment'/'Assigned'/'product(s)') so the status text and final alert
+  // read naturally instead of talking about "rows" that were never a CSV.
+  async _runBatchedCsvImport({ rows, endpoint, title, extraBody, onFinish, summarize, actionVerb = 'Import', actionVerbPast = 'Imported', itemLabel = 'row(s)' }) {
     const BATCH_SIZE = 25;
     const batches = [];
     for (let i = 0; i < rows.length; i += BATCH_SIZE) batches.push(rows.slice(i, i + BATCH_SIZE));
@@ -9420,7 +9431,7 @@ const App = {
       <div class="modal" style="max-width:420px">
         <div class="modal-header"><span class="modal-title">${title}</span></div>
         <div class="modal-body">
-          <p id="csv-import-status" style="font-size:13px;color:var(--text-muted);margin-bottom:8px">Starting import of ${rows.length} row(s)…</p>
+          <p id="csv-import-status" style="font-size:13px;color:var(--text-muted);margin-bottom:8px">Starting ${actionVerb.toLowerCase()} of ${rows.length} ${itemLabel}…</p>
           <div style="background:var(--border);border-radius:6px;overflow:hidden;height:10px">
             <div id="csv-import-bar" style="background:var(--primary);height:100%;width:0%;transition:width .2s"></div>
           </div>
@@ -9464,14 +9475,14 @@ const App = {
       const bar = overlay.querySelector('#csv-import-bar');
       const status = overlay.querySelector('#csv-import-status');
       if (bar) bar.style.width = pct + '%';
-      if (status) status.textContent = `Imported ${processed} of ${rows.length} row(s) (${pct}%)`;
+      if (status) status.textContent = `${actionVerbPast} ${processed} of ${rows.length} ${itemLabel} (${pct}%)`;
     }
 
     overlay.remove();
     const counts = summarize ? summarize(totals) : `${totals.created||0} created, ${totals.updated||0} updated${totals.skipped ? `, ${totals.skipped} skipped (already existed)` : ''}`;
     let msg = cancelled
-      ? `Import cancelled after ${processed} of ${rows.length} row(s): ${counts}`
-      : `Import complete: ${counts}`;
+      ? `${actionVerb} cancelled after ${processed} of ${rows.length} ${itemLabel}: ${counts}`
+      : `${actionVerb} complete: ${counts}`;
     if (errors.length) msg += `\n${errors.length} error(s):\n${errors.join('\n')}`;
     this.alert(msg, errors.length ? 'error' : (cancelled ? 'warning' : 'success'));
     if (onFinish) onFinish();

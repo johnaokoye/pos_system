@@ -440,36 +440,49 @@ router.post('/import', requirePermission('inventory_import'), async (req, res) =
 // can confirm the gap is actually closed.
 router.get('/unbranched-count', requirePermission('inventory'), async (req, res) => {
   try {
-    const { rows: [row] } = await db.execute({
-      sql: `SELECT COUNT(*) as c FROM products
+    const { rows } = await db.execute({
+      sql: `SELECT id FROM products
         WHERE active = 1 AND is_service = 0 AND is_rental = 0 AND is_non_inventory = 0
         AND id NOT IN (SELECT product_id FROM branch_inventory)`,
       args: [],
     });
-    res.json({ count: row.c });
+    // ids: lets the frontend batch the actual assignment (see POST below)
+    // into chunks for a progress bar instead of one big all-at-once call.
+    res.json({ count: rows.length, ids: rows.map(r => r.id) });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// POST bulk-assign every unbranched active retail product's current
-// products.stock_qty to one branch's branch_inventory in one action — the
-// fix for the gap GET /unbranched-count reports. Scoped to products with NO
-// branch_inventory row yet; a product already assigned to (or split across)
-// any branch is left untouched, same caution PUT /:id's single-branch sync
-// already takes — this only ever fills in the gap, never reassigns or
-// overwrites existing branch stock.
+// POST bulk-assign unbranched active retail products' current
+// products.stock_qty to one branch's branch_inventory — the fix for the gap
+// GET /unbranched-count reports. Scoped to products with NO branch_inventory
+// row yet; a product already assigned to (or split across) any branch is
+// left untouched, same caution PUT /:id's single-branch sync already takes
+// — this only ever fills in the gap, never reassigns or overwrites existing
+// branch stock.
+// `rows` (optional): a specific list of product ids to scope this call to —
+// the frontend's progress bar calls this once per batch rather than once for
+// everything, so a slow connection doesn't sit on one giant request with no
+// feedback. Omitting it processes every eligible product in one call, same
+// as before batching existed. Eligibility is always re-checked against this
+// same WHERE clause regardless, so a batch is a no-op for anything another
+// batch (or something else entirely) already handled since the id list was
+// fetched.
 router.post('/bulk-assign-branch', requirePermission('inventory'), async (req, res) => {
   try {
-    const { branch_id } = req.body;
+    const { branch_id, rows: productIds } = req.body;
     if (!branch_id) return res.status(400).json({ error: 'branch_id is required' });
     const { rows: [branch] } = await db.execute({ sql: 'SELECT id FROM branches WHERE id = ?', args: [branch_id] });
     if (!branch) return res.status(404).json({ error: 'Branch not found' });
 
-    const { rows: eligible } = await db.execute({
-      sql: `SELECT id, stock_qty, min_stock FROM products
-        WHERE active = 1 AND is_service = 0 AND is_rental = 0 AND is_non_inventory = 0
-        AND id NOT IN (SELECT product_id FROM branch_inventory)`,
-      args: [],
-    });
+    let sql = `SELECT id, stock_qty, min_stock FROM products
+      WHERE active = 1 AND is_service = 0 AND is_rental = 0 AND is_non_inventory = 0
+      AND id NOT IN (SELECT product_id FROM branch_inventory)`;
+    const args = [];
+    if (Array.isArray(productIds) && productIds.length) {
+      sql += ` AND id IN (${productIds.map(() => '?').join(',')})`;
+      args.push(...productIds);
+    }
+    const { rows: eligible } = await db.execute({ sql, args });
 
     for (const p of eligible) {
       await db.execute({
