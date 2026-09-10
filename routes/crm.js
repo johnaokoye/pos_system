@@ -3,7 +3,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { calcCommission } = require('./commissions');
 const { findDuplicateCustomers } = require('./customers');
-const { requirePermission } = require('../lib/permissions');
+const { requirePermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 
 // Thin insert wrapper other modules can call directly (not an HTTP route,
@@ -205,7 +205,13 @@ router.post('/opportunities', async (req, res) => {
   if (!title) return res.status(400).json({ error: 'Title required' });
   try {
     const opp_number = await nextNumber(db, 'crm_opportunities', 'opp_number', 'OPP-', 5);
-    const result = await db.execute({ sql: `INSERT INTO crm_opportunities (opp_number,title,lead_id,customer_id,employee_id,stage,probability,value,expected_close,notes) VALUES (?,?,?,?,?,?,?,?,?,?)`, args: [opp_number, title, lead_id||null, customer_id||null, employee_id||null, stage||'qualification', parseInt(probability||50), parseFloat(value||0), expected_close||null, notes||null] });
+    // A new opportunity is always owned by whoever is creating it — even a
+    // sales_manager creating one gets assigned to themselves and has to use
+    // the dedicated reassign endpoint below to hand it off. Any employee_id
+    // the client sent is ignored. Falls back to the body's value only for a
+    // system/API-key caller with no logged-in employee to attribute it to.
+    const ownerId = req.employee?.id || employee_id || null;
+    const result = await db.execute({ sql: `INSERT INTO crm_opportunities (opp_number,title,lead_id,customer_id,employee_id,stage,probability,value,expected_close,notes) VALUES (?,?,?,?,?,?,?,?,?,?)`, args: [opp_number, title, lead_id||null, customer_id||null, ownerId, stage||'qualification', parseInt(probability||50), parseFloat(value||0), expected_close||null, notes||null] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM crm_opportunities WHERE id = ?', args: [Number(result.lastInsertRowid)] });
     res.status(201).json(row);
   } catch(e) { res.status(400).json({ error: e.message }); }
@@ -215,9 +221,28 @@ router.put('/opportunities/:id', async (req, res) => {
   try {
     const { rows: [opp] } = await db.execute({ sql: 'SELECT * FROM crm_opportunities WHERE id = ?', args: [req.params.id] });
     if (!opp) return res.status(404).json({ error: 'Not found' });
+    if (req.employee?.is_salesperson && opp.employee_id !== req.employee.id) return res.status(403).json({ error: 'Not your opportunity' });
     const { title, lead_id, customer_id, employee_id, stage, probability, value, expected_close, notes, lost_reason } = req.body;
+    // Reassigning to a different salesperson is a sales_manager-only action —
+    // see PATCH /:id/reassign. A plain edit here can't change who owns it.
+    const ownerId = can(req.employee?.permissions, 'sales_manager') ? (employee_id || null) : opp.employee_id;
     const isWon = stage === 'closed_won' && opp.stage !== 'closed_won';
-    await db.execute({ sql: `UPDATE crm_opportunities SET title=?,lead_id=?,customer_id=?,employee_id=?,stage=?,probability=?,value=?,expected_close=?,notes=?,lost_reason=?,won=?,won_at=?,updated_at=datetime('now') WHERE id=?`, args: [title||opp.title, lead_id||null, customer_id||null, employee_id||null, stage||opp.stage, parseInt(probability||opp.probability), parseFloat(value||opp.value), expected_close||null, notes||null, lost_reason||null, isWon ? 1 : (stage === 'closed_won' ? opp.won : 0), isWon ? new Date().toISOString() : opp.won_at, req.params.id] });
+    await db.execute({ sql: `UPDATE crm_opportunities SET title=?,lead_id=?,customer_id=?,employee_id=?,stage=?,probability=?,value=?,expected_close=?,notes=?,lost_reason=?,won=?,won_at=?,updated_at=datetime('now') WHERE id=?`, args: [title||opp.title, lead_id||null, customer_id||null, ownerId, stage||opp.stage, parseInt(probability||opp.probability), parseFloat(value||opp.value), expected_close||null, notes||null, lost_reason||null, isWon ? 1 : (stage === 'closed_won' ? opp.won : 0), isWon ? new Date().toISOString() : opp.won_at, req.params.id] });
+    const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM crm_opportunities WHERE id = ?', args: [req.params.id] });
+    res.json(row);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Reassigning to a different salesperson is deliberately its own endpoint,
+// gated separately from the general PUT above — mirrors
+// routes/quotations.js PATCH /:id/reassign.
+router.patch('/opportunities/:id/reassign', requirePermission('sales_manager'), async (req, res) => {
+  try {
+    const { employee_id } = req.body;
+    if (!employee_id) return res.status(400).json({ error: 'employee_id required' });
+    const { rows: [opp] } = await db.execute({ sql: 'SELECT * FROM crm_opportunities WHERE id = ?', args: [req.params.id] });
+    if (!opp) return res.status(404).json({ error: 'Not found' });
+    await db.execute({ sql: "UPDATE crm_opportunities SET employee_id=?,updated_at=datetime('now') WHERE id=?", args: [employee_id, req.params.id] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM crm_opportunities WHERE id = ?', args: [req.params.id] });
     res.json(row);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -230,6 +255,7 @@ router.patch('/opportunities/:id/stage', async (req, res) => {
     if (!valid.includes(stage)) return res.status(400).json({ error: 'Invalid stage' });
     const { rows: [opp] } = await db.execute({ sql: 'SELECT * FROM crm_opportunities WHERE id = ?', args: [req.params.id] });
     if (!opp) return res.status(404).json({ error: 'Not found' });
+    if (req.employee?.is_salesperson && opp.employee_id !== req.employee.id) return res.status(403).json({ error: 'Not your opportunity' });
     const isWon = stage === 'closed_won';
     await db.execute({ sql: `UPDATE crm_opportunities SET stage=?,won=?,won_at=?,lost_reason=?,updated_at=datetime('now') WHERE id=?`, args: [stage, isWon ? 1 : 0, isWon ? new Date().toISOString() : null, lost_reason||null, req.params.id] });
     if (isWon && opp.lead_id) {
@@ -249,6 +275,10 @@ router.patch('/opportunities/:id/stage', async (req, res) => {
 
 router.delete('/opportunities/:id', async (req, res) => {
   try {
+    if (req.employee?.is_salesperson) {
+      const { rows: [opp] } = await db.execute({ sql: 'SELECT employee_id FROM crm_opportunities WHERE id = ?', args: [req.params.id] });
+      if (opp && opp.employee_id !== req.employee.id) return res.status(403).json({ error: 'Not your opportunity' });
+    }
     await db.execute({ sql: 'DELETE FROM crm_activities WHERE opportunity_id = ?', args: [req.params.id] });
     await db.execute({ sql: 'DELETE FROM crm_opportunities WHERE id = ?', args: [req.params.id] });
     res.json({ ok: true });

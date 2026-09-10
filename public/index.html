@@ -18807,10 +18807,12 @@ const App = {
           </div>
           <div class="input-row">
             <div class="form-group"><label>Assigned To</label>
-              <select id="o-emp">
-                <option value="">Unassigned</option>
-                ${employees.map(e => `<option value="${e.id}" ${o.employee_id===e.id?'selected':''}>${e.first_name} ${e.last_name}</option>`).join('')}
-              </select>
+              ${id
+                ? `<div style="display:flex;align-items:center;gap:8px">
+                    <span style="padding:6px 0">${o.employee_id ? (employees.find(e=>e.id===o.employee_id)?.first_name+' '+employees.find(e=>e.id===o.employee_id)?.last_name) : 'Unassigned'}</span>
+                    ${this.can('sales_manager') ? `<button type="button" class="btn btn-secondary btn-sm" onclick="App.showReassignOppModal(${id},${o.employee_id||'null'})">Reassign</button>` : ''}
+                  </div>`
+                : `<span style="padding:6px 0">${this.currentUser ? `${this.currentUser.first_name} ${this.currentUser.last_name}` : 'You'} (assigned automatically)</span>`}
             </div>
           </div>
           <div class="form-group"><label>Notes</label><textarea id="o-notes" rows="3">${o.notes||''}</textarea></div>
@@ -18828,7 +18830,6 @@ const App = {
       title: document.getElementById('o-title').value.trim(),
       lead_id: document.getElementById('o-lead').value || null,
       customer_id: document.getElementById('o-cust').value || null,
-      employee_id: document.getElementById('o-emp').value || null,
       stage: document.getElementById('o-stage').value,
       probability: parseInt(document.getElementById('o-prob').value) || 50,
       value: parseFloat(document.getElementById('o-val').value) || 0,
@@ -18841,6 +18842,39 @@ const App = {
       else await this.api('POST', '/crm/opportunities', data);
       this.alert('Opportunity saved');
       this.closeModal();
+      this.renderCrmTab();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async showReassignOppModal(id, currentEmployeeId) {
+    const employees = await this.api('GET', '/employees');
+    this.showModal(`
+      <div class="modal" style="max-width:420px">
+        <div class="modal-header">
+          <span class="modal-title">Reassign Opportunity</span>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px">Hands this opportunity to another salesperson's pipeline.</p>
+          <div class="form-group"><label>Assign To</label>
+            <select id="or-employee">
+              ${employees.filter(e => e.active !== 0).map(e => `<option value="${e.id}" ${e.id===currentEmployeeId?'selected':''}>${e.first_name} ${e.last_name}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.reassignOpp(${id})">Reassign</button>
+        </div>
+      </div>`);
+  },
+
+  async reassignOpp(id) {
+    const employee_id = parseInt(document.getElementById('or-employee').value);
+    try {
+      await this.api('PATCH', `/crm/opportunities/${id}/reassign`, { employee_id });
+      this.closeModal();
+      this.alert('Opportunity reassigned');
       this.renderCrmTab();
     } catch(e) { this.alert(e.message, 'error'); }
   },
@@ -18900,6 +18934,7 @@ const App = {
         </div>
         <div class="modal-footer">
           <button class="btn btn-outline" onclick="App.showOppModal(${opp.id})">Edit</button>
+          ${this.can('sales_manager') ? `<button class="btn btn-secondary" onclick="App.showReassignOppModal(${opp.id},${opp.employee_id||'null'})">Reassign</button>` : ''}
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
