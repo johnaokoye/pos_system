@@ -6351,7 +6351,16 @@ const App = {
             </div>
           </div>
           <p style="font-size:11px;color:var(--text-muted);margin-top:-6px">Item availability below reflects stock at the selected location.</p>
-          <div class="form-group"><label>Due Date *</label><input type="date" id="rc-duedate" value="${tomorrow}" oninput="App._recalcRentalCheckoutEstimate()"></div>
+          <div class="form-group"><label>Due Date *</label>
+            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+              <input type="date" id="rc-duedate" value="${tomorrow}" oninput="App._onRentalDueDateChange()" style="flex:1;min-width:150px">
+              <span id="rc-duedate-days" style="font-size:12px;color:var(--text-muted);white-space:nowrap"></span>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;margin-top:6px">
+              <label style="font-size:11px;font-weight:400;color:var(--text-muted);white-space:nowrap">Or enter number of days:</label>
+              <input type="number" id="rc-duedate-daysinput" min="1" step="1" placeholder="days" style="width:80px" oninput="App._onRentalDaysInputChange()">
+            </div>
+          </div>
           <hr style="margin:12px 0">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
             <strong>Items</strong>
@@ -6406,6 +6415,7 @@ const App = {
         </div>
       </div>`);
     this.addRentalCheckoutLine();
+    this._updateRentalDueDateBadge();
     this._recalcRentalCheckoutEstimate();
     document.addEventListener('click', (e) => {
       if (!e.target.closest('#rc-customer-search') && !e.target.closest('#rc-customer-dd')) {
@@ -6610,6 +6620,42 @@ const App = {
   // to the chosen due date, plus tax, plus delivery/pickup/operator fees.
   // Mirrors the double-charge model used at finalize (the deposit equals the
   // rental fee), so the estimated total matches what actually gets charged.
+  // Same floored-to-the-hour window the rental fee is actually billed
+  // against (see _calcRentalFeeEstimate) — not a separate midnight-to-
+  // midnight count, which could disagree with the total by up to a day
+  // depending on what time of day it is right now.
+  _rentalDaysFromDueDate(dueDateStr) {
+    if (!dueDateStr) return null;
+    const start = new Date();
+    const end = new Date(`${dueDateStr}T${start.toISOString().slice(11,19)}.000Z`);
+    const totalCalendarDays = Math.floor(Math.max(0, end - start) / 3600000) / 24;
+    return Math.max(1, Math.ceil(totalCalendarDays));
+  },
+
+  _updateRentalDueDateBadge() {
+    const badge = document.getElementById('rc-duedate-days');
+    if (!badge) return;
+    const dueDateStr = document.getElementById('rc-duedate')?.value;
+    const days = this._rentalDaysFromDueDate(dueDateStr);
+    badge.textContent = days ? `(${days} day${days===1?'':'s'})` : '';
+  },
+
+  _onRentalDueDateChange() {
+    this._updateRentalDueDateBadge();
+    this._recalcRentalCheckoutEstimate();
+  },
+
+  // Reverse direction: typing a day count writes a computed due date back
+  // into rc-duedate, then runs the same update path as picking a date
+  // directly so the badge and estimate stay in sync.
+  _onRentalDaysInputChange() {
+    const n = parseInt(document.getElementById('rc-duedate-daysinput')?.value);
+    if (!n || n < 1) return;
+    const dateEl = document.getElementById('rc-duedate');
+    if (dateEl) dateEl.value = new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
+    this._onRentalDueDateChange();
+  },
+
   _recalcRentalCheckoutEstimate() {
     const summaryEl = document.getElementById('rc-total-summary');
     if (!summaryEl) return;
@@ -6668,12 +6714,7 @@ const App = {
     // two times Sales Total, plus service fees.
     const salesTotal = feeSubtotal + taxTotal;
     const grandTotal = salesTotal + salesTotal + servicesTotal;
-    // Same floored-to-the-hour window the fee above was actually billed
-    // against (see _calcRentalFeeEstimate) — not a separate midnight-to-
-    // midnight count, which could disagree with the total by up to a day
-    // depending on what time of day it is right now.
-    const totalCalendarDays = Math.floor(Math.max(0, end - start) / 3600000) / 24;
-    const days = Math.max(1, Math.ceil(totalCalendarDays));
+    const days = this._rentalDaysFromDueDate(dueDateStr);
 
     summaryEl.innerHTML = `
       <div style="font-weight:600;margin-bottom:6px">Estimated Total — ${days} day${days===1?'':'s'}</div>
