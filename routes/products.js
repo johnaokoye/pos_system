@@ -535,6 +535,53 @@ router.post('/bulk-tax-rate', requirePermission('inventory'), async (req, res) =
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// GET count of active rental items a bulk tax-rate change would affect —
+// every rental item if branch_id is omitted, or just the ones assigned to
+// one branch (a branch_inventory row) if given. Powers the rental-specific
+// bulk tax-rate modal's preview, same pattern as GET /branch-count above.
+router.get('/rental-tax-count', requirePermission('rentals_manage_items'), async (req, res) => {
+  try {
+    const { branch_id } = req.query;
+    let sql = 'SELECT COUNT(*) as c FROM products WHERE active = 1 AND is_rental = 1';
+    const args = [];
+    if (branch_id) {
+      sql += ' AND id IN (SELECT product_id FROM branch_inventory WHERE branch_id = ?)';
+      args.push(branch_id);
+    }
+    const { rows: [row] } = await db.execute({ sql, args });
+    res.json({ count: row.c });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST bulk-overwrite tax_rate on active rental items — scoped to
+// is_rental = 1 only (unlike the retail-facing /bulk-tax-rate above, which
+// touches whatever's stocked at a branch regardless of type). Unlike that
+// one, branch_id is optional here: omit it to update every rental item
+// across all branches in one shot, or pass one to scope it to just the
+// items currently assigned to that branch (branch_inventory row) — a
+// rental item lives at a single branch at a time, so this mirrors exactly
+// how the Rental Items screen's own branch filter already reads that
+// assignment (assigned_branch_id).
+router.post('/bulk-tax-rate-rentals', requirePermission('rentals_manage_items'), async (req, res) => {
+  try {
+    const { branch_id, tax_rate } = req.body;
+    const rate = parseFloat(tax_rate);
+    if (!Number.isFinite(rate) || rate < 0) return res.status(400).json({ error: 'tax_rate must be a non-negative number' });
+
+    let sql = 'UPDATE products SET tax_rate = ? WHERE active = 1 AND is_rental = 1';
+    const args = [rate];
+    if (branch_id) {
+      const { rows: [branch] } = await db.execute({ sql: 'SELECT id FROM branches WHERE id = ?', args: [branch_id] });
+      if (!branch) return res.status(404).json({ error: 'Branch not found' });
+      sql += ' AND id IN (SELECT product_id FROM branch_inventory WHERE branch_id = ?)';
+      args.push(branch_id);
+    }
+
+    const result = await db.execute({ sql, args });
+    res.json({ updated: result.rowsAffected ?? 0 });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET export rental items as CSV — same shared shape/escaping as the general
 // product export above, but scoped to is_rental=1 with rental-specific
 // columns (rates, classification, replacement value) instead of cost/supplier.

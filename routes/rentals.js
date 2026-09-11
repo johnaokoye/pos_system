@@ -193,7 +193,7 @@ router.get('/agreements/:id', requirePermission('rentals'), async (req, res) => 
     if (agreement.status === 'pending' && items.length) {
       const estCheckoutDateTime = new Date();
       const estDueDateTime = new Date(`${agreement.due_date}T${estCheckoutDateTime.toISOString().slice(11, 19)}.000Z`);
-      let estRentalSubtotal = 0, estTax = 0, estDepositTotal = 0;
+      let estRentalSubtotal = 0, estTax = 0;
       for (const item of items) {
         const estFee = item.is_mandatory ? 0 : feeFor({
           rental_classification: item.rental_classification,
@@ -202,19 +202,21 @@ router.get('/agreements/:id', requirePermission('rentals'), async (req, res) => 
           rental_monthly_rate: item.monthly_rate,
           rental_hourly_rate: item.hourly_rate,
         }, item.quantity, estCheckoutDateTime, estDueDateTime);
+        const estLineTax = parseFloat((estFee * (item.tax_rate || 0) / 100).toFixed(2));
         item.estimated_rental_fee = estFee;
-        item.estimated_deposit_amount = estFee;
+        // Deposit mirrors fee + tax (the "Sales Total"), not the fee alone —
+        // matches what's actually charged at checkout below.
+        item.estimated_deposit_amount = parseFloat((estFee + estLineTax).toFixed(2));
         estRentalSubtotal += estFee;
-        estTax += parseFloat((estFee * (item.tax_rate || 0) / 100).toFixed(2));
-        estDepositTotal += estFee;
+        estTax += estLineTax;
       }
       const deliveryCost = agreement.delivery_required ? parseFloat(agreement.delivery_cost || 0) : 0;
       const pickupCost = agreement.pickup_required ? parseFloat(agreement.pickup_cost || 0) : 0;
       const operatorFee = agreement.operator_required ? parseFloat(agreement.operator_fee || 0) : 0;
       agreement.estimated_rental_subtotal = parseFloat(estRentalSubtotal.toFixed(2));
       agreement.estimated_tax = parseFloat(estTax.toFixed(2));
-      agreement.estimated_deposit_total = parseFloat(estDepositTotal.toFixed(2));
-      agreement.estimated_total = parseFloat((estRentalSubtotal + estTax + estDepositTotal + deliveryCost + pickupCost + operatorFee).toFixed(2));
+      agreement.estimated_deposit_total = parseFloat((estRentalSubtotal + estTax).toFixed(2));
+      agreement.estimated_total = parseFloat((estRentalSubtotal + estTax + agreement.estimated_deposit_total + deliveryCost + pickupCost + operatorFee).toFixed(2));
     }
     const { rows: pauses } = await db.execute({ sql: `SELECT rp.*, pb.first_name || ' ' || pb.last_name as paused_by_name, ab.first_name || ' ' || ab.last_name as authorized_by_name, rb.first_name || ' ' || rb.last_name as resumed_by_name, cb.first_name || ' ' || cb.last_name as confirmed_by_name
       FROM rental_agreement_pauses rp
@@ -352,7 +354,7 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
     const checkoutDateTime = new Date();
     const dueDateTime = new Date(`${agreement.due_date}T${checkoutDateTime.toISOString().slice(11, 19)}.000Z`);
 
-    let rentalSubtotal = 0, taxAmount = 0, depositTotal = 0;
+    let rentalSubtotal = 0, taxAmount = 0;
     for (const item of existingItems) {
       item.rentalFee = item.is_mandatory ? 0 : feeFor({
         rental_classification: item.rental_classification,
@@ -361,15 +363,21 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
         rental_monthly_rate: item.monthly_rate,
         rental_hourly_rate: item.hourly_rate,
       }, item.quantity, checkoutDateTime, dueDateTime);
-      item.depositAmount = item.rentalFee; // deposit == fee (double-charge model)
       item.lineTax = parseFloat((item.rentalFee * (item.tax_rate || 0) / 100).toFixed(2));
+      // Deposit mirrors fee + tax (the "Sales Total" on the printed invoice),
+      // not the fee alone — so what's held as refundable equals what was
+      // actually charged as the sale, tax included.
+      item.depositAmount = parseFloat((item.rentalFee + item.lineTax).toFixed(2));
       rentalSubtotal += item.rentalFee;
       taxAmount += item.lineTax;
-      depositTotal += item.depositAmount;
     }
     rentalSubtotal = parseFloat(rentalSubtotal.toFixed(2));
     taxAmount = parseFloat(taxAmount.toFixed(2));
-    depositTotal = parseFloat(depositTotal.toFixed(2));
+    // Computed from the rounded aggregates directly, rather than summed from
+    // each item's already-rounded depositAmount, so it exactly equals
+    // Sub-Total + Sales Tax with no compounding-rounding drift between the
+    // per-item figures and the printed "Sales Total"/"Rental Deposit" lines.
+    const depositTotal = parseFloat((rentalSubtotal + taxAmount).toFixed(2));
 
     // Delivery/pickup/operator requirement + cost were decided up front when
     // the rental was created (not here) — charged now, alongside the rental

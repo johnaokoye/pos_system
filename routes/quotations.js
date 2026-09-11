@@ -337,6 +337,13 @@ router.post('/', async (req, res) => {
     if (isSpecialProject && !req.apiKey && !can(req.employee && req.employee.permissions, 'special_projects')) {
       return res.status(403).json({ error: 'Missing permission: special_projects' });
     }
+    // Retail quotes default to a 30-day validity window when the caller
+    // doesn't specify one — the UI already pre-fills this (see
+    // _applyQuoteTypeVisibility in public/index.html), but this covers any
+    // other caller (an API key, say) that posts a retail quote directly.
+    const retailValidUntil = (!isRental && !isSpecialProject && !valid_until)
+      ? new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10)
+      : valid_until;
 
     const quote_number = await nextNumber(db, 'quotations', 'quote_number', 'QT-', 6);
 
@@ -360,7 +367,7 @@ router.post('/', async (req, res) => {
         (quote_number,customer_id,employee_id,original_employee_id,branch_id,subtotal,tax_amount,discount_amount,total,notes,valid_until,quote_type,due_date,
          delivery_required,delivery_cost,delivery_address,pickup_required,pickup_cost,operator_required,operator_fee)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        args: [quote_number, customer_id||null, employee_id||null, employee_id||null, branch_id||null, subtotal, tax_amount, disc, total, notes||null, valid_until||null, isRental ? 'rental' : (isSpecialProject ? 'special_project' : 'retail'), isRental ? due_date : null,
+        args: [quote_number, customer_id||null, employee_id||null, employee_id||null, branch_id||null, subtotal, tax_amount, disc, total, notes||null, retailValidUntil||null, isRental ? 'rental' : (isSpecialProject ? 'special_project' : 'retail'), isRental ? due_date : null,
           isRental && delivery_required ? 1 : 0, isRental && delivery_required ? parseFloat(delivery_cost||0) : 0, isRental && delivery_required ? (delivery_address||null) : null,
           isRental && pickup_required ? 1 : 0, isRental && pickup_required ? parseFloat(pickup_cost||0) : 0,
           isRental && operator_required ? 1 : 0, isRental && operator_required ? parseFloat(operator_fee||0) : 0] });

@@ -4,7 +4,19 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const { db } = require('../database');
-const { requireAuth, requirePermission } = require('../lib/permissions');
+const { requireAuth, requirePermission, can } = require('../lib/permissions');
+
+// Credentials/secrets stored in the settings table — SMTP login, and the
+// WooCommerce/Cloudinary API keys — never go out to a caller who can't
+// manage integrations, even though the rest of the table (tax rate,
+// currency, store name, etc.) is intentionally readable by every logged-in
+// employee. Keep this in sync with whatever keys routes/email.js,
+// routes/woocommerce.js, and lib/cloudinary.js actually read.
+const SENSITIVE_SETTINGS_KEYS = [
+  'email_smtp_host', 'email_smtp_port', 'email_smtp_user', 'email_smtp_pass', 'email_smtp_secure',
+  'woo_url', 'woo_pos_url', 'woo_consumer_key', 'woo_consumer_secret',
+  'cloudinary_cloud_name', 'cloudinary_api_key', 'cloudinary_api_secret',
+];
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 const { getBuildCommit } = require('../lib/buildInfo');
 
@@ -15,13 +27,19 @@ const upload = multer({
 });
 
 // requireAuth only — loaded on app init for every logged-in user (tax rate
-// defaults, currency, etc.), not just the Settings screen itself.
+// defaults, currency, etc.), not just the Settings screen itself. Credential
+// fields (SMTP, WooCommerce, Cloudinary — see SENSITIVE_SETTINGS_KEYS) are
+// stripped out unless the caller can manage integrations; every other key
+// stays available to any logged-in employee same as before.
 router.get('/', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.execute({ sql: 'SELECT * FROM settings', args: [] });
     const settings = {};
     rows.forEach(r => { settings[r.key] = r.value; });
     settings.build_commit = getBuildCommit();
+    if (!can(req.employee?.permissions, 'settings_integrations')) {
+      for (const key of SENSITIVE_SETTINGS_KEYS) delete settings[key];
+    }
     res.json(settings);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -45,7 +63,15 @@ router.get('/public', async (req, res) => {
 
 router.put('/', requirePermission('settings'), async (req, res) => {
   try {
+    // The Settings form saves every tab's fields in one request regardless
+    // of which tab was actually edited — since GET / above never even sends
+    // a caller without settings_integrations the real credential values,
+    // their form fields for those would be blank, and without this guard
+    // saving an unrelated tab (company info, tax rate, ...) would silently
+    // overwrite SMTP/WooCommerce/Cloudinary credentials with empty strings.
+    const canIntegrations = can(req.employee?.permissions, 'settings_integrations');
     for (const [key, value] of Object.entries(req.body)) {
+      if (SENSITIVE_SETTINGS_KEYS.includes(key) && !canIntegrations) continue;
       await db.execute({ sql: 'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', args: [key, value] });
     }
     res.json({ success: true });

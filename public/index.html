@@ -3696,7 +3696,29 @@ const App = {
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:right;font-weight:600">${this.fmt(i.total)}</td>
       </tr>`).join('');
 
-    const summaryRows = [
+    // A rental CHECKOUT transaction (not a settlement/return one — those
+    // reverse the deposit instead of charging it, so their DEPOSIT line is
+    // negative) breaks the totals down as Sub-Total Amount / Sales Tax /
+    // Sales Total / Rental Deposit / Grand Total instead of the plain
+    // Subtotal/Tax/TOTAL every other transaction type uses — the deposit
+    // equals Sales Total (fee + tax), per the double-charge model in
+    // PATCH .../checkout in routes/rentals.js.
+    let rentalBreakdown = null;
+    if (isRental) {
+      const depositLine = items.find(i => i.sku === 'DEPOSIT' && i.total > 0);
+      if (depositLine) {
+        const serviceTotal = items.filter(i => ['DELIVERY', 'PICKUP', 'OPERATOR'].includes(i.sku)).reduce((s, i) => s + i.total, 0);
+        const subTotalAmount = parseFloat((tx.subtotal - depositLine.total - serviceTotal).toFixed(2));
+        rentalBreakdown = { subTotalAmount, salesTotal: parseFloat((subTotalAmount + tx.tax_amount).toFixed(2)), depositAmt: depositLine.total };
+      }
+    }
+
+    const summaryRows = rentalBreakdown ? [
+      ['Sub-Total Amount', this.fmt(rentalBreakdown.subTotalAmount)],
+      ['Sales Tax', this.fmt(tx.tax_amount)],
+      ['Sales Total', this.fmt(rentalBreakdown.salesTotal)],
+      ['Rental Deposit', this.fmt(rentalBreakdown.depositAmt)],
+    ] : [
       ['Subtotal', this.fmt(tx.subtotal)],
       tx.tax_exempt ? [`Tax Exempt${tx.tax_exemption_number ? ` — Ref: ${tx.tax_exemption_number}` : ''}`, '—'] : ['Tax', this.fmt(tx.tax_amount)],
       tx.discount_amount > 0 ? [`Discount${tx.promotion_code ? ` (${tx.promotion_code})` : ''}`, `-${this.fmt(tx.discount_amount)}`] : null,
@@ -3769,7 +3791,7 @@ const App = {
     </table>
     <table class="totals">
       ${summaryRows.map(([l,v]) => `<tr><td>${l}</td><td style="text-align:right">${v}</td></tr>`).join('')}
-      <tr class="total-row"><td>TOTAL</td><td style="text-align:right">${this.fmt(tx.total)}</td></tr>
+      <tr class="total-row"><td>${rentalBreakdown ? 'Grand Total' : 'TOTAL'}</td><td style="text-align:right">${this.fmt(tx.total)}</td></tr>
       <tr><td>Payment</td><td style="text-align:right">${tx.payment_method.replace('_',' ').toUpperCase()}</td></tr>
       ${tenderRows.map(([l,v]) => `<tr><td>${l}</td><td style="text-align:right">${v}</td></tr>`).join('')}
     </table>
@@ -5116,6 +5138,7 @@ const App = {
           ${this.can('rentals_manage_items') ? `
           <a class="btn btn-secondary btn-sm" href="/api/products/export/rentals/template" download title="Download import template">&#8659; Template</a>
           <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import rental items from CSV">&#8657; Import<input type="file" accept=".csv" style="display:none" onchange="App.importRentalItemsCsv(this)"></label>
+          <button class="btn btn-secondary btn-sm" onclick="App.showBulkRentalTaxRateModal()" title="Set the tax rate on rental items — all branches or just one">Bulk Tax Rate Change</button>
           <button class="btn btn-primary btn-sm" onclick="App.showRentalItemForm()">+ Add Rental Item</button>` : ''}
         </div>
       </div>
@@ -6639,10 +6662,12 @@ const App = {
     const pickupFee = document.getElementById('rc-pickup')?.checked ? parseFloat(document.getElementById('rc-pickup-cost')?.value) || 0 : 0;
     const operatorFee = document.getElementById('rc-operator')?.checked ? parseFloat(document.getElementById('rc-operator-fee')?.value) || 0 : 0;
     const servicesTotal = deliveryFee + pickupFee + operatorFee;
-    // Deposit mirrors the fee 1:1 (double-charge model — see PATCH .../checkout
-    // in routes/rentals.js), so what's actually collected at the register is
-    // fee + matching deposit + tax + service fees, not just the fee alone.
-    const grandTotal = feeSubtotal + feeSubtotal + taxTotal + servicesTotal;
+    // Sales Total (fee + tax) is what gets charged as the non-refundable
+    // sale AND mirrored as the refundable deposit — see PATCH .../checkout
+    // in routes/rentals.js — so what's actually collected at the register is
+    // two times Sales Total, plus service fees.
+    const salesTotal = feeSubtotal + taxTotal;
+    const grandTotal = salesTotal + salesTotal + servicesTotal;
     // Same floored-to-the-hour window the fee above was actually billed
     // against (see _calcRentalFeeEstimate) — not a separate midnight-to-
     // midnight count, which could disagree with the total by up to a day
@@ -6653,12 +6678,14 @@ const App = {
     summaryEl.innerHTML = `
       <div style="font-weight:600;margin-bottom:6px">Estimated Total — ${days} day${days===1?'':'s'}</div>
       ${rows.map(r => `<div style="display:flex;justify-content:space-between"><span>${r.label}</span><span>${this.fmt(r.fee)}</span></div>`).join('')}
-      <div style="display:flex;justify-content:space-between"><span>Refundable Deposit</span><span>${this.fmt(feeSubtotal)}</span></div>
-      <div style="display:flex;justify-content:space-between"><span>Tax</span><span>${this.fmt(taxTotal)}</span></div>
+      <div style="display:flex;justify-content:space-between"><span>Sub-Total Amount</span><span>${this.fmt(feeSubtotal)}</span></div>
+      <div style="display:flex;justify-content:space-between"><span>Sales Tax</span><span>${this.fmt(taxTotal)}</span></div>
+      <div style="display:flex;justify-content:space-between"><span>Sales Total</span><span>${this.fmt(salesTotal)}</span></div>
+      <div style="display:flex;justify-content:space-between"><span>Rental Deposit</span><span>${this.fmt(salesTotal)}</span></div>
       ${deliveryFee ? `<div style="display:flex;justify-content:space-between"><span>Delivery Fee</span><span>${this.fmt(deliveryFee)}</span></div>` : ''}
       ${pickupFee ? `<div style="display:flex;justify-content:space-between"><span>Pickup Fee</span><span>${this.fmt(pickupFee)}</span></div>` : ''}
       ${operatorFee ? `<div style="display:flex;justify-content:space-between"><span>Operator Fee</span><span>${this.fmt(operatorFee)}</span></div>` : ''}
-      <div style="display:flex;justify-content:space-between;font-weight:700;border-top:1px solid var(--border);margin-top:6px;padding-top:6px"><span>Total Due at Register</span><span>${this.fmt(grandTotal)}</span></div>
+      <div style="display:flex;justify-content:space-between;font-weight:700;border-top:1px solid var(--border);margin-top:6px;padding-top:6px"><span>Grand Total</span><span>${this.fmt(grandTotal)}</span></div>
       <p style="font-size:11px;color:var(--text-muted);margin-top:6px">Estimated — the real charge is computed when payment is processed, based on the exact start time.</p>
     `;
   },
@@ -6830,14 +6857,15 @@ const App = {
               </div>`;
             }).join('')}
             <div style="border-top:1px dashed var(--border);margin-top:8px;padding-top:8px;font-size:13px">
-              <div>Rental Fee <span style="float:right">${this.fmt(a.estimated_rental_subtotal || 0)}</span></div>
-              <div>Refundable Deposit <span style="float:right">${this.fmt(a.estimated_deposit_total || 0)}</span></div>
-              ${a.estimated_tax ? `<div>Tax <span style="float:right">${this.fmt(a.estimated_tax)}</span></div>` : ''}
+              <div>Sub-Total Amount <span style="float:right">${this.fmt(a.estimated_rental_subtotal || 0)}</span></div>
+              <div>Sales Tax <span style="float:right">${this.fmt(a.estimated_tax || 0)}</span></div>
+              <div>Sales Total <span style="float:right">${this.fmt((a.estimated_rental_subtotal || 0) + (a.estimated_tax || 0))}</span></div>
+              <div>Rental Deposit <span style="float:right">${this.fmt(a.estimated_deposit_total || 0)}</span></div>
               ${a.delivery_required ? `<div>Delivery Fee <span style="float:right">${this.fmt(a.delivery_cost)}</span></div>` : ''}
               ${a.pickup_required ? `<div>Pickup Fee <span style="float:right">${this.fmt(a.pickup_cost)}</span></div>` : ''}
               ${a.operator_required ? `<div>Operator Fee <span style="float:right">${this.fmt(a.operator_fee)}</span></div>` : ''}
             </div>
-            <div style="border-top:1px solid var(--border);margin-top:8px;padding-top:8px;font-size:15px;font-weight:600">Total Due <span style="float:right">${this.fmt(a.estimated_total || 0)}</span></div>
+            <div style="border-top:1px solid var(--border);margin-top:8px;padding-top:8px;font-size:15px;font-weight:600">Grand Total <span style="float:right">${this.fmt(a.estimated_total || 0)}</span></div>
           </div>
           <p style="font-size:11px;color:var(--text-muted);margin-top:-6px">Rental fee and deposit are estimated as of now and will be finalized at the moment you click Complete Checkout.</p>
           <div class="form-group"><label>Payment Method</label>
@@ -9244,6 +9272,64 @@ const App = {
       this.alert(`Updated tax rate on ${result.updated} product(s) at ${branchName}.`, 'success');
       this.closeModal();
       this.renderInventory();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // Rental-items counterpart to the retail bulk tax-rate change above —
+  // scoped to is_rental=1 only, and unlike the retail one, "All Branches" is
+  // a real option here (not just a per-branch choice), since a rental
+  // item's single branch assignment makes "every rental item everywhere"
+  // just as meaningful a bulk target as "every rental item at one branch."
+  async showBulkRentalTaxRateModal() {
+    const branches = await this.api('GET', '/branches');
+    this.showModal(`
+      <div class="modal" style="max-width:420px">
+        <div class="modal-header"><span class="modal-title">Bulk Tax Rate Change — Rental Items</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">Overwrite the tax rate on every active rental item — across all branches, or just one.</p>
+          <div class="form-group"><label>Branch</label>
+            <select id="brtr-branch" onchange="App._refreshBulkRentalTaxRateCount()">
+              <option value="">All Branches</option>
+              ${branches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group"><label>New Tax Rate %</label><input type="number" id="brtr-rate" min="0" step="0.1" value="${this.settings?.tax_rate ?? 8.5}"></div>
+          <p id="brtr-count" style="font-size:12px;color:var(--text-muted)">Loading…</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.runBulkRentalTaxRate()">Apply</button>
+        </div>
+      </div>`);
+    this._refreshBulkRentalTaxRateCount();
+  },
+
+  async _refreshBulkRentalTaxRateCount() {
+    const branch_id = document.getElementById('brtr-branch')?.value;
+    const countEl = document.getElementById('brtr-count');
+    if (!countEl) return;
+    countEl.textContent = 'Loading…';
+    try {
+      const qs = branch_id ? `?branch_id=${branch_id}` : '';
+      const { count } = await this.api('GET', `/products/rental-tax-count${qs}`);
+      countEl.textContent = branch_id
+        ? `${count} active rental item(s) are assigned to this branch and will be updated.`
+        : `${count} active rental item(s) will be updated across all branches.`;
+    } catch(e) { countEl.textContent = ''; }
+  },
+
+  async runBulkRentalTaxRate() {
+    const branchSel = document.getElementById('brtr-branch');
+    const branch_id = branchSel.value || null;
+    const tax_rate = document.getElementById('brtr-rate').value;
+    if (tax_rate === '' || parseFloat(tax_rate) < 0) { this.alert('Enter a valid tax rate', 'error'); return; }
+    const branchName = branch_id ? branchSel.selectedOptions[0].textContent : 'All Branches';
+    if (!confirm(`Set every active rental item${branch_id ? ` at ${branchName}` : ''} to ${tax_rate}% tax? This overwrites their current tax rate and can't be undone in bulk.`)) return;
+    try {
+      const result = await this.api('POST', '/products/bulk-tax-rate-rentals', { branch_id, tax_rate });
+      this.alert(`Updated tax rate on ${result.updated} rental item(s)${branch_id ? ` at ${branchName}` : ' across all branches'}.`, 'success');
+      this.closeModal();
+      this.loadRentalItems();
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
@@ -15760,6 +15846,17 @@ const App = {
     if (rentalSection) rentalSection.style.display = type==='rental' ? '' : 'none';
     if (validGroup) validGroup.style.display = type!=='rental' ? '' : 'none';
     if (dueGroup) dueGroup.style.display = type==='rental' ? '' : 'none';
+    // Retail quotes default Valid Until to 30 days out when the field hasn't
+    // been touched yet — a fresh new-quote render, or toggling back from
+    // Rental — same idea as the rental Due Date field defaulting to
+    // tomorrow. Never overwrites an already-populated value (editing an
+    // existing quote, or a date the user already entered/cleared-and-kept).
+    if (type === 'retail') {
+      const validInput = document.getElementById('qt-valid');
+      if (validInput && !validInput.value) {
+        validInput.value = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+      }
+    }
     this._applyQuoteCustomerFilter(type);
     this.calcQuoteTotal();
   },

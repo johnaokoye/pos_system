@@ -287,6 +287,19 @@ function buildRentalInvoiceHtml(agreement, tx, s, origin) {
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(i.total)}</td>
     </tr>`).join('');
 
+  // Mirrors printReceiptLetter's rental breakdown in public/index.html — a
+  // CHECKOUT transaction (positive DEPOSIT line, not a settlement's reversed
+  // one) shows Sub-Total Amount / Sales Tax / Sales Total / Rental Deposit /
+  // Grand Total, since the deposit equals Sales Total (fee + tax) under the
+  // double-charge model in PATCH .../checkout in routes/rentals.js.
+  let rentalBreakdown = null;
+  const depositLine = (tx.items || []).find(i => i.sku === 'DEPOSIT' && i.total > 0);
+  if (depositLine) {
+    const serviceTotal = (tx.items || []).filter(i => ['DELIVERY', 'PICKUP', 'OPERATOR'].includes(i.sku)).reduce((sum, i) => sum + i.total, 0);
+    const subTotalAmount = parseFloat((tx.subtotal - depositLine.total - serviceTotal).toFixed(2));
+    rentalBreakdown = { subTotalAmount, salesTotal: parseFloat((subTotalAmount + tx.tax_amount).toFixed(2)), depositAmt: depositLine.total };
+  }
+
   const issueSignatures = [];
   if (agreement.issue_customer_signature) issueSignatures.push(['Customer Signature', agreement.customer_name, agreement.issue_customer_signature, agreement.issued_at]);
   if (agreement.issue_security_signature) issueSignatures.push(['Security Signature', agreement.issue_security_employee_name, agreement.issue_security_signature, agreement.issue_security_confirmed_at]);
@@ -332,10 +345,15 @@ function buildRentalInvoiceHtml(agreement, tx, s, origin) {
         <tbody>${rows}</tbody>
       </table>
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-top:12px">
+        ${rentalBreakdown ? `
+        <tr><td style="padding:3px 0">Sub-Total Amount</td><td style="text-align:right">${fmt(rentalBreakdown.subTotalAmount)}</td></tr>
+        <tr><td style="padding:3px 0">Sales Tax</td><td style="text-align:right">${fmt(tx.tax_amount)}</td></tr>
+        <tr><td style="padding:3px 0">Sales Total</td><td style="text-align:right">${fmt(rentalBreakdown.salesTotal)}</td></tr>
+        <tr><td style="padding:3px 0">Rental Deposit</td><td style="text-align:right">${fmt(rentalBreakdown.depositAmt)}</td></tr>` : `
         <tr><td style="padding:3px 0">Subtotal</td><td style="text-align:right">${fmt(tx.subtotal)}</td></tr>
-        <tr><td style="padding:3px 0">Tax</td><td style="text-align:right">${fmt(tx.tax_amount)}</td></tr>
+        <tr><td style="padding:3px 0">Tax</td><td style="text-align:right">${fmt(tx.tax_amount)}</td></tr>`}
         <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
-        <tr><td style="font-size:16px;font-weight:700;color:#111">TOTAL</td><td style="font-size:16px;font-weight:700;color:#111;text-align:right">${fmt(tx.total)}</td></tr>
+        <tr><td style="font-size:16px;font-weight:700;color:#111">${rentalBreakdown ? 'GRAND TOTAL' : 'TOTAL'}</td><td style="font-size:16px;font-weight:700;color:#111;text-align:right">${fmt(tx.total)}</td></tr>
         <tr><td style="padding:3px 0;color:#666">Payment</td><td style="text-align:right;color:#666">${(tx.payment_method || '').replace('_',' ').toUpperCase()}</td></tr>
       </table>
       ${sigBlock('Issued', issueSignatures)}
