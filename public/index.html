@@ -7472,7 +7472,11 @@ const App = {
   },
 
   async showWOIntakeModal() {
-    const customers = await this.api('GET', '/customers?active=1');
+    const [customers, feeServices] = await Promise.all([
+      this.api('GET', '/customers?active=1'),
+      this.api('GET', '/products?is_service=1&active=1'),
+    ]);
+    this._woFeeServices = feeServices;
     const branches = this.currentUser.branches || [];
     const isMultiBranch = this.currentUser.permissions?.multi_branch_access && branches.length > 1;
     const defaultBranch = branches.find(b => b.is_default) || branches[0] || null;
@@ -7491,6 +7495,13 @@ const App = {
               : `<input type="text" value="${defaultBranch?.name||'No branch assigned'}" disabled style="background:var(--bg-secondary)"><input type="hidden" id="wo-branch" value="${defaultBranch?.id||''}">`}
           </div>
           <div class="form-group"><label>Item / Tag Label</label><input id="wo-item-label" placeholder="e.g. Red mountain bike, serial #12345"></div>
+          <div class="form-group wo-fee-search-wrap" style="position:relative"><label>Assessment Fee *</label>
+            <input type="text" id="wo-fee-search" placeholder="Search assessment fee…" autocomplete="off"
+              oninput="App._filterWOFeeOptions(this.value)" onfocus="App._filterWOFeeOptions(this.value)">
+            <input type="hidden" id="wo-fee-product" value="">
+            <div id="wo-fee-dd" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
+            <p style="font-size:11px;color:var(--text-muted);margin:4px 0 0">Different machine types can carry different flat fees — pick the one that matches what's coming in.</p>
+          </div>
           <div class="form-group"><label>Description *</label><textarea id="wo-description" rows="3" placeholder="What the customer reported / what's being brought in for"></textarea></div>
           <p style="font-size:11px;color:var(--text-muted);margin-top:-4px">The description stays editable after intake, once the item's been assessed.</p>
         </div>
@@ -7499,17 +7510,48 @@ const App = {
           <button class="btn btn-primary" onclick="App.saveWOIntake()">Open Work Order</button>
         </div>
       </div>`);
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.wo-fee-search-wrap')) {
+        const dd = document.getElementById('wo-fee-dd');
+        if (dd) dd.style.display = 'none';
+      }
+    });
+  },
+
+  _filterWOFeeOptions(query) {
+    const dd = document.getElementById('wo-fee-dd');
+    if (!dd) return;
+    const q = (query || '').toLowerCase().trim();
+    const matches = (this._woFeeServices || []).filter(p => !q || p.name.toLowerCase().includes(q));
+    dd.innerHTML = matches.length ? matches.slice(0, 50).map(p => `
+      <div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text)" onclick="App._selectWOFeeOption(${p.id})">
+        <strong>${p.name}</strong> <span style="color:var(--text-muted);font-size:12px">${this.fmt(p.price)}</span>
+      </div>`).join('') : `<div style="padding:10px;color:var(--text-muted);font-size:13px">No assessment fee services found — add one under Services first.</div>`;
+    dd.style.display = '';
+  },
+
+  _selectWOFeeOption(productId) {
+    const p = (this._woFeeServices || []).find(x => x.id === productId);
+    if (!p) return;
+    const idEl = document.getElementById('wo-fee-product');
+    const searchEl = document.getElementById('wo-fee-search');
+    const dd = document.getElementById('wo-fee-dd');
+    if (idEl) idEl.value = productId;
+    if (searchEl) searchEl.value = `${p.name} (${this.fmt(p.price)})`;
+    if (dd) dd.style.display = 'none';
   },
 
   async saveWOIntake() {
     const customer_id = document.getElementById('wo-customer').value;
     const branch_id = document.getElementById('wo-branch')?.value || null;
     const item_label = document.getElementById('wo-item-label').value.trim();
+    const assessment_fee_product_id = document.getElementById('wo-fee-product').value;
     const description = document.getElementById('wo-description').value.trim();
     if (!customer_id) { this.alert('Please select a customer', 'error'); return; }
+    if (!assessment_fee_product_id) { this.alert('Select an assessment fee', 'error'); return; }
     if (!description) { this.alert('A description is required', 'error'); return; }
     try {
-      const wo = await this.api('POST', '/work-orders', { customer_id, branch_id, item_label, description, employee_id: this.currentUser.id });
+      const wo = await this.api('POST', '/work-orders', { customer_id, branch_id, item_label, description, assessment_fee_product_id, employee_id: this.currentUser.id });
       this.closeModal();
       this.alert(`Work order ${wo.wo_number} opened`);
       this.printWOLabel(wo.id);
@@ -7561,6 +7603,8 @@ const App = {
     this._woCurrentBranchName = wo.branch_name;
     this._woCurrentBranchId = wo.branch_id;
     const estimateTotal = (parseFloat(wo.estimate_labor)||0) + (parseFloat(wo.estimate_consumables)||0);
+    const estimateTax = parseFloat((estimateTotal * (parseFloat(wo.estimate_tax_rate)||0) / 100).toFixed(2));
+    const assessmentTax = parseFloat(((parseFloat(wo.assessment_fee)||0) * (parseFloat(wo.assessment_fee_tax_rate)||0) / 100).toFixed(2));
     // Parts can be identified and assigned as soon as the item's in the door —
     // mirrors what the backend already allows (any pre-completion status), so
     // a tech isn't blocked from pulling/ordering parts just because the
@@ -7575,6 +7619,14 @@ const App = {
       this._woPartsProducts = products;
       this._woBranches = (branches||[]).filter(b => String(b.id) !== String(wo.branch_id));
       this._woPartsStockCache = {};
+      // Part lines are added dynamically (addWOPartLine), so this closes
+      // whichever wop-prod-dd-* dropdown is currently open rather than
+      // binding to a specific line's id.
+      document.addEventListener('click', (e) => {
+        if (!e.target.closest('.wop-prod-search-wrap')) {
+          document.querySelectorAll('[id^="wop-prod-dd-"]').forEach(dd => { dd.style.display = 'none'; });
+        }
+      });
     }
     const tasksSectionVisible = ['in_progress','awaiting_signoff','awaiting_parts','complete','awaiting_pickup','picked_up','not_worth_fixing'].includes(wo.status);
     const tasksEditable = ['in_progress','awaiting_signoff','awaiting_parts'].includes(wo.status) && this.can('wo_technician');
@@ -7582,6 +7634,7 @@ const App = {
       this._woTechnicians = await this.api('GET', '/employees');
     }
     const partsTotal = (wo.items||[]).reduce((s,i) => s + (parseFloat(i.total)||0), 0);
+    const partsTax = (wo.items||[]).reduce((s,i) => s + (parseFloat(i.total)||0) * (parseFloat(i.tax_rate)||0) / 100, 0);
     this.showModal(`
       <div class="modal" style="max-width:640px">
         <div class="modal-header">
@@ -7612,10 +7665,12 @@ const App = {
           <div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:13px">
             <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Fees & Estimate</strong>
             <div style="display:flex;justify-content:space-between;margin-top:4px"><span>Assessment Fee</span><span>${this.fmt(wo.assessment_fee)} ${wo.assessment_transaction_id ? '<span class="badge-pill badge-success" style="font-size:10px">Paid</span>' : '<span style="color:var(--text-muted)">Unpaid</span>'}</span></div>
+            ${assessmentTax > 0 ? `<div style="display:flex;justify-content:space-between;color:var(--text-muted);font-size:12px"><span>Tax on Assessment Fee</span><span>${this.fmt(assessmentTax)}</span></div>` : ''}
             ${wo.status !== 'intake' ? `<div style="display:flex;justify-content:space-between"><span>Estimate (labor + consumables)${wo.is_express ? ' <span class="badge-pill badge-danger" style="font-size:10px">Express +25%</span>' : ''}</span><span>${this.fmt(estimateTotal)}</span></div>` : ''}
             ${partsTotal > 0 ? `<div style="display:flex;justify-content:space-between"><span>Parts</span><span>${this.fmt(partsTotal)}</span></div>` : ''}
+            ${(estimateTax+partsTax) > 0 ? `<div style="display:flex;justify-content:space-between;color:var(--text-muted);font-size:12px"><span>Tax (estimate + parts)</span><span>${this.fmt(estimateTax+partsTax)}</span></div>` : ''}
             ${wo.deposit_amount > 0 ? `<div style="display:flex;justify-content:space-between"><span>Deposit</span><span>${this.fmt(wo.deposit_amount)} ${wo.deposit_transaction_id ? '<span class="badge-pill badge-success" style="font-size:10px">Paid</span>' : '<span style="color:var(--text-muted)">Unpaid</span>'}</span></div>` : ''}
-            ${['complete','awaiting_pickup','picked_up'].includes(wo.status) ? `<div style="display:flex;justify-content:space-between;margin-top:4px;border-top:1px solid var(--border);padding-top:4px"><strong>Balance Due</strong><strong>${this.fmt(Math.max(0, estimateTotal + partsTotal - (parseFloat(wo.deposit_amount)||0)))} ${wo.final_transaction_id ? '<span class="badge-pill badge-success" style="font-size:10px">Paid</span>' : (wo.status === 'picked_up' ? '' : '<span style="color:var(--text-muted)">Unpaid</span>')}</strong></div>` : ''}
+            ${['complete','awaiting_pickup','picked_up'].includes(wo.status) ? `<div style="display:flex;justify-content:space-between;margin-top:4px;border-top:1px solid var(--border);padding-top:4px"><strong>Balance Due</strong><strong>${this.fmt(Math.max(0, estimateTotal + partsTotal + estimateTax + partsTax - (parseFloat(wo.deposit_amount)||0)))} ${wo.final_transaction_id ? '<span class="badge-pill badge-success" style="font-size:10px">Paid</span>' : (wo.status === 'picked_up' ? '' : '<span style="color:var(--text-muted)">Unpaid</span>')}</strong></div>` : ''}
             ${wo.estimate_notes ? `<div style="color:var(--text-muted);margin-top:4px">${wo.estimate_notes}</div>` : ''}
           </div>
 
@@ -7880,7 +7935,6 @@ const App = {
     const idx = this._woNewPartIdx++;
     const container = document.getElementById('wo-parts-new-lines');
     if (!container) return;
-    const products = this._woPartsProducts || [];
     const div = document.createElement('div');
     div.className = 'po-receive-row';
     div.id = `wo-part-${idx}`;
@@ -7892,10 +7946,12 @@ const App = {
         <option value="customer">Customer Brought Their Own</option>
       </select>
       <span id="wop-product-fields-${idx}" style="display:flex;flex:1;gap:8px;min-width:260px">
-        <select style="flex:2" onchange="App.checkWOPartStock(${idx})" id="wop-prod-${idx}">
-          <option value="">-- Select Part --</option>
-          ${products.map(p => `<option value="${p.id}" data-cost="${p.cost}" data-price="${p.price}">${p.name} (${this.fmt(p.price)}, stock: ${p.stock_qty})</option>`).join('')}
-        </select>
+        <span class="wop-prod-search-wrap" style="flex:2;position:relative">
+          <input type="text" id="wop-prod-search-${idx}" placeholder="Search parts…" autocomplete="off" style="width:100%"
+            oninput="App._filterWOPartOptions(${idx},this.value)" onfocus="App._filterWOPartOptions(${idx},this.value)">
+          <input type="hidden" id="wop-prod-${idx}" value="">
+          <div id="wop-prod-dd-${idx}" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
+        </span>
         <input id="wop-qty-${idx}" type="number" min="1" value="1" style="width:70px" placeholder="Qty" oninput="App.checkWOPartStock(${idx})">
       </span>
       <span id="wop-custom-fields-${idx}" style="display:none;flex:1;gap:8px;min-width:260px">
@@ -7913,6 +7969,36 @@ const App = {
     const allocDiv = document.createElement('div');
     allocDiv.id = `wo-part-alloc-${idx}`;
     container.appendChild(allocDiv);
+  },
+
+  // Searchable replacement for what used to be a plain <select> of every
+  // part in the catalog — checkWOPartStock/recalcWOPartAllocation/
+  // _collectWOPartLines all read wop-prod-${idx}'s value directly (a hidden
+  // input here, same id/semantics as the old select), so none of them
+  // needed to change.
+  _filterWOPartOptions(idx, query) {
+    const dd = document.getElementById(`wop-prod-dd-${idx}`);
+    if (!dd) return;
+    const q = (query || '').toLowerCase().trim();
+    const matches = (this._woPartsProducts || []).filter(p => !q || `${p.name} ${p.sku || ''}`.toLowerCase().includes(q));
+    dd.innerHTML = matches.length ? matches.slice(0, 50).map(p => `
+      <div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text)" onclick="App._selectWOPartOption(${idx},${p.id})">
+        <strong>${p.name}</strong>
+        <div style="font-size:11px;color:var(--text-muted)">${this.fmt(p.price)} · stock: ${p.stock_qty}${p.sku ? ' · ' + p.sku : ''}</div>
+      </div>`).join('') : `<div style="padding:10px;color:var(--text-muted);font-size:13px">No parts found</div>`;
+    dd.style.display = '';
+  },
+
+  _selectWOPartOption(idx, productId) {
+    const p = (this._woPartsProducts || []).find(x => x.id === productId);
+    if (!p) return;
+    const hidden = document.getElementById(`wop-prod-${idx}`);
+    const searchEl = document.getElementById(`wop-prod-search-${idx}`);
+    const dd = document.getElementById(`wop-prod-dd-${idx}`);
+    if (hidden) hidden.value = productId;
+    if (searchEl) searchEl.value = p.name;
+    if (dd) dd.style.display = 'none';
+    this.checkWOPartStock(idx);
   },
 
   _woPartTypeHints: {
@@ -8416,8 +8502,11 @@ const App = {
     try {
       const wo = await this.api('GET', `/work-orders/${id}`);
       const estimateTotal = (parseFloat(wo.estimate_labor)||0) + (parseFloat(wo.estimate_consumables)||0);
+      const estimateTax = parseFloat((estimateTotal * (parseFloat(wo.estimate_tax_rate)||0) / 100).toFixed(2));
       const partsTotal = (wo.items||[]).reduce((s,i) => s + (parseFloat(i.total)||0), 0);
-      const balance = Math.max(0, parseFloat((estimateTotal + partsTotal - (parseFloat(wo.deposit_amount)||0)).toFixed(2)));
+      const partsTax = (wo.items||[]).reduce((s,i) => s + (parseFloat(i.total)||0) * (parseFloat(i.tax_rate)||0) / 100, 0);
+      const taxTotal = parseFloat((estimateTax + partsTax).toFixed(2));
+      const balance = Math.max(0, parseFloat((estimateTotal + partsTotal + taxTotal - (parseFloat(wo.deposit_amount)||0)).toFixed(2)));
       this.showModal(`
         <div class="modal" style="max-width:440px">
           <div class="modal-header"><span class="modal-title">Process Final Payment — ${wo.wo_number}</span><button class="modal-close">✕</button></div>
@@ -8425,6 +8514,7 @@ const App = {
             <div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:13px">
               <div style="display:flex;justify-content:space-between"><span>Estimate (labor + consumables)</span><span>${this.fmt(estimateTotal)}</span></div>
               <div style="display:flex;justify-content:space-between"><span>Parts</span><span>${this.fmt(partsTotal)}</span></div>
+              ${taxTotal > 0 ? `<div style="display:flex;justify-content:space-between;color:var(--text-muted);font-size:12px"><span>Tax</span><span>${this.fmt(taxTotal)}</span></div>` : ''}
               <div style="display:flex;justify-content:space-between"><span>Less deposit paid</span><span>-${this.fmt(wo.deposit_amount)}</span></div>
               <div style="display:flex;justify-content:space-between;margin-top:4px;border-top:1px solid var(--border);padding-top:4px"><strong>Balance Due</strong><strong>${this.fmt(balance)}</strong></div>
             </div>
@@ -10951,7 +11041,7 @@ const App = {
         <div class="modal-footer" style="gap:6px;flex-wrap:wrap">
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
           <button class="btn btn-secondary" onclick="App.emailReceipt(${tx.id},'${(tx.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email</button>
-          ${tx.status==='completed'&&!tx.rental_agreement_number&&this.can('transactions_returns')?`<button class="btn btn-sm" style="background:#f59e0b;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer" onclick="App.closeModal();App.processReturn(${tx.id})">↩ Return</button>`:''}
+          ${tx.status==='completed'&&!tx.rental_agreement_number&&!tx.work_order_number&&this.can('transactions_returns')?`<button class="btn btn-sm" style="background:#f59e0b;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer" onclick="App.closeModal();App.processReturn(${tx.id})">↩ Return</button>`:''}
           <button class="btn btn-sm" style="background:#0ea5e9;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer" onclick="App.printLabel(${tx.id},'pickup')">🏪 Pickup Label</button>
           <button class="btn btn-sm" style="background:#6366f1;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer" onclick="App.printLabel(${tx.id},'shipping')">📦 Shipping Label</button>
         </div>
@@ -11053,7 +11143,9 @@ const App = {
         <td style="white-space:nowrap">${this.fmtDateTime(tx.created_at)}</td>
         <td>${tx.customer_name || '<em style="color:#999">Walk-in</em>'}</td>
         <td style="font-size:12px;color:var(--text-muted)">${tx.branch_name || '—'}</td>
-        <td>${tx.rental_agreement_number ? `<span class="badge-pill badge-info" title="${tx.rental_agreement_number} (${tx.rental_role})">Rental</span>` : `<span class="badge-pill badge-secondary">Retail</span>`}</td>
+        <td>${tx.rental_agreement_number ? `<span class="badge-pill badge-info" title="${tx.rental_agreement_number} (${tx.rental_role})">Rental</span>`
+          : tx.work_order_number ? `<span class="badge-pill badge-info" title="${tx.work_order_number} (${tx.wo_role})">Work Order</span>`
+          : `<span class="badge-pill badge-secondary">Retail</span>`}</td>
         <td>${this.fmt(tx.subtotal)}</td>
         <td style="color:var(--text-muted)">${this.fmt(tx.tax_amount)}</td>
         <td class="fw-600">${this.fmt(tx.total)}</td>
@@ -11061,7 +11153,7 @@ const App = {
         <td><span class="badge-pill ${tx.status==='completed'?'badge-success':'badge-danger'}">${tx.status}</span></td>
         <td style="white-space:nowrap">
           <button class="btn btn-secondary btn-sm" onclick="App.viewTransaction(${tx.id})">View</button>
-          ${tx.status==='completed'&&!tx.rental_agreement_number&&this.can('transactions_returns')?`<button class="btn btn-warning btn-sm" onclick="App.processReturn(${tx.id})" style="background:#f59e0b;color:#fff;border:none">Return</button>`:''}
+          ${tx.status==='completed'&&!tx.rental_agreement_number&&!tx.work_order_number&&this.can('transactions_returns')?`<button class="btn btn-warning btn-sm" onclick="App.processReturn(${tx.id})" style="background:#f59e0b;color:#fff;border:none">Return</button>`:''}
         </td>
       </tr>`).join('')}</tbody>
     </table>`;
@@ -11115,6 +11207,10 @@ const App = {
               <div>${tx.rental_returned_at ? `Returned: ${this.fmtDateTime(tx.rental_returned_at)}` : 'Not yet returned'}</div>
             </div>
           </div>` : ''}
+          ${tx.work_order_number ? `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--primary);border-radius:6px;padding:10px 12px;margin-bottom:12px;font-size:12px">
+            <span style="background:var(--primary);color:#fff;border-radius:3px;padding:2px 7px;font-weight:600;font-size:11px;letter-spacing:.3px">WORK ORDER</span>
+            <span>${({assessment:'Assessment fee',deposit:'Deposit',final:'Final payment'})[tx.wo_role] || 'Payment'} for <a href="#" style="font-weight:700;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewWorkOrder(${tx.work_order_id})">${tx.work_order_number}</a> <span class="badge-pill badge-info" style="font-size:10px">${tx.work_order_status}</span></span>
+          </div>` : ''}
           ${tx.source_quote_number ? `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--primary);border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:12px;display:flex;justify-content:space-between;align-items:center">
             <span>Converted from quotation <a href="#" style="font-weight:700;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewQuote(${tx.source_quote_id})">${tx.source_quote_number}</a>${tx.quote_created_by ? ` &nbsp;·&nbsp; <span style="color:var(--text-muted)">Created by</span> <strong>${tx.quote_created_by}</strong>` : ''}</span>
           </div>` : ''}
@@ -11149,7 +11245,7 @@ const App = {
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
-          ${tx.status==='completed'&&!tx.rental_agreement_number&&this.can('transactions_returns')?`<button class="btn btn-sm" style="background:#f59e0b;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer" onclick="App.closeModal();App.processReturn(${tx.id})">↩ Return</button>`:''}
+          ${tx.status==='completed'&&!tx.rental_agreement_number&&!tx.work_order_number&&this.can('transactions_returns')?`<button class="btn btn-sm" style="background:#f59e0b;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer" onclick="App.closeModal();App.processReturn(${tx.id})">↩ Return</button>`:''}
           <button class="btn btn-secondary" onclick="App.emailReceipt(${tx.id},'${(tx.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email Receipt</button>
           <button class="btn btn-primary" onclick="App.closeModal();App.printReceiptOrInvoice(App._viewTx,App._viewTx.change_amount||0)">🖨️ Print Receipt</button>
         </div>
@@ -12793,12 +12889,6 @@ const App = {
             <button class="btn btn-primary" onclick="App.saveSettings()">Save Settings</button>
           </div>
           <div class="card" style="margin-bottom:16px">
-            <div class="card-header"><span class="card-title">Work Orders</span></div>
-            <div class="form-group"><label>Assessment Fee</label><input type="number" id="s-wo-fee" value="${s.wo_assessment_fee||0}" min="0" step="0.01"></div>
-            <p style="font-size:11px;color:var(--text-muted);margin:0 0 8px">Non-refundable fee charged at intake, before the item is assessed. Applies storewide to every work order.</p>
-            <button class="btn btn-primary" onclick="App.saveSettings()">Save Settings</button>
-          </div>
-          <div class="card" style="margin-bottom:16px">
             <div class="card-header"><span class="card-title">POS Line-Item Discounts</span></div>
             <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">Governs the per-line "Discount" action in the POS cart — separate from the whole-ticket Maximum Discount above. An item already covered by an active promotion, or whose brand is listed below, can't take a manual discount at all.</p>
             <div class="form-group"><label>Maximum Line Item Discount (%, 0 = unlimited)</label><input type="number" id="s-max-line-discount" value="${s.pos_max_line_discount_percent||0}" min="0" max="100" step="0.1" placeholder="e.g. 15 for 15% max"></div>
@@ -13170,7 +13260,6 @@ const App = {
       layaway_deposit_percent: document.getElementById('s-layaway-deposit').value,
       layaway_cancellation_fee_type: document.getElementById('s-layaway-fee-type').value,
       layaway_cancellation_fee_value: document.getElementById('s-layaway-fee-value').value,
-      wo_assessment_fee: document.getElementById('s-wo-fee').value,
       pos_max_line_discount_percent: document.getElementById('s-max-line-discount').value,
       email_smtp_host: document.getElementById('s-smtp-host').value,
       email_smtp_port: document.getElementById('s-smtp-port').value,

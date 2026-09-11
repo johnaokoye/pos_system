@@ -1510,6 +1510,34 @@ async function _init() {
     // agreement's own created_at instead.
     'ALTER TABLE quotations ADD COLUMN sent_at DATETIME',
     'ALTER TABLE quotations ADD COLUMN accepted_at DATETIME',
+    // Assessment fee is now picked at intake from a Service-type catalog
+    // product (different machine types carry different flat fees) instead
+    // of always pulling the one storewide settings.wo_assessment_fee value.
+    // assessment_fee (existing column) stays the snapshotted price actually
+    // charged; assessment_fee_name snapshots the service's name at intake
+    // time so PATCH /:id/assessment-paid's transaction line item reads
+    // correctly even if the product is later renamed or deactivated. NULL
+    // on a pre-existing work order created before this — those keep
+    // whatever flat fee they already have.
+    'ALTER TABLE work_orders ADD COLUMN assessment_fee_product_id INTEGER REFERENCES products(id)',
+    'ALTER TABLE work_orders ADD COLUMN assessment_fee_name TEXT',
+    // Tax on work orders — snapshotted rates, same reasoning as
+    // assessment_fee_name above: a later change to a product's tax_rate (or
+    // the company default) shouldn't retroactively change what an
+    // already-quoted/charged work order shows. assessment_fee_tax_rate comes
+    // from the chosen fee service's own tax_rate at intake; estimate_tax_rate
+    // comes from the company's default tax_rate setting at the moment the
+    // estimate is entered (labor/consumables are free-typed amounts with no
+    // catalog product of their own to carry a rate). Parts get their own
+    // per-line rate — see work_order_items.tax_rate below.
+    'ALTER TABLE work_orders ADD COLUMN assessment_fee_tax_rate REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE work_orders ADD COLUMN estimate_tax_rate REAL NOT NULL DEFAULT 0',
+    // A real catalog part's own tax_rate at the time it was added; a "Q" item
+    // (not yet in the catalog) falls back to the company default instead
+    // (see lib/workOrders.js's processWorkOrderItems) since it has no
+    // product row to draw a rate from. Customer-supplied items stay 0 — never
+    // charged, so never taxed either.
+    'ALTER TABLE work_order_items ADD COLUMN tax_rate REAL NOT NULL DEFAULT 0',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

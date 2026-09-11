@@ -95,10 +95,13 @@ router.get('/', requirePermission('transactions'), async (req, res) => {
     const { start, end, customer_id, customer_name, status, branch_id, payment_method, transaction_number, source, fulfillment_status, limit = 100 } = req.query;
     let sql = `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name,
       ra.agreement_number as rental_agreement_number, q.quote_number as source_quote_number,
-      CASE WHEN ra.checkout_transaction_id = t.id THEN 'checkout' WHEN ra.settlement_transaction_id = t.id THEN 'settlement' END as rental_role
+      CASE WHEN ra.checkout_transaction_id = t.id THEN 'checkout' WHEN ra.settlement_transaction_id = t.id THEN 'settlement' END as rental_role,
+      wo.wo_number as work_order_number,
+      CASE WHEN wo.assessment_transaction_id = t.id THEN 'assessment' WHEN wo.deposit_transaction_id = t.id THEN 'deposit' WHEN wo.final_transaction_id = t.id THEN 'final' END as wo_role
       FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN branches b ON t.branch_id = b.id
       LEFT JOIN rental_agreements ra ON ra.checkout_transaction_id = t.id OR ra.settlement_transaction_id = t.id
       LEFT JOIN quotations q ON q.converted_to_tx = t.id
+      LEFT JOIN work_orders wo ON wo.assessment_transaction_id = t.id OR wo.deposit_transaction_id = t.id OR wo.final_transaction_id = t.id
       WHERE 1=1`;
     const params = [];
     if (transaction_number) { sql += ' AND t.transaction_number LIKE ?'; params.push(`%${transaction_number}%`); }
@@ -134,10 +137,13 @@ router.get('/:id', requireAuth, async (req, res) => {
       ra.deposit_total as rental_deposit_total, ra.deposit_refunded as rental_deposit_refunded,
       ra.duration_adjustment_total as rental_duration_adjustment_total, ra.damage_fee_total as rental_damage_fee_total,
       ra.customer_po_number as rental_po_number,
-      CASE WHEN ra.checkout_transaction_id = t.id THEN 'checkout' WHEN ra.settlement_transaction_id = t.id THEN 'settlement' END as rental_role
+      CASE WHEN ra.checkout_transaction_id = t.id THEN 'checkout' WHEN ra.settlement_transaction_id = t.id THEN 'settlement' END as rental_role,
+      wo.id as work_order_id, wo.wo_number as work_order_number, wo.status as work_order_status,
+      CASE WHEN wo.assessment_transaction_id = t.id THEN 'assessment' WHEN wo.deposit_transaction_id = t.id THEN 'deposit' WHEN wo.final_transaction_id = t.id THEN 'final' END as wo_role
       FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN branches b ON t.branch_id = b.id LEFT JOIN quotations q ON q.converted_to_tx = t.id LEFT JOIN employees qe ON q.employee_id = qe.id LEFT JOIN returns r ON t.source_return_id = r.id LEFT JOIN shipments sh ON sh.transaction_id = t.id
       LEFT JOIN employees ve ON t.voided_by = ve.id
       LEFT JOIN rental_agreements ra ON ra.checkout_transaction_id = t.id OR ra.settlement_transaction_id = t.id
+      LEFT JOIN work_orders wo ON wo.assessment_transaction_id = t.id OR wo.deposit_transaction_id = t.id OR wo.final_transaction_id = t.id
       WHERE t.id = ?`, args: [req.params.id] });
     if (!tx) return res.status(404).json({ error: 'Transaction not found' });
     const { rows: items } = await db.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [req.params.id] });
@@ -485,6 +491,14 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
     const { rows: [linkedAgreement] } = await db.execute({ sql: 'SELECT agreement_number FROM rental_agreements WHERE checkout_transaction_id = ? OR settlement_transaction_id = ?', args: [req.params.id, req.params.id] });
     if (linkedAgreement) {
       return res.status(400).json({ error: `This transaction belongs to rental agreement ${linkedAgreement.agreement_number} — process the return from the Rentals screen instead.` });
+    }
+
+    // Same reasoning — an assessment fee/deposit/final-payment transaction
+    // never decremented stock either, so it has nothing a return could
+    // sensibly reverse the way a retail sale's line items can.
+    const { rows: [linkedWorkOrder] } = await db.execute({ sql: 'SELECT wo_number FROM work_orders WHERE assessment_transaction_id = ? OR deposit_transaction_id = ? OR final_transaction_id = ?', args: [req.params.id, req.params.id, req.params.id] });
+    if (linkedWorkOrder) {
+      return res.status(400).json({ error: `This transaction belongs to work order ${linkedWorkOrder.wo_number} — it has no line items to return.` });
     }
 
     const { rows: txItems } = await db.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [req.params.id] });

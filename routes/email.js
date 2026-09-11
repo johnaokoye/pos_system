@@ -1170,8 +1170,15 @@ function buildWorkOrderInvoiceHtml(wo, s) {
   // showWOFinalPaymentModal() — kept in sync manually since there's no
   // shared module between routes/ and public/index.html.
   const estimateTotal = (parseFloat(wo.estimate_labor) || 0) + (parseFloat(wo.estimate_consumables) || 0);
+  const estimateTax = parseFloat((estimateTotal * (parseFloat(wo.estimate_tax_rate) || 0) / 100).toFixed(2));
   const partsTotal = (wo.items || []).reduce((sum, i) => sum + (parseFloat(i.total) || 0), 0);
-  const balanceDue = Math.max(0, estimateTotal + partsTotal - (parseFloat(wo.deposit_amount) || 0));
+  const partsTax = (wo.items || []).reduce((sum, i) => sum + (parseFloat(i.total) || 0) * (parseFloat(i.tax_rate) || 0) / 100, 0);
+  // Assessment fee tax is shown as its own line but never folded into
+  // Balance Due — that fee is always already paid before a WO can reach any
+  // status this invoice covers (see PATCH .../assessment-paid), so it's
+  // settled separately, not part of what's still outstanding.
+  const assessmentTax = parseFloat(((parseFloat(wo.assessment_fee) || 0) * (parseFloat(wo.assessment_fee_tax_rate) || 0) / 100).toFixed(2));
+  const balanceDue = Math.max(0, estimateTotal + partsTotal + estimateTax + partsTax - (parseFloat(wo.deposit_amount) || 0));
 
   const partRows = (wo.items || []).map(i => `
     <tr>
@@ -1183,7 +1190,7 @@ function buildWorkOrderInvoiceHtml(wo, s) {
 
   return `<!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"><title>Work Order Invoice ${wo.wo_number}</title></head>
+<head><meta charset="utf-8"><title>Work Order Tax Invoice ${wo.wo_number}</title></head>
 <body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
 <tr><td align="center">
@@ -1197,7 +1204,7 @@ function buildWorkOrderInvoiceHtml(wo, s) {
     <tr><td style="padding:20px 24px">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px">
         <div>
-          <div style="font-size:20px;font-weight:700;color:#111">WORK ORDER INVOICE</div>
+          <div style="font-size:20px;font-weight:700;color:#111">WORK ORDER TAX INVOICE</div>
           <div style="font-size:13px;color:#888;margin-top:2px">${wo.wo_number}</div>
         </div>
         <div style="text-align:right;font-size:13px;color:#444">
@@ -1224,8 +1231,10 @@ function buildWorkOrderInvoiceHtml(wo, s) {
       </table>` : ''}
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-top:12px">
         <tr><td style="padding:3px 0">Assessment Fee</td><td style="text-align:right">${fmt(wo.assessment_fee)}${wo.assessment_transaction_id ? ' <span style="color:#16a34a;font-size:11px">(paid)</span>' : ''}</td></tr>
+        ${assessmentTax > 0 ? `<tr><td style="padding:3px 0;color:#888;font-size:12px">Tax on Assessment Fee</td><td style="text-align:right;color:#888;font-size:12px">${fmt(assessmentTax)}</td></tr>` : ''}
         ${wo.status !== 'intake' ? `<tr><td style="padding:3px 0">Estimate (labor + consumables)${wo.is_express ? ' — express +25%' : ''}</td><td style="text-align:right">${fmt(estimateTotal)}</td></tr>` : ''}
         ${partsTotal > 0 ? `<tr><td style="padding:3px 0">Parts</td><td style="text-align:right">${fmt(partsTotal)}</td></tr>` : ''}
+        ${(estimateTax + partsTax) > 0 ? `<tr><td style="padding:3px 0;color:#888;font-size:12px">Tax (estimate + parts)</td><td style="text-align:right;color:#888;font-size:12px">${fmt(estimateTax + partsTax)}</td></tr>` : ''}
         ${parseFloat(wo.deposit_amount) > 0 ? `<tr><td style="padding:3px 0">Deposit Paid</td><td style="text-align:right">-${fmt(wo.deposit_amount)}${wo.deposit_transaction_id ? ' <span style="color:#16a34a;font-size:11px">(paid)</span>' : ''}</td></tr>` : ''}
         <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
         <tr><td style="font-size:16px;font-weight:700;color:#111">BALANCE DUE</td><td style="font-size:16px;font-weight:700;color:#111;text-align:right">${fmt(balanceDue)}${wo.final_transaction_id ? ' <span style="color:#16a34a;font-size:11px;font-weight:400">(paid)</span>' : ''}</td></tr>
@@ -1267,7 +1276,7 @@ router.post('/send-work-order-invoice/:id', requireAuth, async (req, res) => {
       await transporter.sendMail({
         from: `"${fromName}" <${fromAddr}>`,
         to,
-        subject: `Work Order Invoice ${wo.wo_number} from ${s.store_name || 'Our Store'}`,
+        subject: `Work Order Tax Invoice ${wo.wo_number} from ${s.store_name || 'Our Store'}`,
         html: buildWorkOrderInvoiceHtml(wo, s),
       });
       res.json({ success: true, message: `Work order invoice sent to ${to}` });
