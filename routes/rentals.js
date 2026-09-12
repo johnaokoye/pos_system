@@ -205,8 +205,9 @@ router.get('/agreements/:id', requirePermission('rentals'), async (req, res) => 
         const estLineTax = parseFloat((estFee * (item.tax_rate || 0) / 100).toFixed(2));
         item.estimated_rental_fee = estFee;
         // Deposit mirrors fee + tax (the "Sales Total"), not the fee alone —
-        // matches what's actually charged at checkout below.
-        item.estimated_deposit_amount = parseFloat((estFee + estLineTax).toFixed(2));
+        // matches what's actually charged at checkout below. Waived when an
+        // operator is required — see PATCH .../checkout.
+        item.estimated_deposit_amount = agreement.operator_required ? 0 : parseFloat((estFee + estLineTax).toFixed(2));
         estRentalSubtotal += estFee;
         estTax += estLineTax;
       }
@@ -215,7 +216,7 @@ router.get('/agreements/:id', requirePermission('rentals'), async (req, res) => 
       const operatorFee = agreement.operator_required ? parseFloat(agreement.operator_fee || 0) : 0;
       agreement.estimated_rental_subtotal = parseFloat(estRentalSubtotal.toFixed(2));
       agreement.estimated_tax = parseFloat(estTax.toFixed(2));
-      agreement.estimated_deposit_total = parseFloat((estRentalSubtotal + estTax).toFixed(2));
+      agreement.estimated_deposit_total = agreement.operator_required ? 0 : parseFloat((estRentalSubtotal + estTax).toFixed(2));
       agreement.estimated_total = parseFloat((estRentalSubtotal + estTax + agreement.estimated_deposit_total + deliveryCost + pickupCost + operatorFee).toFixed(2));
     }
     const { rows: pauses } = await db.execute({ sql: `SELECT rp.*, pb.first_name || ' ' || pb.last_name as paused_by_name, ab.first_name || ' ' || ab.last_name as authorized_by_name, rb.first_name || ' ' || rb.last_name as resumed_by_name, cb.first_name || ' ' || cb.last_name as confirmed_by_name
@@ -366,8 +367,10 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
       item.lineTax = parseFloat((item.rentalFee * (item.tax_rate || 0) / 100).toFixed(2));
       // Deposit mirrors fee + tax (the "Sales Total" on the printed invoice),
       // not the fee alone — so what's held as refundable equals what was
-      // actually charged as the sale, tax included.
-      item.depositAmount = parseFloat((item.rentalFee + item.lineTax).toFixed(2));
+      // actually charged as the sale, tax included. Waived entirely when an
+      // operator is required — our own staff runs the equipment, not the
+      // customer, so there's nothing a deposit needs to protect against.
+      item.depositAmount = agreement.operator_required ? 0 : parseFloat((item.rentalFee + item.lineTax).toFixed(2));
       rentalSubtotal += item.rentalFee;
       taxAmount += item.lineTax;
     }
@@ -377,7 +380,7 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
     // each item's already-rounded depositAmount, so it exactly equals
     // Sub-Total + Sales Tax with no compounding-rounding drift between the
     // per-item figures and the printed "Sales Total"/"Rental Deposit" lines.
-    const depositTotal = parseFloat((rentalSubtotal + taxAmount).toFixed(2));
+    const depositTotal = agreement.operator_required ? 0 : parseFloat((rentalSubtotal + taxAmount).toFixed(2));
 
     // Delivery/pickup/operator requirement + cost were decided up front when
     // the rental was created (not here) — charged now, alongside the rental
