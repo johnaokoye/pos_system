@@ -3781,6 +3781,7 @@ const App = {
       <div><label>Date</label>${this.fmtDateTime(tx.created_at)}</div>
       ${tx.customer_name ? `<div><label>Customer</label>${tx.customer_name}</div>` : ''}
       ${tx.rental_agreement_number ? `<div><label>Rental Agreement</label>${tx.rental_agreement_number}</div>` : ''}
+      ${isRental && tx.employee_name ? `<div><label>Created By</label>${tx.employee_name}</div>` : ''}
       ${rentedItemsLabel ? `<div><label>Item(s) Rented</label>${rentedItemsLabel}</div>` : ''}
       ${tx.rental_due_date ? `<div><label>Due Date</label>${this.fmtDate(tx.rental_due_date)}</div>` : ''}
       ${tx.rental_po_number ? `<div><label>Customer PO</label>${tx.rental_po_number}</div>` : ''}
@@ -15567,6 +15568,9 @@ const App = {
         <button class="crm-tab ${this.quoteTab==='all'?'active':''}" onclick="App.switchQuoteTab('all')">All Quotes</button>
       </div>` : ''}
       <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;align-items:center">
+        <input type="text" id="qt-list-number" placeholder="Quote # search…" style="width:150px" oninput="App.filterQuotationsList()">
+        <input type="text" id="qt-list-customer" placeholder="Customer name…" style="width:160px" oninput="App.filterQuotationsList()">
+        <input type="date" id="qt-list-date" style="width:150px" onchange="App.filterQuotationsList()" title="Filter by the date the quote was created">
         <select id="qt-list-status" onchange="App.filterQuotationsList()" style="width:150px">
           <option value="">All Statuses</option>
           <option value="draft">Draft</option>
@@ -15575,6 +15579,10 @@ const App = {
           <option value="declined">Declined</option>
           <option value="converted">Converted</option>
         </select>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:normal;font-size:13px;text-transform:none;color:var(--text)">
+          <input type="checkbox" id="qt-list-mine" onchange="App.filterQuotationsList()" style="width:16px;height:16px;cursor:pointer">
+          My Quotes Only
+        </label>
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:normal;font-size:13px;text-transform:none;color:var(--text)">
           <input type="checkbox" id="qt-list-reassigned" onchange="App.filterQuotationsList()" style="width:16px;height:16px;cursor:pointer">
           Reassigned only
@@ -15627,11 +15635,23 @@ const App = {
   filterQuotationsList() {
     const status = document.getElementById('qt-list-status')?.value || '';
     const reassignedOnly = document.getElementById('qt-list-reassigned')?.checked || false;
+    // Separate from the Salesperson-only "My Quotes"/"All Quotes" tabs above
+    // (mineOnly) — this checkbox is open to anyone, so staff who aren't
+    // flagged as a formal Salesperson can still narrow the list down to
+    // just the quotes logged in under their own name.
+    const myQuotesOnly = document.getElementById('qt-list-mine')?.checked || false;
     const mineOnly = !!this.currentUser.is_salesperson && this.quoteTab === 'mine';
+    const numberSearch = (document.getElementById('qt-list-number')?.value || '').trim().toLowerCase();
+    const customerSearch = (document.getElementById('qt-list-customer')?.value || '').trim().toLowerCase();
+    const dateSearch = document.getElementById('qt-list-date')?.value || '';
     const filtered = (this._quotesAll||[]).filter(q => {
       if (mineOnly && q.employee_id !== this.currentUser.id) return false;
+      if (myQuotesOnly && q.employee_id !== this.currentUser.id) return false;
       if (status && q.status !== status) return false;
       if (reassignedOnly && !(q.original_employee_name && q.employee_name !== q.original_employee_name)) return false;
+      if (numberSearch && !q.quote_number.toLowerCase().includes(numberSearch)) return false;
+      if (customerSearch && !(q.customer_name || '').toLowerCase().includes(customerSearch)) return false;
+      if (dateSearch && (!q.created_at || q.created_at.slice(0,10) !== dateSearch)) return false;
       return true;
     });
     const tbody = document.getElementById('quotes-tbody');
@@ -15957,6 +15977,15 @@ const App = {
       this._applyQuoteTypeVisibility('retail');
       this.addQuoteItem();
     }
+    // Item lines are added dynamically (addQuoteItem), so this closes
+    // whichever qti-prod-dd-* dropdown is currently open rather than
+    // binding to a specific line's id — same pattern as the Work Order
+    // parts picker.
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.qti-prod-search-wrap')) {
+        document.querySelectorAll('[id^="qti-prod-dd-"]').forEach(dd => { dd.style.display = 'none'; });
+      }
+    });
   },
 
   // Pure show/hide between the retail and rental sections of the quote form
@@ -16039,16 +16068,24 @@ const App = {
     const idx = this._quoteItems.length;
     this._quoteItems.push({});
     const container = document.getElementById('qt-items');
-    const products = this._quoteProducts || [];
     const isSP = this._quoteType === 'special_project';
+    // prefill comes straight off the quotation_items row when editing an
+    // existing quote, which already carries its own product_name/unit_price
+    // snapshot — shown as-is rather than re-looked-up against the current
+    // catalog (a product's price/name may have moved on since the quote was
+    // written), matching how prices elsewhere on this form are snapshots.
+    const prefillLabel = prefill && prefill.product_id ? `${prefill.product_name} (${this.fmt(prefill.unit_price)})` : '';
     const div = document.createElement('div');
     div.className = 'po-receive-row';
     div.id = `qt-item-${idx}`;
     div.innerHTML = `
-      <select style="flex:2" onchange="App.updateQuoteItem(${idx},this.value)" id="qti-prod-${idx}">
-        <option value="">-- Select Product --</option>
-        ${products.map(p => `<option value="${p.id}" data-price="${p.price}" data-cost="${p.cost||0}" ${prefill&&prefill.product_id===p.id?'selected':''}>${p.name}${p.is_rental?' [Rental]':''} (${this.fmt(p.price)})</option>`).join('')}
-      </select>
+      <span class="qti-prod-search-wrap" style="flex:2;position:relative">
+        <input type="text" id="qti-prod-search-${idx}" placeholder="Search products…" autocomplete="off" style="width:100%"
+          value="${this.escapeAttr(prefillLabel)}"
+          oninput="App._filterQuoteItemOptions(${idx},this.value)" onfocus="App._filterQuoteItemOptions(${idx},this.value)">
+        <input type="hidden" id="qti-prod-${idx}" value="${prefill&&prefill.product_id||''}">
+        <div id="qti-prod-dd-${idx}" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
+      </span>
       <input id="qti-qty-${idx}" type="number" min="1" value="${prefill?prefill.quantity:1}" style="width:70px" placeholder="Qty" oninput="App.calcQuoteTotal();App.checkQuoteItemStock(${idx})">
       ${isSP ? `<input id="qti-cost-${idx}" type="number" step="0.01" value="${prefill&&prefill.unit_cost!=null?prefill.unit_cost:''}" style="width:90px" placeholder="Cost" title="Informational only — doesn't affect the total" oninput="App._updateQuoteItemMargin(${idx})">` : ''}
       <input id="qti-price-${idx}" type="number" step="0.01" value="${prefill?prefill.unit_price:''}" style="width:90px" placeholder="Price" oninput="App.calcQuoteTotal();App._updateQuoteItemMargin(${idx})">
@@ -16062,6 +16099,56 @@ const App = {
     this.calcQuoteTotal();
     if (prefill && prefill.product_id) this.checkQuoteItemStock(idx);
     if (isSP) this._updateQuoteItemMargin(idx);
+  },
+
+  // Searchable replacement for what used to be a plain <select> of every
+  // for-sale product — same pattern as the Work Order parts picker
+  // (_filterWOPartOptions/_selectWOPartOption). checkQuoteItemStock/
+  // recalcQuoteAllocation/saveQuote all read qti-prod-${idx}'s value
+  // directly (a hidden input here, same id/semantics as the old select), so
+  // none of them needed to change.
+  _filterQuoteItemOptions(idx, query) {
+    const dd = document.getElementById(`qti-prod-dd-${idx}`);
+    if (!dd) return;
+    const q = (query || '').toLowerCase().trim();
+    const matches = (this._quoteProducts || []).filter(p => !q || `${p.name} ${p.sku || ''}`.toLowerCase().includes(q));
+    dd.innerHTML = matches.length ? matches.slice(0, 50).map(p => `
+      <div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text)" onclick="App._selectQuoteItemOption(${idx},${p.id})">
+        <strong>${p.name}${p.is_rental?' [Rental]':''}</strong>
+        <div style="font-size:11px;color:var(--text-muted)">${this.fmt(p.price)}${p.sku ? ' · ' + p.sku : ''}</div>
+      </div>`).join('') : `<div style="padding:10px;color:var(--text-muted);font-size:13px">No products found</div>`;
+    dd.style.display = '';
+  },
+
+  async _selectQuoteItemOption(idx, productId) {
+    const p = (this._quoteProducts || []).find(x => x.id === productId);
+    if (!p) return;
+    const hidden = document.getElementById(`qti-prod-${idx}`);
+    const searchEl = document.getElementById(`qti-prod-search-${idx}`);
+    const dd = document.getElementById(`qti-prod-dd-${idx}`);
+    if (hidden) hidden.value = productId;
+    if (searchEl) searchEl.value = `${p.name}${p.is_rental?' [Rental]':''} (${this.fmt(p.price)})`;
+    if (dd) dd.style.display = 'none';
+
+    // Once a branch is picked, its tiered price wins over the catalog base
+    // price — matches what the register would actually charge at that
+    // branch. No branch chosen yet falls back to the flat base price.
+    const branchId = document.getElementById('qt-branch')?.value;
+    let price = p.price;
+    if (branchId) {
+      const branchMap = await this.getBranchStock(branchId);
+      const branchPrice = branchMap[productId]?.price;
+      if (branchPrice != null) price = branchPrice;
+    }
+    const priceInp = document.getElementById(`qti-price-${idx}`);
+    if (priceInp) priceInp.value = price;
+    this.calcQuoteTotal();
+    this.checkQuoteItemStock(idx);
+    if (this._quoteType === 'special_project') {
+      const costInput = document.getElementById(`qti-cost-${idx}`);
+      if (costInput && !costInput.value) costInput.value = p.cost || 0;
+      this._updateQuoteItemMargin(idx);
+    }
   },
 
   // Temporary line item: no product_id, just a free-text description and a
@@ -16105,17 +16192,6 @@ const App = {
     const marginPct = ((price - cost) / price * 100);
     el.textContent = `${marginPct >= 0 ? '+' : ''}${marginPct.toFixed(0)}% margin`;
     el.style.color = marginPct < 0 ? 'var(--danger)' : 'var(--text-muted)';
-  },
-
-  // Catalog product picked on a Special Project row — pre-fill Cost from the
-  // product's own cost, same source processQuoteItems() defaults to
-  // server-side when no explicit unit_cost is sent.
-  _prefillQuoteItemCost(idx, selectEl) {
-    const costInput = document.getElementById(`qti-cost-${idx}`);
-    if (!costInput) return;
-    const cost = selectEl.selectedOptions[0]?.dataset.cost;
-    if (cost != null && !costInput.value) costInput.value = cost;
-    this._updateQuoteItemMargin(idx);
   },
 
   // ─── Rental quote item picker ────────────────────────────────────────────
@@ -16205,26 +16281,6 @@ const App = {
       this._updateRentalQuoteLineAvail(idx);
       if (currentVal) this._onRentalQuoteLineProductChange(idx);
     });
-  },
-
-  async updateQuoteItem(idx, productId) {
-    if (!productId) return;
-    const sel = document.getElementById(`qti-prod-${idx}`);
-    const opt = sel.options[sel.selectedIndex];
-    // Once a branch is picked, its tiered price wins over the option's base
-    // data-price — matches what the register would actually charge at that
-    // branch. No branch chosen yet falls back to the flat base price.
-    const branchId = document.getElementById('qt-branch')?.value;
-    let price = opt.dataset.price || '';
-    if (branchId) {
-      const branchMap = await this.getBranchStock(branchId);
-      const branchPrice = branchMap[productId]?.price;
-      if (branchPrice != null) price = branchPrice;
-    }
-    document.getElementById(`qti-price-${idx}`).value = price;
-    this.calcQuoteTotal();
-    this.checkQuoteItemStock(idx);
-    if (this._quoteType === 'special_project') this._prefillQuoteItemCost(idx, sel);
   },
 
   // Cached per-branch stock+price lookup — reuses the same branch-scoped
