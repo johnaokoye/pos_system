@@ -3,7 +3,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { getOutstandingQty } = require('../lib/rentalAvailability');
 const { getBranchStock, feeFor, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, dueDateTime, requiredDepositReturnMethod } = require('../lib/rentals');
-const { requirePermission, requireAnyPermission, can } = require('../lib/permissions');
+const { requirePermission, requireAnyPermission, requireAuth, can } = require('../lib/permissions');
 const { runCreditCheck } = require('./customers');
 const { nextNumber } = require('../lib/nextNumber');
 const { calcRentalCommission } = require('./commissions');
@@ -77,7 +77,7 @@ router.get('/agreements', requirePermission('rentals'), async (req, res) => {
       (SELECT COUNT(*) FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_count,
       (SELECT GROUP_CONCAT(product_name || ' x' || quantity, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_summary,
       (SELECT started_at FROM rental_agreement_pauses WHERE agreement_id = ra.id AND ended_at IS NULL LIMIT 1) as current_pause_started_at,
-      CASE WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused' WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' ELSE ra.status END as display_status,
+      CASE WHEN ra.status = 'awaiting_issue' AND ra.delivery_driver_confirmed_at IS NOT NULL THEN 'out_for_delivery' WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused' WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' ELSE ra.status END as display_status,
       (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total) as balance_due
       FROM rental_agreements ra
       LEFT JOIN customers c ON ra.customer_id = c.id
@@ -147,6 +147,36 @@ router.get('/agreements/pickup-reminders', requirePermission('rentals'), async (
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Restricted, driver-facing queue — deliberately NOT gated by the broad
+// requirePermission('rentals') the other agreement routes use, so a driver's
+// security group never needs that module-wide (all-financial-fields)
+// permission just for their own dashboard to load. Explicit column list, no
+// `ra.*` — no deposit/damage/tax/checkout/settlement figures anywhere in
+// this response, only what a driver actually needs: which job, what item,
+// where to take it, and who to ask for. See renderDriverDashboard in
+// public/index.html, the only consumer of this endpoint.
+router.get('/agreements/driver-queue', requireAuth, async (req, res) => {
+  try {
+    if (!req.employee.is_driver) return res.status(403).json({ error: 'Only drivers can view this' });
+    const { rows } = await db.execute({ sql: `SELECT ra.id, ra.agreement_number, ra.status, ra.due_date, ra.returned_at, ra.checkout_datetime, ra.created_at,
+      ra.delivery_required, ra.delivery_driver_id, ra.delivery_driver_confirmed_at, ra.delivery_address,
+      ra.pickup_required, ra.pickup_driver_id, ra.pickup_confirmed_at, ra.pickup_customer_name,
+      ra.issue_security_employee_id, ra.issue_security_confirmed_at,
+      ra.return_driver_employee_id,
+      c.first_name || ' ' || c.last_name as customer_name, c.phone as customer_phone,
+      c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
+      (SELECT GROUP_CONCAT(product_name || ' x' || quantity, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_summary,
+      CASE WHEN ra.status = 'awaiting_issue' AND ra.delivery_driver_confirmed_at IS NOT NULL THEN 'out_for_delivery'
+           WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused'
+           WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' ELSE ra.status END as display_status
+      FROM rental_agreements ra
+      LEFT JOIN customers c ON ra.customer_id = c.id
+      WHERE (ra.delivery_required = 1 OR ra.pickup_required = 1) AND ra.status IN ('awaiting_issue','active','returned')
+      ORDER BY ra.created_at DESC LIMIT 200`, args: [] });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/agreements/:id', requirePermission('rentals'), async (req, res) => {
   try {
     const { rows: [agreement] } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name,
@@ -155,7 +185,9 @@ router.get('/agreements/:id', requirePermission('rentals'), async (req, res) => 
       b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone,
       e.first_name || ' ' || e.last_name as employee_name,
       co.transaction_number as checkout_transaction_number, co.payment_method as checkout_payment_method, co.created_at as checkout_transaction_created_at,
+      co.subtotal as checkout_subtotal, co.tax_amount as checkout_tax_amount, co.total as checkout_total, co.amount_tendered as checkout_amount_tendered, co.change_amount as checkout_change_amount,
       se.transaction_number as settlement_transaction_number, se.total as settlement_total,
+      se.subtotal as settlement_subtotal, se.tax_amount as settlement_tax_amount, se.payment_method as settlement_payment_method, se.amount_tendered as settlement_amount_tendered, se.change_amount as settlement_change_amount, se.created_at as settlement_created_at,
       q.id as source_quote_id, q.quote_number as source_quote_number, qe.first_name || ' ' || qe.last_name as quote_created_by,
       dd.first_name || ' ' || dd.last_name as delivery_driver_name,
       pd.first_name || ' ' || pd.last_name as pickup_driver_name,
@@ -163,7 +195,9 @@ router.get('/agreements/:id', requirePermission('rentals'), async (req, res) => 
       ise.first_name || ' ' || ise.last_name as issue_security_employee_name,
       rse.first_name || ' ' || rse.last_name as return_security_employee_name,
       rde.first_name || ' ' || rde.last_name as return_driver_employee_name,
-      CASE WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused' WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' ELSE ra.status END as display_status,
+      cne.first_name || ' ' || cne.last_name as credit_note_issued_by_name,
+      dre.first_name || ' ' || dre.last_name as deposit_return_recorded_by_name,
+      CASE WHEN ra.status = 'awaiting_issue' AND ra.delivery_driver_confirmed_at IS NOT NULL THEN 'out_for_delivery' WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused' WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' ELSE ra.status END as display_status,
       (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total) as balance_due
       FROM rental_agreements ra
       LEFT JOIN customers c ON ra.customer_id = c.id
@@ -179,6 +213,8 @@ router.get('/agreements/:id', requirePermission('rentals'), async (req, res) => 
       LEFT JOIN employees ise ON ra.issue_security_employee_id = ise.id
       LEFT JOIN employees rse ON ra.return_security_employee_id = rse.id
       LEFT JOIN employees rde ON ra.return_driver_employee_id = rde.id
+      LEFT JOIN employees cne ON ra.credit_note_issued_by = cne.id
+      LEFT JOIN employees dre ON ra.deposit_return_recorded_by = dre.id
       WHERE ra.id = ?`, args: [req.params.id] });
     if (!agreement) return res.status(404).json({ error: 'Not found' });
     const { rows: items } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
@@ -517,25 +553,55 @@ router.get('/agreements/:id/po-attachment/download', async (req, res) => {
 // This is what actually starts the rental clock — checkout only collects
 // payment. Between the two, a paid agreement sits in 'awaiting_issue' as
 // something waiting to be collected/delivered (e.g. stock held off-site).
-router.patch('/agreements/:id/issue', requirePermission('rentals_issue'), async (req, res) => {
+//
+// For a delivery, the security guard's sign-off and the driver's own claim
+// may already be on file by the time this runs — see PATCH
+// .../security-signoff and PATCH .../claim-delivery below, which split the
+// old single office-side step into three (security signs, driver claims and
+// signs for custody, driver captures the customer's signature in the field).
+// This endpoint stays the one call that actually flips status to 'active'
+// and starts the clock either way: called directly by office staff with all
+// three signatures at once (the original counter-pickup flow, unchanged),
+// or called by the delivery driver with just the customer's signature once
+// the other two steps are already done. Fields already on file from an
+// earlier step fall back to their existing value instead of being required
+// again — a driver's request body won't include security_employee_id/
+// security_signature/delivery_driver_id at all.
+router.patch('/agreements/:id/issue', requireAnyPermission('rentals_issue', 'rentals_confirm_delivery'), async (req, res) => {
   try {
     // Whether delivery/an operator is needed, and what it costs, was already
     // decided (and charged for) when the rental was created — this step only
     // assigns WHO does it, for whichever of those the agreement already flags
     // as required.
-    const { employee_id, delivery_driver_id, operator_id, issued_at, security_employee_id, customer_signature, security_signature } = req.body;
+    const { employee_id, delivery_driver_id, operator_id, issued_at, security_employee_id, customer_name, customer_signature, security_signature } = req.body;
     const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
     if (!agreement) return res.status(404).json({ error: 'Not found' });
     if (agreement.status !== 'awaiting_issue') return res.status(400).json({ error: `This agreement is ${agreement.status}, not awaiting issue` });
+
+    const securityAlreadyDone = !!agreement.issue_security_employee_id;
+    const driverAlreadyDone = !!agreement.delivery_driver_confirmed_at;
+
+    // A caller without rentals_issue is completing their own delivery claim
+    // in the field, not running the office counter flow — lock this down to
+    // exactly the driver who claimed it, and only once they actually have
+    // (claiming is PATCH .../claim-delivery, below).
+    if (!can(req.employee.permissions, 'rentals_issue')) {
+      if (!req.employee.is_driver || agreement.delivery_driver_id !== req.employee.id || !driverAlreadyDone) {
+        return res.status(403).json({ error: 'This delivery has not been claimed and signed for by you yet' });
+      }
+    }
 
     // Chain-of-custody checkpoints — required, not optional, so an item
     // can't leave the premises without a security guard verifying (and
     // signing for) it and the customer signing for it. See database.js's
     // migration comment for why these live as their own columns rather
-    // than reusing employee_id.
-    if (!security_employee_id) return res.status(400).json({ error: 'Select the security employee who verified this item leaving' });
-    if (!security_signature) return res.status(400).json({ error: "The security employee's signature is required to issue this rental" });
+    // than reusing employee_id. Security's sign-off may already be on file
+    // (self-service, see PATCH .../security-signoff) — don't re-require or
+    // overwrite it in that case.
+    const securityEmployeeId = security_employee_id || agreement.issue_security_employee_id;
+    if (!securityEmployeeId) return res.status(400).json({ error: 'Select the security employee who verified this item leaving' });
     if (!customer_signature) return res.status(400).json({ error: 'Customer signature is required to issue this rental' });
+    if (!securityAlreadyDone && !security_signature) return res.status(400).json({ error: "The security employee's signature is required to issue this rental" });
 
     // Defaults to the moment this request is processed, but staff can back-date
     // it to when the item actually went out (e.g. it sat ready at the counter
@@ -552,8 +618,10 @@ router.patch('/agreements/:id/issue', requirePermission('rentals_issue'), async 
 
     const customerSigPath = await uploadSignature(customer_signature, `rental-${req.params.id}-issue-customer`);
     if (!customerSigPath) return res.status(400).json({ error: 'Invalid customer signature image' });
-    const guardSigPath = await uploadSignature(security_signature, `rental-${req.params.id}-issue-guard`);
+    const guardSigPath = securityAlreadyDone ? agreement.issue_security_signature : await uploadSignature(security_signature, `rental-${req.params.id}-issue-guard`);
     if (!guardSigPath) return res.status(400).json({ error: 'Invalid security signature image' });
+    const securityConfirmedAt = securityAlreadyDone ? agreement.issue_security_confirmed_at : issuedAt.toISOString();
+    const deliveryDriverId = agreement.delivery_required ? (delivery_driver_id || agreement.delivery_driver_id || null) : null;
 
     await db.execute({
       sql: `UPDATE rental_agreements SET
@@ -561,14 +629,14 @@ router.patch('/agreements/:id/issue', requirePermission('rentals_issue'), async 
         checkout_date = ?, checkout_datetime = ?,
         issued_at = ?, issued_by = ?,
         delivery_driver_id = ?, operator_id = ?,
-        issue_security_employee_id = ?, issue_security_confirmed_at = ?, issue_customer_signature = ?, issue_security_signature = ?
+        issue_security_employee_id = ?, issue_security_confirmed_at = ?, issue_customer_name = ?, issue_customer_signature = ?, issue_security_signature = ?
         WHERE id = ?`,
       args: [
         today, issuedAt.toISOString(),
         issuedAt.toISOString(), employee_id || agreement.employee_id || null,
-        agreement.delivery_required ? (delivery_driver_id || null) : null,
+        deliveryDriverId,
         agreement.operator_required ? (operator_id || null) : null,
-        security_employee_id, issuedAt.toISOString(), customerSigPath, guardSigPath,
+        securityEmployeeId, securityConfirmedAt, (customer_name || agreement.issue_customer_name || null), customerSigPath, guardSigPath,
         req.params.id,
       ],
     });
@@ -576,6 +644,55 @@ router.patch('/agreements/:id/issue', requirePermission('rentals_issue'), async 
     const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
     const { rows: agItems } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
     updated.items = agItems;
+    res.json(updated);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Delivery: security sign-off + driver claim (field confirmation) ──────
+// Splits a delivery's issue into three checkpoints instead of one combined
+// office-side step (which doesn't work when the customer isn't at the
+// counter): security signs off that the item is clear to leave (self-
+// service — the logged-in guard IS the signer, no picker needed), then a
+// driver claims the job and signs for custody (first-come-first-served, like
+// the existing "Deliveries Needed" pool already works — delivery has never
+// had a pre-assignment step the way pickup does), then that same driver
+// captures the customer's signature in the field via PATCH .../issue above,
+// which is what actually starts the rental clock. Neither step here touches
+// `status` — a claimed-but-not-yet-signed-for delivery is still
+// 'awaiting_issue' underneath, just displayed as 'out_for_delivery' (see the
+// display_status CASE expressions below).
+router.patch('/agreements/:id/security-signoff', requirePermission('rentals_security_signoff'), async (req, res) => {
+  try {
+    if (!req.employee.is_security) return res.status(403).json({ error: 'Only security-flagged employees can sign off on a delivery' });
+    const { security_signature } = req.body;
+    const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    if (!agreement) return res.status(404).json({ error: 'Not found' });
+    if (!agreement.delivery_required) return res.status(400).json({ error: 'This agreement does not require delivery' });
+    if (agreement.status !== 'awaiting_issue') return res.status(400).json({ error: `This agreement is ${agreement.status}, not awaiting issue` });
+    if (agreement.issue_security_employee_id) return res.status(400).json({ error: 'Security has already signed off on this delivery' });
+    const sigPath = await uploadSignature(security_signature, `rental-${req.params.id}-issue-guard`);
+    if (!sigPath) return res.status(400).json({ error: 'Signature is required to sign off' });
+    await db.execute({ sql: 'UPDATE rental_agreements SET issue_security_employee_id = ?, issue_security_confirmed_at = ?, issue_security_signature = ? WHERE id = ?', args: [req.employee.id, new Date().toISOString(), sigPath, req.params.id] });
+    const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    res.json(updated);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.patch('/agreements/:id/claim-delivery', requirePermission('rentals_confirm_delivery'), async (req, res) => {
+  try {
+    if (!req.employee.is_driver) return res.status(403).json({ error: 'Only drivers can claim a delivery' });
+    const { driver_signature } = req.body;
+    const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    if (!agreement) return res.status(404).json({ error: 'Not found' });
+    if (!agreement.delivery_required) return res.status(400).json({ error: 'This agreement does not require delivery' });
+    if (agreement.status !== 'awaiting_issue') return res.status(400).json({ error: `This agreement is ${agreement.status}, not awaiting issue` });
+    if (!agreement.issue_security_employee_id) return res.status(400).json({ error: 'Security must verify this item before it can go out for delivery' });
+    if (agreement.delivery_driver_id && agreement.delivery_driver_id !== req.employee.id) return res.status(403).json({ error: 'This delivery has already been claimed by a different driver' });
+    if (agreement.delivery_driver_confirmed_at) return res.status(400).json({ error: 'This delivery has already been claimed and signed for' });
+    const sigPath = await uploadSignature(driver_signature, `rental-${req.params.id}-issue-delivery-driver`);
+    if (!sigPath) return res.status(400).json({ error: 'Signature is required to claim this delivery' });
+    await db.execute({ sql: 'UPDATE rental_agreements SET delivery_driver_id = ?, delivery_driver_confirmed_at = ?, delivery_driver_signature = ? WHERE id = ?', args: [req.employee.id, new Date().toISOString(), sigPath, req.params.id] });
+    const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
     res.json(updated);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

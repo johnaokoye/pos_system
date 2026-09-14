@@ -1907,32 +1907,49 @@ const App = {
     </div>`;
   },
 
-  async renderDriverDashboard() {
-    const [awaitingIssue, active, returned] = await Promise.all([
-      this.api('GET', '/rentals/agreements?view=awaiting_issue'),
-      this.api('GET', '/rentals/agreements?view=active'),
-      this.api('GET', '/rentals/agreements?view=returned'),
-    ]);
-    if (this.section !== 'driver-dashboard') return;
+  // Address + phone block shown on delivery rows — deliberately the only
+  // customer info beyond name shown to a driver (see GET
+  // /rentals/agreements/driver-queue, which is the restricted, non-financial
+  // projection this whole dashboard reads from).
+  _rentalDeliveryContactHtml(a) {
+    return `<div style="font-size:12px;color:var(--text-muted)">📍 ${this._rentalPickupAddress(a) || 'No address on file'}</div>
+      ${a.customer_phone ? `<div style="font-size:12px;color:var(--text-muted)">📞 ${a.customer_phone}</div>` : ''}`;
+  },
 
-    const deliveries = awaitingIssue.filter(a => a.delivery_required && !a.delivery_driver_id);
+  async renderDriverDashboard() {
+    const agreements = await this.api('GET', '/rentals/agreements/driver-queue');
+    if (this.section !== 'driver-dashboard') return;
+    // Cached for the claim/signature modals below, so they can read the
+    // restricted row data already in hand instead of a fresh fetch — the
+    // full GET /rentals/agreements/:id route requires the broad `rentals`
+    // permission and returns every financial column, which is exactly what
+    // this dashboard is built to avoid exposing to a driver.
+    this._driverQueueCache = agreements;
+
     const myId = this.currentUser.id;
+    // Security must have signed off (issue_security_employee_id set) before
+    // a delivery is even visible to drivers — see PATCH .../security-signoff.
+    // First-come-first-served: unclaimed, or already claimed by me (in case
+    // I refresh mid-claim).
+    const readyToClaim = agreements.filter(a => a.delivery_required && a.status === 'awaiting_issue' && a.issue_security_employee_id && !a.delivery_driver_confirmed_at && (!a.delivery_driver_id || a.delivery_driver_id === myId));
+    const outForDelivery = agreements.filter(a => a.delivery_required && a.status === 'awaiting_issue' && a.delivery_driver_confirmed_at && a.delivery_driver_id === myId);
     // Only jobs dispatch has actually assigned to THIS driver (see
     // assign-pickup-driver) and not yet confirmed in the field — not the
-    // shared pending pool deliveries above still is.
-    const pickups = active.filter(a => a.pickup_required && a.pickup_driver_id === myId && !a.pickup_confirmed_at)
+    // shared pending pool above still is.
+    const pickups = agreements.filter(a => a.pickup_required && a.status === 'active' && a.pickup_driver_id === myId && !a.pickup_confirmed_at)
       .sort((a,b) => (a.due_date||'').localeCompare(b.due_date||''));
 
-    const history = [...awaitingIssue, ...active, ...returned]
-      .filter(a => a.delivery_driver_id === myId || (a.pickup_driver_id === myId && (a.pickup_confirmed_at || a.status === 'returned')) || a.return_driver_employee_id === myId)
-      .map(a => ({ a, at: a.returned_at || a.pickup_confirmed_at || a.checkout_datetime || a.created_at }))
+    const history = agreements
+      .filter(a => (a.delivery_driver_id === myId && a.delivery_driver_confirmed_at) || (a.pickup_driver_id === myId && (a.pickup_confirmed_at || a.status === 'returned')) || a.return_driver_employee_id === myId)
+      .map(a => ({ a, at: a.returned_at || a.pickup_confirmed_at || a.delivery_driver_confirmed_at || a.checkout_datetime || a.created_at }))
       .sort((x,y) => (y.at||'').localeCompare(x.at||''))
       .slice(0, 8)
       .map(x => x.a);
 
     document.getElementById('content').innerHTML = `
       <div class="section-header"><h2>My Deliveries</h2></div>
-      ${this._rentalDashSection('Deliveries Needed', deliveries.map(a => this._rentalDashRow(a)), 'No deliveries waiting to go out.')}
+      ${this._rentalDashSection('Deliveries Ready to Claim', readyToClaim.map(a => this._rentalDashRow(a, '', this.can('rentals_confirm_delivery') ? `<button class="btn btn-sm btn-primary" onclick="App.showClaimDeliveryModal(${a.id})">Accept &amp; Sign for Delivery</button>` : '', this._rentalDeliveryContactHtml(a))), 'No deliveries waiting to go out.')}
+      ${this._rentalDashSection('Out for Delivery — Awaiting Customer Signature', outForDelivery.map(a => this._rentalDashRow(a, '', this.can('rentals_confirm_delivery') ? `<button class="btn btn-sm btn-primary" onclick="App.showDeliveryCustomerSignatureModal(${a.id})">Get Customer Signature</button>` : '', this._rentalDeliveryContactHtml(a))), 'Nothing out for delivery right now.')}
       ${this._rentalDashSection('Pickups Needed', pickups.map(a => this._rentalDashRow(a, '', this.can('rentals_confirm_pickup') ? `<button class="btn btn-sm btn-primary" onclick="App.showConfirmPickupModal(${a.id})">Confirm Pickup</button>` : '', `<div style="font-size:12px;color:var(--text-muted)">📍 ${this._rentalPickupAddress(a) || 'No address on file'}</div>`)), 'No pickups assigned to you right now.')}
       ${this._rentalDashSection('My Recent Activity', history.map(a => this._rentalDashRow(a, `<div style="font-size:11px;color:var(--text-muted)">${a.display_status}</div>`)), 'No completed deliveries or pickups yet.')}
     `;
@@ -2014,6 +2031,75 @@ const App = {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
+  // ─── Delivery: driver claim + field customer signature ─────────────────
+  // Both modals read from _driverQueueCache (set by renderDriverDashboard)
+  // rather than fetching the agreement fresh — the full GET
+  // /rentals/agreements/:id route needs the broad `rentals` permission and
+  // returns every financial column, which this restricted flow is built to
+  // avoid ever reaching a driver's browser.
+  showClaimDeliveryModal(id) {
+    const a = (this._driverQueueCache||[]).find(x => x.id === id);
+    if (!a) { this.alert('Delivery not found — refresh and try again', 'error'); return; }
+    this.showModal(`
+      <div class="modal" style="max-width:440px">
+        <div class="modal-header"><span class="modal-title">Accept Delivery — ${a.agreement_number}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:8px">${a.item_summary || 'Item'} — for ${a.customer_name||'the customer'}. Sign below to confirm you're taking this out for delivery.</p>
+          ${this._rentalDeliveryContactHtml(a)}
+          <div style="margin-top:12px">${this._sigPadHtml('cd-driver-sig', 'Driver Signature', 'required — confirms you are taking custody for delivery')}</div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.submitClaimDelivery(${id})">Accept &amp; Sign</button>
+        </div>
+      </div>`);
+    this._sigPadInit('cd-driver-sig');
+  },
+
+  async submitClaimDelivery(id) {
+    if (!this._sigPadHasDrawn('cd-driver-sig')) { this.alert('Signature is required to accept this delivery', 'error'); return; }
+    try {
+      await this.api('PATCH', `/rentals/agreements/${id}/claim-delivery`, { driver_signature: this._sigPadDataUrl('cd-driver-sig') });
+      this.closeModal();
+      this.alert('Delivery accepted — get the customer to sign once you arrive');
+      this.renderDriverDashboard();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  showDeliveryCustomerSignatureModal(id) {
+    const a = (this._driverQueueCache||[]).find(x => x.id === id);
+    if (!a) { this.alert('Delivery not found — refresh and try again', 'error'); return; }
+    this.showModal(`
+      <div class="modal" style="max-width:440px">
+        <div class="modal-header"><span class="modal-title">Customer Signature — ${a.agreement_number}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">Have the customer enter their name and sign below to complete delivery of ${a.item_summary || 'the item'}. This is what starts the rental clock.</p>
+          <div class="form-group"><label>Customer Name</label><input id="dcs-customer-name" placeholder="Full name" value="${(a.customer_name||'').replace(/"/g,'&quot;')}"></div>
+          ${this._sigPadHtml('dcs-customer-sig', 'Customer Signature', 'required — confirms receipt and starts the rental')}
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.submitDeliveryCustomerSignature(${id})">Complete Delivery</button>
+        </div>
+      </div>`);
+    this._sigPadInit('dcs-customer-sig');
+  },
+
+  async submitDeliveryCustomerSignature(id) {
+    const name = document.getElementById('dcs-customer-name').value.trim();
+    if (!name) { this.alert("Enter the customer's name", 'error'); return; }
+    if (!this._sigPadHasDrawn('dcs-customer-sig')) { this.alert('Customer signature is required to complete delivery', 'error'); return; }
+    try {
+      await this.api('PATCH', `/rentals/agreements/${id}/issue`, {
+        customer_name: name,
+        customer_signature: this._sigPadDataUrl('dcs-customer-sig'),
+      });
+      this.closeModal();
+      this.alert('Delivered — rental clock started');
+      this.renderDriverDashboard();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
   async renderGuardDashboard() {
     const [awaitingIssue, active, returned] = await Promise.all([
       this.api('GET', '/rentals/agreements?view=awaiting_issue'),
@@ -2021,6 +2107,7 @@ const App = {
       this.api('GET', '/rentals/agreements?view=returned'),
     ]);
     if (this.section !== 'guard-dashboard') return;
+    this._guardDashCache = [...awaitingIssue, ...active, ...returned];
 
     const awaitingCheck = awaitingIssue.filter(a => !a.issue_security_employee_id);
     const expectedReturns = [...active].sort((a,b) => (a.due_date||'').localeCompare(b.due_date||''));
@@ -2035,10 +2122,42 @@ const App = {
 
     document.getElementById('content').innerHTML = `
       <div class="section-header"><h2>My Verifications</h2></div>
-      ${this._rentalDashSection('Awaiting Security Check', awaitingCheck.map(a => this._rentalDashRow(a)), 'Nothing waiting on a security check right now.')}
+      ${this._rentalDashSection('Awaiting Security Check', awaitingCheck.map(a => this._rentalDashRow(a, '', (a.delivery_required && this.can('rentals_security_signoff')) ? `<button class="btn btn-sm btn-primary" onclick="App.showSecuritySignoffModal(${a.id})">Sign Off</button>` : '')), 'Nothing waiting on a security check right now.')}
       ${this._rentalDashSection('Expected Returns', expectedReturns.map(a => this._rentalDashRow(a)), 'No active rentals outstanding.')}
       ${this._rentalDashSection('My Recent Verifications', history.map(a => this._rentalDashRow(a, `<div style="font-size:11px;color:var(--text-muted)">${a.display_status}</div>`)), 'No verifications recorded yet.')}
     `;
+  },
+
+  // Self-service — the logged-in guard IS the signer, so there's no employee
+  // picker like the legacy combined Issue modal has. Only offered for
+  // delivery-required agreements; counter-pickup ones still go through
+  // showIssueRentalModal's combined step, unchanged.
+  showSecuritySignoffModal(id) {
+    const a = (this._guardDashCache||[]).find(x => x.id === id);
+    if (!a) { this.alert('Agreement not found — refresh and try again', 'error'); return; }
+    this.showModal(`
+      <div class="modal" style="max-width:420px">
+        <div class="modal-header"><span class="modal-title">Security Sign-Off — ${a.agreement_number}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">${a.item_summary || 'Item'} is going out for delivery. Sign below to confirm it's clear to leave.</p>
+          ${this._sigPadHtml('ss-guard-sig', 'Guard Signature', 'required — confirms this item is clear to leave')}
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.submitSecuritySignoff(${id})">Sign Off</button>
+        </div>
+      </div>`);
+    this._sigPadInit('ss-guard-sig');
+  },
+
+  async submitSecuritySignoff(id) {
+    if (!this._sigPadHasDrawn('ss-guard-sig')) { this.alert('Signature is required to sign off', 'error'); return; }
+    try {
+      await this.api('PATCH', `/rentals/agreements/${id}/security-signoff`, { security_signature: this._sigPadDataUrl('ss-guard-sig') });
+      this.closeModal();
+      this.alert('Signed off — this delivery is now available to drivers');
+      this.renderGuardDashboard();
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   async renderDashboard() {
@@ -3610,22 +3729,23 @@ const App = {
       </div>`);
   },
 
-  // Renders the Issue and Return signature checkpoints as their own labeled
-  // rows (rather than one flat row) so it's clear which signatures belong to
-  // handing the item out versus taking it back in — both can be present on
-  // the same invoice once a rental has been returned.
+  // All Issue and Return signature checkpoints in one row (up to 4 columns)
+  // instead of two stacked rows — each label is prefixed with which
+  // checkpoint it belongs to, so the grouping stays clear at a glance while
+  // taking a fraction of the vertical space.
   _signatureRowsHtml(issueSignatures, returnSignatures) {
-    const row = (heading, sigs) => `<div style="margin-top:32px">
-      <div style="font-size:10px;font-weight:bold;text-transform:uppercase;color:#888;margin-bottom:8px">${heading}</div>
-      <div style="display:flex;justify-content:space-between;gap:24px">
-        ${sigs.map(([label, name, src, signedAt]) => `<div style="flex:1;text-align:center">
-          <img src="${src}" style="max-height:70px;max-width:100%;border-bottom:1px solid #333;padding-bottom:4px" />
-          <div style="font-size:11px;color:#555;margin-top:4px">${label}${name ? ` — ${name}` : ''}</div>
-          ${signedAt ? `<div style="font-size:10px;color:#888;margin-top:1px">${this.fmtDateTime(signedAt)}</div>` : ''}
-        </div>`).join('')}
-      </div>
+    const sigs = [
+      ...issueSignatures.map(([label, name, src, signedAt]) => [`Issued — ${label}`, name, src, signedAt]),
+      ...returnSignatures.map(([label, name, src, signedAt]) => [`Returned — ${label}`, name, src, signedAt]),
+    ];
+    if (!sigs.length) return '';
+    return `<div style="margin-top:24px;display:flex;justify-content:space-between;gap:16px">
+      ${sigs.map(([label, name, src, signedAt]) => `<div style="flex:1;text-align:center">
+        <img src="${src}" style="max-height:50px;max-width:100%;border-bottom:1px solid #333;padding-bottom:4px" />
+        <div style="font-size:10px;color:#555;margin-top:4px">${label}${name ? ` — ${name}` : ''}</div>
+        ${signedAt ? `<div style="font-size:9px;color:#888;margin-top:1px">${this.fmtDateTime(signedAt)}</div>` : ''}
+      </div>`).join('')}
     </div>`;
-    return `${issueSignatures.length ? row('Issued', issueSignatures) : ''}${returnSignatures.length ? row('Returned', returnSignatures) : ''}`;
   },
 
   // Rental-linked transactions always print letter-size (routed here
@@ -5014,7 +5134,7 @@ const App = {
     if (!el) return;
     const agreements = await this.api('GET', `/rentals/agreements?view=${this.dispatchTab}`);
     if (!document.getElementById('dispatch-content')) return;
-    const sc = { awaiting_issue:'badge-warning', active:'badge-info' };
+    const sc = { out_for_delivery:'badge-teal', awaiting_issue:'badge-warning', active:'badge-info' };
     const notAssigned = '<span style="color:var(--text-muted)">Not yet assigned</span>';
     const notApplicable = '<span style="color:var(--text-muted)">—</span>';
     const customerPickupTag = '<span class="badge-pill badge-secondary" style="font-size:11px">Customer Pickup</span>';
@@ -5057,7 +5177,7 @@ const App = {
     ]);
     const deliveries = [...awaitingIssue, ...active].filter(a => a.delivery_required || a.pickup_required || a.operator_required);
     if (!document.getElementById('dispatch-content')) return;
-    const sc = { awaiting_issue:'badge-warning', active:'badge-info' };
+    const sc = { out_for_delivery:'badge-teal', awaiting_issue:'badge-warning', active:'badge-info' };
     const none = '<span style="color:var(--text-muted)">None</span>';
     const notAssigned = '<span style="color:var(--text-muted)">Not yet assigned</span>';
     const fromAddr = a => [a.branch_name, a.branch_address, [a.branch_city, a.branch_state, a.branch_zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
@@ -5566,7 +5686,7 @@ const App = {
     const view = this.rentalTab === 'all' ? '' : this.rentalTab;
     const agreements = await this.api('GET', `/rentals/agreements${view ? '?view='+view : ''}`);
     if (!document.getElementById('rental-content')) return;
-    const sc = { pending:'badge-warning', awaiting_issue:'badge-warning', active:'badge-info', overdue:'badge-danger', paused:'badge-warning', returned:'badge-success', cancelled:'badge-secondary' };
+    const sc = { out_for_delivery:'badge-teal', pending:'badge-warning', awaiting_issue:'badge-warning', active:'badge-info', overdue:'badge-danger', paused:'badge-warning', returned:'badge-success', cancelled:'badge-secondary' };
     const none = '<span style="color:var(--text-muted)">None</span>';
     const notAssigned = '<span style="color:var(--text-muted)">Not yet assigned</span>';
     const customerPickupTag = '<span class="badge-pill badge-secondary" style="font-size:11px">Customer Pickup</span>';
@@ -5664,7 +5784,7 @@ const App = {
   },
 
   renderRentalDepositRow(a) {
-    const sc = { awaiting_issue:'badge-warning', active:'badge-info', overdue:'badge-danger', returned:'badge-success' };
+    const sc = { out_for_delivery:'badge-teal', awaiting_issue:'badge-warning', active:'badge-info', overdue:'badge-danger', returned:'badge-success' };
     let depositCell;
     if (!a.deposit_total) {
       depositCell = '<span style="color:var(--text-muted)">No deposit</span>';
@@ -5695,11 +5815,13 @@ const App = {
     let creditCell;
     const refundDue = a.settlement_total < 0 ? parseFloat((-a.settlement_total).toFixed(2)) : 0;
     if (a.credit_note_amount > 0) {
-      creditCell = `<span class="badge-pill badge-teal">Credit Note Issued</span> ${this.fmt(a.credit_note_amount)}`;
+      creditCell = `<span class="badge-pill badge-teal">Credit Note Issued</span> ${this.fmt(a.credit_note_amount)}
+        <div style="margin-top:4px"><button class="btn btn-sm btn-outline" onclick="App.launchRentalSummary(${a.id})">Receipt</button></div>`;
     } else if (a.checkout_payment_method === 'credit' && refundDue > 0) {
       creditCell = `<span class="badge-pill badge-info">Applied to Account</span> ${this.fmt(refundDue)}`;
     } else if (methodLabels[a.deposit_return_method]) {
-      creditCell = `<span class="badge-pill badge-success">${methodLabels[a.deposit_return_method]}</span> ${this.fmt(refundDue)}${a.deposit_return_reference ? ` <span style="color:var(--text-muted);font-size:11px">Ref: ${a.deposit_return_reference}</span>` : ''}`;
+      creditCell = `<span class="badge-pill badge-success">${methodLabels[a.deposit_return_method]}</span> ${this.fmt(refundDue)}${a.deposit_return_reference ? ` <span style="color:var(--text-muted);font-size:11px">Ref: ${a.deposit_return_reference}</span>` : ''}
+        <div style="margin-top:4px"><button class="btn btn-sm btn-outline" onclick="App.launchRentalSummary(${a.id})">Receipt</button></div>`;
     } else if (refundDue > 0) {
       const esc = (s) => (s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
       const custName = esc(a.customer_name);
@@ -5750,8 +5872,8 @@ const App = {
     try {
       await this.api('POST', `/rentals/agreements/${id}/credit-note`, { amount, employee_id: this.currentUser?.id || null });
       this.closeModal();
-      this.alert('Credit note issued');
       this.loadRentalDeposits();
+      this.launchRentalSummary(id);
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
@@ -5796,14 +5918,199 @@ const App = {
     try {
       await this.api('PATCH', `/rentals/agreements/${id}/deposit-return`, { method, reference, notes, employee_id: this.currentUser?.id || null });
       this.closeModal();
-      this.alert('Deposit refund recorded');
       this.loadRentalDeposits();
+      this.launchRentalSummary(id);
     } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // A comprehensive, single "final rental agreement" document — checkout
+  // through return through however the deposit was ultimately settled
+  // (balance collected, refunded, or issued as store credit) — replacing the
+  // narrower deposit-only receipts that used to print separately. Offered
+  // right after issuing a credit note or recording a deposit refund, and
+  // reachable any time afterward from the agreement view or the Deposits tab.
+  async launchRentalSummary(id) {
+    let a;
+    try { a = await this.api('GET', `/rentals/agreements/${id}`); }
+    catch(e) { this.alert(e.message, 'error'); return; }
+    this.showModal(`
+      <div class="modal" style="max-width:400px">
+        <div class="modal-header"><span class="modal-title">${a.agreement_number}</span><button class="modal-close" onclick="App.closeModal()">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px">A complete summary of this rental — checkout, return, item rates, adjustments, and how the deposit was settled — is ready for the customer.</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+          <button class="btn btn-secondary" onclick="App.emailRentalSummary(${a.id},'${(a.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email Summary</button>
+          <button class="btn btn-primary" onclick="App.printRentalAgreementSummary(${a.id})">🖨️ Print Summary</button>
+        </div>
+      </div>`);
+  },
+
+  emailRentalSummary(agreementId, customerEmail) {
+    this.showEmailModal('Email Rental Agreement Summary', customerEmail, async (to) => {
+      this.closeModal();
+      try {
+        await this.api('POST', `/email/send-rental-summary/${agreementId}`, { to });
+        this.alert(`Rental agreement summary sent to ${to}`);
+      } catch(e) { this.alert(e.message, 'error'); }
+    });
+  },
+
+  // Full-page popup (letter size, same window.open()+document.write()
+  // pattern as printReceiptLetter) rather than the narrow 72mm thermal modal
+  // style, since @page can't be scripted per-print on the main app window —
+  // this needs real column width for the item/rate table. The window is
+  // opened synchronously, before the agreement fetch, so it stays inside the
+  // click's user-gesture stack and isn't blocked as a popup.
+  async printRentalAgreementSummary(id) {
+    const win = window.open('', '_blank', 'width=850,height=1000');
+    if (!win) { this.alert('Your browser blocked the print popup — allow popups for this site and try again', 'warning'); return; }
+    let a;
+    try { a = await this.api('GET', `/rentals/agreements/${id}`); }
+    catch(e) { win.close(); this.alert(e.message, 'error'); return; }
+
+    const storeName = this.settings.store_name || 'My Store';
+    const addressLine = a.branch_address || this.settings.store_address || '';
+    const cityLine = a.branch_address ? `${a.branch_city ? ', ' + a.branch_city : ''}${a.branch_state ? ' ' + a.branch_state : ''}${a.branch_zip ? ' ' + a.branch_zip : ''}` : '';
+    const phoneLine = a.branch_phone || this.settings.store_phone || '';
+    const footer = this.settings.receipt_footer || 'Thank you for your business!';
+    const isReturned = a.status === 'returned';
+
+    const itemRows = (a.items || []).map(i => {
+      const tag = i.parent_item_id ? (i.is_mandatory ? ' <span style="color:#16a34a;font-size:10px">(included)</span>' : ' <span style="color:#888;font-size:10px">(accessory)</span>') : '';
+      const rateParts = i.is_mandatory ? [] : [`${this.fmt(i.daily_rate)}/day`];
+      if (!i.is_mandatory) {
+        if (i.weekly_rate) rateParts.push(`${this.fmt(i.weekly_rate)}/wk`);
+        if (i.monthly_rate) rateParts.push(`${this.fmt(i.monthly_rate)}/mo`);
+      }
+      return `<tr>
+        <td style="padding:6px 8px;border-bottom:1px solid #e8e8e8">${i.product_name}${tag}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #e8e8e8;text-align:center">${i.quantity}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #e8e8e8;text-align:center;font-size:11px;color:#555">${i.is_mandatory ? 'No charge' : rateParts.join(' · ')}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #e8e8e8;text-align:right">${this.fmt(i.rental_fee)}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #e8e8e8;text-align:right">${i.quantity_returned > 0 ? this.fmt(i.final_rental_fee) : '—'}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #e8e8e8;text-align:right">${i.damage_fee > 0 ? this.fmt(i.damage_fee) : '—'}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #e8e8e8;text-align:center;font-size:11px;color:#555">${i.condition_out||'—'} → ${i.condition_in||'—'}</td>
+      </tr>`;
+    }).join('');
+
+    const serviceFeesTotal = (a.delivery_required ? a.delivery_cost||0 : 0) + (a.pickup_required ? a.pickup_cost||0 : 0) + (a.operator_required ? a.operator_fee||0 : 0);
+    const rentalFeeSubtotal = parseFloat(((a.checkout_subtotal||0) - a.deposit_total - serviceFeesTotal).toFixed(2));
+    const checkoutRows = a.checkout_transaction_id ? [
+      ['Rental Fee Subtotal', this.fmt(rentalFeeSubtotal)],
+      serviceFeesTotal > 0 ? ['Delivery / Pickup / Operator Fees', this.fmt(serviceFeesTotal)] : null,
+      ['Tax', this.fmt(a.checkout_tax_amount)],
+      ['Deposit Collected', this.fmt(a.deposit_total)],
+      ['Total Charged at Checkout', this.fmt(a.checkout_total)],
+      ['Payment Method', (a.checkout_payment_method||'').replace('_',' ').toUpperCase()],
+    ].filter(Boolean) : [];
+
+    const durationAdjLabel = a.duration_adjustment_total > 0 ? 'Additional Rental Time' : a.duration_adjustment_total < 0 ? 'Rental Fee Credit (returned early)' : 'Duration Adjustment';
+    const settlementRows = isReturned ? [
+      a.damage_fee_total ? ['Damage Fees', this.fmt(a.damage_fee_total)] : null,
+      a.duration_adjustment_total ? [durationAdjLabel, this.fmt(a.duration_adjustment_total)] : null,
+      a.tax_adjustment_total ? ['Tax Adjustment', this.fmt(a.tax_adjustment_total)] : null,
+      ['Less: Deposit Applied', `-${this.fmt(a.deposit_total)}`],
+    ].filter(Boolean) : [];
+    const balanceLabel = a.balance_due > 0.004 ? 'BALANCE DUE' : a.balance_due < -0.004 ? 'REFUND DUE' : 'SETTLED IN FULL';
+    const balanceDisplay = this.fmt(Math.abs(a.balance_due));
+
+    let dispositionLine = null;
+    if (isReturned && a.balance_due > 0.004) {
+      if (a.settlement_transaction_id) {
+        dispositionLine = `Collected ${this.fmt(a.balance_due)} via ${(a.settlement_payment_method||'').replace('_',' ').toUpperCase()} on ${this.fmtDateTime(a.settlement_created_at)}${a.settlement_amount_tendered > a.balance_due ? ` — Tendered ${this.fmt(a.settlement_amount_tendered)}, Change ${this.fmt(a.settlement_change_amount)}` : ''}.`;
+      } else {
+        dispositionLine = 'Balance due has not yet been collected — see POS Hold Recall.';
+      }
+    } else if (isReturned && a.balance_due < -0.004) {
+      if (a.credit_note_amount > 0) {
+        dispositionLine = `Issued as store credit on the customer's account: ${this.fmt(a.credit_note_amount)} on ${this.fmtDateTime(a.credit_note_issued_at)}${a.credit_note_issued_by_name ? ` by ${a.credit_note_issued_by_name}` : ''}.`;
+      } else if (a.checkout_payment_method === 'credit') {
+        dispositionLine = `Applied automatically to the customer's account balance: ${this.fmt(-a.settlement_total)}.`;
+      } else if (['cash','bank_transfer','original_card'].includes(a.deposit_return_method)) {
+        const methodLabels = { cash: 'Cash', bank_transfer: 'Bank Transfer', original_card: 'Refund to Original Card' };
+        dispositionLine = `Refunded via ${methodLabels[a.deposit_return_method]} on ${this.fmtDateTime(a.deposit_return_recorded_at)}${a.deposit_return_reference ? ` — Ref: ${a.deposit_return_reference}` : ''}${a.deposit_return_recorded_by_name ? ` (recorded by ${a.deposit_return_recorded_by_name})` : ''}.`;
+      } else {
+        dispositionLine = 'Refund due — not yet disbursed.';
+      }
+    }
+
+    const issueSignatures = [];
+    if (a.issue_customer_signature) issueSignatures.push(['Customer', a.customer_name, a.issue_customer_signature, a.issued_at]);
+    if (a.issue_security_signature) issueSignatures.push(['Security (Issue)', a.issue_security_employee_name, a.issue_security_signature, a.issue_security_confirmed_at]);
+    if (a.return_security_signature) issueSignatures.push(['Security (Return)', a.return_security_employee_name, a.return_security_signature, a.return_security_confirmed_at]);
+    if (a.return_driver_signature) issueSignatures.push(['Driver (Return)', a.return_driver_employee_name, a.return_driver_signature, a.return_driver_confirmed_at]);
+
+    win.document.write(`<!DOCTYPE html><html><head><title>Rental Agreement Summary – ${a.agreement_number}</title>
+    <style>
+      body{font-family:Arial,sans-serif;font-size:13px;margin:0;padding:48px;color:#111}
+      .header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px}
+      .store h1{font-size:20px;margin:0 0 2px}
+      .store div{font-size:12px;color:#555}
+      .doc-title{font-size:20px;font-weight:700;text-align:right;color:#333}
+      .meta{display:flex;flex-wrap:wrap;gap:24px;margin-bottom:16px;font-size:12px}
+      .meta div{line-height:1.6}
+      .meta label{font-weight:bold;text-transform:uppercase;font-size:10px;color:#555;display:block}
+      h2{font-size:12px;text-transform:uppercase;color:#555;margin:20px 0 6px;border-bottom:1px solid #ddd;padding-bottom:4px}
+      table{width:100%;border-collapse:collapse}
+      th{background:#f0f0f0;text-align:left;padding:6px 8px;font-size:11px;text-transform:uppercase;color:#555}
+      .totals{width:340px;margin-left:auto;font-size:13px}
+      .totals tr td{padding:3px 0;border:none}
+      .totals .total-row td{border-top:2px solid #111;font-size:15px;font-weight:700;padding-top:6px}
+      .disposition{margin-top:8px;padding:8px 12px;background:#f5f5f5;border-left:3px solid #555;font-size:12px;border-radius:4px}
+      .footer{margin-top:32px;font-size:11px;color:#777;border-top:1px solid #ddd;padding-top:10px;text-align:center}
+      @page { size: letter; margin: 0.75in; }
+      @media print{body{padding:0}}
+    </style></head><body>
+    <div style="text-align:center;font-weight:700;font-size:20px;margin-bottom:16px">${storeName}</div>
+    <div class="header">
+      <div class="store">
+        ${this._printLogoTag(50)}
+        ${a.branch_name ? `<h1>${a.branch_name}</h1>` : ''}
+        ${addressLine ? `<div>${addressLine}${cityLine}</div>` : ''}
+        ${phoneLine ? `<div>${phoneLine}</div>` : ''}
+      </div>
+      <div class="doc-title">RENTAL AGREEMENT SUMMARY</div>
+    </div>
+    <div class="meta">
+      <div><label>Agreement #</label>${a.agreement_number}</div>
+      ${a.customer_name ? `<div><label>Customer</label>${a.customer_name}</div>` : ''}
+      <div><label>Checked Out</label>${a.checkout_datetime ? this.fmtDateTime(a.checkout_datetime) : '—'}</div>
+      <div><label>Due Date</label>${this.fmtDate(a.due_date)}</div>
+      <div><label>Returned</label>${a.returned_at ? this.fmtDateTime(a.returned_at) : 'Not yet returned'}</div>
+      <div><label>Duration</label>${a.checkout_datetime ? this.rentalDurationLabel(a.checkout_date, a.due_date, a.returned_at) : '—'}</div>
+    </div>
+    <h2>Items Rented</h2>
+    <table>
+      <thead><tr><th>Item</th><th style="text-align:center">Qty</th><th style="text-align:center">Rate</th><th style="text-align:right">Original Fee</th><th style="text-align:right">Final Fee</th><th style="text-align:right">Damage Fee</th><th style="text-align:center">Condition Out → In</th></tr></thead>
+      <tbody>${itemRows}</tbody>
+    </table>
+    ${checkoutRows.length ? `<h2>Checkout Charges</h2>
+    <table class="totals">${checkoutRows.map(([l,v]) => `<tr><td>${l}</td><td style="text-align:right">${v}</td></tr>`).join('')}</table>` : ''}
+    ${settlementRows.length ? `<h2>Return Settlement</h2>
+    <table class="totals">
+      ${settlementRows.map(([l,v]) => `<tr><td>${l}</td><td style="text-align:right">${v}</td></tr>`).join('')}
+      <tr class="total-row"><td>${balanceLabel}</td><td style="text-align:right">${balanceDisplay}</td></tr>
+    </table>
+    ${dispositionLine ? `<div class="disposition">${dispositionLine}</div>` : ''}` : ''}
+    ${issueSignatures.length ? `<h2>Signatures</h2>
+    <div style="display:flex;gap:16px;margin-top:8px">
+      ${issueSignatures.map(([label, name, src, signedAt]) => `<div style="flex:1;text-align:center">
+        <img src="${src}" style="max-height:50px;max-width:100%;border-bottom:1px solid #333;padding-bottom:4px" />
+        <div style="font-size:10px;color:#555;margin-top:4px">${label}${name ? ` — ${name}` : ''}</div>
+        ${signedAt ? `<div style="font-size:9px;color:#888">${this.fmtDateTime(signedAt)}</div>` : ''}
+      </div>`).join('')}
+    </div>` : ''}
+    <div class="footer">${footer}</div>
+    <script>window.onload=()=>{window.print()}<\/script>
+    </body></html>`);
+    win.document.close();
   },
 
   async viewRentalAgreement(id) {
     const a = await this.api('GET', `/rentals/agreements/${id}`);
-    const sc = { pending:'badge-warning', awaiting_issue:'badge-warning', active:'badge-info', overdue:'badge-danger', returned:'badge-success', cancelled:'badge-secondary' };
+    const sc = { out_for_delivery:'badge-teal', pending:'badge-warning', awaiting_issue:'badge-warning', active:'badge-info', overdue:'badge-danger', returned:'badge-success', cancelled:'badge-secondary' };
     const notYetIssued = a.status === 'pending' || a.status === 'awaiting_issue';
     // A missed-pickup pause should be resolved through "Record Customer
     // Decision" (documents what the customer said, and lets staff pick a
@@ -5906,7 +6213,8 @@ const App = {
           ${a.status==='pending' && this.can('pos') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showFinalizeRentalModal(${a.id})">Process Payment</button>` : ''}
           ${a.status==='awaiting_issue' && this.can('rentals_issue') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showIssueRentalModal(${a.id})">Issue Rental</button>` : ''}
           ${a.checkout_transaction_id ? `<button class="btn btn-secondary" onclick="App.printRentalInvoice(${a.id})">🖨️ Tax Invoice</button>
-          <button class="btn btn-secondary" onclick="App.emailRentalInvoice(${a.id},'${(a.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email Invoice</button>` : ''}
+          <button class="btn btn-secondary" onclick="App.emailRentalInvoice(${a.id},'${(a.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email Invoice</button>
+          <button class="btn btn-secondary" onclick="App.closeModal();App.launchRentalSummary(${a.id})">📋 Full Summary</button>` : ''}
           ${a.status==='active' ? `<button class="btn btn-secondary" onclick="App.printRentalDeliveryNote(${a.id})">🖨️ Delivery Note</button>` : ''}
           ${a.status==='active' && !a.is_paused ? `<button class="btn btn-secondary" onclick="App.closeModal();App.showPauseRentalModal(${a.id})">⏸ Pause Rental</button>` : ''}
           ${a.status==='active' && a.is_paused && !openMissedPickupPause ? `<button class="btn btn-primary" onclick="App.resumeRentalAgreement(${a.id})">▶ Resume Rental</button>` : ''}
@@ -7095,14 +7403,16 @@ const App = {
             <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Defaults to now — back-date this if the item actually went out earlier. The rental clock and all fee calculations run from this time.</div>
           </div>
 
-          ${a.delivery_required ? `<div class="form-group">
+          ${a.delivery_required ? (a.delivery_driver_confirmed_at
+            ? `<div style="padding:8px 12px;background:rgba(22,163,74,0.08);border-left:3px solid #16a34a;border-radius:4px;font-size:12px;color:#166534;margin-bottom:12px">✓ ${a.delivery_driver_name||'A driver'} has already claimed and signed for this delivery on ${this.fmtDateTime(a.delivery_driver_confirmed_at)}${this._sigButton(a.delivery_driver_signature, 'View Driver Signature')}</div>`
+            : `<div class="form-group">
             <label>Delivery Driver <span style="font-weight:400;color:var(--text-muted)">(fee ${this.fmt(a.delivery_cost)}, already charged)</span></label>
             <select id="ri-delivery-driver">
               <option value="">-- Select --</option>
               ${drivers.map(e => `<option value="${e.id}">${e.first_name} ${e.last_name}</option>`).join('')}
             </select>
             ${!drivers.length ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">No employees are flagged as a driver yet.</div>` : ''}
-          </div>` : ''}
+          </div>`) : ''}
 
           ${a.operator_required ? `<div class="form-group">
             <label>Operator <span style="font-weight:400;color:var(--text-muted)">(fee ${this.fmt(a.operator_fee)}, already charged)</span></label>
@@ -7113,7 +7423,10 @@ const App = {
             ${!operators.length ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">No employees are flagged as an operator yet.</div>` : ''}
           </div>` : ''}
 
-          <div class="form-group" style="margin-bottom:12px;border-top:1px solid var(--border);padding-top:12px">
+          <div style="border-top:1px solid var(--border);padding-top:12px">
+          ${a.issue_security_employee_id
+            ? `<div style="padding:8px 12px;background:rgba(22,163,74,0.08);border-left:3px solid #16a34a;border-radius:4px;font-size:12px;color:#166534;margin-bottom:12px">✓ ${a.issue_security_employee_name||'Security'} already signed off on ${this.fmtDateTime(a.issue_security_confirmed_at)}${this._sigButton(a.issue_security_signature, 'View Guard Signature')}</div>`
+            : `<div class="form-group" style="margin-bottom:12px">
             <label>Security Verification <span style="font-weight:400;color:var(--text-muted)">(required — item leaving the premises)</span></label>
             <select id="ri-security-employee">
               <option value="">-- Select --</option>
@@ -7121,7 +7434,8 @@ const App = {
             </select>
             ${!securityEmployees.length ? `<div style="font-size:11px;color:var(--danger);margin-top:2px">No employees are flagged as Security yet — this rental can't be issued until one is (Employees → edit → Security checkbox).</div>` : ''}
           </div>
-          ${this._sigPadHtml('ri-guard-sig', 'Guard Signature', 'required — the security employee above signs to confirm')}
+          ${this._sigPadHtml('ri-guard-sig', 'Guard Signature', 'required — the security employee above signs to confirm')}`}
+          </div>
           ${this._sigPadHtml('ri-customer-sig', 'Customer Signature', 'required — confirms receipt')}
         </div>
         <div class="modal-footer">
@@ -7210,10 +7524,14 @@ const App = {
     const deliveryDriverEl = document.getElementById('ri-delivery-driver');
     const operatorEl = document.getElementById('ri-operator-id');
     const securityEl = document.getElementById('ri-security-employee');
+    // The security dropdown/pad only exist when security hasn't already
+    // signed off (see showIssueRentalModal's banner-vs-form branch) — nothing
+    // to validate or send if they're not on the page.
+    const hasSecuritySigPad = !!document.getElementById('ri-guard-sig');
     if (deliveryDriverEl && !deliveryDriverEl.value) { this.alert('Select a driver for delivery', 'error'); return; }
     if (operatorEl && !operatorEl.value) { this.alert('Select an operator', 'error'); return; }
-    if (!securityEl?.value) { this.alert('Select the security employee who verified this item leaving', 'error'); return; }
-    if (!this._sigPadHasDrawn('ri-guard-sig')) { this.alert("The security employee's signature is required to issue this rental", 'error'); return; }
+    if (securityEl && !securityEl.value) { this.alert('Select the security employee who verified this item leaving', 'error'); return; }
+    if (hasSecuritySigPad && !this._sigPadHasDrawn('ri-guard-sig')) { this.alert("The security employee's signature is required to issue this rental", 'error'); return; }
     if (!this._sigPadHasDrawn('ri-customer-sig')) { this.alert('Customer signature is required to issue this rental', 'error'); return; }
     const issuedAtRaw = document.getElementById('ri-issued-at')?.value;
     if (!issuedAtRaw) { this.alert('Enter a start date/time', 'error'); return; }
@@ -7227,8 +7545,8 @@ const App = {
         delivery_driver_id: deliveryDriverEl ? parseInt(deliveryDriverEl.value) || null : null,
         operator_id: operatorEl ? parseInt(operatorEl.value) || null : null,
         issued_at: issuedAt,
-        security_employee_id: parseInt(securityEl.value),
-        security_signature: this._sigPadDataUrl('ri-guard-sig'),
+        security_employee_id: securityEl ? parseInt(securityEl.value) : null,
+        security_signature: hasSecuritySigPad ? this._sigPadDataUrl('ri-guard-sig') : null,
         customer_signature: this._sigPadDataUrl('ri-customer-sig'),
       });
       this.closeModal();
@@ -7384,7 +7702,7 @@ const App = {
               <div style="display:flex;justify-content:space-between;margin-top:4px;border-top:1px solid var(--border);padding-top:4px"><strong>Balance Due</strong><strong>${this.fmt(balance)}</strong></div>
             </div>
             <div class="form-group"><label>Payment Method</label>
-              <select id="rb-paymethod">
+              <select id="rb-paymethod" onchange="App._toggleRentalBalanceTenderFields()">
                 <option value="cash">Cash</option>
                 <option value="credit_card">Credit Card</option>
                 <option value="debit_card">Debit Card</option>
@@ -7393,24 +7711,58 @@ const App = {
                 <option value="direct_deposit">Direct Deposit</option>
               </select>
             </div>
+            <div class="form-group" id="rb-tendered-group" style="display:none">
+              <label>Amount Tendered</label>
+              <input type="number" id="rb-tendered" step="any" placeholder="${balance.toFixed(2)}" oninput="App._updateRentalBalanceTenderChange(${balance})" style="font-size:16px;font-weight:600">
+            </div>
+            <div id="rb-change-info" style="display:none;font-size:13px;font-weight:600;text-align:right"></div>
           </div>
           <div class="modal-footer">
             <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
             <button class="btn btn-primary" onclick="App.confirmRentalBalancePayment(${id})">Confirm Payment</button>
           </div>
         </div>`);
+      this._toggleRentalBalanceTenderFields();
     } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  _toggleRentalBalanceTenderFields() {
+    const method = document.getElementById('rb-paymethod')?.value;
+    const showTender = method === 'cash' || method === 'check';
+    const tenderGroup = document.getElementById('rb-tendered-group');
+    if (tenderGroup) tenderGroup.style.display = showTender ? 'block' : 'none';
+    const infoEl = document.getElementById('rb-change-info');
+    if (!showTender && infoEl) infoEl.style.display = 'none';
+  },
+
+  _updateRentalBalanceTenderChange(balance) {
+    const infoEl = document.getElementById('rb-change-info');
+    const tenderedEl = document.getElementById('rb-tendered');
+    if (!infoEl || !tenderedEl) return;
+    const tendered = parseFloat(tenderedEl.value);
+    if (isNaN(tendered) || tendered <= 0) { infoEl.style.display = 'none'; return; }
+    const change = parseFloat((tendered - balance).toFixed(2));
+    infoEl.style.display = 'block';
+    if (change >= 0) {
+      infoEl.style.color = 'var(--success)';
+      infoEl.textContent = `Change Due: ${this.fmt(change)}`;
+    } else {
+      infoEl.style.color = 'var(--danger)';
+      infoEl.textContent = `Short ${this.fmt(Math.abs(change))}`;
+    }
   },
 
   async confirmRentalBalancePayment(id) {
     const payment_method = document.getElementById('rb-paymethod')?.value;
+    const amount_tendered = document.getElementById('rb-tendered')?.value || undefined;
     try {
       const settled = await this.api('PATCH', `/rentals/agreements/${id}/collect-balance`, {
-        payment_method, employee_id: this.currentUser.id, drawer_session_id: this.currentDrawerSession?.id || null,
+        payment_method, amount_tendered, employee_id: this.currentUser.id, drawer_session_id: this.currentDrawerSession?.id || null,
       });
       this.closeModal();
       const tx = await this.api('GET', `/transactions/${settled.id}`);
       this.showReceipt(tx, tx.change_amount || 0);
+      this.updateHoldBadge();
       if (this.section === 'rentals') this.renderRentals();
     } catch(e) { this.alert(e.message, 'error'); }
   },
@@ -17587,6 +17939,8 @@ const App = {
       { key: 'rentals_confirm_pickup', label: 'Confirm Rental Pickups (Driver)' },
       { key: 'rentals_deposit_refund', label: 'Record Deposit Refunds' },
       { key: 'rentals_credit_note', label: 'Issue Credit Notes' },
+      { key: 'rentals_security_signoff', label: 'Sign Off on Delivery (Security)' },
+      { key: 'rentals_confirm_delivery', label: 'Accept & Sign for Delivery (Driver)' },
     ]},
     { key: 'work_orders', label: 'Work Orders', subs: [
       { key: 'wo_intake', label: 'Open Work Orders' },

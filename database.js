@@ -1538,6 +1538,28 @@ async function _init() {
     // product row to draw a rate from. Customer-supplied items stay 0 — never
     // charged, so never taxed either.
     'ALTER TABLE work_order_items ADD COLUMN tax_rate REAL NOT NULL DEFAULT 0',
+    // Delivery-leg field confirmation, mirroring the pickup-leg split above
+    // (pickup_driver_assigned_at / pickup_confirmed_at / pickup_customer_*)
+    // but for issuing a delivery rather than returning one, and with the
+    // security guard's sign-off split out too. Before this, PATCH .../issue
+    // captured the security guard's AND the customer's signature together in
+    // one office-side step, which doesn't work for a delivery — the customer
+    // isn't at the counter. Now: security signs off first (self-service, see
+    // PATCH .../security-signoff — reuses the existing issue_security_*
+    // columns), then a driver claims the job and signs for custody
+    // (delivery_driver_confirmed_at/delivery_driver_signature, PATCH
+    // .../claim-delivery — delivery_driver_id already existed but was only
+    // ever set at issue time before), then the driver captures the
+    // customer's signature in the field to actually complete the issue and
+    // start the rental clock (PATCH .../issue, unchanged endpoint).
+    // issue_customer_name is the customer's typed name at that moment —
+    // .../issue never needed this before (it trusted customer_id, fine when
+    // the customer signed in person at the counter) but a field signature
+    // benefits from the same "who actually signed" record confirm-pickup
+    // already keeps via pickup_customer_name.
+    'ALTER TABLE rental_agreements ADD COLUMN delivery_driver_confirmed_at DATETIME',
+    'ALTER TABLE rental_agreements ADD COLUMN delivery_driver_signature TEXT',
+    'ALTER TABLE rental_agreements ADD COLUMN issue_customer_name TEXT',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

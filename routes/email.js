@@ -307,15 +307,24 @@ function buildRentalInvoiceHtml(agreement, tx, s, origin) {
   if (agreement.return_security_signature) returnSignatures.push(['Security Signature', agreement.return_security_employee_name, agreement.return_security_signature, agreement.return_security_confirmed_at]);
   if (agreement.return_driver_signature) returnSignatures.push(['Driver Signature', agreement.return_driver_employee_name, agreement.return_driver_signature, agreement.return_driver_confirmed_at]);
 
-  const sigBlock = (heading, sigs) => !sigs.length ? '' : `
-    <div style="margin-top:16px;font-size:10px;font-weight:bold;text-transform:uppercase;color:#888">${heading}</div>
-    <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:6px"><tr>
+  // All Issue and Return signature checkpoints in one row (up to 4 columns)
+  // instead of two stacked rows — each label carries which checkpoint it
+  // belongs to, so the grouping stays clear while taking a fraction of the
+  // vertical space.
+  const sigBlock = (issueSigs, returnSigs) => {
+    const sigs = [
+      ...issueSigs.map(([label, name, src, signedAt]) => [`Issued — ${label}`, name, src, signedAt]),
+      ...returnSigs.map(([label, name, src, signedAt]) => [`Returned — ${label}`, name, src, signedAt]),
+    ];
+    if (!sigs.length) return '';
+    return `<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:16px"><tr>
       ${sigs.map(([label, name, src, signedAt]) => `<td style="text-align:center;padding:4px 8px">
-        <img src="${absUrl(src)}" style="max-height:60px;max-width:150px;border-bottom:1px solid #333;padding-bottom:4px" />
-        <div style="font-size:11px;color:#555;margin-top:4px">${label}${name ? ` — ${name}` : ''}</div>
-        ${signedAt ? `<div style="font-size:10px;color:#888">${new Date(signedAt).toLocaleString()}</div>` : ''}
+        <img src="${absUrl(src)}" style="max-height:44px;max-width:120px;border-bottom:1px solid #333;padding-bottom:4px" />
+        <div style="font-size:10px;color:#555;margin-top:4px">${label}${name ? ` — ${name}` : ''}</div>
+        ${signedAt ? `<div style="font-size:9px;color:#888">${new Date(signedAt).toLocaleString()}</div>` : ''}
       </td>`).join('')}
     </tr></table>`;
+  };
 
   return `<!DOCTYPE html>
 <html>
@@ -357,9 +366,136 @@ function buildRentalInvoiceHtml(agreement, tx, s, origin) {
         <tr><td style="font-size:16px;font-weight:700;color:#111">${rentalBreakdown ? 'GRAND TOTAL' : 'TOTAL'}</td><td style="font-size:16px;font-weight:700;color:#111;text-align:right">${fmt(tx.total)}</td></tr>
         <tr><td style="padding:3px 0;color:#666">Payment</td><td style="text-align:right;color:#666">${(tx.payment_method || '').replace('_',' ').toUpperCase()}</td></tr>
       </table>
-      ${sigBlock('Issued', issueSignatures)}
-      ${sigBlock('Returned', returnSignatures)}
+      ${sigBlock(issueSignatures, returnSignatures)}
       <div style="text-align:center;margin-top:20px;font-size:13px;color:#666;font-style:italic">${footer}</div>
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body>
+</html>`;
+}
+
+// The single comprehensive "final rental agreement" document — checkout
+// through return through however the deposit was ultimately settled. Mirrors
+// printRentalAgreementSummary in public/index.html section-for-section so
+// the emailed copy matches what printing it produces; replaces what used to
+// be three separate narrower documents (tax invoice extras aside, the
+// deposit-only credit-note/refund receipts) with one.
+function buildRentalSummaryHtml(agreement, s) {
+  const storeName = s.store_name || 'My Store';
+  const storeAddr = agreement.branch_address
+    ? `${agreement.branch_address}${agreement.branch_city ? ', ' + agreement.branch_city : ''}${agreement.branch_state ? ' ' + agreement.branch_state : ''}${agreement.branch_zip ? ' ' + agreement.branch_zip : ''}`
+    : s.store_address || '';
+  const isReturned = agreement.status === 'returned';
+
+  const itemRows = (agreement.items || []).map(i => {
+    const tag = i.parent_item_id ? (i.is_mandatory ? ' (included)' : ' (accessory)') : '';
+    const rateParts = i.is_mandatory ? [] : [`${fmt(i.daily_rate)}/day`];
+    if (!i.is_mandatory) {
+      if (i.weekly_rate) rateParts.push(`${fmt(i.weekly_rate)}/wk`);
+      if (i.monthly_rate) rateParts.push(`${fmt(i.monthly_rate)}/mo`);
+    }
+    return `<tr>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}${tag}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${i.quantity}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center;font-size:11px;color:#666">${i.is_mandatory ? 'No charge' : rateParts.join(' · ')}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${fmt(i.rental_fee)}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${i.quantity_returned > 0 ? fmt(i.final_rental_fee) : '—'}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${i.damage_fee > 0 ? fmt(i.damage_fee) : '—'}</td>
+    </tr>`;
+  }).join('');
+
+  const serviceFeesTotal = (agreement.delivery_required ? agreement.delivery_cost||0 : 0) + (agreement.pickup_required ? agreement.pickup_cost||0 : 0) + (agreement.operator_required ? agreement.operator_fee||0 : 0);
+  const rentalFeeSubtotal = parseFloat(((agreement.checkout_subtotal||0) - agreement.deposit_total - serviceFeesTotal).toFixed(2));
+  const checkoutRows = agreement.checkout_transaction_id ? [
+    ['Rental Fee Subtotal', fmt(rentalFeeSubtotal)],
+    serviceFeesTotal > 0 ? ['Delivery / Pickup / Operator Fees', fmt(serviceFeesTotal)] : null,
+    ['Tax', fmt(agreement.checkout_tax_amount)],
+    ['Deposit Collected', fmt(agreement.deposit_total)],
+    ['Total Charged at Checkout', fmt(agreement.checkout_total)],
+    ['Payment Method', (agreement.checkout_payment_method||'').replace('_',' ').toUpperCase()],
+  ].filter(Boolean) : [];
+
+  const durationAdjLabel = agreement.duration_adjustment_total > 0 ? 'Additional Rental Time' : agreement.duration_adjustment_total < 0 ? 'Rental Fee Credit (returned early)' : 'Duration Adjustment';
+  const settlementRows = isReturned ? [
+    agreement.damage_fee_total ? ['Damage Fees', fmt(agreement.damage_fee_total)] : null,
+    agreement.duration_adjustment_total ? [durationAdjLabel, fmt(agreement.duration_adjustment_total)] : null,
+    agreement.tax_adjustment_total ? ['Tax Adjustment', fmt(agreement.tax_adjustment_total)] : null,
+    ['Less: Deposit Applied', `-${fmt(agreement.deposit_total)}`],
+  ].filter(Boolean) : [];
+  const balanceLabel = agreement.balance_due > 0.004 ? 'BALANCE DUE' : agreement.balance_due < -0.004 ? 'REFUND DUE' : 'SETTLED IN FULL';
+  const balanceDisplay = fmt(Math.abs(agreement.balance_due));
+
+  let dispositionLine = null;
+  if (isReturned && agreement.balance_due > 0.004) {
+    dispositionLine = agreement.settlement_transaction_id
+      ? `Collected ${fmt(agreement.balance_due)} via ${(agreement.settlement_payment_method||'').replace('_',' ').toUpperCase()} on ${new Date(agreement.settlement_created_at).toLocaleString()}${agreement.settlement_amount_tendered > agreement.balance_due ? ` — Tendered ${fmt(agreement.settlement_amount_tendered)}, Change ${fmt(agreement.settlement_change_amount)}` : ''}.`
+      : 'Balance due has not yet been collected — see POS Hold Recall.';
+  } else if (isReturned && agreement.balance_due < -0.004) {
+    if (agreement.credit_note_amount > 0) {
+      dispositionLine = `Issued as store credit on the customer's account: ${fmt(agreement.credit_note_amount)} on ${new Date(agreement.credit_note_issued_at).toLocaleString()}${agreement.credit_note_issued_by_name ? ` by ${agreement.credit_note_issued_by_name}` : ''}.`;
+    } else if (agreement.checkout_payment_method === 'credit') {
+      dispositionLine = `Applied automatically to the customer's account balance: ${fmt(-agreement.settlement_total)}.`;
+    } else if (['cash','bank_transfer','original_card'].includes(agreement.deposit_return_method)) {
+      const methodLabels = { cash: 'Cash', bank_transfer: 'Bank Transfer', original_card: 'Refund to Original Card' };
+      dispositionLine = `Refunded via ${methodLabels[agreement.deposit_return_method]} on ${new Date(agreement.deposit_return_recorded_at).toLocaleString()}${agreement.deposit_return_reference ? ` — Ref: ${agreement.deposit_return_reference}` : ''}${agreement.deposit_return_recorded_by_name ? ` (recorded by ${agreement.deposit_return_recorded_by_name})` : ''}.`;
+    } else {
+      dispositionLine = 'Refund due — not yet disbursed.';
+    }
+  }
+
+  const issueSignatures = [];
+  if (agreement.issue_customer_signature) issueSignatures.push(['Customer', agreement.customer_name, agreement.issue_customer_signature, agreement.issued_at]);
+  if (agreement.issue_security_signature) issueSignatures.push(['Security (Issue)', agreement.issue_security_employee_name, agreement.issue_security_signature, agreement.issue_security_confirmed_at]);
+  if (agreement.return_security_signature) issueSignatures.push(['Security (Return)', agreement.return_security_employee_name, agreement.return_security_signature, agreement.return_security_confirmed_at]);
+  if (agreement.return_driver_signature) issueSignatures.push(['Driver (Return)', agreement.return_driver_employee_name, agreement.return_driver_signature, agreement.return_driver_confirmed_at]);
+  const sigRow = !issueSignatures.length ? '' : `<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:12px"><tr>
+    ${issueSignatures.map(([label, name, src, signedAt]) => `<td style="text-align:center;padding:4px 8px">
+      <img src="${src}" style="max-height:44px;max-width:110px;border-bottom:1px solid #333;padding-bottom:4px" />
+      <div style="font-size:10px;color:#555;margin-top:4px">${label}${name ? ` — ${name}` : ''}</div>
+      ${signedAt ? `<div style="font-size:9px;color:#888">${new Date(signedAt).toLocaleString()}</div>` : ''}
+    </td>`).join('')}
+  </tr></table>`;
+
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Rental Agreement Summary ${agreement.agreement_number}</title></head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
+<tr><td align="center">
+  <table width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+    <tr><td style="background:#1a56db;padding:24px;text-align:center">
+      <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
+      ${agreement.branch_name ? `<div style="color:#bcd4ff;font-size:13px;margin-top:4px">${agreement.branch_name}</div>` : ''}
+      ${storeAddr ? `<div style="color:#bcd4ff;font-size:12px;margin-top:2px">${storeAddr}</div>` : ''}
+      ${agreement.branch_phone || s.store_phone ? `<div style="color:#bcd4ff;font-size:12px">${agreement.branch_phone || s.store_phone}</div>` : ''}
+    </td></tr>
+    <tr><td style="padding:20px 24px">
+      <div style="font-size:18px;font-weight:700;color:#111;margin-bottom:12px">Rental Agreement Summary</div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-bottom:16px">
+        <tr><td style="padding:2px 0"><strong>Agreement #:</strong> ${agreement.agreement_number}</td>${agreement.customer_name ? `<td style="text-align:right;padding:2px 0"><strong>Customer:</strong> ${agreement.customer_name}</td>` : ''}</tr>
+        <tr><td style="padding:2px 0"><strong>Checked Out:</strong> ${agreement.checkout_datetime ? new Date(agreement.checkout_datetime).toLocaleString() : '—'}</td><td style="text-align:right;padding:2px 0"><strong>Due Date:</strong> ${agreement.due_date}</td></tr>
+        <tr><td colspan="2" style="padding:2px 0"><strong>Returned:</strong> ${agreement.returned_at ? new Date(agreement.returned_at).toLocaleString() : 'Not yet returned'}</td></tr>
+      </table>
+      <div style="font-size:12px;font-weight:700;text-transform:uppercase;color:#666;border-bottom:1px solid #e8e8e8;padding-bottom:4px;margin-bottom:6px">Items Rented</div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:12px">
+        <thead><tr style="background:#f9fafb"><th style="padding:6px 8px;text-align:left;font-size:11px;color:#666;border-bottom:1px solid #e8e8e8">Item</th><th style="padding:6px 8px;text-align:center;font-size:11px;color:#666;border-bottom:1px solid #e8e8e8">Qty</th><th style="padding:6px 8px;text-align:center;font-size:11px;color:#666;border-bottom:1px solid #e8e8e8">Rate</th><th style="padding:6px 8px;text-align:right;font-size:11px;color:#666;border-bottom:1px solid #e8e8e8">Original Fee</th><th style="padding:6px 8px;text-align:right;font-size:11px;color:#666;border-bottom:1px solid #e8e8e8">Final Fee</th><th style="padding:6px 8px;text-align:right;font-size:11px;color:#666;border-bottom:1px solid #e8e8e8">Damage Fee</th></tr></thead>
+        <tbody>${itemRows}</tbody>
+      </table>
+      ${checkoutRows.length ? `<div style="font-size:12px;font-weight:700;text-transform:uppercase;color:#666;border-bottom:1px solid #e8e8e8;padding-bottom:4px;margin:16px 0 6px">Checkout Charges</div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444">
+        ${checkoutRows.map(([l,v]) => `<tr><td style="padding:3px 0">${l}</td><td style="text-align:right">${v}</td></tr>`).join('')}
+      </table>` : ''}
+      ${settlementRows.length ? `<div style="font-size:12px;font-weight:700;text-transform:uppercase;color:#666;border-bottom:1px solid #e8e8e8;padding-bottom:4px;margin:16px 0 6px">Return Settlement</div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444">
+        ${settlementRows.map(([l,v]) => `<tr><td style="padding:3px 0">${l}</td><td style="text-align:right">${v}</td></tr>`).join('')}
+        <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
+        <tr><td style="font-size:15px;font-weight:700;color:#111">${balanceLabel}</td><td style="font-size:15px;font-weight:700;color:#111;text-align:right">${balanceDisplay}</td></tr>
+      </table>
+      ${dispositionLine ? `<div style="margin-top:8px;padding:8px 12px;background:#f5f5f5;border-left:3px solid #555;font-size:12px;border-radius:4px">${dispositionLine}</div>` : ''}` : ''}
+      ${sigRow}
+      <div style="text-align:center;margin-top:20px;font-size:13px;color:#666;font-style:italic">${s.receipt_footer || 'Thank you for your business!'}</div>
     </td></tr>
   </table>
 </td></tr>
@@ -576,6 +712,57 @@ router.post('/send-cancellation-receipt/:id', requireAuth, async (req, res) => {
         html: buildCancellationReceiptHtml(agreement, s),
       });
       res.json({ success: true, message: `Cancellation receipt sent to ${to}` });
+    } catch (e) {
+      res.status(500).json({ error: `Failed to send email: ${e.message}` });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Send the comprehensive rental agreement summary — checkout through return
+// through however the deposit was settled. Mirrors GET
+// /rentals/agreements/:id's joins (routes/rentals.js) so the emailed copy
+// carries the same fields the in-app print view reads.
+router.post('/send-rental-summary/:id', requireAuth, async (req, res) => {
+  const { to } = req.body;
+  if (!to) return res.status(400).json({ error: 'Recipient email is required' });
+  try {
+    const { rows: [agreement] } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name,
+      b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone,
+      co.payment_method as checkout_payment_method, co.subtotal as checkout_subtotal, co.tax_amount as checkout_tax_amount, co.total as checkout_total,
+      se.total as settlement_total, se.payment_method as settlement_payment_method, se.amount_tendered as settlement_amount_tendered, se.change_amount as settlement_change_amount, se.created_at as settlement_created_at,
+      (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total) as balance_due,
+      ise.first_name || ' ' || ise.last_name as issue_security_employee_name,
+      rse.first_name || ' ' || rse.last_name as return_security_employee_name,
+      rde.first_name || ' ' || rde.last_name as return_driver_employee_name,
+      cne.first_name || ' ' || cne.last_name as credit_note_issued_by_name,
+      dre.first_name || ' ' || dre.last_name as deposit_return_recorded_by_name
+      FROM rental_agreements ra
+      LEFT JOIN customers c ON ra.customer_id = c.id
+      LEFT JOIN branches b ON ra.branch_id = b.id
+      LEFT JOIN transactions co ON ra.checkout_transaction_id = co.id
+      LEFT JOIN transactions se ON ra.settlement_transaction_id = se.id
+      LEFT JOIN employees ise ON ra.issue_security_employee_id = ise.id
+      LEFT JOIN employees rse ON ra.return_security_employee_id = rse.id
+      LEFT JOIN employees rde ON ra.return_driver_employee_id = rde.id
+      LEFT JOIN employees cne ON ra.credit_note_issued_by = cne.id
+      LEFT JOIN employees dre ON ra.deposit_return_recorded_by = dre.id
+      WHERE ra.id = ?`, args: [req.params.id] });
+    if (!agreement) return res.status(404).json({ error: 'Rental agreement not found' });
+    const { rows: items } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
+    agreement.items = items;
+
+    const s = await getSettings();
+    try {
+      const transporter = createTransporter(s);
+      const fromName = s.email_from_name || s.store_name || 'POS System';
+      const fromAddr = s.email_smtp_user || s.store_email || '';
+      await transporter.sendMail({
+        from: `"${fromName}" <${fromAddr}>`,
+        to,
+        subject: `Rental Agreement Summary - ${agreement.agreement_number} from ${s.store_name || 'Our Store'}`,
+        html: buildRentalSummaryHtml(agreement, s),
+      });
+      res.json({ success: true, message: `Rental agreement summary sent to ${to}` });
     } catch (e) {
       res.status(500).json({ error: `Failed to send email: ${e.message}` });
     }
