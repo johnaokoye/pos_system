@@ -1,0 +1,38 @@
+WEBVTT
+
+00:00:00.000 --> 00:00:09.383
+Welcome to the Point of Sale training video. In this lesson, we'll walk through completing a basic retail sale from start to finish.
+
+00:00:09.383 --> 00:00:14.059
+From the sidebar, click Sales to open the Sales hub.
+
+00:00:14.060 --> 00:00:18.596
+Then click Point of Sale to open the register screen.
+
+00:00:18.596 --> 00:00:32.926
+If a cash drawer isn't already open for this session, you'd be prompted to open one here, so the app can track cash for reconciliation later. We already have a drawer open, so we'll go straight to the register.
+
+00:00:32.926 --> 00:00:38.574
+To ring up a sale, click Item Lookup to browse or search the catalog.
+
+00:00:38.574 --> 00:00:44.865
+Click a product to add it to the ticket. Here we're adding a bag of Coffee Beans.
+
+00:00:44.865 --> 00:00:51.782
+Close the lookup window, and the item appears on the ticket with its price and a running subtotal.
+
+00:00:51.782 --> 00:00:57.320
+When the sale is ready, click Payment to choose how the customer is paying.
+
+00:00:57.320 --> 00:01:00.982
+Select Cash for an immediate cash sale.
+
+00:01:00.982 --> 00:01:06.849
+Enter the amount the customer handed over. Here it's the exact total.
+
+00:01:06.850 --> 00:01:10.712
+Click Confirm Payment to complete the sale.
+
+00:01:10.712 --> 00:01:19.645
+That's it. The sale is complete and a receipt is ready to print. You've just completed a basic sale in Point of Sale.
+
