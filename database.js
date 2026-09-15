@@ -1560,6 +1560,20 @@ async function _init() {
     'ALTER TABLE rental_agreements ADD COLUMN delivery_driver_confirmed_at DATETIME',
     'ALTER TABLE rental_agreements ADD COLUMN delivery_driver_signature TEXT',
     'ALTER TABLE rental_agreements ADD COLUMN issue_customer_name TEXT',
+    // Lets a rental customer with an incomplete compliance record (typically
+    // one bulk-imported from a previous system — see routes/customers.js
+    // POST /import) still be rented to: lib/rentals.js's
+    // assertRentalCustomerEligible() only blocks on missing fields when this
+    // is false, so a preapproved customer's gaps stop being a hard block but
+    // still show up on the Missing Rental Info report (GET
+    // /customers/rental-incomplete) and the New Rental customer picker, so
+    // staff know to go collect them. by/at capture who granted it and when,
+    // for the same reason credit terms changes and similar overrides get
+    // attributed elsewhere in this schema — set together, see PUT
+    // /customers/:id and POST /customers/import.
+    'ALTER TABLE customers ADD COLUMN rental_preapproved INTEGER DEFAULT 0',
+    'ALTER TABLE customers ADD COLUMN rental_preapproved_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE customers ADD COLUMN rental_preapproved_at DATETIME',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
@@ -1901,6 +1915,24 @@ async function _init() {
       if (!('special_projects' in perms)) { perms.special_projects = (g.name === 'Administrator'); changed = true; }
       if (!('special_projects_approve' in perms)) { perms.special_projects_approve = (g.name === 'Administrator'); changed = true; }
       if (changed) await db.execute({ sql: 'UPDATE security_groups SET permissions = ? WHERE id = ?', args: [JSON.stringify(perms), g.id] });
+    }
+  } catch(e) {}
+
+  // Add customers_rental_preapprove to existing security groups — same
+  // reasoning as special_projects above: this overrides the rental
+  // compliance gate (assertRentalCustomerEligible in lib/rentals.js), so it
+  // does NOT inherit the blanket Administrator-or-Manager default every
+  // other sub-permission gets here. Only Administrator has it out of the
+  // box; a store grants it to whoever should be allowed to preapprove
+  // legacy-imported rental customers via Security Groups.
+  try {
+    const { rows: groups } = await db.execute({ sql: 'SELECT id, name, permissions FROM security_groups', args: [] });
+    for (const g of groups) {
+      const perms = JSON.parse(g.permissions || '{}');
+      if (!('customers_rental_preapprove' in perms)) {
+        perms.customers_rental_preapprove = (g.name === 'Administrator');
+        await db.execute({ sql: 'UPDATE security_groups SET permissions = ? WHERE id = ?', args: [JSON.stringify(perms), g.id] });
+      }
     }
   } catch(e) {}
 

@@ -1040,15 +1040,32 @@ const App = {
     ]},
   },
 
+  // Rentals module access for hub tiles / direct nav. this.can('rentals') is
+  // deliberately bidirectional (a sub-permission alone grants the parent
+  // key), but the two driver-facing subs (rentals_confirm_pickup,
+  // rentals_confirm_delivery) must NOT unlock the full Rentals / Rental
+  // Dispatch / Rental Deposits / Rental Items screens — a driver should only
+  // ever reach rental data through the restricted My Deliveries dashboard
+  // (renderDriverDashboard / GET /rentals/agreements/driver-queue).
+  _canManageRentals() {
+    const perms = this.currentUser?.permissions;
+    if (!perms) return true;
+    if (perms.rentals) return true;
+    const driverOnlySubs = new Set(['rentals_confirm_pickup', 'rentals_confirm_delivery']);
+    const mod = this._permissionTree.find(m => m.key === 'rentals');
+    return !!mod && mod.subs.some(s => !driverOnlySubs.has(s.key) && !!perms[s.key]);
+  },
+
   // Cash Drawers requires the drawers_manage sub-permission specifically (the
   // parent drawers key only grants POS drawer access); Online Orders piggybacks
   // on the transactions permission since it has no key of its own.
   _hubTileAllowed(section) {
     if (section === 'drawers') return !!this.currentUser?.permissions?.drawers_manage;
     if (section === 'online-orders') return this.can('transactions');
-    if (section === 'rental-items') return this.can('rentals');
-    if (section === 'rental-deposits') return this.can('rentals');
-    if (section === 'rental-dispatch') return this.can('rentals');
+    if (section === 'rentals') return this._canManageRentals();
+    if (section === 'rental-items') return this._canManageRentals();
+    if (section === 'rental-deposits') return this._canManageRentals();
+    if (section === 'rental-dispatch') return this._canManageRentals();
     if (section === 'transfer-dispatch') return this.can('transfers');
     if (section === 'purchase-requests') return this.can('purchase_requests');
     if (section === 'work-orders') return this.can('work_orders');
@@ -1242,7 +1259,7 @@ const App = {
 
   async showSection(name) {
     const perms = this.currentUser?.permissions;
-    const sectionAllowed = name === 'driver-dashboard' ? !!this.currentUser?.is_driver : name === 'guard-dashboard' ? !!this.currentUser?.is_security : name === 'online-orders' ? this.can('transactions') : name === 'rental-items' ? this.can('rentals') : name === 'rental-deposits' ? this.can('rentals') : name === 'rental-dispatch' ? this.can('rentals') : name === 'transfer-dispatch' ? this.can('transfers') : name === 'purchase-requests' ? this.can('purchase_requests') : name === 'work-orders' ? this.can('work_orders') : name === 'wo-schedule' ? this.can('work_orders') : name === 'special-projects' ? (this.can('special_projects') || this.can('special_projects_approve')) : (name === 'reports-marketing' || name === 'reports-sales' || name === 'reports-accounts') ? this.can('reports') : this._hubGroups[name] ? this.canAccessHub(name) : this.can(name);
+    const sectionAllowed = name === 'driver-dashboard' ? !!this.currentUser?.is_driver : name === 'guard-dashboard' ? !!this.currentUser?.is_security : name === 'online-orders' ? this.can('transactions') : name === 'rentals' ? this._canManageRentals() : name === 'rental-items' ? this._canManageRentals() : name === 'rental-deposits' ? this._canManageRentals() : name === 'rental-dispatch' ? this._canManageRentals() : name === 'transfer-dispatch' ? this.can('transfers') : name === 'purchase-requests' ? this.can('purchase_requests') : name === 'work-orders' ? this.can('work_orders') : name === 'wo-schedule' ? this.can('work_orders') : name === 'special-projects' ? (this.can('special_projects') || this.can('special_projects_approve')) : (name === 'reports-marketing' || name === 'reports-sales' || name === 'reports-accounts') ? this.can('reports') : this._hubGroups[name] ? this.canAccessHub(name) : this.can(name);
     if (perms && !sectionAllowed) return;
     this.section = name;
     this.closeModal();
@@ -1881,7 +1898,13 @@ const App = {
     return a.delivery_address || [a.customer_address, [a.customer_city, a.customer_state, a.customer_zip].filter(Boolean).join(' ')].filter(Boolean).join(', ') || null;
   },
 
-  _rentalDashRow(a, extra = '', actionHtml = '', addressHtml = '') {
+  // showAgreementLink=false for the driver's own "My Recent Activity" (see
+  // renderDriverDashboard) — a driver can see the delivery/pickup address
+  // for a job but must not be able to open the full rental agreement (rate/
+  // deposit/payment detail), which is exactly what App.viewRentalAgreement
+  // renders. Guard's "My Recent Verifications" keeps the link since guards
+  // already hold rentals_security_signoff on the agreement they signed off.
+  _rentalDashRow(a, extra = '', actionHtml = '', addressHtml = '', showAgreementLink = true) {
     const overdue = a.display_status === 'overdue';
     return `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)">
       <div>
@@ -1894,7 +1917,7 @@ const App = {
         ${extra}
         <div style="margin-top:4px;display:flex;gap:6px;justify-content:flex-end">
           ${actionHtml}
-          <button class="btn btn-sm btn-outline" onclick="App.viewRentalAgreement(${a.id})">View</button>
+          ${showAgreementLink ? `<button class="btn btn-sm btn-outline" onclick="App.viewRentalAgreement(${a.id})">View</button>` : ''}
         </div>
       </div>
     </div>`;
@@ -1951,7 +1974,7 @@ const App = {
       ${this._rentalDashSection('Deliveries Ready to Claim', readyToClaim.map(a => this._rentalDashRow(a, '', this.can('rentals_confirm_delivery') ? `<button class="btn btn-sm btn-primary" onclick="App.showClaimDeliveryModal(${a.id})">Accept &amp; Sign for Delivery</button>` : '', this._rentalDeliveryContactHtml(a))), 'No deliveries waiting to go out.')}
       ${this._rentalDashSection('Out for Delivery — Awaiting Customer Signature', outForDelivery.map(a => this._rentalDashRow(a, '', this.can('rentals_confirm_delivery') ? `<button class="btn btn-sm btn-primary" onclick="App.showDeliveryCustomerSignatureModal(${a.id})">Get Customer Signature</button>` : '', this._rentalDeliveryContactHtml(a))), 'Nothing out for delivery right now.')}
       ${this._rentalDashSection('Pickups Needed', pickups.map(a => this._rentalDashRow(a, '', this.can('rentals_confirm_pickup') ? `<button class="btn btn-sm btn-primary" onclick="App.showConfirmPickupModal(${a.id})">Confirm Pickup</button>` : '', `<div style="font-size:12px;color:var(--text-muted)">📍 ${this._rentalPickupAddress(a) || 'No address on file'}</div>`)), 'No pickups assigned to you right now.')}
-      ${this._rentalDashSection('My Recent Activity', history.map(a => this._rentalDashRow(a, `<div style="font-size:11px;color:var(--text-muted)">${a.display_status}</div>`)), 'No completed deliveries or pickups yet.')}
+      ${this._rentalDashSection('My Recent Activity', history.map(a => this._rentalDashRow(a, `<div style="font-size:11px;color:var(--text-muted)">${a.display_status}</div>`, '', `<div style="font-size:12px;color:var(--text-muted)">📍 ${this._rentalPickupAddress(a) || 'No address on file'}</div>`, false)), 'No completed deliveries or pickups yet.')}
     `;
   },
 
@@ -5281,8 +5304,12 @@ const App = {
     inputEl.value = '';
     if (!file) return;
     const text = await file.text();
-    const rows = this._parseCsv(text);
-    if (!rows.length) { this.alert('No data rows found in CSV', 'error'); return; }
+    const { headers, rows: rawRows } = this._parseCsv(text);
+    if (!rawRows.length) { this.alert('No data rows found in CSV', 'error'); return; }
+
+    const mapping = await this._showFieldMappingModal({ title: 'Map Import Columns', headers, fields: this._rentalImportFields });
+    if (!mapping) return;
+    const rows = this._remapCsvRows(rawRows, mapping);
 
     await this._runBatchedCsvImport({
       rows, endpoint: '/products/import/rentals', title: 'Importing Rental Items',
@@ -6659,6 +6686,7 @@ const App = {
               <input type="hidden" id="rc-branch" value="${defaultBranch?.id || ''}">`}
             </div>
           </div>
+          <div id="rc-customer-warning" style="display:none;margin-top:6px"></div>
           <p style="font-size:11px;color:var(--text-muted);margin-top:-6px">Item availability below reflects stock at the selected location.</p>
           <div class="form-group"><label>Due Date *</label>
             <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
@@ -6791,6 +6819,24 @@ const App = {
     dd.style.display = '';
   },
 
+  // Mirrors lib/rentals.js's RENTAL_REQUIREMENTS exactly (same dual-
+  // maintenance pattern as App._permissionTree / PERMISSION_TREE) — only
+  // used here to preview what assertRentalCustomerEligible would reject, so
+  // staff see it before attempting to place the rental on hold rather than
+  // only after a failed submit.
+  _rentalMissingFieldLabels(c) {
+    const reqs = [
+      { label: 'Photo ID (type & number)', ok: !!(c.rental_id_type && c.rental_id_number) },
+      { label: 'ID scan', ok: !!c.rental_id_scan_path },
+      { label: 'Proof of address', ok: !!c.rental_address_proof_path },
+      { label: 'Reference 1 (name & phone)', ok: !!(c.rental_reference_name && c.rental_reference_phone) },
+      { label: 'Reference 1 ID scan', ok: !!c.rental_reference_id_path },
+      { label: 'Reference 2 (name & phone)', ok: !!(c.rental_reference2_name && c.rental_reference2_phone) },
+      { label: 'Reference 3 (name & phone)', ok: !!(c.rental_reference3_name && c.rental_reference3_phone) },
+    ];
+    return reqs.filter(r => !r.ok).map(r => r.label);
+  },
+
   _selectRentalCustomer(id) {
     const c = (this._rentalCustomers || []).find(x => x.id === id);
     if (!c) return;
@@ -6800,6 +6846,26 @@ const App = {
     if (idEl) idEl.value = id;
     if (searchEl) searchEl.value = `${c.first_name} ${c.last_name}`;
     if (dd) dd.style.display = 'none';
+
+    const warnEl = document.getElementById('rc-customer-warning');
+    if (warnEl) {
+      if (!c.is_rental_customer) {
+        warnEl.style.display = '';
+        warnEl.innerHTML = `<div style="padding:8px 10px;background:#fff3f3;border:1px solid #f44336;border-radius:6px;color:#c62828;font-size:12px">&#9888; Not set up as a rental customer yet — edit them first to add photo ID, proof of address, and references.</div>`;
+      } else {
+        const missing = this._rentalMissingFieldLabels(c);
+        if (!missing.length) {
+          warnEl.style.display = 'none';
+          warnEl.innerHTML = '';
+        } else if (c.rental_preapproved) {
+          warnEl.style.display = '';
+          warnEl.innerHTML = `<div style="padding:8px 10px;background:#fff8e1;border:1px solid #f9a825;border-radius:6px;color:#8d6e00;font-size:12px">&#9888; Preapproved, but still missing: ${missing.join(', ')} — collect when possible.</div>`;
+        } else {
+          warnEl.style.display = '';
+          warnEl.innerHTML = `<div style="padding:8px 10px;background:#fff3f3;border:1px solid #f44336;border-radius:6px;color:#c62828;font-size:12px">&#9888; Missing ${missing.join(', ')} — this rental can't be placed on hold until it's added (or the customer is marked Preapproved).</div>`;
+        }
+      }
+    }
   },
 
   addRentalCheckoutLine() {
@@ -9827,8 +9893,12 @@ const App = {
     inputEl.value = '';
     if (!file) return;
     const text = await file.text();
-    const rows = this._parseCsv(text);
-    if (!rows.length) { this.alert('No data rows found in CSV', 'error'); return; }
+    const { headers, rows: rawRows } = this._parseCsv(text);
+    if (!rawRows.length) { this.alert('No data rows found in CSV', 'error'); return; }
+
+    const mapping = await this._showFieldMappingModal({ title: 'Map Import Columns', headers, fields: this._productImportFields });
+    if (!mapping) return;
+    const rows = this._remapCsvRows(rawRows, mapping);
 
     const choice = await this._askImportExistingSkuMode();
     if (choice === null) return; // dismissed without choosing
@@ -10076,14 +10146,165 @@ const App = {
     if (btn) { btn.disabled = true; btn.textContent = 'Cancelling…'; }
   },
 
+  // Returns { headers, rows } — headers is the raw column order from the
+  // file (used by _showFieldMappingModal to build the mapping UI), rows are
+  // keyed by those same raw header strings (not yet mapped to backend field
+  // names — see _remapCsvRows).
   _parseCsv(text) {
     const lines = text.trim().split(/\r?\n/);
-    if (lines.length < 2) return [];
+    if (lines.length < 2) return { headers: [], rows: [] };
     const headers = this._parseCsvLine(lines[0]).map(h => h.trim());
-    return lines.slice(1).filter(l => l.trim()).map(line => {
+    const rows = lines.slice(1).filter(l => l.trim()).map(line => {
       const vals = this._parseCsvLine(line);
       return Object.fromEntries(headers.map((h, i) => [h, (vals[i] || '').trim()]));
     });
+    return { headers, rows };
+  },
+
+  // ─── Import Column Mapping ────────────────────────────────
+  // Field definitions for the three CSV imports that now go through a
+  // mapping step — key must match exactly what the corresponding backend
+  // /import endpoint destructures off each row (routes/products.js POST
+  // /import and /import/rentals, routes/customers.js POST /import).
+  _productImportFields: [
+    { key: 'sku',            label: 'SKU',              required: true },
+    { key: 'barcode',        label: 'Barcode' },
+    { key: 'name',           label: 'Name',             required: true },
+    { key: 'description',    label: 'Description' },
+    { key: 'category_name',  label: 'Category' },
+    { key: 'price',          label: 'Price' },
+    { key: 'cost',           label: 'Cost' },
+    { key: 'tax_rate',       label: 'Tax Rate (%)' },
+    { key: 'stock_qty',      label: 'Stock Qty' },
+    { key: 'min_stock',      label: 'Min Stock' },
+    { key: 'active',         label: 'Active (1/0)' },
+    { key: 'supplier_name',  label: 'Supplier' },
+  ],
+  _rentalImportFields: [
+    { key: 'sku',                    label: 'SKU',        required: true },
+    { key: 'name',                   label: 'Name',       required: true },
+    { key: 'description',            label: 'Description' },
+    { key: 'model_number',           label: 'Model Number' },
+    { key: 'size',                   label: 'Size' },
+    { key: 'category_name',          label: 'Category' },
+    { key: 'branch_name',            label: 'Branch' },
+    { key: 'stock_qty',              label: 'Stock Qty' },
+    { key: 'min_stock',              label: 'Min Stock' },
+    { key: 'tax_rate',               label: 'Tax Rate (%)' },
+    { key: 'taxable',                label: 'Taxable (1/0)' },
+    { key: 'rental_classification',  label: 'Classification (tool/equipment)' },
+    { key: 'daily_rate',             label: 'Daily Rate' },
+    { key: 'weekly_rate',            label: 'Weekly Rate' },
+    { key: 'monthly_rate',           label: 'Monthly Rate' },
+    { key: 'hourly_rate',            label: 'Hourly Rate' },
+    { key: 'replacement_value',      label: 'Replacement Value' },
+    { key: 'is_accessory',           label: 'Is Accessory (1/0)' },
+    { key: 'active',                 label: 'Active (1/0)' },
+  ],
+  _customerImportFields: [
+    { key: 'first_name',            label: 'First Name', required: true },
+    { key: 'last_name',             label: 'Last Name',  required: true },
+    { key: 'email',                 label: 'Email' },
+    { key: 'phone',                 label: 'Phone' },
+    { key: 'address',               label: 'Address' },
+    { key: 'city',                  label: 'City' },
+    { key: 'state',                 label: 'State' },
+    { key: 'zip',                   label: 'ZIP' },
+    { key: 'customer_type',         label: 'Customer Type (cash/credit)' },
+    { key: 'credit_terms_days',     label: 'Credit Terms (days)' },
+    { key: 'credit_limit',          label: 'Credit Limit' },
+    { key: 'tax_exempt',            label: 'Tax Exempt (1/0)' },
+    { key: 'tax_exemption_number',  label: 'Tax Exemption #' },
+    { key: 'customer_category_name', label: 'Category' },
+    { key: 'notes',                 label: 'Notes' },
+    { key: 'is_rental_customer',              label: 'Rental Customer? (1/0)',      group: 'Rental Compliance (optional)' },
+    { key: 'rental_id_type',                  label: 'Rental ID Type',              group: 'Rental Compliance (optional)' },
+    { key: 'rental_id_number',                label: 'Rental ID Number',            group: 'Rental Compliance (optional)' },
+    { key: 'rental_address_proof_type',       label: 'Address Proof Type',          group: 'Rental Compliance (optional)' },
+    { key: 'rental_reference_name',           label: 'Reference 1 Name',            group: 'Rental Compliance (optional)' },
+    { key: 'rental_reference_phone',          label: 'Reference 1 Phone',           group: 'Rental Compliance (optional)' },
+    { key: 'rental_reference_relationship',   label: 'Reference 1 Relationship',    group: 'Rental Compliance (optional)' },
+    { key: 'rental_reference_address',        label: 'Reference 1 Address',         group: 'Rental Compliance (optional)' },
+    { key: 'rental_reference2_name',          label: 'Reference 2 Name',            group: 'Rental Compliance (optional)' },
+    { key: 'rental_reference2_phone',         label: 'Reference 2 Phone',           group: 'Rental Compliance (optional)' },
+    { key: 'rental_reference2_relationship',  label: 'Reference 2 Relationship',    group: 'Rental Compliance (optional)' },
+    { key: 'rental_reference3_name',          label: 'Reference 3 Name',            group: 'Rental Compliance (optional)' },
+    { key: 'rental_reference3_phone',         label: 'Reference 3 Phone',           group: 'Rental Compliance (optional)' },
+    { key: 'rental_reference3_relationship',  label: 'Reference 3 Relationship',    group: 'Rental Compliance (optional)' },
+    { key: 'rental_preapproved',              label: 'Preapproved (1/0) — bypasses missing-info check', group: 'Rental Compliance (optional)' },
+  ],
+
+  // Shown once per CSV import, right after the file is parsed and before any
+  // other import-options prompt (existing-SKU mode, duplicate mode, ...).
+  // Lets the user match each of our target fields to whichever column in
+  // their file actually holds that data — the file's own headers don't need
+  // to match our field names at all. Auto-maps anything whose header, once
+  // lowercased with spaces/punctuation stripped, matches the target field's
+  // key or label the same way (so a re-import of our own template, or a
+  // file that already uses matching headers, auto-fills every field and
+  // just needs Continue). Resolves to a { targetField: csvHeader } mapping,
+  // or null if the user cancels.
+  _showFieldMappingModal({ title, headers, fields }) {
+    const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const normedHeaders = headers.map(h => ({ header: h, n: norm(h) }));
+    const autoMap = {};
+    for (const f of fields) {
+      const hit = normedHeaders.find(x => x.n === norm(f.key)) || normedHeaders.find(x => x.n === norm(f.label));
+      if (hit) autoMap[f.key] = hit.header;
+    }
+    return new Promise(resolve => {
+      document.querySelectorAll('.modal-overlay').forEach(el => el.remove());
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      const optionsHtml = fieldKey => `<option value="">— Not mapped —</option>` +
+        headers.map(h => `<option value="${h.replace(/"/g,'&quot;')}" ${autoMap[fieldKey] === h ? 'selected' : ''}>${h}</option>`).join('');
+      const rowHtml = f => `
+        <div style="display:flex;align-items:center;gap:8px;padding:4px 0">
+          <label style="flex:0 0 200px;font-size:13px">${f.label}${f.required ? ' <span style="color:var(--danger)">*</span>' : ''}</label>
+          <select data-field="${f.key}" style="flex:1;padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--card);color:var(--text)">${optionsHtml(f.key)}</select>
+        </div>`;
+      let bodyHtml = '', currentGroup;
+      for (const f of fields) {
+        if (f.group !== currentGroup) {
+          currentGroup = f.group;
+          if (currentGroup) bodyHtml += `<div style="font-weight:600;font-size:12px;margin:14px 0 4px;color:var(--text-muted);text-transform:uppercase">${currentGroup}</div>`;
+        }
+        bodyHtml += rowHtml(f);
+      }
+      const unmappedCount = headers.length - new Set(Object.values(autoMap)).size;
+      overlay.innerHTML = `
+        <div class="modal" style="max-width:580px">
+          <div class="modal-header"><span class="modal-title">${title}</span></div>
+          <div class="modal-body">
+            <p style="font-size:13px;color:var(--text-muted);margin-bottom:8px">Match each field below to the matching column in your file. Columns that already look like a match are pre-selected — double-check them and adjust anything wrong. Fields left "Not mapped" are skipped (default value used, if any).${unmappedCount > 0 ? ` ${unmappedCount} column(s) in your file weren't auto-matched to anything.` : ''}</p>
+            <div style="max-height:420px;overflow-y:auto">${bodyHtml}</div>
+          </div>
+          <div class="modal-footer" style="flex-wrap:wrap;gap:8px">
+            <button class="btn btn-secondary btn-sm" id="fm-cancel">Cancel</button>
+            <button class="btn btn-primary btn-sm" id="fm-continue">Continue</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      const finish = mapping => { overlay.remove(); resolve(mapping); };
+      overlay.querySelector('#fm-cancel').addEventListener('click', () => finish(null));
+      overlay.querySelector('#fm-continue').addEventListener('click', () => {
+        const mapping = {};
+        overlay.querySelectorAll('select[data-field]').forEach(sel => { mapping[sel.dataset.field] = sel.value; });
+        const missing = fields.filter(f => f.required && !mapping[f.key]);
+        if (missing.length) { this.alert(`Please map required field(s): ${missing.map(f => f.label).join(', ')}`, 'error'); return; }
+        finish(mapping);
+      });
+    });
+  },
+
+  // Applies a { targetField: csvHeader } mapping (from _showFieldMappingModal)
+  // to rows keyed by raw CSV headers (from _parseCsv), producing rows keyed
+  // by the backend's expected field names — an unmapped target field is
+  // simply absent from the output row, same as if the CSV never had that
+  // column at all.
+  _remapCsvRows(rows, mapping) {
+    const entries = Object.entries(mapping).filter(([, header]) => header);
+    return rows.map(row => Object.fromEntries(entries.map(([field, header]) => [field, row[header]])));
   },
 
   _parseCsvLine(line) {
@@ -10485,10 +10706,11 @@ const App = {
           : '<span class="badge-pill" style="background:#e0e0e0;color:#555">Cash</span>';
         const taxExemptBadge = c.tax_exempt ? ' <span class="badge-pill" style="background:#e8f5e9;color:#2e7d32;border:1px solid #a5d6a7">Tax Exempt</span>' : '';
         const rentalBadge = c.is_rental_customer ? ' <span class="badge-pill badge-purple">🔑 Rental</span>' : '';
+        const preapprovedBadge = c.is_rental_customer && c.rental_preapproved ? ' <span class="badge-pill badge-success" title="Can be rented to despite incomplete compliance info">Preapproved</span>' : '';
         return `<tr>
         <td style="font-family:monospace;font-size:12px">${c.customer_number}</td>
         <td class="fw-600">${c.first_name} ${c.last_name}</td>
-        <td style="white-space:nowrap">${typeBadge}${taxExemptBadge}${rentalBadge}</td>
+        <td style="white-space:nowrap">${typeBadge}${taxExemptBadge}${rentalBadge}${preapprovedBadge}</td>
         <td style="color:var(--text-muted)">${c.email||'—'}</td>
         <td>${c.phone||'—'}</td>
         <td style="color:var(--text-muted)">${c.city||'—'}</td>
@@ -10652,6 +10874,18 @@ const App = {
                 <div class="form-group"><label>Phone</label><input id="cf-ref3-phone" value="${c.rental_reference3_phone||''}"></div>
               </div>
               <div class="form-group"><label>Relationship</label><input id="cf-ref3-relationship" value="${c.rental_reference3_relationship||''}" placeholder="e.g. Employer, Family, Friend"></div>
+              <hr style="margin:12px 0">
+              <strong style="font-size:12px;color:var(--text-muted);text-transform:uppercase">Preapproved (Legacy Migration)</strong>
+              ${this.can('customers_rental_preapprove') ? `
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:normal;margin-top:6px">
+                <input type="checkbox" id="cf-rental-preapproved" ${c.rental_preapproved?'checked':''} style="margin:0">
+                Preapproved — allow rentals despite incomplete info above
+              </label>
+              <p style="font-size:11px;color:var(--text-muted);margin:4px 0 0">For rental customers migrated from a previous system whose old export didn't carry the ID/reference/document data above. Still shows on the Missing Rental Info report until those fields are actually filled in — this only stops the gap from blocking a new rental today.</p>
+              ` : `
+              <p style="font-size:12px;margin-top:6px;${c.rental_preapproved ? 'color:#2e7d32' : 'color:var(--text-muted)'}">${c.rental_preapproved ? '✓ Preapproved for rentals despite incomplete info' : 'Not preapproved'}</p>
+              `}
+              ${c.rental_preapproved && c.rental_preapproved_at ? `<p style="font-size:11px;color:var(--text-muted);margin-top:2px">Approved ${new Date(c.rental_preapproved_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}${c.rental_preapproved_by_name ? ' by ' + c.rental_preapproved_by_name : ''}</p>` : ''}
             </div>
           </div>
           <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">
@@ -10806,6 +11040,7 @@ const App = {
       rental_reference3_name: isRentalCustomer ? (document.getElementById('cf-ref3-name')?.value.trim() || null) : null,
       rental_reference3_phone: isRentalCustomer ? (document.getElementById('cf-ref3-phone')?.value.trim() || null) : null,
       rental_reference3_relationship: isRentalCustomer ? (document.getElementById('cf-ref3-relationship')?.value.trim() || null) : null,
+      rental_preapproved: isRentalCustomer ? (document.getElementById('cf-rental-preapproved')?.checked ? 1 : 0) : 0,
       discount_card_type_id: document.getElementById('cf-discount-card-type')?.value || null,
       discount_card_number: document.getElementById('cf-discount-card-number')?.value.trim() || null,
       cash_back_card_type_id: document.getElementById('cf-cash-back-card-type')?.value || null,
@@ -10881,8 +11116,18 @@ const App = {
     inputEl.value = '';
     if (!file) return;
     const text = await file.text();
-    const rows = this._parseCsv(text);
-    if (!rows.length) { this.alert('No data rows found in CSV', 'error'); return; }
+    const { headers, rows: rawRows } = this._parseCsv(text);
+    if (!rawRows.length) { this.alert('No data rows found in CSV', 'error'); return; }
+
+    // rental_preapproved only offered to map when the employee actually holds
+    // customers_rental_preapprove — mirrors the server-side gate in POST
+    // /customers/import (routes/customers.js), which silently ignores the
+    // column anyway without that permission; hiding it here avoids a mapping
+    // choice that would quietly do nothing.
+    const importFields = this._customerImportFields.filter(f => f.key !== 'rental_preapproved' || this.can('customers_rental_preapprove'));
+    const mapping = await this._showFieldMappingModal({ title: 'Map Import Columns', headers, fields: importFields });
+    if (!mapping) return;
+    const rows = this._remapCsvRows(rawRows, mapping);
 
     const duplicateMode = await this._askCustomerDuplicateMode();
     if (duplicateMode === null) return; // dismissed without choosing
@@ -10967,12 +11212,13 @@ const App = {
         <div class="modal-header"><span class="modal-title">Rental Customers Missing Info</span><button class="modal-close">✕</button></div>
         <div class="modal-body" style="padding:0">
           ${!rows.length ? '<div class="empty-state" style="padding:20px"><p>Every rental customer has a complete compliance record.</p></div>' : `
-          <p style="font-size:12px;color:var(--text-muted);margin:12px 12px 0">${rows.length} rental customer${rows.length === 1 ? '' : 's'} can't be rented to yet until the listed info is added.</p>
+          <p style="font-size:12px;color:var(--text-muted);margin:12px 12px 0">${rows.length} rental customer${rows.length === 1 ? '' : 's'} missing info below. <strong>Preapproved</strong> ones can still be rented to today — the rest are blocked until it's added.</p>
           <table style="width:100%;border-collapse:collapse;margin-top:8px">
             <thead><tr style="background:var(--bg-secondary,#f9fafb)">
               <th style="padding:8px 12px;text-align:left;font-size:12px">Customer #</th>
               <th style="padding:8px 12px;text-align:left;font-size:12px">Name</th>
               <th style="padding:8px 12px;text-align:left;font-size:12px">Phone</th>
+              <th style="padding:8px 12px;text-align:left;font-size:12px">Status</th>
               <th style="padding:8px 12px;text-align:left;font-size:12px">Missing</th>
               <th style="padding:8px 12px"></th>
             </tr></thead>
@@ -10981,6 +11227,7 @@ const App = {
                 <td style="padding:8px 12px;font-size:12px;font-family:monospace">${r.customer_number}</td>
                 <td style="padding:8px 12px;font-size:12px">${r.first_name} ${r.last_name}</td>
                 <td style="padding:8px 12px;font-size:12px">${r.phone || '—'}</td>
+                <td style="padding:8px 12px;font-size:12px">${r.rental_preapproved ? '<span class="badge-pill badge-success">Preapproved</span>' : '<span class="badge-pill badge-danger">Blocked</span>'}</td>
                 <td style="padding:8px 12px;font-size:12px">${r.missing.map(m => `<span class="badge-pill badge-danger" style="margin:2px">${m}</span>`).join(' ')}</td>
                 <td style="padding:8px 12px"><button class="btn btn-secondary btn-sm" onclick="App.closeModal();App.showCustomerForm(${r.id})">Edit</button></td>
               </tr>`).join('')}
@@ -11093,7 +11340,7 @@ const App = {
     this.showModal(`
       <div class="modal" style="max-width:660px">
         <div class="modal-header">
-          <span class="modal-title">${c.first_name} ${c.last_name}${isCredit ? ` <span style="font-size:12px;padding:2px 8px;border-radius:4px;background:#e3f2fd;color:#1565c0;margin-left:6px">Credit</span>` : ''}${c.account_blocked ? ` <span style="font-size:12px;padding:2px 8px;border-radius:4px;background:#ffebee;color:#c62828;margin-left:4px">BLOCKED</span>` : ''}${c.is_rental_customer ? ` <span class="badge-pill badge-purple" style="font-size:12px;margin-left:4px">🔑 Rental</span>` : ''}</span>
+          <span class="modal-title">${c.first_name} ${c.last_name}${isCredit ? ` <span style="font-size:12px;padding:2px 8px;border-radius:4px;background:#e3f2fd;color:#1565c0;margin-left:6px">Credit</span>` : ''}${c.account_blocked ? ` <span style="font-size:12px;padding:2px 8px;border-radius:4px;background:#ffebee;color:#c62828;margin-left:4px">BLOCKED</span>` : ''}${c.is_rental_customer ? ` <span class="badge-pill badge-purple" style="font-size:12px;margin-left:4px">🔑 Rental</span>` : ''}${c.is_rental_customer && c.rental_preapproved ? ` <span class="badge-pill badge-success" style="font-size:12px;margin-left:4px" title="Can be rented to despite incomplete compliance info">Preapproved</span>` : ''}</span>
           <button class="modal-close">✕</button>
         </div>
         <div class="modal-body">
@@ -17907,6 +18154,7 @@ const App = {
       { key: 'customers_export_balances', label: 'Export Balances' },
       { key: 'customers_missing_rental_info', label: 'Missing Rental Info Report' },
       { key: 'customers_print_history', label: 'Print Customer History' },
+      { key: 'customers_rental_preapprove', label: 'Preapprove Rental Customers With Incomplete Info' },
     ]},
     { key: 'transactions', label: 'Transactions', subs: [
       { key: 'transactions_export', label: 'Export Transactions' },

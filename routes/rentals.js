@@ -3,7 +3,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { getOutstandingQty } = require('../lib/rentalAvailability');
 const { getBranchStock, feeFor, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, dueDateTime, requiredDepositReturnMethod } = require('../lib/rentals');
-const { requirePermission, requireAnyPermission, requireAuth, can } = require('../lib/permissions');
+const { requirePermission, requireAnyPermission, requireAuth, can, canManageRentals, requireRentalsManage } = require('../lib/permissions');
 const { runCreditCheck } = require('./customers');
 const { nextNumber } = require('../lib/nextNumber');
 const { calcRentalCommission } = require('./commissions');
@@ -58,7 +58,7 @@ function attachDepositReturnPolicy(agreement) {
 
 // ─── Agreements list/detail ───────────────────────────────────────────────
 
-router.get('/agreements', requirePermission('rentals'), async (req, res) => {
+router.get('/agreements', requireRentalsManage, async (req, res) => {
   try {
     const { customer_id, branch_id, view } = req.query;
     let sql = `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name,
@@ -120,7 +120,7 @@ router.get('/agreements', requirePermission('rentals'), async (req, res) => {
 // An 'overdue' entry should only be momentarily visible: server.js's
 // missed-pickup check auto-pauses it shortly after, which drops it out of
 // this list (is_paused=1) and into the pause-history/contact workflow below.
-router.get('/agreements/pickup-reminders', requirePermission('rentals'), async (req, res) => {
+router.get('/agreements/pickup-reminders', requireRentalsManage, async (req, res) => {
   try {
     const { rows } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name,
       c.phone as customer_phone, c.email as customer_email,
@@ -147,14 +147,19 @@ router.get('/agreements/pickup-reminders', requirePermission('rentals'), async (
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Restricted, driver-facing queue — deliberately NOT gated by the broad
-// requirePermission('rentals') the other agreement routes use, so a driver's
-// security group never needs that module-wide (all-financial-fields)
-// permission just for their own dashboard to load. Explicit column list, no
-// `ra.*` — no deposit/damage/tax/checkout/settlement figures anywhere in
-// this response, only what a driver actually needs: which job, what item,
-// where to take it, and who to ask for. See renderDriverDashboard in
-// public/index.html, the only consumer of this endpoint.
+// Restricted, driver-facing queue — deliberately NOT gated by
+// requireRentalsManage (the broad, all-financial-fields check the other
+// agreement routes use), so a driver's security group never needs that
+// module-wide permission just for their own dashboard to load. Explicit
+// column list, no `ra.*` — no deposit/damage/tax/checkout/settlement figures
+// anywhere in this response, only what a driver actually needs: which job,
+// what item, where to take it, and who to ask for. See renderDriverDashboard
+// in public/index.html, the only consumer of this endpoint. Note that
+// canManageRentals()/requireRentalsManage() in lib/permissions.js also
+// carve out rentals_confirm_pickup/rentals_confirm_delivery — the two subs a
+// driver-only group would actually have — from unlocking the full routes
+// below, so a driver stuck at this endpoint can't just be granted broader
+// access by accident.
 router.get('/agreements/driver-queue', requireAuth, async (req, res) => {
   try {
     if (!req.employee.is_driver) return res.status(403).json({ error: 'Only drivers can view this' });
@@ -177,7 +182,7 @@ router.get('/agreements/driver-queue', requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/agreements/:id', requirePermission('rentals'), async (req, res) => {
+router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
   try {
     const { rows: [agreement] } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name,
       c.phone as customer_phone, c.email as customer_email,
@@ -270,7 +275,7 @@ router.get('/agreements/:id', requirePermission('rentals'), async (req, res) => 
 
 // ─── Availability ───────────────────────────────────────────────────────────
 
-router.get('/availability', requirePermission('rentals'), async (req, res) => {
+router.get('/availability', requireRentalsManage, async (req, res) => {
   try {
     const { product_id, branch_id } = req.query;
     if (!product_id) return res.status(400).json({ error: 'product_id is required' });
@@ -773,7 +778,7 @@ async function validateOverridePin(pin, permission) {
 // as voiding a cart line. The button to open this is visible to anyone who
 // can see the agreement; the PIN is what actually gates it, not a separate
 // permission on visibility.
-router.post('/agreements/:id/pause', requirePermission('rentals'), async (req, res) => {
+router.post('/agreements/:id/pause', requireRentalsManage, async (req, res) => {
   try {
     const { reason, notes, override_pin, employee_id } = req.body;
     if (!['maintenance', 'replacement', 'other'].includes(reason)) return res.status(400).json({ error: 'A valid reason (maintenance, replacement, or other) is required' });
@@ -814,7 +819,7 @@ router.post('/agreements/:id/pause', requirePermission('rentals'), async (req, r
 // Resuming just closes out the downtime and pushes the due date out by
 // however long it lasted — not the exceptional action pausing was, so no
 // PIN here. Rounds the extension UP to a whole day, in the customer's favor.
-router.patch('/agreements/:id/resume', requirePermission('rentals'), async (req, res) => {
+router.patch('/agreements/:id/resume', requireRentalsManage, async (req, res) => {
   try {
     const { employee_id } = req.body;
     const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
@@ -868,7 +873,7 @@ async function findOpenMissedPickupPause(agreementId) {
 // pause — actually sending the email itself is routes/email.js's job
 // (POST /email/send-missed-pickup-contact/:id); this just records that it
 // happened, same split as the rest of the app's email-vs-state separation.
-router.patch('/agreements/:id/missed-pickup-contact', requirePermission('rentals'), async (req, res) => {
+router.patch('/agreements/:id/missed-pickup-contact', requireRentalsManage, async (req, res) => {
   try {
     const { contact_method, notes, employee_id } = req.body;
     if (!['email', 'phone'].includes(contact_method)) return res.status(400).json({ error: 'contact_method must be "email" or "phone"' });
@@ -898,7 +903,7 @@ router.patch('/agreements/:id/missed-pickup-contact', requirePermission('rentals
 // staff attesting to the customer's decision, not the customer's own
 // verifiable action — there's no reply-parsing or click-to-confirm link
 // infrastructure in this app.
-router.patch('/agreements/:id/missed-pickup-confirm', requirePermission('rentals'), async (req, res) => {
+router.patch('/agreements/:id/missed-pickup-confirm', requireRentalsManage, async (req, res) => {
   try {
     const { decision, new_due_date, notes, employee_id } = req.body;
     if (!['continue', 'stop'].includes(decision)) return res.status(400).json({ error: 'decision must be "continue" or "stop"' });
@@ -1288,7 +1293,12 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
 // final-payment: the settlement transaction is created fresh at the moment
 // payment is actually taken, using the cashier's own drawer session rather
 // than whatever (if anything) security had open at sign-in.
-router.patch('/agreements/:id/collect-balance', requireAnyPermission('pos', 'rentals'), async (req, res) => {
+router.patch('/agreements/:id/collect-balance', (req, res, next) => {
+  if (req.apiKey) return next();
+  if (!req.employee) return res.status(401).json({ error: 'Authentication required' });
+  if (can(req.employee.permissions, 'pos') || canManageRentals(req.employee.permissions)) return next();
+  return res.status(403).json({ error: 'Missing permission: pos or rentals' });
+}, async (req, res) => {
   try {
     const { payment_method, amount_tendered, employee_id, drawer_session_id, branch_id } = req.body;
     const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
@@ -1439,7 +1449,7 @@ router.patch('/agreements/:id/deposit-return', requirePermission('rentals_deposi
 // SQL aggregates, since the bucketing logic (credit-checkout vs store credit
 // vs a recorded method vs still-pending vs no-refund-due) isn't expressible
 // as a single GROUP BY.
-router.get('/deposits/summary', requirePermission('rentals'), async (req, res) => {
+router.get('/deposits/summary', requireRentalsManage, async (req, res) => {
   try {
     const { rows } = await db.execute({ sql: `SELECT ra.status, ra.deposit_total, ra.credit_note_amount, ra.deposit_return_method,
       ra.settlement_transaction_id, ra.checkout_transaction_id, co.payment_method as checkout_payment_method, se.total as settlement_total

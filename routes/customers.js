@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
-const { requireAuth, requirePermission } = require('../lib/permissions');
+const { requireAuth, requirePermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const multer = require('multer');
 const path = require('path');
@@ -35,6 +35,32 @@ async function findDuplicateCustomers({ email, phone, first_name, last_name }) {
     args: [email || '', phone || '', first_name || '', last_name || ''],
   });
   return rows;
+}
+
+// Resolves the three rental_preapproved* columns for a customer create/
+// update. Changing the flag needs customers_rental_preapprove specifically —
+// customers_edit alone can't touch it (see lib/rentals.js
+// assertRentalCustomerEligible, the compliance gate this flag bypasses) — so
+// a request from someone without it just keeps whatever the customer
+// already had, the same "silently ignore, don't 403 the whole save" pattern
+// used for is_rental_customer-gated fields elsewhere in this file. Flipping
+// 0->1 stamps who/when; flipping 1->0 (or the customer no longer being a
+// rental customer at all) clears both, since a later re-approval should
+// carry a fresh timestamp, not the old one.
+function resolveRentalPreapproval(req, current, isRentalCust, requested) {
+  const currentVal = current?.rental_preapproved ? 1 : 0;
+  const keepCurrent = () => ({
+    rental_preapproved: currentVal,
+    rental_preapproved_by: current?.rental_preapproved_by ?? null,
+    rental_preapproved_at: current?.rental_preapproved_at ?? null,
+  });
+  if (!isRentalCust) return { rental_preapproved: 0, rental_preapproved_by: null, rental_preapproved_at: null };
+  if (!can(req.employee?.permissions, 'customers_rental_preapprove')) return keepCurrent();
+  const newVal = requested ? 1 : 0;
+  if (newVal === currentVal) return keepCurrent();
+  return newVal
+    ? { rental_preapproved: 1, rental_preapproved_by: req.employee?.id || null, rental_preapproved_at: new Date().toISOString() }
+    : { rental_preapproved: 0, rental_preapproved_by: null, rental_preapproved_at: null };
 }
 
 // Check if a credit customer has exceeded their payment terms and block/unblock accordingly
@@ -120,10 +146,14 @@ const CSV_COLUMNS = ['first_name','last_name','email','phone','address','city','
 // scan, and reference-1 ID scan uploaded one-at-a-time per customer (POST
 // /:id/id-scan, /:id/address-proof, /:id/reference-id below) since a CSV
 // row can't carry a file, but everything else can be bulk-loaded here.
+// rental_preapproved lets a bulk-migrated row bypass the missing-field gate
+// (lib/rentals.js assertRentalCustomerEligible) despite everything a legacy
+// export can't carry — see POST /import below, which only honors it for the
+// employee running the import if they hold customers_rental_preapprove.
 const RENTAL_CSV_COLUMNS = ['is_rental_customer','rental_id_type','rental_id_number','rental_address_proof_type',
   'rental_reference_name','rental_reference_phone','rental_reference_relationship','rental_reference_address',
   'rental_reference2_name','rental_reference2_phone','rental_reference2_relationship',
-  'rental_reference3_name','rental_reference3_phone','rental_reference3_relationship'];
+  'rental_reference3_name','rental_reference3_phone','rental_reference3_relationship','rental_preapproved'];
 CSV_COLUMNS.push(...RENTAL_CSV_COLUMNS);
 
 function escapeCsv(v) {
@@ -140,7 +170,7 @@ function csvBool(v) {
 // GET CSV template for bulk import
 router.get('/export/template', requirePermission('customers_import'), (req, res) => {
   const example = ['Jane','Doe','jane.doe@example.com','555-0100','123 Main St','Springfield','IL','62701','cash','30','0','0','','Individual','Prefers email contact',
-    '1','drivers_license','D1234567','utility_bill','John Smith','555-0101','Brother','456 Oak St','Mary Jones','555-0102','Friend','Bob White','555-0103','Coworker'];
+    '1','drivers_license','D1234567','utility_bill','John Smith','555-0101','Brother','456 Oak St','Mary Jones','555-0102','Friend','Bob White','555-0103','Coworker','0'];
   const csv = [CSV_COLUMNS.join(','), example.map(escapeCsv).join(',')].join('\r\n');
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename="customer_import_template.csv"');
@@ -227,6 +257,7 @@ router.get('/rental-incomplete', requirePermission('customers_missing_rental_inf
       .map(({ c, missing }) => ({
         id: c.id, customer_number: c.customer_number, first_name: c.first_name, last_name: c.last_name,
         email: c.email, phone: c.phone,
+        rental_preapproved: !!c.rental_preapproved,
         missing: missing.map(m => m.label),
       }));
     res.json(results);
@@ -248,10 +279,12 @@ router.get('/rental-incomplete', requirePermission('customers_missing_rental_inf
 const CUSTOMER_WITH_CARD_SELECT = `SELECT c.*, dct.name as discount_card_type_name, dct.discount_percent as discount_card_percent, dct.active as discount_card_type_active,
   cbct.name as cash_back_card_type_name, cbct.points_threshold as cash_back_points_threshold, cbct.reward_amount as cash_back_reward_amount,
   cbct.min_redeem_amount as cash_back_min_redeem_amount, cbct.min_redeem_days as cash_back_min_redeem_days, cbct.active as cash_back_card_type_active,
-  cc.name as customer_category_name, cc.discount_percent as customer_category_discount_percent, cc.active as customer_category_active
+  cc.name as customer_category_name, cc.discount_percent as customer_category_discount_percent, cc.active as customer_category_active,
+  rpe.first_name || ' ' || rpe.last_name as rental_preapproved_by_name
   FROM customers c LEFT JOIN discount_card_types dct ON c.discount_card_type_id = dct.id
   LEFT JOIN cash_back_card_types cbct ON c.cash_back_card_type_id = cbct.id
-  LEFT JOIN customer_categories cc ON c.customer_category_id = cc.id WHERE c.id = ?`;
+  LEFT JOIN customer_categories cc ON c.customer_category_id = cc.id
+  LEFT JOIN employees rpe ON c.rental_preapproved_by = rpe.id WHERE c.id = ?`;
 
 router.get('/:id', requireAuth, async (req, res) => {
   try {
@@ -318,6 +351,7 @@ router.post('/', requirePermission('customers_add'), async (req, res) => {
     rental_reference_name, rental_reference_phone, rental_reference_relationship, rental_reference_address,
     rental_reference2_name, rental_reference2_phone, rental_reference2_relationship,
     rental_reference3_name, rental_reference3_phone, rental_reference3_relationship,
+    rental_preapproved,
     discount_card_type_id, discount_card_number,
     cash_back_card_type_id, cash_back_card_number,
     customer_category_id,
@@ -342,19 +376,22 @@ router.post('/', requirePermission('customers_add'), async (req, res) => {
     const limit = parseFloat(credit_limit) || 0;
     const taxExempt = tax_exempt ? 1 : 0;
     const isRentalCust = is_rental_customer ? 1 : 0;
+    const preapproval = resolveRentalPreapproval(req, null, isRentalCust, !!rental_preapproved);
     const result = await db.execute({ sql: `INSERT INTO customers
       (customer_number,first_name,last_name,email,phone,address,city,state,zip,notes,customer_type,credit_terms_days,credit_limit,credit_enabled,tax_exempt,tax_exemption_number,
        is_rental_customer,rental_id_type,rental_id_number,rental_address_proof_type,
        rental_reference_name,rental_reference_phone,rental_reference_relationship,rental_reference_address,
        rental_reference2_name,rental_reference2_phone,rental_reference2_relationship,
        rental_reference3_name,rental_reference3_phone,rental_reference3_relationship,
+       rental_preapproved,rental_preapproved_by,rental_preapproved_at,
        discount_card_type_id,discount_card_number,cash_back_card_type_id,cash_back_card_number,customer_category_id)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       args: [customer_number, first_name, last_name, email||null, phone||null, address||null, city||null, state||null, zip||null, notes||null, type, terms, limit, creditEnabled, taxExempt, tax_exemption_number||null,
         isRentalCust, isRentalCust ? (rental_id_type||null) : null, isRentalCust ? (rental_id_number||null) : null, isRentalCust ? (rental_address_proof_type||null) : null,
         isRentalCust ? (rental_reference_name||null) : null, isRentalCust ? (rental_reference_phone||null) : null, isRentalCust ? (rental_reference_relationship||null) : null, isRentalCust ? (rental_reference_address||null) : null,
         isRentalCust ? (rental_reference2_name||null) : null, isRentalCust ? (rental_reference2_phone||null) : null, isRentalCust ? (rental_reference2_relationship||null) : null,
         isRentalCust ? (rental_reference3_name||null) : null, isRentalCust ? (rental_reference3_phone||null) : null, isRentalCust ? (rental_reference3_relationship||null) : null,
+        preapproval.rental_preapproved, preapproval.rental_preapproved_by, preapproval.rental_preapproved_at,
         discount_card_type_id || null, discount_card_type_id ? (discount_card_number || null) : null,
         cash_back_card_type_id || null, cash_back_card_type_id ? (cash_back_card_number || null) : null,
         customer_category_id || null] });
@@ -372,6 +409,7 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
     rental_reference_name, rental_reference_phone, rental_reference_relationship, rental_reference_address,
     rental_reference2_name, rental_reference2_phone, rental_reference2_relationship,
     rental_reference3_name, rental_reference3_phone, rental_reference3_relationship,
+    rental_preapproved,
     discount_card_type_id, discount_card_number,
     cash_back_card_type_id, cash_back_card_number,
     customer_category_id,
@@ -381,23 +419,27 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
     if (cardError) return res.status(400).json({ error: cardError });
     const cashBackCardError = await validateCashBackCard(cash_back_card_type_id, cash_back_card_number, req.params.id);
     if (cashBackCardError) return res.status(400).json({ error: cashBackCardError });
+    const { rows: [existing] } = await db.execute({ sql: 'SELECT rental_preapproved, rental_preapproved_by, rental_preapproved_at FROM customers WHERE id = ?', args: [req.params.id] });
     const type = customer_type || 'cash';
     const creditEnabled = type === 'credit' ? 1 : 0;
     const terms = parseInt(credit_terms_days) || 30;
     const limit = parseFloat(credit_limit) || 0;
     const taxExempt = tax_exempt ? 1 : 0;
     const isRentalCust = is_rental_customer ? 1 : 0;
+    const preapproval = resolveRentalPreapproval(req, existing, isRentalCust, !!rental_preapproved);
     await db.execute({ sql: `UPDATE customers SET first_name=?,last_name=?,email=?,phone=?,address=?,city=?,state=?,zip=?,notes=?,active=?,customer_type=?,credit_terms_days=?,credit_limit=?,credit_enabled=?,tax_exempt=?,tax_exemption_number=?,
       is_rental_customer=?,rental_id_type=?,rental_id_number=?,rental_address_proof_type=?,
       rental_reference_name=?,rental_reference_phone=?,rental_reference_relationship=?,rental_reference_address=?,
       rental_reference2_name=?,rental_reference2_phone=?,rental_reference2_relationship=?,
       rental_reference3_name=?,rental_reference3_phone=?,rental_reference3_relationship=?,
+      rental_preapproved=?,rental_preapproved_by=?,rental_preapproved_at=?,
       discount_card_type_id=?,discount_card_number=?,cash_back_card_type_id=?,cash_back_card_number=?,customer_category_id=? WHERE id=?`,
       args: [first_name, last_name, email||null, phone||null, address||null, city||null, state||null, zip||null, notes||null, active??1, type, terms, limit, creditEnabled, taxExempt, tax_exemption_number||null,
         isRentalCust, isRentalCust ? (rental_id_type||null) : null, isRentalCust ? (rental_id_number||null) : null, isRentalCust ? (rental_address_proof_type||null) : null,
         isRentalCust ? (rental_reference_name||null) : null, isRentalCust ? (rental_reference_phone||null) : null, isRentalCust ? (rental_reference_relationship||null) : null, isRentalCust ? (rental_reference_address||null) : null,
         isRentalCust ? (rental_reference2_name||null) : null, isRentalCust ? (rental_reference2_phone||null) : null, isRentalCust ? (rental_reference2_relationship||null) : null,
         isRentalCust ? (rental_reference3_name||null) : null, isRentalCust ? (rental_reference3_phone||null) : null, isRentalCust ? (rental_reference3_relationship||null) : null,
+        preapproval.rental_preapproved, preapproval.rental_preapproved_by, preapproval.rental_preapproved_at,
         discount_card_type_id || null, discount_card_type_id ? (discount_card_number || null) : null,
         cash_back_card_type_id || null, cash_back_card_type_id ? (cash_back_card_number || null) : null,
         customer_category_id || null, req.params.id] });
@@ -434,6 +476,13 @@ router.post('/import', requirePermission('customers_import'), async (req, res) =
 
     const { rows: catRows } = await db.execute({ sql: 'SELECT id, name FROM customer_categories', args: [] });
     const catMap = Object.fromEntries(catRows.map(c => [c.name.toLowerCase(), c.id]));
+    // Only an employee holding customers_rental_preapprove can actually set
+    // the flag through an import — same restriction as PUT /:id (see
+    // resolveRentalPreapproval above). Checked once for the whole batch
+    // rather than per row since the requester doesn't change mid-import; a
+    // row that asks for it without the permission just imports as an
+    // ordinary (non-preapproved) rental customer instead of failing.
+    const canPreapprove = can(req.employee?.permissions, 'customers_rental_preapprove');
 
     let created = 0, skipped = 0;
     const errors = [];
@@ -453,7 +502,7 @@ router.post('/import', requirePermission('customers_import'), async (req, res) =
         is_rental_customer, rental_id_type, rental_id_number, rental_address_proof_type,
         rental_reference_name, rental_reference_phone, rental_reference_relationship, rental_reference_address,
         rental_reference2_name, rental_reference2_phone, rental_reference2_relationship,
-        rental_reference3_name, rental_reference3_phone, rental_reference3_relationship } = row;
+        rental_reference3_name, rental_reference3_phone, rental_reference3_relationship, rental_preapproved } = row;
       const rowLabel = `${first_name || ''} ${last_name || ''}`.trim() || email || phone || `row ${rowNum}`;
       if (!first_name || !last_name) {
         const msg = `Row ${rowNum}: first and last name are required`;
@@ -477,18 +526,21 @@ router.post('/import', requirePermission('customers_import'), async (req, res) =
         // Rental fields only get stored when the row actually flags the
         // customer as a rental customer — same as POST / (single create).
         const isRentalCust = csvBool(is_rental_customer);
+        const isPreapproved = isRentalCust && canPreapprove && csvBool(rental_preapproved);
         const result = await db.execute({
           sql: `INSERT INTO customers (customer_number,first_name,last_name,email,phone,address,city,state,zip,customer_type,credit_terms_days,credit_limit,credit_enabled,tax_exempt,tax_exemption_number,customer_category_id,notes,
                 is_rental_customer,rental_id_type,rental_id_number,rental_address_proof_type,
                 rental_reference_name,rental_reference_phone,rental_reference_relationship,rental_reference_address,
                 rental_reference2_name,rental_reference2_phone,rental_reference2_relationship,
-                rental_reference3_name,rental_reference3_phone,rental_reference3_relationship)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+                rental_reference3_name,rental_reference3_phone,rental_reference3_relationship,
+                rental_preapproved,rental_preapproved_by,rental_preapproved_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           args: [customer_number, first_name, last_name, email||null, phone||null, address||null, city||null, state||null, zip||null, type, parseInt(credit_terms_days)||30, parseFloat(credit_limit)||0, type === 'credit' ? 1 : 0, tax_exempt ? 1 : 0, tax_exemption_number||null, category_id, notes||null,
             isRentalCust ? 1 : 0, isRentalCust ? (rental_id_type||null) : null, isRentalCust ? (rental_id_number||null) : null, isRentalCust ? (rental_address_proof_type||null) : null,
             isRentalCust ? (rental_reference_name||null) : null, isRentalCust ? (rental_reference_phone||null) : null, isRentalCust ? (rental_reference_relationship||null) : null, isRentalCust ? (rental_reference_address||null) : null,
             isRentalCust ? (rental_reference2_name||null) : null, isRentalCust ? (rental_reference2_phone||null) : null, isRentalCust ? (rental_reference2_relationship||null) : null,
-            isRentalCust ? (rental_reference3_name||null) : null, isRentalCust ? (rental_reference3_phone||null) : null, isRentalCust ? (rental_reference3_relationship||null) : null],
+            isRentalCust ? (rental_reference3_name||null) : null, isRentalCust ? (rental_reference3_phone||null) : null, isRentalCust ? (rental_reference3_relationship||null) : null,
+            isPreapproved ? 1 : 0, isPreapproved ? (req.employee?.id || null) : null, isPreapproved ? new Date().toISOString() : null],
         });
         created++;
         await logItem(rowLabel, Number(result.lastInsertRowid), 'created', null, null);
