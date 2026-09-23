@@ -1395,7 +1395,6 @@ const App = {
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     overlay.innerHTML = html;
-    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
     document.body.appendChild(overlay);
     overlay.querySelector('.modal-close')?.addEventListener('click', () => overlay.remove());
     return overlay;
@@ -1452,7 +1451,6 @@ const App = {
         </div>`;
       document.body.appendChild(overlay);
       const cancel = () => { overlay.remove(); resolve(null); };
-      overlay.addEventListener('click', e => { if (e.target === overlay) cancel(); });
       overlay.querySelector('#ctm-x').addEventListener('click', cancel);
       overlay.querySelector('#ctm-cancel').addEventListener('click', cancel);
       overlay.querySelector('#ctm-confirm').addEventListener('click', () => {
@@ -1576,7 +1574,6 @@ const App = {
         </div>`;
       document.body.appendChild(overlay);
       const cancel = () => { overlay.remove(); resolve(null); };
-      overlay.addEventListener('click', e => { if (e.target === overlay) cancel(); });
       overlay.querySelector('#cam-x').addEventListener('click', cancel);
       overlay.querySelector('#cam-cancel').addEventListener('click', cancel);
       overlay.querySelector('#cam-confirm').addEventListener('click', () => {
@@ -1612,7 +1609,6 @@ const App = {
         </div>`;
       document.body.appendChild(overlay);
       const cancel = () => { overlay.remove(); resolve(null); };
-      overlay.addEventListener('click', e => { if (e.target === overlay) cancel(); });
       overlay.querySelector('#gcm-x').addEventListener('click', cancel);
       overlay.querySelector('#gcm-cancel').addEventListener('click', cancel);
       overlay.querySelector('#gcm-confirm').addEventListener('click', () => {
@@ -1648,7 +1644,6 @@ const App = {
         </div>`;
       document.body.appendChild(overlay);
       const cancel = () => { overlay.remove(); resolve(null); };
-      overlay.addEventListener('click', e => { if (e.target === overlay) cancel(); });
       overlay.querySelector('#ddm-x').addEventListener('click', cancel);
       overlay.querySelector('#ddm-cancel').addEventListener('click', cancel);
       overlay.querySelector('#ddm-confirm').addEventListener('click', () => {
@@ -1695,7 +1690,6 @@ const App = {
       this._updateStmSummary(total);
 
       const cancel = () => { overlay.remove(); resolve(null); };
-      overlay.addEventListener('click', e => { if (e.target === overlay) cancel(); });
       overlay.querySelector('#stm-x').addEventListener('click', cancel);
       overlay.querySelector('#stm-cancel').addEventListener('click', cancel);
       overlay.querySelector('#stm-confirm').addEventListener('click', () => {
@@ -7161,7 +7155,6 @@ const App = {
           <div id="rl-picker-list" style="margin-top:10px"></div>
         </div>
       </div>`;
-    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
     document.body.appendChild(overlay);
     this._renderRentalItemPickerList(idx, this._rentalProducts || []);
     setTimeout(() => document.getElementById('rl-picker-search')?.focus(), 50);
@@ -15151,7 +15144,6 @@ const App = {
     overlay.className = 'modal-overlay';
     overlay.style.zIndex = '1100';
     overlay.innerHTML = html;
-    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
     document.body.appendChild(overlay);
     overlay.querySelector('.modal-close')?.addEventListener('click', () => overlay.remove());
     return overlay;
