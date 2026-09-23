@@ -353,7 +353,7 @@
       <h2 class="module">Layaway <span class="tag">layaway</span></h2>
       <p class="module-intro">Reserve merchandise for a customer against a schedule of installment payments.</p>
       <ul>
-        <li>Only products explicitly marked layaway-eligible can go on a plan.</li>
+        <li>Only products explicitly marked layaway-eligible can go on a plan — picked from a searchable box (type a few letters of the name or SKU) rather than scrolling the full list.</li>
         <li>Stock is reserved <strong>immediately</strong> when the plan is created, not when it's paid off — so it won't get sold to someone else in the meantime.</li>
         <li>A minimum deposit (a store-wide percentage) is required up front; the customer can choose weekly, biweekly, or monthly installments after that.</li>
         <li>Every deposit and installment is recorded as a real transaction, so it shows up in normal cash-drawer and sales reporting.</li>
@@ -576,11 +576,11 @@
       <p class="module-intro">Getting new stock from suppliers, from an internal request through to receiving it.</p>
 
       <h3>Purchase Requests (PR) — the ask</h3>
-      <p>Staff request items either for resale or for internal use (consumables that won't track stock). A request line can point at an existing catalog product, or just be typed in by name with an optional source URL — handy for something not in the catalog yet. Requests flow <strong>draft → submitted → approved/rejected</strong> (needs <span class="perm-pill">pr_create</span> / <span class="perm-pill">pr_approve</span>), and an approved request converts 1:1 into a Purchase Order (<span class="perm-pill">pr_convert</span>). A line auto-created from an accepted <a href="#quotations">quotation</a> carries that quote line's discount forward as a small tag, visible here and again on the resulting PO — see <a href="#quotations">Quotations</a>' Per-line discount note.</p>
+      <p>Staff request items either for resale or for internal use (consumables that won't track stock). A request line can point at an existing catalog product — picked from a searchable box (type a few letters of the name or SKU) rather than scrolling the full catalog — or just be typed in by name with an optional source URL, handy for something not in the catalog yet. Requests flow <strong>draft → submitted → approved/rejected</strong> (needs <span class="perm-pill">pr_create</span> / <span class="perm-pill">pr_approve</span>), and an approved request converts 1:1 into a Purchase Order (<span class="perm-pill">pr_convert</span>). A line auto-created from an accepted <a href="#quotations">quotation</a> carries that quote line's discount forward as a small tag, visible here and again on the resulting PO — see <a href="#quotations">Quotations</a>' Per-line discount note.</p>
 
       <h3>Purchase Orders (PO) — the supplier-facing order</h3>
       <ol class="steps">
-        <li><strong>Draft</strong> — built directly, from a converted PR, or sent back here by a rejection. Fully editable: items (qty/cost), supplier, branch, dates, and notes can all be changed while a PO is in Draft.</li>
+        <li><strong>Draft</strong> — built directly, from a converted PR, or sent back here by a rejection. Fully editable: items (qty/cost), supplier, branch, dates, and notes can all be changed while a PO is in Draft. The item picker is searchable and scoped to whichever supplier is selected — pick the supplier first to see their products.</li>
         <li><strong>Sent</strong> — formally submitted for approval.</li>
         <li><strong>Approved</strong> or <strong>Rejected</strong> (needs <span class="perm-pill">purchasing_approve</span>) — the decision on a submitted PO.</li>
         <li><strong>Receiving</strong> (needs <span class="perm-pill">purchasing_receive</span>) — mark items as arrived; this can happen over multiple partial deliveries. Receiving updates stock (both overall and at the PO's branch) and refreshes the product's cost to the latest price paid.</li>
@@ -614,7 +614,7 @@
         <li><strong>Receive</strong> (needs <span class="perm-pill">transfers_dropoff</span>) — add the stock to the destination branch; this can be done in partial batches over more than one delivery.</li>
       </ol>
       <p>Cancelling a transfer restores whatever hadn't yet been received back to the source branch. Transfers can also be created automatically when a multi-branch quotation is accepted and part of the order has to come from another location.</p>
-      <p>The New Transfer product picker works for rental items too (tagged <span style="font-weight:600">[Rental]</span> in the list) — see <a href="#rentals">Rentals</a> for how a rental item's currently-checked-out units are excluded from what's offered.</p>
+      <p>The New Transfer product picker is <strong>searchable</strong> — type a few letters of the name or SKU and pick from the matching results, instead of scrolling a long list — and works for rental items too (tagged <span style="font-weight:600">[Rental]</span> in the results) — see <a href="#rentals">Rentals</a> for how a rental item's currently-checked-out units are excluded from what's offered.</p>
     </section>
 
     <section class="module" id="warehouse">
@@ -622,13 +622,13 @@
       <p class="module-intro">Physical storage layout, inventory audits, and outbound shipments.</p>
 
       <h3>Zones &amp; bins</h3>
-      <p>Set up named zones per branch, then individual storage bins within each zone (with an optional capacity). Assign products to specific bins with a quantity, marking one bin as "primary" if a product lives in more than one spot. A bin's assigned quantity is automatically kept in sync with that branch's stock level everywhere stock moves — receiving, shipping, transfers, layaway, cycle counts — so you never have to update it by hand.</p>
+      <p>Set up named zones per branch, then individual storage bins within each zone (with an optional capacity). Assign products to specific bins with a quantity (the product picker is searchable — type a few letters of the name or SKU rather than scrolling the full catalog), marking one bin as "primary" if a product lives in more than one spot. A bin's assigned quantity is automatically kept in sync with that branch's stock level everywhere stock moves — receiving, shipping, transfers, layaway, cycle counts — so you never have to update it by hand.</p>
 
       <h3>Cycle Counts</h3>
       <p>A physical inventory audit. Start a session scoped to all products, a category, or a specific bin — it snapshots what the system currently expects for each item. Export the sheet to CSV for an offline count, then import the actual counted quantities back in; the system computes the variance per line. <strong>Committing</strong> the session applies only the lines that actually differ, adjusting stock and bin quantities and logging each change for audit purposes — once committed, a session is locked. Needs <span class="perm-pill">cyclecounts_create</span> to run a session, <span class="perm-pill">cyclecounts_approve</span> to commit it.</p>
 
       <h3>Shipping</h3>
-      <p>Create a shipment (a set of items going out to a customer or another location), print a pick list for warehouse staff and a shipping label once it's packed, then progress it: <strong>draft → shipped</strong> (deducts stock) <strong>→ delivered</strong>. A shipment can also be created directly from an online order that's ready to fulfill, and cancelling a shipment that had already shipped restores the stock it took.</p>
+      <p>Create a shipment (a set of items going out to a customer or another location) — its item picker is searchable, type a few letters of the name or SKU rather than scrolling the full catalog — print a pick list for warehouse staff and a shipping label once it's packed, then progress it: <strong>draft → shipped</strong> (deducts stock) <strong>→ delivered</strong>. A shipment can also be created directly from an online order that's ready to fulfill, and cancelling a shipment that had already shipped restores the stock it took.</p>
     </section>
 
     <section class="module" id="customers">

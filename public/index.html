@@ -9155,6 +9155,9 @@ const App = {
         const dd = document.getElementById('lc-customer-dd');
         if (dd) dd.style.display = 'none';
       }
+      if (!e.target.closest('.ll-prod-search-wrap')) {
+        document.querySelectorAll('[id^="ll-prod-dd-"]').forEach(dd => { dd.style.display = 'none'; });
+      }
     });
   },
 
@@ -9190,19 +9193,49 @@ const App = {
     const container = document.getElementById('layaway-checkout-lines');
     if (!container) return;
     const idx = this._layawayLineIdx++;
-    const products = this._layawayProducts || [];
     const wrap = document.createElement('div');
     wrap.id = `layaway-line-${idx}`;
     wrap.style.cssText = 'display:flex;gap:6px;align-items:flex-start;border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:8px';
     wrap.innerHTML = `
-      <select id="ll-prod-${idx}" style="flex:2;padding:6px;border:1px solid var(--border);border-radius:4px;font-size:13px" onchange="App._recalcLayawayTotals()">
-        <option value="">Select item…</option>
-        ${products.map(p=>`<option value="${p.id}" data-price="${p.price}" data-tax="${p.tax_rate||0}" data-avail="${p.stock_qty}">${p.name} (${p.stock_qty} available)</option>`).join('')}
-      </select>
+      <span class="ll-prod-search-wrap" style="flex:2;position:relative">
+        <input type="text" id="ll-prod-search-${idx}" placeholder="Search products…" autocomplete="off" style="width:100%;padding:6px;border:1px solid var(--border);border-radius:4px;font-size:13px"
+          oninput="App._filterLayawayLineOptions(${idx},this.value)" onfocus="App._filterLayawayLineOptions(${idx},this.value)">
+        <input type="hidden" id="ll-prod-${idx}" value="">
+        <div id="ll-prod-dd-${idx}" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
+      </span>
       <input type="number" id="ll-qty-${idx}" value="1" min="1" style="width:70px;padding:6px;border:1px solid var(--border);border-radius:4px" onchange="App._recalcLayawayTotals()">
       <span id="ll-warn-${idx}" style="font-size:11px;color:var(--danger);align-self:center"></span>
       <button class="btn btn-sm btn-outline" onclick="document.getElementById('layaway-line-${idx}').remove();App._recalcLayawayTotals()">✕</button>`;
     container.appendChild(wrap);
+    this._recalcLayawayTotals();
+  },
+
+  // Searchable replacement for what used to be a plain <select> of every
+  // layaway-eligible product — same pattern as the Quotation item picker.
+  // createLayawayPlan/_recalcLayawayTotals read ll-prod-${idx}'s value
+  // directly (a hidden input here, same id/semantics as the old select).
+  _filterLayawayLineOptions(idx, query) {
+    const dd = document.getElementById(`ll-prod-dd-${idx}`);
+    if (!dd) return;
+    const q = (query || '').toLowerCase().trim();
+    const matches = (this._layawayProducts || []).filter(p => !q || `${p.name} ${p.sku || ''}`.toLowerCase().includes(q));
+    dd.innerHTML = matches.length ? matches.slice(0, 50).map(p => `
+      <div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text)" onclick="App._selectLayawayLineOption(${idx},${p.id})">
+        <strong>${p.name}</strong>
+        <div style="font-size:11px;color:var(--text-muted)">${this.fmt(p.price)} &bull; ${p.stock_qty} available${p.sku ? ' · ' + p.sku : ''}</div>
+      </div>`).join('') : `<div style="padding:10px;color:var(--text-muted);font-size:13px">No products found</div>`;
+    dd.style.display = '';
+  },
+
+  _selectLayawayLineOption(idx, productId) {
+    const p = (this._layawayProducts || []).find(x => x.id === productId);
+    if (!p) return;
+    const hidden = document.getElementById(`ll-prod-${idx}`);
+    const searchEl = document.getElementById(`ll-prod-search-${idx}`);
+    const dd = document.getElementById(`ll-prod-dd-${idx}`);
+    if (hidden) { hidden.value = productId; hidden.dataset.price = p.price; hidden.dataset.tax = p.tax_rate||0; hidden.dataset.avail = p.stock_qty; }
+    if (searchEl) searchEl.value = `${p.name} (${p.stock_qty} available)`;
+    if (dd) dd.style.display = 'none';
     this._recalcLayawayTotals();
   },
 
@@ -9212,10 +9245,25 @@ const App = {
     if (!document.getElementById('lc-branch')) return;
     document.querySelectorAll('#layaway-checkout-lines [id^="layaway-line-"]').forEach(line => {
       const idx = line.id.replace('layaway-line-','');
-      const sel = document.getElementById(`ll-prod-${idx}`);
-      if (!sel) return;
-      const currentVal = sel.value;
-      sel.innerHTML = `<option value="">Select item…</option>${this._layawayProducts.map(p=>`<option value="${p.id}" data-price="${p.price}" data-tax="${p.tax_rate||0}" data-avail="${p.stock_qty}" ${String(p.id)===currentVal?'selected':''}>${p.name} (${p.stock_qty} available)</option>`).join('')}`;
+      const hidden = document.getElementById(`ll-prod-${idx}`);
+      const searchEl = document.getElementById(`ll-prod-search-${idx}`);
+      if (!hidden) return;
+      const currentVal = hidden.value;
+      const match = currentVal ? this._layawayProducts.find(p => String(p.id) === String(currentVal)) : null;
+      if (match) {
+        hidden.dataset.price = match.price;
+        hidden.dataset.tax = match.tax_rate||0;
+        hidden.dataset.avail = match.stock_qty;
+        if (searchEl) searchEl.value = `${match.name} (${match.stock_qty} available)`;
+      } else if (currentVal) {
+        // Selected item isn't available at the new branch — clear it rather
+        // than silently keeping a stale selection the new branch can't serve.
+        hidden.value = '';
+        hidden.dataset.price = '';
+        hidden.dataset.tax = '';
+        hidden.dataset.avail = '';
+        if (searchEl) searchEl.value = '';
+      }
     });
     this._recalcLayawayTotals();
   },
@@ -9224,17 +9272,16 @@ const App = {
     let subtotal = 0, taxAmount = 0;
     document.querySelectorAll('#layaway-checkout-lines [id^="layaway-line-"]').forEach(line => {
       const idx = line.id.replace('layaway-line-','');
-      const sel = document.getElementById(`ll-prod-${idx}`);
+      const hidden = document.getElementById(`ll-prod-${idx}`);
       const qtyEl = document.getElementById(`ll-qty-${idx}`);
       const warnEl = document.getElementById(`ll-warn-${idx}`);
-      if (!sel || !qtyEl) return;
-      const opt = sel.selectedOptions[0];
-      const avail = parseInt(opt?.dataset.avail) || 0;
+      if (!hidden || !qtyEl) return;
+      const avail = parseInt(hidden.dataset.avail) || 0;
       const qty = parseInt(qtyEl.value) || 0;
-      if (warnEl) warnEl.textContent = (sel.value && qty > avail) ? `Only ${avail} available` : '';
-      if (!sel.value) return;
-      const price = parseFloat(opt?.dataset.price) || 0;
-      const taxRate = parseFloat(opt?.dataset.tax) || 0;
+      if (warnEl) warnEl.textContent = (hidden.value && qty > avail) ? `Only ${avail} available` : '';
+      if (!hidden.value) return;
+      const price = parseFloat(hidden.dataset.price) || 0;
+      const taxRate = parseFloat(hidden.dataset.tax) || 0;
       const lineTotal = price * qty;
       subtotal += lineTotal;
       taxAmount += lineTotal * taxRate / 100;
@@ -14674,6 +14721,14 @@ const App = {
       this.addPRItem();
     }
     this._onPRCurrencyChange(); // show tax badge on open
+    // Item lines are added dynamically (addPRItem), so this closes whichever
+    // pri-prod-dd-* dropdown is currently open rather than binding to a
+    // specific line's id — same pattern as the Quotation item picker.
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.pri-prod-search-wrap')) {
+        document.querySelectorAll('[id^="pri-prod-dd-"]').forEach(dd => { dd.style.display = 'none'; });
+      }
+    });
   },
 
   _setPRType(type) {
@@ -14727,14 +14782,21 @@ const App = {
     const idx = this._prItems.length;
     this._prItems.push({});
     const container = document.getElementById('pr-items');
-    const opts = `<option value="">-- Product (optional) --</option>${(this._prAllProducts||[]).map(p=>`<option value="${p.id}" data-cost="${p.cost||0}" data-name="${p.name}" data-sku="${p.sku||''}" ${prefill&&prefill.product_id===p.id?'selected':''}>${p.name} (${p.sku})</option>`).join('')}`;
+    const prefillProduct = prefill && prefill.product_id ? (this._prAllProducts||[]).find(p => p.id === prefill.product_id) : null;
+    const prefillLabel = prefillProduct ? `${prefillProduct.name} (${prefillProduct.sku||''})` : '';
     const defaultType = prefill ? prefill.item_type : ((this._prRequestType === 'internal_use') ? 'internal' : 'sale');
     const wrap = document.createElement('div');
     wrap.id = `pr-item-${idx}`;
     wrap.style.cssText = 'border-bottom:1px solid var(--border);padding:8px 0';
     wrap.innerHTML = `
       <div style="display:grid;grid-template-columns:2fr 1.5fr 60px 90px 90px 28px;gap:6px;align-items:center">
-        <select onchange="App.updatePRItem(${idx},this.value)" id="pri-prod-${idx}">${opts}</select>
+        <span class="pri-prod-search-wrap" style="position:relative">
+          <input type="text" id="pri-prod-search-${idx}" placeholder="Search product (optional)…" autocomplete="off" style="width:100%"
+            value="${this.escapeAttr(prefillLabel)}"
+            oninput="App._filterPRProdOptions(${idx},this.value)" onfocus="App._filterPRProdOptions(${idx},this.value)">
+          <input type="hidden" id="pri-prod-${idx}" value="${prefill&&prefill.product_id||''}">
+          <div id="pri-prod-dd-${idx}" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
+        </span>
         <input id="pri-name-${idx}" placeholder="Or type item name" value="${prefill&&!prefill.product_id?this.escapeAttr(prefill.product_name):''}" data-qi-id="${prefill&&prefill.quotation_item_id||''}" oninput="App.calcPRTotal()">
         <input id="pri-qty-${idx}" type="number" min="1" value="${prefill?prefill.quantity:1}" placeholder="Qty" oninput="App.calcPRTotal()">
         <input id="pri-cost-${idx}" type="number" step="0.01" value="${prefill?prefill.unit_cost:''}" placeholder="Est. Cost" oninput="App.calcPRTotal()">
@@ -14753,12 +14815,35 @@ const App = {
     container.appendChild(wrap);
   },
 
-  updatePRItem(idx, productId) {
-    if (!productId) return;
-    const sel = document.getElementById(`pri-prod-${idx}`);
-    const opt = sel.options[sel.selectedIndex];
+  // Searchable replacement for what used to be a plain <select> of every
+  // product — same pattern as the Quotation item picker. The product is
+  // optional here (a request can name a free-typed item instead), so an
+  // empty search box is a valid, unselected state — savePR falls back to
+  // pri-name-${idx}'s free text whenever pri-prod-${idx} has no value.
+  _filterPRProdOptions(idx, query) {
+    const dd = document.getElementById(`pri-prod-dd-${idx}`);
+    if (!dd) return;
+    const q = (query || '').toLowerCase().trim();
+    const matches = (this._prAllProducts || []).filter(p => !q || `${p.name} ${p.sku || ''}`.toLowerCase().includes(q));
+    dd.innerHTML = matches.length ? matches.slice(0, 50).map(p => `
+      <div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text)" onclick="App._selectPRProdOption(${idx},${p.id})">
+        <strong>${p.name}</strong>
+        <div style="font-size:11px;color:var(--text-muted)">${p.sku||''}</div>
+      </div>`).join('') : `<div style="padding:10px;color:var(--text-muted);font-size:13px">No products found</div>`;
+    dd.style.display = '';
+  },
+
+  _selectPRProdOption(idx, productId) {
+    const p = (this._prAllProducts || []).find(x => x.id === productId);
+    if (!p) return;
+    const hidden = document.getElementById(`pri-prod-${idx}`);
+    const searchEl = document.getElementById(`pri-prod-search-${idx}`);
+    const dd = document.getElementById(`pri-prod-dd-${idx}`);
+    if (hidden) { hidden.value = productId; hidden.dataset.name = p.name; hidden.dataset.sku = p.sku||''; }
+    if (searchEl) searchEl.value = `${p.name} (${p.sku||''})`;
+    if (dd) dd.style.display = 'none';
     document.getElementById(`pri-name-${idx}`).value = '';
-    document.getElementById(`pri-cost-${idx}`).value = opt.dataset.cost || '';
+    document.getElementById(`pri-cost-${idx}`).value = p.cost || '';
     this.calcPRTotal();
   },
 
@@ -14806,9 +14891,8 @@ const App = {
       const product_id = sel?.value || '';
       const nameEl = document.getElementById(`pri-name-${idx}`);
       const nameInput = nameEl?.value.trim();
-      const opt = sel?.options[sel.selectedIndex];
-      const product_name = product_id ? (opt?.dataset.name || '') : nameInput;
-      const sku = product_id ? (opt?.dataset.sku || '') : '';
+      const product_name = product_id ? (sel?.dataset.name || '') : nameInput;
+      const sku = product_id ? (sel?.dataset.sku || '') : '';
       if (!product_id && !product_name) return;
       const quantity = parseInt(qEl.value) || 1;
       const unit_cost = parseFloat(document.getElementById(`pri-cost-${idx}`)?.value) || 0;
@@ -15089,6 +15173,14 @@ const App = {
     } else {
       this.addPOItem();
     }
+    // Item lines are added dynamically (addPOItem), so this closes whichever
+    // poi-prod-dd-* dropdown is currently open rather than binding to a
+    // specific line's id — same pattern as the Quotation item picker.
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.poi-prod-search-wrap')) {
+        document.querySelectorAll('[id^="poi-prod-dd-"]').forEach(dd => { dd.style.display = 'none'; });
+      }
+    });
   },
 
   _poExistingItemRowHtml(item) {
@@ -15098,15 +15190,6 @@ const App = {
       <input type="number" class="poi-existing-cost" step="0.01" value="${item.unit_cost}" style="width:90px" placeholder="Unit Cost" oninput="App.calcPOTotal()">
       <button class="btn btn-sm btn-danger" onclick="this.closest('.po-existing-item').remove();App.calcPOTotal()">✕</button>
     </div>`;
-  },
-
-  _productOpts() {
-    const products = this._poProducts || [];
-    const supplierId = document.getElementById('po-supplier')?.value;
-    if (products.length === 0) {
-      return `<option value="">${supplierId ? '-- No products for this supplier --' : '-- Select a supplier first --'}</option>`;
-    }
-    return `<option value="">-- Select Product --</option>${products.map(p => `<option value="${p.id}" data-cost="${p.cost||0}" data-name="${p.name}" data-sku="${p.sku||''}">${p.name} (${p.sku})</option>`).join('')}`;
   },
 
   onPOSupplierChange() {
@@ -15120,11 +15203,25 @@ const App = {
       else if (this._poProducts.length === 0) statusEl.textContent = 'No products assigned to this supplier yet. Use "+ New Product" to add one.';
       else statusEl.textContent = `${this._poProducts.length} product(s) available from this supplier.`;
     }
-    const opts = this._productOpts();
-    document.querySelectorAll('[id^="poi-prod-"]').forEach(sel => {
-      const cur = sel.value;
-      sel.innerHTML = opts;
-      if (cur) sel.value = cur;
+    // Iterate line wrappers rather than a "[id^='poi-prod-']" attribute
+    // selector — that prefix also matches this same line's poi-prod-dd-*/
+    // poi-prod-search-* elements, not just the hidden product-id field.
+    document.querySelectorAll('#po-items [id^="po-item-"]').forEach(line => {
+      const idx = line.id.replace('po-item-','');
+      const hidden = document.getElementById(`poi-prod-${idx}`);
+      const searchEl = document.getElementById(`poi-prod-search-${idx}`);
+      if (!hidden) return;
+      const currentVal = hidden.value;
+      const match = currentVal ? this._poProducts.find(p => String(p.id) === String(currentVal)) : null;
+      if (match) {
+        hidden.dataset.cost = match.cost||0; hidden.dataset.name = match.name; hidden.dataset.sku = match.sku||'';
+        if (searchEl) searchEl.value = `${match.name} (${match.sku||''})`;
+      } else if (currentVal) {
+        // Selected product isn't offered by the new supplier — clear it
+        // rather than silently keeping a stale selection.
+        hidden.value = ''; hidden.dataset.cost = ''; hidden.dataset.name = ''; hidden.dataset.sku = '';
+        if (searchEl) searchEl.value = '';
+      }
     });
   },
 
@@ -15133,22 +15230,55 @@ const App = {
     const idx = this._poItems.length;
     this._poItems.push({});
     const container = document.getElementById('po-items');
+    const preselectedProduct = preselectedId ? (this._poProducts||[]).find(p => String(p.id) === String(preselectedId)) : null;
+    const prefillLabel = preselectedProduct ? `${preselectedProduct.name} (${preselectedProduct.sku||''})` : '';
     const div = document.createElement('div');
     div.className = 'po-receive-row';
     div.id = `po-item-${idx}`;
     div.innerHTML = `
-      <select style="flex:2" onchange="App.updatePOItem(${idx},this.value)" id="poi-prod-${idx}">
-        ${this._productOpts()}
-      </select>
+      <span class="poi-prod-search-wrap" style="flex:2;position:relative">
+        <input type="text" id="poi-prod-search-${idx}" placeholder="Search products…" autocomplete="off" style="width:100%"
+          value="${this.escapeAttr(prefillLabel)}"
+          oninput="App._filterPOProdOptions(${idx},this.value)" onfocus="App._filterPOProdOptions(${idx},this.value)">
+        <input type="hidden" id="poi-prod-${idx}" value="${preselectedProduct?preselectedProduct.id:''}" data-cost="${preselectedProduct?(preselectedProduct.cost||0):''}" data-name="${preselectedProduct?preselectedProduct.name:''}" data-sku="${preselectedProduct?(preselectedProduct.sku||''):''}">
+        <div id="poi-prod-dd-${idx}" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
+      </span>
       <input id="poi-qty-${idx}" type="number" min="1" value="1" style="width:70px" placeholder="Qty" oninput="App.calcPOTotal()">
-      <input id="poi-cost-${idx}" type="number" step="0.01" style="width:90px" placeholder="Unit Cost" oninput="App.calcPOTotal()">
+      <input id="poi-cost-${idx}" type="number" step="0.01" value="${preselectedProduct?(preselectedProduct.cost||''):''}" style="width:90px" placeholder="Unit Cost" oninput="App.calcPOTotal()">
       <button class="btn btn-sm btn-danger" onclick="document.getElementById('po-item-${idx}').remove();App.calcPOTotal()">✕</button>`;
     container.appendChild(div);
-    if (preselectedId) {
-      const sel = document.getElementById(`poi-prod-${idx}`);
-      sel.value = String(preselectedId);
-      this.updatePOItem(idx, String(preselectedId));
-    }
+    this.calcPOTotal();
+  },
+
+  // Searchable replacement for what used to be a plain <select> scoped to
+  // the chosen supplier's products — same pattern as the Quotation item
+  // picker. savePO/onPOSupplierChange read poi-prod-${idx}'s value directly
+  // (a hidden input here, same id/semantics as the old select).
+  _filterPOProdOptions(idx, query) {
+    const dd = document.getElementById(`poi-prod-dd-${idx}`);
+    if (!dd) return;
+    const q = (query || '').toLowerCase().trim();
+    const products = this._poProducts || [];
+    const matches = products.filter(p => !q || `${p.name} ${p.sku || ''}`.toLowerCase().includes(q));
+    dd.innerHTML = matches.length ? matches.slice(0, 50).map(p => `
+      <div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text)" onclick="App._selectPOProdOption(${idx},${p.id})">
+        <strong>${p.name}</strong>
+        <div style="font-size:11px;color:var(--text-muted)">${this.fmt(p.cost||0)}${p.sku ? ' · ' + p.sku : ''}</div>
+      </div>`).join('') : `<div style="padding:10px;color:var(--text-muted);font-size:13px">${products.length ? 'No products found' : (document.getElementById('po-supplier')?.value ? 'No products assigned to this supplier yet' : 'Select a supplier first')}</div>`;
+    dd.style.display = '';
+  },
+
+  _selectPOProdOption(idx, productId) {
+    const p = (this._poProducts || []).find(x => x.id === productId);
+    if (!p) return;
+    const hidden = document.getElementById(`poi-prod-${idx}`);
+    const searchEl = document.getElementById(`poi-prod-search-${idx}`);
+    const dd = document.getElementById(`poi-prod-dd-${idx}`);
+    if (hidden) { hidden.value = productId; hidden.dataset.cost = p.cost||0; hidden.dataset.name = p.name; hidden.dataset.sku = p.sku||''; }
+    if (searchEl) searchEl.value = `${p.name} (${p.sku||''})`;
+    if (dd) dd.style.display = 'none';
+    document.getElementById(`poi-cost-${idx}`).value = p.cost || '';
+    this.calcPOTotal();
   },
 
   showSecondaryModal(html) {
@@ -15232,15 +15362,6 @@ const App = {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
-  updatePOItem(idx, productId) {
-    if (!productId) return;
-    const sel = document.getElementById(`poi-prod-${idx}`);
-    const opt = sel.options[sel.selectedIndex];
-    const cost = opt.dataset.cost;
-    document.getElementById(`poi-cost-${idx}`).value = cost || '';
-    this.calcPOTotal();
-  },
-
   calcPOTotal() {
     let total = 0;
     document.querySelectorAll('[id^="poi-qty-"]').forEach(qEl => {
@@ -15270,10 +15391,9 @@ const App = {
       const unit_cost = parseFloat(row.querySelector('.poi-existing-cost').value) || 0;
       items.push({ id: row.dataset.itemId, product_id: row.dataset.productId || null, quantity_ordered: qty, unit_cost });
     });
-    document.querySelectorAll('[id^="poi-prod-"]').forEach(sel => {
-      if (!sel.closest('[id^="po-item-"]')) return;
-      const idx = sel.id.split('-').pop();
-      const product_id = sel.value;
+    document.querySelectorAll('#po-items [id^="po-item-"]').forEach(line => {
+      const idx = line.id.replace('po-item-','');
+      const product_id = document.getElementById(`poi-prod-${idx}`)?.value;
       if (!product_id) return;
       const qty = parseInt(document.getElementById(`poi-qty-${idx}`).value) || 1;
       const unit_cost = parseFloat(document.getElementById(`poi-cost-${idx}`).value) || 0;
@@ -15892,6 +16012,15 @@ const App = {
         </div>
       </div>`);
     if (prefill?.fromBranchId) await this.onTransferFromChange(prefill.productId);
+    // Item lines are added dynamically (addTransferItem), so this closes
+    // whichever trfi-prod-dd-* dropdown is currently open rather than
+    // binding to a specific line's id — same pattern as the Quotation
+    // item picker.
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.trfi-prod-search-wrap')) {
+        document.querySelectorAll('[id^="trfi-prod-dd-"]').forEach(dd => { dd.style.display = 'none'; });
+      }
+    });
   },
 
   // preselectedId (optional): passed through when the source-branch load was
@@ -15934,31 +16063,60 @@ const App = {
     const products = this._transferProducts || [];
     if (!products.length) return;
     const idx = this._transferItemIdx++;
+    const preselectedProduct = preselectedId ? products.find(p => String(p.id) === String(preselectedId)) : null;
+    const prefillLabel = preselectedProduct ? `${preselectedProduct.name} (${preselectedProduct.sku})${preselectedProduct.is_rental?' [Rental]':''} — Avail: ${preselectedProduct.available_qty}` : '';
     const div = document.createElement('div');
     div.className = 'po-receive-row';
     div.id = `trf-item-${idx}`;
     div.innerHTML = `
-      <select style="flex:2" id="trfi-prod-${idx}" onchange="App.onTransferProductChange(${idx})">
-        <option value="">-- Select Product --</option>
-        ${products.map(p => `<option value="${p.id}" data-stock="${p.available_qty}">${p.name} (${p.sku})${p.is_rental?' [Rental]':''} — Avail: ${p.available_qty}</option>`).join('')}
-      </select>
-      <input id="trfi-qty-${idx}" type="number" min="1" max="" value="1" style="width:80px" placeholder="Qty">
-      <span id="trfi-stock-${idx}" style="font-size:12px;color:var(--text-muted);white-space:nowrap"></span>
+      <span class="trfi-prod-search-wrap" style="flex:2;position:relative">
+        <input type="text" id="trfi-prod-search-${idx}" placeholder="Search products…" autocomplete="off" style="width:100%"
+          value="${this.escapeAttr(prefillLabel)}"
+          oninput="App._filterTransferItemOptions(${idx},this.value)" onfocus="App._filterTransferItemOptions(${idx},this.value)">
+        <input type="hidden" id="trfi-prod-${idx}" value="${preselectedProduct?preselectedProduct.id:''}" data-stock="${preselectedProduct?preselectedProduct.available_qty:''}">
+        <div id="trfi-prod-dd-${idx}" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
+      </span>
+      <input id="trfi-qty-${idx}" type="number" min="1" max="${preselectedProduct?preselectedProduct.available_qty:''}" value="1" style="width:80px" placeholder="Qty">
+      <span id="trfi-stock-${idx}" style="font-size:12px;color:var(--text-muted);white-space:nowrap">${preselectedProduct?`Max: ${preselectedProduct.available_qty}`:''}</span>
       <button class="btn btn-sm btn-danger" onclick="document.getElementById('trf-item-${idx}').remove()">✕</button>`;
     container.appendChild(div);
-    if (preselectedId) {
-      const sel = document.getElementById(`trfi-prod-${idx}`);
-      sel.value = String(preselectedId);
-      this.onTransferProductChange(idx);
-    }
+  },
+
+  // Searchable replacement for what used to be a plain <select> of every
+  // product available at the source branch — same pattern as the
+  // Quotation item picker. saveTransfer reads trfi-prod-${idx}'s value
+  // directly (a hidden input here, same id/semantics as the old select).
+  _filterTransferItemOptions(idx, query) {
+    const dd = document.getElementById(`trfi-prod-dd-${idx}`);
+    if (!dd) return;
+    const q = (query || '').toLowerCase().trim();
+    const matches = (this._transferProducts || []).filter(p => !q || `${p.name} ${p.sku || ''}`.toLowerCase().includes(q));
+    dd.innerHTML = matches.length ? matches.slice(0, 50).map(p => `
+      <div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text)" onclick="App._selectTransferItemOption(${idx},${p.id})">
+        <strong>${p.name}${p.is_rental?' [Rental]':''}</strong>
+        <div style="font-size:11px;color:var(--text-muted)">Avail: ${p.available_qty}${p.sku ? ' · ' + p.sku : ''}</div>
+      </div>`).join('') : `<div style="padding:10px;color:var(--text-muted);font-size:13px">No products found</div>`;
+    dd.style.display = '';
+  },
+
+  _selectTransferItemOption(idx, productId) {
+    const p = (this._transferProducts || []).find(x => x.id === productId);
+    if (!p) return;
+    const hidden = document.getElementById(`trfi-prod-${idx}`);
+    const searchEl = document.getElementById(`trfi-prod-search-${idx}`);
+    const dd = document.getElementById(`trfi-prod-dd-${idx}`);
+    if (hidden) { hidden.value = productId; hidden.dataset.stock = p.available_qty; }
+    if (searchEl) searchEl.value = `${p.name} (${p.sku})${p.is_rental?' [Rental]':''} — Avail: ${p.available_qty}`;
+    if (dd) dd.style.display = 'none';
+    this.onTransferProductChange(idx);
   },
 
   onTransferProductChange(idx) {
-    const sel = document.getElementById(`trfi-prod-${idx}`);
+    const hidden = document.getElementById(`trfi-prod-${idx}`);
     const stockEl = document.getElementById(`trfi-stock-${idx}`);
     const qtyEl = document.getElementById(`trfi-qty-${idx}`);
-    if (!sel || !sel.value) { if (stockEl) stockEl.textContent = ''; return; }
-    const stock = parseInt(sel.selectedOptions[0]?.dataset.stock) || 0;
+    if (!hidden || !hidden.value) { if (stockEl) stockEl.textContent = ''; return; }
+    const stock = parseInt(hidden.dataset.stock) || 0;
     if (stockEl) stockEl.textContent = `Max: ${stock}`;
     if (qtyEl) qtyEl.max = stock;
   },
@@ -15971,10 +16129,9 @@ const App = {
     if (!to_branch_id) { this.alert('Select a destination branch', 'error'); return; }
     if (from_branch_id === to_branch_id) { this.alert('Source and destination must differ', 'error'); return; }
     const items = [];
-    document.querySelectorAll('[id^="trfi-prod-"]').forEach(sel => {
-      if (!sel.closest('[id^="trf-item-"]')) return;
-      const idx = sel.id.split('-').pop();
-      const product_id = sel.value;
+    document.querySelectorAll('#trf-items [id^="trf-item-"]').forEach(line => {
+      const idx = line.id.replace('trf-item-','');
+      const product_id = document.getElementById(`trfi-prod-${idx}`)?.value;
       if (!product_id) return;
       const qty = parseInt(document.getElementById(`trfi-qty-${idx}`).value) || 1;
       items.push({ product_id, quantity: qty });
@@ -20381,6 +20538,7 @@ const App = {
       this.api('GET','/warehouse/bins'),
     ]);
     this._whBins = bins;
+    this._asnProducts = products.filter(p=>p.active);
     this.showModal(`
       <div class="modal" style="max-width:460px">
         <div class="modal-header">
@@ -20388,11 +20546,11 @@ const App = {
           <button class="modal-close">✕</button>
         </div>
         <div class="modal-body">
-          <div class="form-group"><label>Product *</label>
-            <select id="asn-prod">
-              <option value="">Select product…</option>
-              ${products.filter(p=>p.active).map(p=>`<option value="${p.id}">${p.name} (${p.sku})</option>`).join('')}
-            </select>
+          <div class="form-group asn-prod-search-wrap" style="position:relative"><label>Product *</label>
+            <input type="text" id="asn-prod-search" placeholder="Search product…" autocomplete="off"
+              oninput="App._filterAsnProdOptions(this.value)" onfocus="App._filterAsnProdOptions(this.value)">
+            <input type="hidden" id="asn-prod" value="">
+            <div id="asn-prod-dd" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
           </div>
           <div class="form-group"><label>Bin *</label>
             <select id="asn-bin">
@@ -20414,6 +20572,40 @@ const App = {
           <button class="btn btn-primary" onclick="App.saveAssignment()">Assign</button>
         </div>
       </div>`);
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.asn-prod-search-wrap')) {
+        const dd = document.getElementById('asn-prod-dd');
+        if (dd) dd.style.display = 'none';
+      }
+    });
+  },
+
+  // Searchable replacement for what used to be a plain <select> of every
+  // active product — same pattern as the Quotation item picker.
+  // saveAssignment reads asn-prod's value directly (a hidden input here,
+  // same id/semantics as the old select).
+  _filterAsnProdOptions(query) {
+    const dd = document.getElementById('asn-prod-dd');
+    if (!dd) return;
+    const q = (query || '').toLowerCase().trim();
+    const matches = (this._asnProducts || []).filter(p => !q || `${p.name} ${p.sku || ''}`.toLowerCase().includes(q));
+    dd.innerHTML = matches.length ? matches.slice(0, 50).map(p => `
+      <div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text)" onclick="App._selectAsnProdOption(${p.id})">
+        <strong>${p.name}</strong>
+        <div style="font-size:11px;color:var(--text-muted)">${p.sku||''}</div>
+      </div>`).join('') : `<div style="padding:10px;color:var(--text-muted);font-size:13px">No products found</div>`;
+    dd.style.display = '';
+  },
+
+  _selectAsnProdOption(productId) {
+    const p = (this._asnProducts || []).find(x => x.id === productId);
+    if (!p) return;
+    const hidden = document.getElementById('asn-prod');
+    const searchEl = document.getElementById('asn-prod-search');
+    const dd = document.getElementById('asn-prod-dd');
+    if (hidden) hidden.value = productId;
+    if (searchEl) searchEl.value = `${p.name} (${p.sku||''})`;
+    if (dd) dd.style.display = 'none';
   },
 
   async saveAssignment() {
@@ -20669,22 +20861,32 @@ const App = {
         </div>
       </div>`);
     this.addShipLine();
+    // Item lines are added dynamically (addShipLine), so this closes
+    // whichever sh-prod-dd-* dropdown is currently open rather than
+    // binding to a specific line's id — same pattern as the Quotation
+    // item picker.
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.sh-prod-search-wrap')) {
+        document.querySelectorAll('[id^="sh-prod-dd-"]').forEach(dd => { dd.style.display = 'none'; });
+      }
+    });
   },
 
   addShipLine() {
     const container = document.getElementById('ship-lines');
     if (!container) return;
     const idx = this._shipLineIdx++;
-    const products = this._shipProducts||[];
-    const bins     = this._shipBins||[];
+    const bins = this._shipBins||[];
     const div = document.createElement('div');
     div.id = `ship-line-${idx}`;
     div.style.cssText = 'display:flex;gap:6px;margin-bottom:6px;align-items:center';
     div.innerHTML = `
-      <select id="sh-prod-${idx}" style="flex:2;padding:6px;border:1px solid var(--border);border-radius:4px;font-size:13px">
-        <option value="">Product…</option>
-        ${products.map(p=>`<option value="${p.id}">${p.name} (${p.sku})</option>`).join('')}
-      </select>
+      <span class="sh-prod-search-wrap" style="flex:2;position:relative">
+        <input type="text" id="sh-prod-search-${idx}" placeholder="Search product…" autocomplete="off" style="width:100%;padding:6px;border:1px solid var(--border);border-radius:4px;font-size:13px"
+          oninput="App._filterShipProdOptions(${idx},this.value)" onfocus="App._filterShipProdOptions(${idx},this.value)">
+        <input type="hidden" id="sh-prod-${idx}" value="">
+        <div id="sh-prod-dd-${idx}" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
+      </span>
       <input id="sh-qty-${idx}" type="number" min="1" value="1" style="width:60px;padding:6px;border:1px solid var(--border);border-radius:4px;font-size:13px">
       <select id="sh-bin-${idx}" style="flex:1;padding:6px;border:1px solid var(--border);border-radius:4px;font-size:13px">
         <option value="">No bin</option>
@@ -20694,12 +20896,41 @@ const App = {
     container.appendChild(div);
   },
 
+  // Searchable replacement for what used to be a plain <select> of every
+  // active product — same pattern as the Quotation item picker.
+  // saveShipment reads sh-prod-${idx}'s value directly (a hidden input
+  // here, same id/semantics as the old select).
+  _filterShipProdOptions(idx, query) {
+    const dd = document.getElementById(`sh-prod-dd-${idx}`);
+    if (!dd) return;
+    const q = (query || '').toLowerCase().trim();
+    const matches = (this._shipProducts || []).filter(p => !q || `${p.name} ${p.sku || ''}`.toLowerCase().includes(q));
+    dd.innerHTML = matches.length ? matches.slice(0, 50).map(p => `
+      <div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text)" onclick="App._selectShipProdOption(${idx},${p.id})">
+        <strong>${p.name}</strong>
+        <div style="font-size:11px;color:var(--text-muted)">${p.sku||''}</div>
+      </div>`).join('') : `<div style="padding:10px;color:var(--text-muted);font-size:13px">No products found</div>`;
+    dd.style.display = '';
+  },
+
+  _selectShipProdOption(idx, productId) {
+    const p = (this._shipProducts || []).find(x => x.id === productId);
+    if (!p) return;
+    const hidden = document.getElementById(`sh-prod-${idx}`);
+    const searchEl = document.getElementById(`sh-prod-search-${idx}`);
+    const dd = document.getElementById(`sh-prod-dd-${idx}`);
+    if (hidden) hidden.value = productId;
+    if (searchEl) searchEl.value = `${p.name} (${p.sku||''})`;
+    if (dd) dd.style.display = 'none';
+  },
+
   async saveShipment() {
     const items = [];
-    document.querySelectorAll('[id^="sh-prod-"]').forEach(sel => {
-      const idx = sel.id.replace('sh-prod-','');
-      if (sel.value) items.push({
-        product_id: sel.value,
+    document.querySelectorAll('#ship-lines [id^="ship-line-"]').forEach(line => {
+      const idx = line.id.replace('ship-line-','');
+      const product_id = document.getElementById(`sh-prod-${idx}`)?.value;
+      if (product_id) items.push({
+        product_id,
         quantity:   parseInt(document.getElementById(`sh-qty-${idx}`)?.value)||1,
         bin_id:     document.getElementById(`sh-bin-${idx}`)?.value||null,
       });
