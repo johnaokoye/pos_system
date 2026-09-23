@@ -2696,7 +2696,7 @@ const App = {
   // then prefills it from the current ticket instead of leaving it blank.
   async posCreateQuoteFromCart() {
     await this.showQuoteForm();
-    if (this.cartCustomer?.id) { const el = document.getElementById('qt-cust'); if (el) el.value = this.cartCustomer.id; }
+    if (this.cartCustomer?.id) this._selectCustomerPicker('qt-cust', this.cartCustomer.id);
     if (this.posBranch?.id) { const el = document.getElementById('qt-branch'); if (el) el.value = this.posBranch.id; }
     if (this.cart.length) {
       document.getElementById('qt-item-0')?.remove();
@@ -7956,10 +7956,7 @@ const App = {
         <div class="modal-header"><span class="modal-title">New Work Order</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <div class="form-group"><label>Customer *</label>
-            <select id="wo-customer">
-              <option value="">-- Select Customer --</option>
-              ${customers.map(c => `<option value="${c.id}">${c.first_name} ${c.last_name} (${c.customer_number})</option>`).join('')}
-            </select>
+            ${this._customerPickerHtml('wo-customer', customers)}
           </div>
           <div class="form-group"><label>Branch / Location</label>
             ${isMultiBranch ? `<select id="wo-branch">${branches.map(b=>`<option value="${b.id}" ${defaultBranch && b.id===defaultBranch.id?'selected':''}>${b.name}</option>`).join('')}</select>`
@@ -9176,6 +9173,60 @@ const App = {
         <div><strong>${c.first_name} ${c.last_name}</strong><span style="color:var(--text-muted);font-size:12px;margin-left:4px">${c.customer_number||''}</span></div>
       </div>`).join('');
     dd.style.display = '';
+  },
+
+  // Shared type-to-search customer picker for forms that used to render a
+  // plain <select> of every customer. The hidden input keeps the old
+  // select's id, so callers keep reading document.getElementById(id).value
+  // unchanged. emptyLabel (optional) adds a "none" row that clears the pick.
+  _customerPickerHtml(id, customers, selectedId, { placeholder = 'Search customer…', emptyLabel = '' } = {}) {
+    this._custPickerLists = this._custPickerLists || {};
+    this._custPickerLists[id] = { customers: customers || [], emptyLabel };
+    const sel = selectedId != null && selectedId !== '' ? (customers || []).find(c => String(c.id) === String(selectedId)) : null;
+    if (!this._custPickerListenerBound) {
+      this._custPickerListenerBound = true;
+      document.addEventListener('click', (e) => {
+        if (!e.target.closest('.cust-picker-wrap')) {
+          document.querySelectorAll('.cust-picker-dd').forEach(dd => { dd.style.display = 'none'; });
+        }
+      });
+    }
+    return `<div class="cust-picker-wrap" style="position:relative">
+      <input type="text" id="${id}-search" placeholder="${this.escapeAttr(placeholder)}" autocomplete="off"
+        value="${sel ? this.escapeAttr(`${sel.first_name} ${sel.last_name}`) : ''}"
+        oninput="document.getElementById('${id}').value='';App._filterCustomerPicker('${id}',this.value)" onfocus="App._filterCustomerPicker('${id}',this.value)">
+      <input type="hidden" id="${id}" value="${sel ? sel.id : ''}">
+      <div id="${id}-dd" class="cust-picker-dd" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
+    </div>`;
+  },
+
+  _filterCustomerPicker(id, q) {
+    const dd = document.getElementById(`${id}-dd`);
+    const cfg = (this._custPickerLists || {})[id];
+    if (!dd || !cfg) return;
+    const query = (q || '').toLowerCase().trim();
+    const matches = cfg.customers.filter(c =>
+      !query || `${c.first_name} ${c.last_name} ${c.customer_number || ''} ${c.phone || ''} ${c.email || ''}`.toLowerCase().includes(query));
+    const noneRow = cfg.emptyLabel && !query
+      ? `<div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text-muted)" onclick="App._selectCustomerPicker('${id}',null)">${cfg.emptyLabel}</div>`
+      : '';
+    dd.innerHTML = noneRow + (matches.length
+      ? matches.slice(0, 50).map(c => `<div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text)" onclick="App._selectCustomerPicker('${id}',${c.id})">
+          <div><strong>${c.first_name} ${c.last_name}</strong><span style="color:var(--text-muted);font-size:12px;margin-left:4px">${c.customer_number||''}</span></div>
+        </div>`).join('')
+      : '<div style="padding:10px;color:var(--text-muted);font-size:13px">No customers found</div>');
+    dd.style.display = '';
+  },
+
+  _selectCustomerPicker(id, customerId) {
+    const cfg = (this._custPickerLists || {})[id];
+    const c = customerId != null && cfg ? cfg.customers.find(x => String(x.id) === String(customerId)) : null;
+    const idEl = document.getElementById(id);
+    const searchEl = document.getElementById(`${id}-search`);
+    const dd = document.getElementById(`${id}-dd`);
+    if (idEl) idEl.value = c ? c.id : '';
+    if (searchEl) searchEl.value = c ? `${c.first_name} ${c.last_name}` : '';
+    if (dd) dd.style.display = 'none';
   },
 
   _selectLayawayCustomer(id) {
@@ -16610,7 +16661,7 @@ const App = {
 
   async showQuoteForm(editId, initialType) {
     const [customers, employees, products] = await Promise.all([
-      this.api('GET', '/customers?limit=200'),
+      this.api('GET', '/customers'),
       this.api('GET', '/employees'),
       this.api('GET', '/products?for_sale=1'),
     ]);
@@ -16637,10 +16688,7 @@ const App = {
           </div>` : ''}
           <div class="input-row">
             <div class="form-group"><label>Customer</label>
-              <select id="qt-cust">
-                <option value="">-- Walk-in / No Customer --</option>
-                ${customers.map(c => `<option value="${c.id}" ${q&&q.customer_id===c.id?'selected':''}>${c.first_name} ${c.last_name} (${c.customer_number})</option>`).join('')}
-              </select>
+              ${this._customerPickerHtml('qt-cust', customers, q && q.customer_id, { emptyLabel: '-- Walk-in / No Customer --' })}
               <p id="qt-cust-hint" style="display:none;font-size:11px;color:var(--text-muted);margin:4px 0 0">Only approved rental customers are listed.</p>
             </div>
             <div class="form-group"><label>Branch</label>
@@ -16794,14 +16842,13 @@ const App = {
   // match, so editing an older quote (or a customer whose flag changed
   // since) never silently loses its assigned customer.
   _applyQuoteCustomerFilter(type) {
-    const select = document.getElementById('qt-cust');
+    const input = document.getElementById('qt-cust');
     const hint = document.getElementById('qt-cust-hint');
-    if (!select) return;
-    const selectedId = select.value;
+    const cfg = (this._custPickerLists || {})['qt-cust'];
+    if (!input || !cfg) return;
+    const selectedId = input.value;
     const list = this._quoteAllCustomers || [];
-    const filtered = type === 'rental' ? list.filter(c => c.is_rental_customer || String(c.id) === String(selectedId)) : list;
-    select.innerHTML = `<option value="">-- Walk-in / No Customer --</option>` +
-      filtered.map(c => `<option value="${c.id}" ${String(selectedId)===String(c.id)?'selected':''}>${c.first_name} ${c.last_name} (${c.customer_number})</option>`).join('');
+    cfg.customers = type === 'rental' ? list.filter(c => c.is_rental_customer || String(c.id) === String(selectedId)) : list;
     if (hint) hint.style.display = type === 'rental' ? '' : 'none';
   },
 
@@ -18051,10 +18098,7 @@ const App = {
         <div class="modal-header"><span class="modal-title">Enable Credit Account</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <div class="form-group"><label>Customer *</label>
-            <select id="ec-cust">
-              <option value="">-- Select Customer --</option>
-              ${customers.filter(c => !c.credit_enabled).map(c => `<option value="${c.id}">${c.first_name} ${c.last_name} (${c.customer_number})</option>`).join('')}
-            </select>
+            ${this._customerPickerHtml('ec-cust', customers.filter(c => !c.credit_enabled))}
           </div>
           <div class="form-group"><label>Credit Limit ($)</label><input id="ec-limit" type="number" step="0.01" value="1000.00"></div>
         </div>
@@ -19890,10 +19934,7 @@ const App = {
               </select>
             </div>
             <div class="form-group"><label>Customer</label>
-              <select id="o-cust">
-                <option value="">None</option>
-                ${customers.map(c => `<option value="${c.id}" ${o.customer_id===c.id?'selected':''}>${c.first_name} ${c.last_name}</option>`).join('')}
-              </select>
+              ${this._customerPickerHtml('o-cust', customers, o.customer_id, { emptyLabel: 'None' })}
             </div>
           </div>
           <div class="input-row">
@@ -20087,10 +20128,7 @@ const App = {
               </select>
             </div>
             <div class="form-group"><label>Customer</label>
-              <select id="a-cust">
-                <option value="">None</option>
-                ${customers.map(c => `<option value="${c.id}">${c.first_name} ${c.last_name}</option>`).join('')}
-              </select>
+              ${this._customerPickerHtml('a-cust', customers, null, { emptyLabel: 'None' })}
             </div>
           </div>
           <div class="form-group"><label>Due Date / Time</label><input id="a-due" type="datetime-local" value="${defaultDue}"></div>
@@ -20824,10 +20862,7 @@ const App = {
               </select>
             </div>
             <div class="form-group"><label>Ship To (Customer)</label>
-              <select id="sh-cust">
-                <option value="">Walk-in / Other</option>
-                ${customers.map(c=>`<option value="${c.id}">${c.first_name} ${c.last_name}</option>`).join('')}
-              </select>
+              ${this._customerPickerHtml('sh-cust', customers, null, { emptyLabel: 'Walk-in / Other' })}
             </div>
           </div>
           <div class="input-row">
