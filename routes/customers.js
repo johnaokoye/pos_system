@@ -468,6 +468,29 @@ router.delete('/:id', requirePermission('customers_delete'), async (req, res) =>
 // POST / (email/phone/full name against active customers): by default a
 // match skips the row instead of creating it — pass `duplicate_mode:
 // 'force'` to create every row regardless of matches.
+// TEMPORARY bulk utility (Customers screen button) — flags every active
+// customer as a rental customer and preapproves them, so rentals can be
+// created for anyone despite missing ID/reference info. Customers already
+// preapproved keep their original preapproved_by/at. { dry_run: true }
+// only returns how many rows would change. Remove once no longer needed.
+router.post('/bulk-rental-preapprove', requirePermission('customers_rental_preapprove'), async (req, res) => {
+  try {
+    const where = 'active = 1 AND (COALESCE(is_rental_customer, 0) = 0 OR COALESCE(rental_preapproved, 0) = 0)';
+    const { rows: [{ n }] } = await db.execute({ sql: `SELECT COUNT(*) AS n FROM customers WHERE ${where}`, args: [] });
+    if (req.body?.dry_run) return res.json({ count: Number(n) });
+    const result = await db.execute({
+      sql: `UPDATE customers SET
+              is_rental_customer = 1,
+              rental_preapproved_by = CASE WHEN COALESCE(rental_preapproved, 0) = 1 THEN rental_preapproved_by ELSE ? END,
+              rental_preapproved_at = CASE WHEN COALESCE(rental_preapproved, 0) = 1 THEN rental_preapproved_at ELSE ? END,
+              rental_preapproved = 1
+            WHERE ${where}`,
+      args: [req.employee?.id || null, new Date().toISOString()],
+    });
+    res.json({ updated: result.rowsAffected });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.post('/import', requirePermission('customers_import'), async (req, res) => {
   try {
     const { rows, batch_id, duplicate_mode } = req.body;

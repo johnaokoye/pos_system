@@ -3985,7 +3985,10 @@ const App = {
             <button class="modal-close">✕</button>
           </div>
           <div class="modal-body">
-            <input type="text" id="cust-search-modal" placeholder="Search customers..." style="margin-bottom:12px">
+            <div style="display:flex;gap:8px;margin-bottom:12px">
+              <input type="text" id="cust-search-modal" placeholder="Search customers..." style="flex:1;margin:0">
+              ${this.can('customers_add') ? `<button class="btn btn-primary" style="white-space:nowrap" onclick="App._addCustomerFromLookup('pos')">+ Add New Customer</button>` : ''}
+            </div>
             <div style="max-height:320px;overflow-y:auto" id="cust-list">
               ${customers.map(c => {
                 const blocked = c.customer_type === 'credit' && c.account_blocked;
@@ -4018,6 +4021,81 @@ const App = {
         });
       });
     });
+  },
+
+  // "+ Add New Customer" from any customer lookup. What was typed in the
+  // lookup's search box seeds the form (digits → phone, "@" → email,
+  // otherwise first/last name); once saved, the new customer is picked in
+  // that lookup just as if it had been searched for and clicked.
+  _addCustomerFromLookup(kind) {
+    const searchId = { pos: 'cust-search-modal', rental: 'rc-customer-search', layaway: 'lc-customer-search' }[kind] || `${kind}-search`;
+    const q = (document.getElementById(searchId)?.value || '').trim();
+    document.querySelectorAll('.cust-picker-dd, #rc-customer-dd, #lc-customer-dd').forEach(dd => { dd.style.display = 'none'; });
+    const addTo = (list, c) => { if (list && !list.some(x => String(x.id) === String(c.id))) list.unshift(c); };
+    this.openCustomerFormOver(q, c => {
+      if (kind === 'pos') { this.closeModal(); this.setCartCustomer(c.id, `${c.first_name} ${c.last_name}`); }
+      else if (kind === 'rental') { addTo(this._rentalCustomers, c); this._selectRentalCustomer(c.id); }
+      else if (kind === 'layaway') { addTo(this._layawayCustomers, c); this._selectLayawayCustomer(c.id); }
+      else {
+        if (kind === 'qt-cust') addTo(this._quoteAllCustomers, c);
+        addTo((this._custPickerLists || {})[kind]?.customers, c);
+        this._selectCustomerPicker(kind, c.id);
+      }
+    });
+  },
+
+  // Dropdown row appended to the searchable customer pickers.
+  _addCustomerRowHtml(kind) {
+    if (!this.can('customers_add')) return '';
+    return `<div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--accent);font-weight:600;border-bottom:1px solid var(--border)" onclick="App._addCustomerFromLookup('${kind}')">+ Add New Customer</div>`;
+  },
+
+  // showModal only allows one overlay at a time, so opening the customer
+  // form normally would destroy the half-filled form underneath (a quote,
+  // rental, etc.). Instead the current overlay is stashed (hidden, and
+  // renamed so showModal/closeModal skip it) and restored once the customer
+  // form — or the duplicate-customer modal that can replace it — is gone.
+  async openCustomerFormOver(query, onCreated) {
+    const q = (query || '').trim();
+    const prefill = {};
+    if (q.includes('@')) prefill.email = q;
+    else if (q && /^[\d\s()+-]+$/.test(q)) prefill.phone = q;
+    else if (q) {
+      const parts = q.split(/\s+/);
+      prefill.first_name = parts.shift();
+      prefill.last_name = parts.join(' ');
+    }
+    const parents = [...document.querySelectorAll('.modal-overlay')];
+    parents.forEach(el => { el.classList.replace('modal-overlay', 'modal-overlay-stashed'); el.style.display = 'none'; });
+    const stack = { onCreated };
+    stack.restore = () => {
+      stack.obs?.disconnect();
+      if (this._customerFormStack === stack) this._customerFormStack = null;
+      parents.forEach(el => { el.classList.replace('modal-overlay-stashed', 'modal-overlay'); el.style.display = ''; });
+    };
+    this._customerFormStack = stack;
+    try {
+      await this.showCustomerForm(null, { prefill });
+    } catch (e) {
+      stack.restore();
+      return this.alert(e.message, 'error');
+    }
+    stack.obs = new MutationObserver(() => { if (!document.querySelector('.modal-overlay')) stack.restore(); });
+    stack.obs.observe(document.body, { childList: true });
+  },
+
+  // Called with the new (or chosen existing duplicate) customer's id when
+  // the customer form was opened via openCustomerFormOver.
+  async _finishStackedCustomerForm(customerId) {
+    const stack = this._customerFormStack;
+    if (!stack) return;
+    try {
+      const c = await this.api('GET', `/customers/${customerId}`);
+      this.closeModal();
+      stack.restore();
+      this.alert('Customer added');
+      stack.onCreated(c);
+    } catch (e) { this.alert(e.message, 'error'); }
   },
 
   // Client-side mirror of computeAvailableCashBack() in routes/transactions.js
@@ -6806,11 +6884,11 @@ const App = {
     const matches = (this._rentalCustomers || []).filter(c =>
       !query || `${c.first_name} ${c.last_name} ${c.customer_number || ''}`.toLowerCase().includes(query));
     if (!matches.length) {
-      dd.innerHTML = '<div style="padding:10px;color:var(--text-muted);font-size:13px">No customers found</div>';
+      dd.innerHTML = this._addCustomerRowHtml('rental') + '<div style="padding:10px;color:var(--text-muted);font-size:13px">No customers found</div>';
       dd.style.display = '';
       return;
     }
-    dd.innerHTML = matches.map(c => {
+    dd.innerHTML = this._addCustomerRowHtml('rental') + matches.map(c => {
       const blocked = c.customer_type === 'credit' && c.account_blocked;
       const typeTag = c.customer_type === 'credit'
         ? `<span style="font-size:10px;padding:1px 5px;border-radius:4px;background:#e3f2fd;color:#1565c0;margin-left:4px">Credit</span>`
@@ -9169,11 +9247,11 @@ const App = {
     const matches = (this._layawayCustomers || []).filter(c =>
       !query || `${c.first_name} ${c.last_name} ${c.customer_number || ''}`.toLowerCase().includes(query));
     if (!matches.length) {
-      dd.innerHTML = '<div style="padding:10px;color:var(--text-muted);font-size:13px">No customers found</div>';
+      dd.innerHTML = this._addCustomerRowHtml('layaway') + '<div style="padding:10px;color:var(--text-muted);font-size:13px">No customers found</div>';
       dd.style.display = '';
       return;
     }
-    dd.innerHTML = matches.map(c => `<div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text)" onclick="App._selectLayawayCustomer(${c.id})">
+    dd.innerHTML = this._addCustomerRowHtml('layaway') + matches.map(c => `<div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text)" onclick="App._selectLayawayCustomer(${c.id})">
         <div><strong>${c.first_name} ${c.last_name}</strong><span style="color:var(--text-muted);font-size:12px;margin-left:4px">${c.customer_number||''}</span></div>
       </div>`).join('');
     dd.style.display = '';
@@ -9214,7 +9292,7 @@ const App = {
     const noneRow = cfg.emptyLabel && !query
       ? `<div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text-muted)" onclick="App._selectCustomerPicker('${id}',null)">${cfg.emptyLabel}</div>`
       : '';
-    dd.innerHTML = noneRow + (matches.length
+    dd.innerHTML = this._addCustomerRowHtml(id) + noneRow + (matches.length
       ? matches.slice(0, 50).map(c => `<div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text)" onclick="App._selectCustomerPicker('${id}',${c.id})">
           <div><strong>${c.first_name} ${c.last_name}</strong><span style="color:var(--text-muted);font-size:12px;margin-left:4px">${c.customer_number||''}</span></div>
         </div>`).join('')
@@ -10786,6 +10864,7 @@ const App = {
           ${this.can('customers_import_history') ? `<button class="btn btn-secondary btn-sm" onclick="App.showCustomerImportHistory()" title="Review or reverse past CSV imports">Import History</button>` : ''}
           ${this.can('customers_export_balances') ? `<button class="btn btn-secondary btn-sm" onclick="App.showCustomerBalancesExport()" title="Export AR balance, credit note total, and status by customer type">Export Balances</button>` : ''}
           ${this.can('customers_missing_rental_info') ? `<button class="btn btn-secondary btn-sm" onclick="App.showRentalIncompleteReport()" title="Rental customers missing the ID/reference/document info required to create a rental">🔑 Missing Rental Info</button>` : ''}
+          ${this.can('customers_rental_preapprove') ? `<button class="btn btn-danger btn-sm" onclick="App.bulkRentalPreapproveAll()" title="Temporary utility: mark every active customer as a rental customer and preapprove them">⚠ Preapprove All for Rental (temp)</button>` : ''}
           ${this.can('customers_add') ? `<button class="btn btn-primary" onclick="App.showCustomerForm()">+ Add Customer</button>` : ''}
         </div>
       </div>
@@ -10833,9 +10912,21 @@ const App = {
     </table>`;
   },
 
-  async showCustomerForm(id) {
+  // TEMPORARY utility — see POST /customers/bulk-rental-preapprove.
+  async bulkRentalPreapproveAll() {
+    try {
+      const { count } = await this.api('POST', '/customers/bulk-rental-preapprove', { dry_run: true });
+      if (!count) return this.alert('Every active customer is already a preapproved rental customer');
+      if (!confirm(`Mark ${count} active customer(s) as Rental Customers and preapprove them?\n\nThey'll be able to rent without photo ID, proof of address, or references on file. This can't be undone in bulk.`)) return;
+      const { updated } = await this.api('POST', '/customers/bulk-rental-preapprove', {});
+      this.alert(`${updated} customer(s) preapproved for rental`);
+      this.renderCustomers();
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  async showCustomerForm(id, opts = {}) {
     const [c, cardTypes, cashBackCardTypes, customerCategories] = await Promise.all([
-      id ? this.api('GET', `/customers/${id}`) : Promise.resolve({}),
+      id ? this.api('GET', `/customers/${id}`) : Promise.resolve({ ...(opts.prefill || {}) }),
       this.api('GET', '/discount-cards'),
       this.api('GET', '/cash-back-cards'),
       this.api('GET', '/customer-categories'),
@@ -11161,7 +11252,10 @@ const App = {
     if (opts.force) data.force = true;
     try {
       if (id) await this.api('PUT', `/customers/${id}`, data);
-      else await this.api('POST', '/customers', data);
+      else {
+        const created = await this.api('POST', '/customers', data);
+        if (this._customerFormStack) return this._finishStackedCustomerForm(created.id);
+      }
       this.closeModal();
       this.alert(id ? 'Customer updated' : 'Customer created');
       this.renderCustomers();
@@ -11193,13 +11287,15 @@ const App = {
                   <div><strong>${c.first_name} ${c.last_name}</strong> (${c.customer_number})</div>
                   <div style="font-size:12px;color:var(--text-muted)">${c.email || ''} ${c.phone ? '· ' + c.phone : ''}</div>
                 </div>
-                <button class="btn btn-outline btn-sm" onclick="App.closeModal();App.viewCustomer(${c.id})">View</button>
+                ${this._customerFormStack
+                  ? `<button class="btn btn-primary btn-sm" onclick="App._pendingCustomerData=null;App._finishStackedCustomerForm(${c.id})">Use This Customer</button>`
+                  : `<button class="btn btn-outline btn-sm" onclick="App.closeModal();App.viewCustomer(${c.id})">View</button>`}
               </div>
             `).join('')}
           </div>
         </div>
         <div class="modal-footer">
-          <button class="btn btn-outline" onclick="App.closeModal();App.showCustomerForm(null)">Cancel</button>
+          <button class="btn btn-outline" onclick="App.showCustomerForm(null, { prefill: App._pendingCustomerData })">Cancel</button>
           <button class="btn btn-danger" onclick="App.forceCreateCustomer()">Create New Customer Anyway</button>
         </div>
       </div>
@@ -11211,8 +11307,9 @@ const App = {
     if (!data) return this.closeModal();
     data.force = true;
     try {
-      await this.api('POST', '/customers', data);
+      const created = await this.api('POST', '/customers', data);
       this._pendingCustomerData = null;
+      if (this._customerFormStack) return this._finishStackedCustomerForm(created.id);
       this.closeModal();
       this.alert('Customer created');
       this.renderCustomers();
