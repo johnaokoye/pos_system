@@ -3377,13 +3377,14 @@ const App = {
               ${combined.map(entry => entry.type === 'order' ? (h => `
                 <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px;cursor:pointer;transition:background 0.15s" onmouseover="this.style.background='#f0f4ff'" onmouseout="this.style.background=''" onclick="App.loadHeldOrder(${h.id})">
                   <div style="display:flex;justify-content:space-between;align-items:center">
-                    <strong style="font-size:14px">${h.customer_name || 'Walk-in Customer'}${h.source_quote_number ? ` <span class="badge-pill badge-info" style="font-size:10px;margin-left:4px">QUOTE</span>` : ''}</strong>
+                    <strong style="font-size:14px">${h.customer_name || 'Walk-in Customer'} <span class="badge-pill badge-success" style="font-size:10px;margin-left:4px">RETAIL</span>${h.source_quote_number ? ` <span class="badge-pill badge-info" style="font-size:10px;margin-left:2px">QUOTE</span>` : ''}</strong>
                     <span style="font-size:12px;color:var(--text-muted);font-family:monospace">${h.source_quote_number || h.transaction_number}</span>
                   </div>
                   <div style="font-size:13px;color:var(--text-muted);margin-top:3px">
                     Total: <strong>${this.fmt(h.total)}</strong> &bull; ${new Date(h.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}
                     ${h.notes ? `&bull; ${h.notes}` : ''}
                   </div>
+                  ${this._recallMetaLine(h.employee_name, h.branch_name)}
                 </div>`)(entry.data) : entry.type === 'rental' ? (r => `
                 <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px;cursor:pointer;transition:background 0.15s" onmouseover="this.style.background='#f0f4ff'" onmouseout="this.style.background=''" onclick="App.closeModal();App.showFinalizeRentalModal(${r.id})">
                   <div style="display:flex;justify-content:space-between;align-items:center">
@@ -3393,6 +3394,7 @@ const App = {
                   <div style="font-size:13px;color:var(--text-muted);margin-top:3px">
                     ${r.item_count} item${r.item_count===1?'':'s'} &bull; Due ${this.fmtDate(r.due_date)} &bull; ${new Date(r.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}
                   </div>
+                  ${this._recallMetaLine(r.employee_name, r.branch_name)}
                 </div>`)(entry.data) : entry.type === 'rental_balance' ? (r => `
                 <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px;cursor:pointer;transition:background 0.15s" onmouseover="this.style.background='#f0f4ff'" onmouseout="this.style.background=''" onclick="App.closeModal();App.showRentalBalanceDueModal(${r.id})">
                   <div style="display:flex;justify-content:space-between;align-items:center">
@@ -3402,6 +3404,7 @@ const App = {
                   <div style="font-size:13px;color:var(--text-muted);margin-top:3px">
                     Balance Due: <strong>${this.fmt(r.balance_due)}</strong> &bull; returned ${new Date(r.returned_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}
                   </div>
+                  ${this._recallMetaLine(r.employee_name, r.branch_name)}
                 </div>`)(entry.data) : (w => `
                 <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px;cursor:pointer;transition:background 0.15s" onmouseover="this.style.background='#f0f4ff'" onmouseout="this.style.background=''" onclick="App.closeModal();${w.status==='intake' ? `App.showWOAssessmentFeeModal(${w.id})` : w.status==='pending_deposit' ? `App.showWODepositModal(${w.id})` : `App.showWOFinalPaymentModal(${w.id})`}">
                   <div style="display:flex;justify-content:space-between;align-items:center">
@@ -3414,6 +3417,7 @@ const App = {
                       : `Balance Due: <strong>${this.fmt(Math.max(0, (parseFloat(w.estimate_labor)||0) + (parseFloat(w.estimate_consumables)||0) + (parseFloat(w.parts_total)||0) - (parseFloat(w.deposit_amount)||0)))}</strong>`}
                     &bull; ${new Date(w.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}
                   </div>
+                  ${this._recallMetaLine(w.employee_name, w.branch_name)}
                 </div>`)(entry.data)).join('')}
             </div>
           </div>
@@ -3421,6 +3425,16 @@ const App = {
     } catch(e) {
       this.alert(e.message, 'error');
     }
+  },
+
+  // Shared "who/where" line for each Hold Recall card — employee_name and
+  // branch_name are already joined by every source endpoint (transactions,
+  // rentals/agreements, work-orders), so this just formats what's there.
+  _recallMetaLine(employeeName, branchName) {
+    if (!employeeName && !branchName) return '';
+    return `<div style="font-size:12px;color:var(--text-muted);margin-top:2px">
+      ${employeeName ? `Held by <strong>${employeeName}</strong>` : ''}${employeeName && branchName ? ' &bull; ' : ''}${branchName || ''}
+    </div>`;
   },
 
   async loadHeldOrder(id) {
@@ -16568,13 +16582,16 @@ const App = {
       this._applyQuoteTypeVisibility('retail');
       this.addQuoteItem();
     }
-    // Item lines are added dynamically (addQuoteItem), so this closes
-    // whichever qti-prod-dd-* dropdown is currently open rather than
-    // binding to a specific line's id — same pattern as the Work Order
-    // parts picker.
+    // Item lines are added dynamically (addQuoteItem/addRentalQuoteLine), so
+    // this closes whichever qti-prod-dd-*/rql-prod-dd-* dropdown is
+    // currently open rather than binding to a specific line's id — same
+    // pattern as the Work Order parts picker.
     document.addEventListener('click', (e) => {
       if (!e.target.closest('.qti-prod-search-wrap')) {
         document.querySelectorAll('[id^="qti-prod-dd-"]').forEach(dd => { dd.style.display = 'none'; });
+      }
+      if (!e.target.closest('.rql-prod-search-wrap')) {
+        document.querySelectorAll('[id^="rql-prod-dd-"]').forEach(dd => { dd.style.display = 'none'; });
       }
     });
   },
@@ -16800,19 +16817,22 @@ const App = {
     const idx = this._rentalQuoteLineIdx = (this._rentalQuoteLineIdx || 0);
     this._rentalQuoteLineIdx++;
     const products = this._rentalQuoteProducts || [];
+    const prefillProduct = prefill && prefill.product_id ? products.find(p => String(p.id) === String(prefill.product_id)) : null;
+    const prefillAvail = prefillProduct ? (prefillProduct.stock_qty - (prefillProduct.rental_outstanding_qty||0)) : null;
+    const prefillLabel = prefillProduct ? `${prefillProduct.name} (${prefillAvail} available)` : '';
     const wrap = document.createElement('div');
     wrap.id = `rq-line-${idx}`;
     wrap.style.cssText = 'border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:8px';
     if (prefill && prefill.accessory_ids) wrap.dataset.preselect = JSON.stringify(prefill.accessory_ids);
     wrap.innerHTML = `
       <div style="display:flex;gap:6px;align-items:flex-start">
-        <select id="rql-prod-${idx}" style="flex:2;padding:6px;border:1px solid var(--border);border-radius:4px;font-size:13px" onchange="App._onRentalQuoteLineProductChange(${idx})">
-          <option value="">Select item…</option>
-          ${products.map(p=>{
-            const avail = p.stock_qty - (p.rental_outstanding_qty||0);
-            return `<option value="${p.id}" data-avail="${avail}" ${prefill&&String(prefill.product_id)===String(p.id)?'selected':''}>${p.name} (${avail} available)</option>`;
-          }).join('')}
-        </select>
+        <span class="rql-prod-search-wrap" style="flex:2;position:relative">
+          <input type="text" id="rql-prod-search-${idx}" placeholder="Search rental items…" autocomplete="off" style="width:100%;padding:6px;border:1px solid var(--border);border-radius:4px;font-size:13px"
+            value="${this.escapeAttr(prefillLabel)}"
+            oninput="App._filterRentalQuoteLineOptions(${idx},this.value)" onfocus="App._filterRentalQuoteLineOptions(${idx},this.value)">
+          <input type="hidden" id="rql-prod-${idx}" value="${prefill&&prefill.product_id||''}" data-avail="${prefillAvail!=null?prefillAvail:''}">
+          <div id="rql-prod-dd-${idx}" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
+        </span>
         <input type="number" id="rql-qty-${idx}" value="${prefill?prefill.quantity:1}" min="1" style="width:70px;padding:6px;border:1px solid var(--border);border-radius:4px" onchange="App._updateRentalQuoteLineAvail(${idx})">
         <input type="text" id="rql-cond-${idx}" placeholder="Condition out (optional)" value="${prefill?this.escapeAttr(prefill.condition_out):''}" style="flex:2;padding:6px;border:1px solid var(--border);border-radius:4px;font-size:13px">
         <span id="rql-warn-${idx}" style="font-size:11px;color:var(--danger);align-self:center"></span>
@@ -16823,23 +16843,57 @@ const App = {
     if (prefill && prefill.product_id) this._onRentalQuoteLineProductChange(idx);
   },
 
+  // Searchable replacement for what used to be a plain <select> of every
+  // rental item — same pattern as the retail Quote item picker
+  // (_filterQuoteItemOptions/_selectQuoteItemOption) and the Work Order
+  // parts picker. saveQuote/_refreshRentalQuoteBranch all read
+  // rql-prod-${idx}'s value directly (a hidden input here, same id/semantics
+  // as the old select), so neither needed to change.
+  _filterRentalQuoteLineOptions(idx, query) {
+    const dd = document.getElementById(`rql-prod-dd-${idx}`);
+    if (!dd) return;
+    const q = (query || '').toLowerCase().trim();
+    const matches = (this._rentalQuoteProducts || []).filter(p => !q || `${p.name} ${p.sku || ''}`.toLowerCase().includes(q));
+    dd.innerHTML = matches.length ? matches.slice(0, 50).map(p => {
+      const avail = p.stock_qty - (p.rental_outstanding_qty||0);
+      return `<div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text)" onclick="App._selectRentalQuoteLineOption(${idx},${p.id})">
+        <strong>${p.name}</strong>
+        <div style="font-size:11px;color:var(--text-muted)">${avail} available${p.sku ? ' · ' + p.sku : ''}</div>
+      </div>`;
+    }).join('') : `<div style="padding:10px;color:var(--text-muted);font-size:13px">No rental items found</div>`;
+    dd.style.display = '';
+  },
+
+  _selectRentalQuoteLineOption(idx, productId) {
+    const p = (this._rentalQuoteProducts || []).find(x => x.id === productId);
+    if (!p) return;
+    const hidden = document.getElementById(`rql-prod-${idx}`);
+    const searchEl = document.getElementById(`rql-prod-search-${idx}`);
+    const dd = document.getElementById(`rql-prod-dd-${idx}`);
+    const avail = p.stock_qty - (p.rental_outstanding_qty||0);
+    if (hidden) { hidden.value = productId; hidden.dataset.avail = avail; }
+    if (searchEl) searchEl.value = `${p.name} (${avail} available)`;
+    if (dd) dd.style.display = 'none';
+    this._onRentalQuoteLineProductChange(idx);
+  },
+
   _updateRentalQuoteLineAvail(idx) {
-    const sel = document.getElementById(`rql-prod-${idx}`);
+    const hidden = document.getElementById(`rql-prod-${idx}`);
     const qtyEl = document.getElementById(`rql-qty-${idx}`);
     const warnEl = document.getElementById(`rql-warn-${idx}`);
-    if (!sel || !qtyEl || !warnEl) return;
-    const avail = parseInt(sel.selectedOptions[0]?.dataset.avail) || 0;
+    if (!hidden || !qtyEl || !warnEl) return;
+    const avail = parseInt(hidden.dataset.avail) || 0;
     const qty = parseInt(qtyEl.value) || 0;
     warnEl.textContent = qty > avail ? `Only ${avail} available` : '';
   },
 
   async _onRentalQuoteLineProductChange(idx) {
     this._updateRentalQuoteLineAvail(idx);
-    const sel = document.getElementById(`rql-prod-${idx}`);
+    const hidden = document.getElementById(`rql-prod-${idx}`);
     const accEl = document.getElementById(`rql-accessories-${idx}`);
     const wrap = document.getElementById(`rq-line-${idx}`);
-    if (!sel || !accEl) return;
-    const productId = sel.value;
+    if (!hidden || !accEl) return;
+    const productId = hidden.value;
     if (!productId) { accEl.innerHTML = ''; return; }
     const accessories = await this.api('GET', `/products/${productId}/accessories`);
     if (!document.getElementById(`rql-accessories-${idx}`)) return;
@@ -16862,15 +16916,24 @@ const App = {
     if (!document.getElementById('qt-branch')) return;
     document.querySelectorAll('#qt-rental-items [id^="rq-line-"]').forEach(line => {
       const idx = line.id.replace('rq-line-','');
-      const sel = document.getElementById(`rql-prod-${idx}`);
-      if (!sel) return;
-      const currentVal = sel.value;
-      sel.innerHTML = `<option value="">Select item…</option>${this._rentalQuoteProducts.map(p=>{
-        const avail = p.stock_qty - (p.rental_outstanding_qty||0);
-        return `<option value="${p.id}" data-avail="${avail}" ${String(p.id)===currentVal?'selected':''}>${p.name} (${avail} available)</option>`;
-      }).join('')}`;
+      const hidden = document.getElementById(`rql-prod-${idx}`);
+      const searchEl = document.getElementById(`rql-prod-search-${idx}`);
+      if (!hidden) return;
+      const currentVal = hidden.value;
+      const match = currentVal ? this._rentalQuoteProducts.find(p => String(p.id) === String(currentVal)) : null;
+      if (match) {
+        const avail = match.stock_qty - (match.rental_outstanding_qty||0);
+        hidden.dataset.avail = avail;
+        if (searchEl) searchEl.value = `${match.name} (${avail} available)`;
+      } else if (currentVal) {
+        // Selected item isn't available at the new branch — clear it rather
+        // than silently keeping a stale selection the new branch can't serve.
+        hidden.value = '';
+        hidden.dataset.avail = '';
+        if (searchEl) searchEl.value = '';
+      }
       this._updateRentalQuoteLineAvail(idx);
-      if (currentVal) this._onRentalQuoteLineProductChange(idx);
+      if (hidden.value) this._onRentalQuoteLineProductChange(idx);
     });
   },
 
