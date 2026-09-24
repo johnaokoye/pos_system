@@ -3,6 +3,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { requirePermission, requireAnyPermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
+const { isSerialNumberProduct, serialNumberLabel, serialNumberOf } = require('../lib/serialNumber');
 const { createTransfer } = require('../lib/transfers');
 const { feeFor, buildRentalLines, revalidateQuoteLines, insertPendingAgreement, assertRentalCustomerEligible } = require('../lib/rentals');
 
@@ -109,7 +110,11 @@ async function processQuoteItems(items) {
     } else if (!item.description || !String(item.description).trim()) {
       throw new Error('Item must have a product_id or a description');
     }
-    const qty = parseInt(item.quantity || 1);
+    // Blank serial on an SN line → drop the line (serials are optional).
+    const isSN = isSerialNumberProduct(product);
+    const serial_number = isSN ? serialNumberOf(item) : null;
+    if (isSN && !serial_number) continue;
+    const qty = serial_number ? 1 : parseInt(item.quantity || 1);
     const unit_price = parseFloat(item.unit_price ?? (product ? product.price : 0));
     const lineTotal = parseFloat((unit_price * qty).toFixed(2));
     const lineTax = parseFloat((lineTotal * (product ? product.tax_rate : defaultTaxRate) / 100).toFixed(2));
@@ -122,14 +127,15 @@ async function processQuoteItems(items) {
     // entered. Never affects subtotal/tax/total.
     const unit_cost = item.unit_cost != null && item.unit_cost !== '' ? parseFloat(item.unit_cost) : (product ? product.cost : null);
     let sources = null;
-    if (product && Array.isArray(item.sources) && item.sources.length) {
+    if (product && !serial_number && Array.isArray(item.sources) && item.sources.length) {
       const sourcesSum = item.sources.reduce((s, src) => s + (parseInt(src.quantity) || 0), 0);
       if (sourcesSum !== qty) throw new Error(`Branch sourcing for ${product.name} (${sourcesSum}) doesn't match quantity (${qty})`);
       sources = item.sources.map(src => ({ branch_id: src.branch_id || null, quantity: parseInt(src.quantity) || 0 })).filter(src => src.quantity > 0);
     }
     processedItems.push({
       product_id: product ? product.id : null,
-      product_name: product ? product.name : String(item.description).trim(),
+      product_name: serial_number ? serialNumberLabel(serial_number) : product ? product.name : String(item.description).trim(),
+      serial_number,
       sku: product ? product.sku : null,
       is_temp_item: product ? 0 : 1,
       purchase_request_id: product ? null : (item.purchase_request_id || null),
@@ -137,6 +143,7 @@ async function processQuoteItems(items) {
       qty, unit_price, unit_cost, lineTotal, lineTax, lineDisc,
     });
   }
+  if (!processedItems.length) throw new Error('No items in quotation');
   return {
     subtotal: parseFloat(subtotal.toFixed(2)),
     tax_amount: parseFloat(tax_amount.toFixed(2)),
@@ -389,8 +396,8 @@ router.post('/', async (req, res) => {
         }
       } else {
         for (const item of processedItems) {
-          const { product_id, product_name, sku, is_temp_item, purchase_request_id, sources, qty, unit_price, unit_cost, lineTotal, lineTax, lineDisc } = item;
-          const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,unit_cost,discount_amount,tax_amount,total,is_temp_item,purchase_request_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', args: [quoteId, product_id, product_name, sku, qty, unit_price, unit_cost, lineDisc, lineTax, lineTotal, is_temp_item, purchase_request_id] });
+          const { product_id, product_name, sku, is_temp_item, purchase_request_id, sources, qty, unit_price, unit_cost, lineTotal, lineTax, lineDisc, serial_number } = item;
+          const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,unit_cost,discount_amount,tax_amount,total,is_temp_item,purchase_request_id,serial_number) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [quoteId, product_id, product_name, sku, qty, unit_price, unit_cost, lineDisc, lineTax, lineTotal, is_temp_item, purchase_request_id, serial_number || null] });
           item.id = Number(itemResult.lastInsertRowid);
           if (sources) {
             for (const src of sources) {
@@ -469,8 +476,8 @@ router.put('/:id', async (req, res) => {
         }
       } else {
         for (const item of processedItems) {
-          const { product_id, product_name, sku, is_temp_item, purchase_request_id, sources, qty, unit_price, unit_cost, lineTotal, lineTax, lineDisc } = item;
-          const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,unit_cost,discount_amount,tax_amount,total,is_temp_item,purchase_request_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', args: [quote.id, product_id, product_name, sku, qty, unit_price, unit_cost, lineDisc, lineTax, lineTotal, is_temp_item, purchase_request_id] });
+          const { product_id, product_name, sku, is_temp_item, purchase_request_id, sources, qty, unit_price, unit_cost, lineTotal, lineTax, lineDisc, serial_number } = item;
+          const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,unit_cost,discount_amount,tax_amount,total,is_temp_item,purchase_request_id,serial_number) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [quote.id, product_id, product_name, sku, qty, unit_price, unit_cost, lineDisc, lineTax, lineTotal, is_temp_item, purchase_request_id, serial_number || null] });
           item.id = Number(itemResult.lastInsertRowid);
           if (sources) {
             for (const src of sources) {
@@ -698,7 +705,7 @@ router.post('/:id/convert', async (req, res) => {
       const txId = Number(result.lastInsertRowid);
 
       for (const item of items) {
-        await convTx.execute({ sql: 'INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total) VALUES (?,?,?,?,?,?,?,?,?)', args: [txId, item.product_id, item.product_name, item.sku || '', item.quantity, item.unit_price, item.discount_amount, item.tax_amount, item.total] });
+        await convTx.execute({ sql: 'INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,serial_number) VALUES (?,?,?,?,?,?,?,?,?,?)', args: [txId, item.product_id, item.product_name, item.sku || '', item.quantity, item.unit_price, item.discount_amount, item.tax_amount, item.total, item.serial_number || null] });
       }
 
       await convTx.execute({ sql: 'UPDATE quotations SET status = ?, converted_to_tx = ? WHERE id = ?', args: ['converted', txId, quote.id] });

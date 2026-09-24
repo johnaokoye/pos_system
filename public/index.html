@@ -2714,7 +2714,7 @@ const App = {
           // collapsing the line to the base product.
           this.addQuoteCustomItem({ product_name: `${item.name} (${item.variation_name})`, quantity: item.quantity, unit_price: item.price });
         } else {
-          this.addQuoteItem({ product_id: item.product_id, quantity: item.quantity, unit_price: item.price });
+          this.addQuoteItem({ product_id: item.product_id, product_name: item.name, serial_number: item.serial_number || null, quantity: item.quantity, unit_price: item.price });
         }
       }
     }
@@ -2821,9 +2821,32 @@ const App = {
     }).join('');
   },
 
+  // The "SN" item (seeded server-side, see lib/serialNumber.js) exists only
+  // to record a serial number on a ticket/quote — ring up the serialized
+  // item, then add SN and key in its serial. Mirrors isSerialNumberProduct().
+  _isSerialNumberProduct(p) {
+    return !!p && String(p.sku || '').toUpperCase() === 'SN';
+  },
+
+  _promptSerialNumber(current = '') {
+    const input = prompt('Enter serial number:', current);
+    if (input == null) return null;
+    // Serials are optional — a blank entry just adds no SN line.
+    return input.trim() || null;
+  },
+
   addToCart(productId) {
     const product = this.allProducts.find(p => p.id === productId);
     if (!product) return;
+    if (this._isSerialNumberProduct(product)) {
+      // Each serial is its own qty-1 line (never merged), placed after
+      // whatever was just rung up so it reads as that item's serial.
+      const serial = this._promptSerialNumber();
+      if (!serial) return;
+      this.cart.push({ product_id: product.id, category_id: product.category_id || null, name: `SN: ${serial}`, serial_number: serial, price: product.price, tax_rate: product.tax_rate, quantity: 1, is_service: 1 });
+      this._checkAutoPromos();
+      return;
+    }
     if (product.has_variations > 0) { this.showVariationPicker(product); return; }
     if (!product.is_service) {
       if (product.stock_qty <= 0) return;
@@ -2849,6 +2872,7 @@ const App = {
     const item = this.cart[idx];
     if (!item) return;
     const newQty = item.quantity + delta;
+    if (item.serial_number && newQty > 1) { this.alert('Each SN line holds one serial number — add SN again for another', 'warning'); return; }
     if (newQty <= 0) { this.cart.splice(idx, 1); }
     else {
       const stockLimit = item.variation_id ? (item.stock_qty ?? Infinity) : (this.allProducts.find(p => p.id === item.product_id)?.stock_qty ?? Infinity);
@@ -3269,7 +3293,7 @@ const App = {
         // directly for that case only; a real product_id line still has its
         // price/tax authoritatively re-derived server-side, never trusted
         // from the client.
-        items: this.cart.map(i => ({ product_id: i.product_id, variation_id: i.variation_id||null, quantity: i.quantity, discount_percent: i.discountPercent||0, discount_override_employee_id: i.discountOverrideEmployeeId||null, ...(i.product_id ? {} : { product_name: i.name, unit_price: i.price, tax_rate: i.tax_rate||0 }) })),
+        items: this.cart.map(i => ({ product_id: i.product_id, variation_id: i.variation_id||null, serial_number: i.serial_number||null, quantity: i.quantity, discount_percent: i.discountPercent||0, discount_override_employee_id: i.discountOverrideEmployeeId||null, ...(i.product_id ? {} : { product_name: i.name, unit_price: i.price, tax_rate: i.tax_rate||0 }) })),
         discount_amount: discount,
         promotion_code: this.appliedDiscountCard ? (this.appliedDiscountCard.card_number || null) : (this.appliedPromoCode?.code || null),
         promotion_name: this.appliedDiscountCard ? `${this.appliedDiscountCard.type_name} ${this.appliedDiscountCard.label || 'Discount Card'}` : (this.appliedPromoCode?.promo_name || this.autoAppliedPromo?.name || null),
@@ -3326,6 +3350,7 @@ const App = {
           unit_price: i.price,
           tax_rate: i.tax_rate || 0,
           variation_name: i.variation_name || null,
+          serial_number: i.serial_number || null,
         };
       });
       await this.api('POST', '/transactions/hold', {
@@ -3468,6 +3493,7 @@ const App = {
           tax_rate: product ? (product.tax_rate || 0) : derivedTaxRate,
           quantity: item.quantity,
           variation_name: item.variation_name || null,
+          serial_number: item.serial_number || null,
           is_service: product?.product_type === 'service' ? 1 : 0,
           stock_qty: product?.stock_qty ?? 999,
         };
@@ -3637,6 +3663,7 @@ const App = {
           product_id: item.product_id,
           variation_id: null,
           name: item.product_name,
+          serial_number: item.serial_number || null,
           price: parseFloat(item.unit_price),
           tax_rate: product ? (product.tax_rate || 0) : derivedTaxRate,
           quantity: item.quantity,
@@ -17009,7 +17036,8 @@ const App = {
         <input type="hidden" id="qti-prod-${idx}" value="${prefill&&prefill.product_id||''}">
         <div id="qti-prod-dd-${idx}" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
       </span>
-      <input id="qti-qty-${idx}" type="number" min="1" value="${prefill?prefill.quantity:1}" style="width:70px" placeholder="Qty" oninput="App.calcQuoteTotal();App.checkQuoteItemStock(${idx})">
+      <input id="qti-sn-${idx}" type="text" placeholder="Serial #" value="${this.escapeAttr(prefill&&prefill.serial_number||'')}" style="width:130px;${prefill&&prefill.serial_number?'':'display:none'}" title="Serial number recorded on this SN line">
+      <input id="qti-qty-${idx}" type="number" min="1" value="${prefill?prefill.quantity:1}" style="width:70px" placeholder="Qty" ${prefill&&prefill.serial_number?'readonly':''} oninput="App.calcQuoteTotal();App.checkQuoteItemStock(${idx})">
       ${isSP ? `<input id="qti-cost-${idx}" type="number" step="0.01" value="${prefill&&prefill.unit_cost!=null?prefill.unit_cost:''}" style="width:90px" placeholder="Cost" title="Informational only — doesn't affect the total" oninput="App._updateQuoteItemMargin(${idx})">` : ''}
       <input id="qti-price-${idx}" type="number" step="0.01" value="${prefill?prefill.unit_price:''}" style="width:90px" placeholder="Price" oninput="App.calcQuoteTotal();App._updateQuoteItemMargin(${idx})">
       <input id="qti-disc-${idx}" type="number" min="0" step="0.01" value="${prefill&&prefill.discount_amount||''}" style="width:80px" placeholder="Discount" title="Discount given on this line — recorded for reference, doesn't change the price above">
@@ -17052,6 +17080,13 @@ const App = {
     if (hidden) hidden.value = productId;
     if (searchEl) searchEl.value = `${p.name}${p.is_rental?' [Rental]':''} (${this.fmt(p.price)})`;
     if (dd) dd.style.display = 'none';
+    // SN line: reveal the serial field and pin qty to 1 (one serial per line).
+    const isSN = this._isSerialNumberProduct(p);
+    const snInp = document.getElementById(`qti-sn-${idx}`);
+    const qtyInp = document.getElementById(`qti-qty-${idx}`);
+    if (snInp) { snInp.style.display = isSN ? '' : 'none'; if (!isSN) snInp.value = ''; }
+    if (qtyInp) { qtyInp.readOnly = isSN; if (isSN) qtyInp.value = 1; }
+    if (isSN && snInp) snInp.focus();
 
     // Once a branch is picked, its tiered price wins over the catalog base
     // price — matches what the register would actually charge at that
@@ -17298,6 +17333,8 @@ const App = {
     const prodSel = document.getElementById(`qti-prod-${idx}`);
     const allocDiv = document.getElementById(`qt-alloc-${idx}`);
     if (!prodSel || !allocDiv) return; // custom item row — no stock concept
+    // SN line — a stockless serial-number placeholder, never a shortfall.
+    if (this._isSerialNumberProduct((this._quoteProducts || []).find(p => String(p.id) === prodSel.value))) { allocDiv.innerHTML = ''; return; }
     const branchId = document.getElementById('qt-branch')?.value;
     const productId = parseInt(prodSel.value);
     const qty = parseInt(document.getElementById(`qti-qty-${idx}`)?.value) || 0;
@@ -17454,6 +17491,12 @@ const App = {
       if (prodSel) {
         if (!prodSel.value) return;
         const item = { product_id: prodSel.value, quantity, unit_price, unit_cost, discount };
+        const snInp = document.getElementById(`qti-sn-${idx}`);
+        if (snInp && snInp.style.display !== 'none') {
+          item.serial_number = snInp.value.trim();
+          // Optional — an SN line left blank is simply left off the quote.
+          if (!item.serial_number) return;
+        }
         const allocInputs = document.querySelectorAll(`[id^="qt-alloc-${idx}-b"]`);
         if (allocInputs.length && branch_id) {
           // Rebuild the split deterministically so it always sums exactly to

@@ -6,6 +6,7 @@ const { getWcSettings, wcRequest } = require('./woocommerce');
 const { syncBinQty } = require('../lib/binSync');
 const { requireAuth, requirePermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
+const { isSerialNumberProduct, serialNumberLabel, serialNumberOf } = require('../lib/serialNumber');
 const { checkDiscountEligibility } = require('./promotions');
 
 // Mirrors availableCashBack() in public/index.html — the frontend uses this
@@ -54,9 +55,10 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
       for (const item of items) {
         const lineTotal = parseFloat((parseFloat(item.unit_price) * item.quantity).toFixed(2));
         const lineTax = parseFloat((lineTotal * (parseFloat(item.tax_rate) || 0) / 100).toFixed(2));
+        const serial = item.serial_number ? String(item.serial_number).trim() : null;
         await txn.execute({
-          sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name) VALUES (?,?,?,?,?,?,0,?,?,?,?)`,
-          args: [txId, item.product_id, item.product_name, item.sku || '', item.quantity, parseFloat(item.unit_price), lineTax, lineTotal, item.variation_id || null, item.variation_name || null]
+          sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,serial_number) VALUES (?,?,?,?,?,?,0,?,?,?,?,?)`,
+          args: [txId, item.product_id, serial ? serialNumberLabel(serial) : item.product_name, item.sku || '', item.quantity, parseFloat(item.unit_price), lineTax, lineTotal, item.variation_id || null, item.variation_name || null, serial || null]
         });
       }
       await txn.commit();
@@ -216,6 +218,18 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       }
       const { rows: [product] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] });
       if (!product) throw new Error(`Product ${item.product_id} not found`);
+      // SN line: always its own qty-1 row carrying the serial, no stock.
+      // Blank serial → dropped, not refused (serials are optional).
+      if (isSerialNumberProduct(product)) {
+        const serialNumber = serialNumberOf(item);
+        if (!serialNumber) continue;
+        const unit_price = product.price || 0;
+        const lineTax = isTaxExempt ? 0 : parseFloat((unit_price * product.tax_rate / 100).toFixed(2));
+        subtotal += unit_price;
+        tax_amount += lineTax;
+        processedItems.push({ product, variation: null, serialNumber, quantity: 1, unit_price, lineTotal: unit_price, lineTax, discount: 0, discountPercent: 0, discountOverrideBy: null });
+        continue;
+      }
       let variation = null, unit_price = product.price;
       if (item.variation_id) {
         const { rows: [v] } = await db.execute({ sql: 'SELECT * FROM product_variations WHERE id = ? AND product_id = ?', args: [item.variation_id, item.product_id] });
@@ -258,6 +272,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       processedItems.push({ product, variation, quantity: item.quantity, unit_price, lineTotal, lineTax, discount: discountAmount, discountPercent, discountOverrideBy });
     }
 
+    if (!processedItems.length) return res.status(400).json({ error: 'No items in transaction' });
     subtotal = parseFloat(subtotal.toFixed(2));
     tax_amount = parseFloat(tax_amount.toFixed(2));
     const disc = parseFloat(discount_amount || 0);
@@ -320,12 +335,13 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         await tx.execute({ sql: 'INSERT INTO transaction_payments (transaction_id, payment_method, amount, approval_code) VALUES (?,?,?,?)', args: [txId, leg.payment_method, leg.amount, leg.approval_code || null] });
       }
 
-      for (const { product, variation, customName, quantity, unit_price, lineTotal, lineTax, discount, discountPercent, discountOverrideBy } of processedItems) {
-        const itemName = customName || (variation ? `${product.name} — ${variation.name}` : product.name);
+      for (const { product, variation, customName, serialNumber, quantity, unit_price, lineTotal, lineTax, discount, discountPercent, discountOverrideBy } of processedItems) {
+        const itemName = customName || (serialNumber ? serialNumberLabel(serialNumber) : variation ? `${product.name} — ${variation.name}` : product.name);
         const itemSku = customName ? '' : (variation ? variation.sku : product.sku);
-        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,discount_percent,discount_override_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [txId, product ? product.id : null, itemName, itemSku, quantity, unit_price, discount, lineTax, lineTotal, variation?.id||null, variation?.name||null, discountPercent || 0, discountOverrideBy || null] });
-        // A custom/temp line has no catalog product — nothing to deduct.
-        if (!product) continue;
+        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,discount_percent,discount_override_by,serial_number) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [txId, product ? product.id : null, itemName, itemSku, quantity, unit_price, discount, lineTax, lineTotal, variation?.id||null, variation?.name||null, discountPercent || 0, discountOverrideBy || null, serialNumber || null] });
+        // A custom/temp line has no catalog product — nothing to deduct; an
+        // SN line is a stockless placeholder for the serial.
+        if (!product || serialNumber) continue;
         if (variation) {
           await tx.execute({ sql: 'UPDATE product_variations SET stock_qty = stock_qty - ? WHERE id = ?', args: [quantity, variation.id] });
         } else {

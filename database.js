@@ -1245,6 +1245,10 @@ async function _init() {
     // cart, or the quote's creator. NULL on older rows means "same as
     // employee_id"; readers COALESCE the two.
     'ALTER TABLE transactions ADD COLUMN created_by INTEGER REFERENCES employees(id)',
+    // Raw serial number on an "SN" line (see lib/serialNumber.js) — the line's
+    // product_name already reads "SN: <serial>"; this copy is for lookups.
+    'ALTER TABLE transaction_items ADD COLUMN serial_number TEXT',
+    'ALTER TABLE quotation_items ADD COLUMN serial_number TEXT',
     // "Overdue" is otherwise computed live (due_date vs today) with no
     // stored status — this column only exists to stop the overdue-rental
     // poller (server.js) from re-logging the same CRM activity on every
@@ -1947,6 +1951,15 @@ async function _init() {
   // PATCH /quotations/:id/reassign instead of this default.
   try {
     await db.execute({ sql: 'UPDATE quotations SET original_employee_id = employee_id WHERE original_employee_id IS NULL AND employee_id IS NOT NULL', args: [] });
+  } catch(e) {}
+
+  // Seed the "SN" serial-number entry item (see lib/serialNumber.js) — a
+  // $0, untaxed service with no stock. Only inserted if no SN sku exists, so
+  // an admin's later edits to it (price, name, deactivating it) stick.
+  try {
+    await db.execute({ sql: `INSERT INTO products (sku, name, description, price, cost, tax_rate, stock_qty, min_stock, is_service, taxable)
+      SELECT 'SN', 'SN', 'Serial number entry — add after a serialized item to record its serial', 0, 0, 0, 0, 0, 1, 0
+      WHERE NOT EXISTS (SELECT 1 FROM products WHERE UPPER(sku) = 'SN')`, args: [] });
   } catch(e) {}
 
   // Ensure admin always has a password — runs unconditionally on every boot

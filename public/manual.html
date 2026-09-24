@@ -244,6 +244,9 @@
       <h3>Holding an order</h3>
       <p>Use <strong>Hold</strong> (needs <span class="perm-pill">pos_hold</span>) to park a cart without charging it or touching stock — useful when a customer steps away or a quote is being converted. Use <strong>Hold Recall</strong> to finish it later from the held-orders list, or delete the hold entirely to abandon it. Every card in that list — retail holds, pending rentals, rental balances due, and work orders alike — shows which employee placed it on hold and at which branch, alongside its type badge (<strong>RETAIL</strong>, <strong>RENTAL</strong>, <strong>RENTAL BALANCE DUE</strong>, or <strong>WORK ORDER</strong>), so a cashier picking up someone else's held ticket can see whose it was at a glance.</p>
 
+      <h3>Recording serial numbers — the SN item</h3>
+      <p>For items that need a serial number captured on the sale, ring up the item as usual, then add the built-in <strong>SN</strong> item (search "SN" or tap its tile) right after it. You're asked for the serial number, and the ticket gets a line reading <strong>SN: <em>serial</em></strong> directly under the item. Serials are optional — leave the prompt blank (or cancel) and no SN line is added; a sale or quote is never refused for a missing serial. SN is a $0, untaxed service with no stock, so it never changes the total or inventory — it only carries the serial. Each SN line holds exactly one serial (its quantity can't be raised), so for several units add SN once per unit. The serial prints on the receipt, the letter-size invoice and emailed receipts, and survives Hold/Recall and conversion to or from a quote. On a quotation, pick <strong>SN</strong> as a line's product and a <strong>Serial #</strong> box appears beside it; an SN line left blank is simply dropped when the quote is saved.</p>
+
       <h3>Converting the current ticket to a Quote or Layaway</h3>
       <p><strong>Create Quote</strong> and <strong>Create Layaway</strong> on the grid open the normal quotation/layaway tools (see <a href="#quotations">Quotations</a>), pre-filled from whatever's currently on the ticket — the attached customer, branch, and line items — so you don't have to re-enter them. Both forms stay fully editable before you save, so nothing is locked in by the prefill.</p>
       <ul>
@@ -270,7 +273,7 @@
       <p>Voiding a line item mid-sale (<strong>Void Line</strong>, or the row's own VOID button) needs <span class="perm-pill">pos_void_items</span> and an authorizing PIN. <strong>Cancel Ticket</strong> (needs <span class="perm-pill">pos_cancel_ticket</span>) clears the whole sale in progress. Refunding or returning items on an already-completed sale is handled from <a href="#transactions">Transactions</a> — the <strong>Returns</strong> button on the grid jumps straight there — and needs <span class="perm-pill">transactions_returns</span>/<span class="perm-pill">pos_refunds</span>.</p>
 
       <h3>Receipts and labels</h3>
-      <p>After checkout you can print a standard receipt, or re-open the last completed sale's receipt with <strong>Reprint Ticket</strong> (needs <span class="perm-pill">pos_reprint_ticket</span>, scoped to the current register session). For shippable orders, print a pick list / shipping label from the Shipping screen — see <a href="#warehouse">Warehouse Management</a>.</p>
+      <p>Every receipt shows who <strong>created</strong> the ticket (whoever started it — e.g. the salesperson who held it, or the quote's original author) and the <strong>cashier</strong> who took payment; for an ordinary sale both are the same person. After checkout you can print a standard receipt, or re-open the last completed sale's receipt with <strong>Reprint Ticket</strong> (needs <span class="perm-pill">pos_reprint_ticket</span>, scoped to the current register session). For shippable orders, print a pick list / shipping label from the Shipping screen — see <a href="#warehouse">Warehouse Management</a>.</p>
     </section>
 
     <section class="module" id="drawers">
@@ -569,6 +572,7 @@
       <h2 class="module">Services &amp; Non-Inventory Items <span class="tag">services</span></h2>
       <p class="module-intro">Things you sell that aren't physical stock — labor, installation, warranties, etc.</p>
       <p>These are ordinary products under the hood (same catalog, same <code>/products</code> data), just flagged as a service or non-inventory item, which turns off stock tracking for them entirely. They won't ever show up in low-stock alerts or stock reports, and selling one never touches a stock number.</p>
+      <p>One service, <strong>SN</strong>, is created automatically: it exists only to record a serial number on a ticket or quote (see <a href="#pos">Point of Sale</a> → Recording serial numbers). Its SKU must stay <code>SN</code> for the serial prompt to appear; its name, price or active status can be changed like any other item.</p>
     </section>
 
     <section class="module" id="purchasing">
