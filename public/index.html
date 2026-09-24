@@ -578,6 +578,9 @@ const App = {
   _storeCreditApplied: 0,
   _cashBackApplied: 0,
   _activeQuoteId: null,
+  // Employee who started the current cart, when recalled from a hold someone
+  // else created — sent as created_by so the receipt can show both people.
+  _ticketCreatedBy: null,
   allProducts: [],
   allCategories: [],
   posCategory: 'all',
@@ -3014,7 +3017,7 @@ const App = {
   },
 
   clearCart() {
-    this.cart = []; this.cartCustomer = null; this.cartDiscount = 0; this._storeCreditApplied = 0; this._cashBackApplied = 0; this.appliedPromoCode = null; this.autoAppliedPromo = null; this._availablePromos = []; this._returnCredit = null; this._activeQuoteId = null; this.appliedDiscountCard = null; this._manualTaxExempt = null;
+    this.cart = []; this.cartCustomer = null; this.cartDiscount = 0; this._storeCreditApplied = 0; this._cashBackApplied = 0; this.appliedPromoCode = null; this.autoAppliedPromo = null; this._availablePromos = []; this._returnCredit = null; this._activeQuoteId = null; this._ticketCreatedBy = null; this.appliedDiscountCard = null; this._manualTaxExempt = null;
     this.renderCart();
     const aqBar = document.getElementById('active-quote-bar');
     if (aqBar) aqBar.style.display = 'none';
@@ -3257,6 +3260,7 @@ const App = {
       const tx = await this.api('POST', '/transactions', {
         customer_id: this.cartCustomer?.id || null,
         employee_id: this.currentUser?.id || 1,
+        created_by: this._ticketCreatedBy || null,
         branch_id: this.posBranch?.id || null,
         drawer_session_id: this.currentDrawerSession?.id || null,
         // A custom/temp line (no product_id — e.g. a Special Project's
@@ -3327,6 +3331,7 @@ const App = {
       await this.api('POST', '/transactions/hold', {
         customer_id: this.cartCustomer?.id || null,
         employee_id: this.currentUser?.id || 1,
+        created_by: this._ticketCreatedBy || null,
         branch_id: this.posBranch?.id || null,
         items: cartItems,
         discount_amount: this.cartDiscount || 0,
@@ -3477,6 +3482,7 @@ const App = {
       // — restoring it here is what makes checkout finalize the quote correctly,
       // exactly like loadQuoteToCart does for its own "Load Quote" pull flow.
       this._activeQuoteId = held.source_quote_id || null;
+      this._ticketCreatedBy = held.created_by || held.employee_id || null;
       if (held.customer_id) {
         const customer = await this.api('GET', `/customers/${held.customer_id}`);
         this.cartCustomer = customer;
@@ -3644,6 +3650,7 @@ const App = {
       this.appliedPromoCode = null;
       this._returnCredit = null;
       this._activeQuoteId = quote.id;
+      this._ticketCreatedBy = null;
 
       if (quote.customer_id) {
         const customer = await this.api('GET', `/customers/${quote.customer_id}`);
@@ -3739,6 +3746,8 @@ const App = {
             <div class="receipt-row"><span>Transaction #:</span><span>${tx.transaction_number}</span></div>
             <div class="receipt-row"><span>Date:</span><span>${this.fmtDateTime(tx.created_at)}</span></div>
             ${tx.customer_name ? `<div class="receipt-row"><span>Customer:</span><span>${tx.customer_name}</span></div>` : ''}
+            ${tx.created_by_name ? `<div class="receipt-row"><span>Created By:</span><span>${tx.created_by_name}</span></div>` : ''}
+            ${tx.employee_name ? `<div class="receipt-row"><span>Cashier:</span><span>${tx.employee_name}</span></div>` : ''}
             <hr>
             ${items.map(i => `<div class="receipt-row"><span>${i.product_name}</span><span>${this.fmt(i.total)}</span></div>${i.quantity > 1 ? `<div style="color:#666;font-size:11px;padding-left:4px">${i.quantity} x ${this.fmt(i.unit_price)}</div>` : ''}`).join('')}
             <hr>
@@ -3936,7 +3945,8 @@ const App = {
       <div><label>Date</label>${this.fmtDateTime(tx.created_at)}</div>
       ${tx.customer_name ? `<div><label>Customer</label>${tx.customer_name}</div>` : ''}
       ${tx.rental_agreement_number ? `<div><label>Rental Agreement</label>${tx.rental_agreement_number}</div>` : ''}
-      ${isRental && tx.employee_name ? `<div><label>Created By</label>${tx.employee_name}</div>` : ''}
+      ${tx.created_by_name || tx.employee_name ? `<div><label>Created By</label>${tx.created_by_name || tx.employee_name}</div>` : ''}
+      ${tx.employee_name ? `<div><label>Cashier</label>${tx.employee_name}</div>` : ''}
       ${rentedItemsLabel ? `<div><label>Item(s) Rented</label>${rentedItemsLabel}</div>` : ''}
       ${tx.rental_due_date ? `<div><label>Due Date</label>${this.fmtDate(tx.rental_due_date)}</div>` : ''}
       ${tx.rental_po_number ? `<div><label>Customer PO</label>${tx.rental_po_number}</div>` : ''}

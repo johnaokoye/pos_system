@@ -27,7 +27,7 @@ function computeAvailableCashBack(row) {
 // Put order on hold (no stock updates, no payment processing)
 router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
   try {
-    const { customer_id, employee_id, branch_id, items, discount_amount, notes } = req.body;
+    const { customer_id, employee_id, created_by, branch_id, items, discount_amount, notes } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in cart' });
 
     const hold_number = 'HOLD-' + Date.now();
@@ -47,8 +47,8 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
     let committed = false;
     try {
       const result = await txn.execute({
-        sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,subtotal,tax_amount,discount_amount,total,payment_method,status,notes,amount_tendered,change_amount) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,0)`,
-        args: [hold_number, customer_id || null, employee_id || 1, branch_id || null, subtotal, tax_amount, disc, total, 'hold', 'hold', notes || null]
+        sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,created_by,branch_id,subtotal,tax_amount,discount_amount,total,payment_method,status,notes,amount_tendered,change_amount) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,0)`,
+        args: [hold_number, customer_id || null, employee_id || 1, created_by || employee_id || 1, branch_id || null, subtotal, tax_amount, disc, total, 'hold', 'hold', notes || null]
       });
       const txId = Number(result.lastInsertRowid);
       for (const item of items) {
@@ -130,7 +130,7 @@ router.get('/', requirePermission('transactions'), async (req, res) => {
 // returns flow, online orders), not just the Transactions detail view.
 router.get('/:id', requireAuth, async (req, res) => {
   try {
-    const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, c.phone as customer_phone, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone, q.id as source_quote_id, q.quote_number as source_quote_number, qe.first_name || ' ' || qe.last_name as quote_created_by, r.return_number as source_return_number, sh.carrier as shipment_carrier, sh.tracking_number as shipment_tracking_number, sh.status as shipment_status, sh.ship_date as shipment_ship_date, sh.estimated_delivery as shipment_estimated_delivery,
+    const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, c.phone as customer_phone, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip, e.first_name || ' ' || e.last_name as employee_name, cbe.first_name || ' ' || cbe.last_name as created_by_name, b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone, q.id as source_quote_id, q.quote_number as source_quote_number, qe.first_name || ' ' || qe.last_name as quote_created_by, r.return_number as source_return_number, sh.carrier as shipment_carrier, sh.tracking_number as shipment_tracking_number, sh.status as shipment_status, sh.ship_date as shipment_ship_date, sh.estimated_delivery as shipment_estimated_delivery,
       ve.first_name || ' ' || ve.last_name as voided_by_name,
       ra.id as rental_agreement_id, ra.agreement_number as rental_agreement_number, ra.status as rental_status,
       ra.checkout_datetime as rental_checkout_datetime, ra.due_date as rental_due_date, ra.returned_at as rental_returned_at,
@@ -142,6 +142,7 @@ router.get('/:id', requireAuth, async (req, res) => {
       CASE WHEN wo.assessment_transaction_id = t.id THEN 'assessment' WHEN wo.deposit_transaction_id = t.id THEN 'deposit' WHEN wo.final_transaction_id = t.id THEN 'final' END as wo_role
       FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN branches b ON t.branch_id = b.id LEFT JOIN quotations q ON q.converted_to_tx = t.id LEFT JOIN employees qe ON q.employee_id = qe.id LEFT JOIN returns r ON t.source_return_id = r.id LEFT JOIN shipments sh ON sh.transaction_id = t.id
       LEFT JOIN employees ve ON t.voided_by = ve.id
+      LEFT JOIN employees cbe ON cbe.id = COALESCE(t.created_by, t.employee_id)
       LEFT JOIN rental_agreements ra ON ra.checkout_transaction_id = t.id OR ra.settlement_transaction_id = t.id
       LEFT JOIN work_orders wo ON wo.assessment_transaction_id = t.id OR wo.deposit_transaction_id = t.id OR wo.final_transaction_id = t.id
       WHERE t.id = ?`, args: [req.params.id] });
@@ -162,7 +163,7 @@ router.get('/:id', requireAuth, async (req, res) => {
 
 router.post('/', requirePermission('pos'), async (req, res) => {
   try {
-    const { customer_id, employee_id, drawer_session_id, items, discount_amount, promotion_code, promotion_name, payment_method, amount_tendered, notes, source_return_id, store_credit_applied, cash_back_applied, quote_id, tax_exempt, tax_exemption_number, approval_code, tenders } = req.body;
+    const { customer_id, employee_id, created_by, drawer_session_id, items, discount_amount, promotion_code, promotion_name, payment_method, amount_tendered, notes, source_return_id, store_credit_applied, cash_back_applied, quote_id, tax_exempt, tax_exemption_number, approval_code, tenders } = req.body;
     let { branch_id } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in transaction' });
 
@@ -173,6 +174,15 @@ router.post('/', requirePermission('pos'), async (req, res) => {
     }
 
     const transaction_number = await nextNumber(db, 'transactions', 'transaction_number', 'TXN-', 6);
+
+    // Ticket creator for the receipt: whoever started a recalled hold (sent by
+    // the POS), else the quote's original salesperson, else the cashier.
+    let createdBy = created_by || null;
+    if (!createdBy && quote_id) {
+      const { rows: [q] } = await db.execute({ sql: 'SELECT employee_id, original_employee_id FROM quotations WHERE id = ?', args: [quote_id] });
+      createdBy = q?.original_employee_id || q?.employee_id || null;
+    }
+    createdBy = createdBy || employee_id || 1;
 
     // Store-wide cap for a manual per-line discount (see the POS "Discount"
     // action on a cart line) — 0/unset means no limit is configured, same
@@ -302,7 +312,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
     let committed = false;
     try {
       const txSource = req.apiKey ? 'online' : 'pos';
-      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,promotion_code,promotion_name,total,payment_method,amount_tendered,change_amount,is_credit,notes,source_return_id,store_credit_applied,cash_back_applied,tax_exempt,tax_exemption_number,approval_code,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id || null, employee_id || 1, branch_id || null, drawer_session_id || null, subtotal, tax_amount, disc, promotion_code || null, promotion_name || null, total, method, tendered, change > 0 ? change : 0, isCredit ? 1 : 0, notes || null, source_return_id || null, storeCredit > 0 ? storeCredit : 0, cashBack > 0 ? cashBack : 0, isTaxExempt, tax_exemption_number || null, finalApprovalCode, txSource] });
+      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,created_by,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,promotion_code,promotion_name,total,payment_method,amount_tendered,change_amount,is_credit,notes,source_return_id,store_credit_applied,cash_back_applied,tax_exempt,tax_exemption_number,approval_code,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id || null, employee_id || 1, createdBy, branch_id || null, drawer_session_id || null, subtotal, tax_amount, disc, promotion_code || null, promotion_name || null, total, method, tendered, change > 0 ? change : 0, isCredit ? 1 : 0, notes || null, source_return_id || null, storeCredit > 0 ? storeCredit : 0, cashBack > 0 ? cashBack : 0, isTaxExempt, tax_exemption_number || null, finalApprovalCode, txSource] });
       const txId = Number(txResult.lastInsertRowid);
 
       const paymentLegs = tenderLegs || [{ payment_method: method, amount: total, approval_code: finalApprovalCode }];
@@ -365,7 +375,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       await tx.commit();
       committed = true;
 
-      const { rows: [savedTx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id LEFT JOIN branches b ON t.branch_id = b.id WHERE t.id = ?`, args: [txId] });
+      const { rows: [savedTx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, e.first_name || ' ' || e.last_name as employee_name, cbe.first_name || ' ' || cbe.last_name as created_by_name, b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN employees cbe ON cbe.id = COALESCE(t.created_by, t.employee_id) LEFT JOIN branches b ON t.branch_id = b.id WHERE t.id = ?`, args: [txId] });
       const { rows: txItems } = await db.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [txId] });
       savedTx.items = txItems;
       const { rows: txPayments } = await db.execute({ sql: 'SELECT * FROM transaction_payments WHERE transaction_id = ? ORDER BY id', args: [txId] });

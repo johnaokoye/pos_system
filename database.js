@@ -1240,6 +1240,11 @@ async function _init() {
     // Mirrors store_credit_applied — how much of this sale was paid with
     // redeemed cash-back value, for the receipt line and audit trail.
     'ALTER TABLE transactions ADD COLUMN cash_back_applied REAL DEFAULT 0',
+    // Who started the ticket, when that's someone other than the cashier who
+    // rang it up (employee_id) — e.g. a salesperson who built and held the
+    // cart, or the quote's creator. NULL on older rows means "same as
+    // employee_id"; readers COALESCE the two.
+    'ALTER TABLE transactions ADD COLUMN created_by INTEGER REFERENCES employees(id)',
     // "Overdue" is otherwise computed live (due_date vs today) with no
     // stored status — this column only exists to stop the overdue-rental
     // poller (server.js) from re-logging the same CRM activity on every

@@ -70,6 +70,8 @@ function buildReceiptHtml(tx, s) {
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-bottom:16px">
         <tr><td style="padding:2px 0"><strong>Transaction #:</strong> ${tx.transaction_number}</td><td style="text-align:right;padding:2px 0"><strong>Date:</strong> ${new Date(tx.created_at).toLocaleString()}</td></tr>
         ${tx.customer_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Customer:</strong> ${tx.customer_name}</td></tr>` : ''}
+        ${tx.created_by_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Created By:</strong> ${tx.created_by_name}</td></tr>` : ''}
+        ${tx.employee_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Cashier:</strong> ${tx.employee_name}</td></tr>` : ''}
         <tr><td colspan="2" style="padding:2px 0"><strong>Payment:</strong> ${(tx.payment_method || '').replace('_',' ').toUpperCase()}</td></tr>
       </table>
       <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px">
@@ -345,7 +347,8 @@ function buildRentalInvoiceHtml(agreement, tx, s, origin) {
         <tr><td style="padding:2px 0"><strong>Transaction #:</strong> ${tx.transaction_number}</td><td style="text-align:right;padding:2px 0"><strong>Date:</strong> ${new Date(tx.created_at).toLocaleString()}</td></tr>
         ${agreement.customer_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Customer:</strong> ${agreement.customer_name}</td></tr>` : ''}
         <tr><td colspan="2" style="padding:2px 0"><strong>Rental Agreement:</strong> ${agreement.agreement_number}</td></tr>
-        ${tx.employee_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Created By:</strong> ${tx.employee_name}</td></tr>` : ''}
+        ${tx.created_by_name || tx.employee_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Created By:</strong> ${tx.created_by_name || tx.employee_name}</td></tr>` : ''}
+        ${tx.employee_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Cashier:</strong> ${tx.employee_name}</td></tr>` : ''}
         <tr><td colspan="2" style="padding:2px 0"><strong>Item(s) Rented:</strong> ${rentedItemsLabel || '—'}</td></tr>
         <tr><td style="padding:2px 0"><strong>Rented:</strong> ${rentedLabel}</td><td style="text-align:right;padding:2px 0"><strong>Returned:</strong> ${returnedLabel}</td></tr>
         <tr><td colspan="2" style="padding:2px 0"><strong>Duration:</strong> ${durationLabel}</td></tr>
@@ -578,10 +581,13 @@ router.post('/send-receipt/:id', requireAuth, async (req, res) => {
 
   try {
     const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name,
+      e.first_name || ' ' || e.last_name as employee_name, cbe.first_name || ' ' || cbe.last_name as created_by_name,
       b.name as branch_name, b.address as branch_address, b.city as branch_city,
       b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone
       FROM transactions t
       LEFT JOIN customers c ON t.customer_id = c.id
+      LEFT JOIN employees e ON t.employee_id = e.id
+      LEFT JOIN employees cbe ON cbe.id = COALESCE(t.created_by, t.employee_id)
       LEFT JOIN branches b ON t.branch_id = b.id
       WHERE t.id = ?`, args: [req.params.id] });
     if (!tx) return res.status(404).json({ error: 'Transaction not found' });
@@ -795,8 +801,8 @@ router.post('/send-rental-invoice/:id', requireAuth, async (req, res) => {
     const { rows: items } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
     agreement.items = items;
 
-    const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone, e.first_name || ' ' || e.last_name as employee_name
-      FROM transactions t LEFT JOIN branches b ON t.branch_id = b.id LEFT JOIN employees e ON t.employee_id = e.id WHERE t.id = ?`, args: [agreement.checkout_transaction_id] });
+    const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone, e.first_name || ' ' || e.last_name as employee_name, cbe.first_name || ' ' || cbe.last_name as created_by_name
+      FROM transactions t LEFT JOIN branches b ON t.branch_id = b.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN employees cbe ON cbe.id = COALESCE(t.created_by, t.employee_id) WHERE t.id = ?`, args: [agreement.checkout_transaction_id] });
     if (!tx) return res.status(404).json({ error: 'Checkout transaction not found' });
     const { rows: txItems } = await db.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [agreement.checkout_transaction_id] });
     tx.items = txItems;
