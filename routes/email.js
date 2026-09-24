@@ -4,6 +4,13 @@ const nodemailer = require('nodemailer');
 const { db } = require('../database');
 const { requireAuth, requirePermission } = require('../lib/permissions');
 
+// Brand palette for every email sent out (receipts, quotes, invoices,
+// statements, notices): green header with a yellow accent stripe, black
+// text. Red is kept only for warning figures (voided amounts, balances
+// owed, damage, deadlines) where it signals a problem.
+const BRAND = { green: '#007e37', yellow: '#ffd800', black: '#000000' };
+const BRAND_HEADER_STYLE = `background:${BRAND.green};border-bottom:5px solid ${BRAND.yellow};padding:24px;text-align:center`;
+
 async function getSettings() {
   const { rows } = await db.execute({ sql: 'SELECT * FROM settings', args: [] });
   const s = {};
@@ -59,14 +66,14 @@ function buildReceiptHtml(tx, s) {
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
 <tr><td align="center">
   <table width="480" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
-    <tr><td style="background:#1a56db;padding:24px;text-align:center">
+    <tr><td style="${BRAND_HEADER_STYLE}">
       <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
-      ${tx.branch_name ? `<div style="color:#bcd4ff;font-size:13px;margin-top:4px">${tx.branch_name}</div>` : ''}
-      ${storeAddr ? `<div style="color:#bcd4ff;font-size:12px;margin-top:2px">${storeAddr}</div>` : ''}
-      ${storePhone ? `<div style="color:#bcd4ff;font-size:12px">${storePhone}</div>` : ''}
+      ${tx.branch_name ? `<div style="color:#ffffff;font-size:13px;margin-top:4px">${tx.branch_name}</div>` : ''}
+      ${storeAddr ? `<div style="color:#ffffff;font-size:12px;margin-top:2px">${storeAddr}</div>` : ''}
+      ${storePhone ? `<div style="color:#ffffff;font-size:12px">${storePhone}</div>` : ''}
     </td></tr>
     <tr><td style="padding:20px 24px">
-      <div style="font-size:18px;font-weight:700;color:#111;margin-bottom:4px">Receipt</div>
+      <div style="font-size:18px;font-weight:700;color:${BRAND.black};margin-bottom:4px">Receipt</div>
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-bottom:16px">
         <tr><td style="padding:2px 0"><strong>Transaction #:</strong> ${tx.transaction_number}</td><td style="text-align:right;padding:2px 0"><strong>Date:</strong> ${new Date(tx.created_at).toLocaleString()}</td></tr>
         ${tx.customer_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Customer:</strong> ${tx.customer_name}</td></tr>` : ''}
@@ -81,10 +88,10 @@ function buildReceiptHtml(tx, s) {
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-top:12px">
         <tr><td style="padding:3px 0">Subtotal</td><td style="text-align:right">${fmt(tx.subtotal)}</td></tr>
         <tr><td style="padding:3px 0">Tax</td><td style="text-align:right">${fmt(tx.tax_amount)}</td></tr>
-        ${parseFloat(tx.discount_amount) > 0 ? `<tr><td style="padding:3px 0;color:#16a34a">Discount</td><td style="text-align:right;color:#16a34a">-${fmt(tx.discount_amount)}</td></tr>` : ''}
+        ${parseFloat(tx.discount_amount) > 0 ? `<tr><td style="padding:3px 0;color:${BRAND.green}">Discount</td><td style="text-align:right;color:${BRAND.green}">-${fmt(tx.discount_amount)}</td></tr>` : ''}
         <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
-        <tr><td style="font-size:16px;font-weight:700;color:#111">TOTAL</td><td style="font-size:16px;font-weight:700;color:#111;text-align:right">${fmt(tx.total)}</td></tr>
-        ${parseFloat(tx.change_amount) > 0 ? `<tr><td style="padding:3px 0;color:#16a34a">Change</td><td style="text-align:right;color:#16a34a">${fmt(tx.change_amount)}</td></tr>` : ''}
+        <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">TOTAL</td><td style="font-size:16px;font-weight:700;color:${BRAND.black};text-align:right">${fmt(tx.total)}</td></tr>
+        ${parseFloat(tx.change_amount) > 0 ? `<tr><td style="padding:3px 0;color:${BRAND.green}">Change</td><td style="text-align:right;color:${BRAND.green}">${fmt(tx.change_amount)}</td></tr>` : ''}
       </table>
       <div style="text-align:center;margin-top:20px;font-size:13px;color:#666;font-style:italic">${footer}</div>
     </td></tr>
@@ -99,20 +106,22 @@ function buildReceiptHtml(tx, s) {
 // same store-branding shape as buildReceiptHtml, but a red/orange header
 // instead of blue so it reads as distinct from a sales receipt at a glance.
 function docHeader(storeName, branchLine, addrLine, phoneLine, docTitle, docNumber) {
-  return `<tr><td style="background:#dc2626;padding:24px;text-align:center">
+  return `<tr><td style="${BRAND_HEADER_STYLE}">
       <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
-      ${branchLine ? `<div style="color:#fecaca;font-size:13px;margin-top:4px">${branchLine}</div>` : ''}
-      ${addrLine ? `<div style="color:#fecaca;font-size:12px;margin-top:2px">${addrLine}</div>` : ''}
-      ${phoneLine ? `<div style="color:#fecaca;font-size:12px">${phoneLine}</div>` : ''}
+      ${branchLine ? `<div style="color:#ffffff;font-size:13px;margin-top:4px">${branchLine}</div>` : ''}
+      ${addrLine ? `<div style="color:#ffffff;font-size:12px;margin-top:2px">${addrLine}</div>` : ''}
+      ${phoneLine ? `<div style="color:#ffffff;font-size:12px">${phoneLine}</div>` : ''}
     </td></tr>
     <tr><td style="padding:20px 24px 0">
-      <div style="font-size:18px;font-weight:700;color:#111;margin-bottom:2px">${docTitle}</div>
+      <div style="font-size:18px;font-weight:700;color:${BRAND.black};margin-bottom:2px">${docTitle}</div>
       <div style="font-size:13px;color:#888;margin-bottom:14px">${docNumber}</div>
     </td></tr>`;
 }
 
+// A block, not a <tr>: every caller drops these straight into a padded
+// <td>, where a bare <tr> is invalid and gets hoisted out of the card.
 function docRow(label, value, color) {
-  return `<tr><td style="padding:2px 24px;font-size:13px;color:${color||'#444'}"><strong>${label}:</strong> ${value}</td></tr>`;
+  return `<div style="padding:2px 0;font-size:13px;color:${color||'#444'}"><strong>${label}:</strong> ${value}</div>`;
 }
 
 function buildVoidReceiptHtml(tx, s) {
@@ -147,7 +156,7 @@ function buildVoidReceiptHtml(tx, s) {
       </table>` : ''}
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-top:12px">
         <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
-        <tr><td style="font-size:16px;font-weight:700;color:#111">AMOUNT VOIDED</td><td style="font-size:16px;font-weight:700;color:#dc2626;text-align:right">${fmt(tx.total)}</td></tr>
+        <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">AMOUNT VOIDED</td><td style="font-size:16px;font-weight:700;color:#dc2626;text-align:right">${fmt(tx.total)}</td></tr>
       </table>
       <div style="text-align:center;margin-top:20px;font-size:12px;color:#999">This document confirms transaction ${tx.transaction_number} was voided and no charge stands.</div>
     </td></tr>
@@ -194,7 +203,7 @@ function buildReturnReceiptHtml(ret, s) {
         <tr><td style="padding:3px 0">Subtotal</td><td style="text-align:right">${fmt(ret.subtotal)}</td></tr>
         <tr><td style="padding:3px 0">Tax</td><td style="text-align:right">${fmt(ret.tax_amount)}</td></tr>
         <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
-        <tr><td style="font-size:16px;font-weight:700;color:#111">${resolutionLabel.toUpperCase()} TOTAL</td><td style="font-size:16px;font-weight:700;color:#dc2626;text-align:right">${fmt(ret.total)}</td></tr>
+        <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">${resolutionLabel.toUpperCase()} TOTAL</td><td style="font-size:16px;font-weight:700;color:#dc2626;text-align:right">${fmt(ret.total)}</td></tr>
       </table>
     </td></tr>
   </table>
@@ -235,7 +244,7 @@ function buildCancellationReceiptHtml(agreement, s) {
         <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
         ${wasBilled ? `
         <tr><td style="padding:3px 0">Original Charge (${(agreement.checkout_payment_method||'').replace('_',' ').toUpperCase()})</td><td style="text-align:right">${fmt(agreement.checkout_total)}</td></tr>
-        <tr><td style="font-size:16px;font-weight:700;color:#111">AMOUNT VOIDED</td><td style="font-size:16px;font-weight:700;color:#dc2626;text-align:right">${fmt(agreement.checkout_total)}</td></tr>
+        <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">AMOUNT VOIDED</td><td style="font-size:16px;font-weight:700;color:#dc2626;text-align:right">${fmt(agreement.checkout_total)}</td></tr>
         ` : `<tr><td style="font-size:13px;color:#666" colspan="2">This rental was on hold — no payment had been collected, so nothing was charged or refunded.</td></tr>`}
       </table>
       <div style="text-align:center;margin-top:20px;font-size:12px;color:#999">This document confirms rental agreement ${agreement.agreement_number} was cancelled${wasBilled ? ' and the original charge was voided' : ''}.</div>
@@ -335,14 +344,14 @@ function buildRentalInvoiceHtml(agreement, tx, s, origin) {
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
 <tr><td align="center">
   <table width="520" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
-    <tr><td style="background:#1a56db;padding:24px;text-align:center">
+    <tr><td style="${BRAND_HEADER_STYLE}">
       <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
-      ${agreement.branch_name ? `<div style="color:#bcd4ff;font-size:13px;margin-top:4px">${agreement.branch_name}</div>` : ''}
-      ${storeAddr ? `<div style="color:#bcd4ff;font-size:12px;margin-top:2px">${storeAddr}</div>` : ''}
-      ${storePhone ? `<div style="color:#bcd4ff;font-size:12px">${storePhone}</div>` : ''}
+      ${agreement.branch_name ? `<div style="color:#ffffff;font-size:13px;margin-top:4px">${agreement.branch_name}</div>` : ''}
+      ${storeAddr ? `<div style="color:#ffffff;font-size:12px;margin-top:2px">${storeAddr}</div>` : ''}
+      ${storePhone ? `<div style="color:#ffffff;font-size:12px">${storePhone}</div>` : ''}
     </td></tr>
     <tr><td style="padding:20px 24px">
-      <div style="font-size:18px;font-weight:700;color:#111;margin-bottom:4px">Rental Tax Invoice</div>
+      <div style="font-size:18px;font-weight:700;color:${BRAND.black};margin-bottom:4px">Rental Tax Invoice</div>
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-bottom:16px">
         <tr><td style="padding:2px 0"><strong>Transaction #:</strong> ${tx.transaction_number}</td><td style="text-align:right;padding:2px 0"><strong>Date:</strong> ${new Date(tx.created_at).toLocaleString()}</td></tr>
         ${agreement.customer_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Customer:</strong> ${agreement.customer_name}</td></tr>` : ''}
@@ -366,7 +375,7 @@ function buildRentalInvoiceHtml(agreement, tx, s, origin) {
         <tr><td style="padding:3px 0">Subtotal</td><td style="text-align:right">${fmt(tx.subtotal)}</td></tr>
         <tr><td style="padding:3px 0">Tax</td><td style="text-align:right">${fmt(tx.tax_amount)}</td></tr>`}
         <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
-        <tr><td style="font-size:16px;font-weight:700;color:#111">${rentalBreakdown ? 'GRAND TOTAL' : 'TOTAL'}</td><td style="font-size:16px;font-weight:700;color:#111;text-align:right">${fmt(tx.total)}</td></tr>
+        <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">${rentalBreakdown ? 'GRAND TOTAL' : 'TOTAL'}</td><td style="font-size:16px;font-weight:700;color:${BRAND.black};text-align:right">${fmt(tx.total)}</td></tr>
         <tr><td style="padding:3px 0;color:#666">Payment</td><td style="text-align:right;color:#666">${(tx.payment_method || '').replace('_',' ').toUpperCase()}</td></tr>
       </table>
       ${sigBlock(issueSignatures, returnSignatures)}
@@ -468,14 +477,14 @@ function buildRentalSummaryHtml(agreement, s) {
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
 <tr><td align="center">
   <table width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
-    <tr><td style="background:#1a56db;padding:24px;text-align:center">
+    <tr><td style="${BRAND_HEADER_STYLE}">
       <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
-      ${agreement.branch_name ? `<div style="color:#bcd4ff;font-size:13px;margin-top:4px">${agreement.branch_name}</div>` : ''}
-      ${storeAddr ? `<div style="color:#bcd4ff;font-size:12px;margin-top:2px">${storeAddr}</div>` : ''}
-      ${agreement.branch_phone || s.store_phone ? `<div style="color:#bcd4ff;font-size:12px">${agreement.branch_phone || s.store_phone}</div>` : ''}
+      ${agreement.branch_name ? `<div style="color:#ffffff;font-size:13px;margin-top:4px">${agreement.branch_name}</div>` : ''}
+      ${storeAddr ? `<div style="color:#ffffff;font-size:12px;margin-top:2px">${storeAddr}</div>` : ''}
+      ${agreement.branch_phone || s.store_phone ? `<div style="color:#ffffff;font-size:12px">${agreement.branch_phone || s.store_phone}</div>` : ''}
     </td></tr>
     <tr><td style="padding:20px 24px">
-      <div style="font-size:18px;font-weight:700;color:#111;margin-bottom:12px">Rental Agreement Summary</div>
+      <div style="font-size:18px;font-weight:700;color:${BRAND.black};margin-bottom:12px">Rental Agreement Summary</div>
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-bottom:16px">
         <tr><td style="padding:2px 0"><strong>Agreement #:</strong> ${agreement.agreement_number}</td>${agreement.customer_name ? `<td style="text-align:right;padding:2px 0"><strong>Customer:</strong> ${agreement.customer_name}</td>` : ''}</tr>
         <tr><td style="padding:2px 0"><strong>Checked Out:</strong> ${agreement.checkout_datetime ? new Date(agreement.checkout_datetime).toLocaleString() : '—'}</td><td style="text-align:right;padding:2px 0"><strong>Due Date:</strong> ${agreement.due_date}</td></tr>
@@ -494,7 +503,7 @@ function buildRentalSummaryHtml(agreement, s) {
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444">
         ${settlementRows.map(([l,v]) => `<tr><td style="padding:3px 0">${l}</td><td style="text-align:right">${v}</td></tr>`).join('')}
         <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
-        <tr><td style="font-size:15px;font-weight:700;color:#111">${balanceLabel}</td><td style="font-size:15px;font-weight:700;color:#111;text-align:right">${balanceDisplay}</td></tr>
+        <tr><td style="font-size:15px;font-weight:700;color:${BRAND.black}">${balanceLabel}</td><td style="font-size:15px;font-weight:700;color:${BRAND.black};text-align:right">${balanceDisplay}</td></tr>
       </table>
       ${dispositionLine ? `<div style="margin-top:8px;padding:8px 12px;background:#f5f5f5;border-left:3px solid #555;font-size:12px;border-radius:4px">${dispositionLine}</div>` : ''}` : ''}
       ${sigRow}
@@ -528,15 +537,15 @@ function buildQuoteHtml(q, s) {
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
 <tr><td align="center">
   <table width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
-    <tr><td style="background:#1a56db;padding:24px;text-align:center">
+    <tr><td style="${BRAND_HEADER_STYLE}">
       <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
-      ${storeAddr ? `<div style="color:#bcd4ff;font-size:12px;margin-top:4px">${storeAddr}</div>` : ''}
-      ${storePhone ? `<div style="color:#bcd4ff;font-size:12px">${storePhone}</div>` : ''}
+      ${storeAddr ? `<div style="color:#ffffff;font-size:12px;margin-top:4px">${storeAddr}</div>` : ''}
+      ${storePhone ? `<div style="color:#ffffff;font-size:12px">${storePhone}</div>` : ''}
     </td></tr>
     <tr><td style="padding:20px 24px">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px">
         <div>
-          <div style="font-size:20px;font-weight:700;color:#111">QUOTATION</div>
+          <div style="font-size:20px;font-weight:700;color:${BRAND.black}">QUOTATION</div>
           <div style="font-size:13px;color:#888;margin-top:2px">${q.quote_number}</div>
         </div>
         <div style="text-align:right;font-size:13px;color:#444">
@@ -560,9 +569,9 @@ function buildQuoteHtml(q, s) {
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-top:12px">
         <tr><td style="padding:3px 0">Subtotal</td><td style="text-align:right">${fmt(q.subtotal)}</td></tr>
         <tr><td style="padding:3px 0">Tax</td><td style="text-align:right">${fmt(q.tax_amount)}</td></tr>
-        ${parseFloat(q.discount_amount) > 0 ? `<tr><td style="padding:3px 0;color:#16a34a">Discount</td><td style="text-align:right;color:#16a34a">-${fmt(q.discount_amount)}</td></tr>` : ''}
+        ${parseFloat(q.discount_amount) > 0 ? `<tr><td style="padding:3px 0;color:${BRAND.green}">Discount</td><td style="text-align:right;color:${BRAND.green}">-${fmt(q.discount_amount)}</td></tr>` : ''}
         <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
-        <tr><td style="font-size:16px;font-weight:700;color:#111">TOTAL</td><td style="font-size:16px;font-weight:700;color:#111;text-align:right">${fmt(q.total)}</td></tr>
+        <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">TOTAL</td><td style="font-size:16px;font-weight:700;color:${BRAND.black};text-align:right">${fmt(q.total)}</td></tr>
       </table>
       ${q.notes ? `<div style="margin-top:16px;font-size:13px;color:#444"><strong>Notes:</strong> ${q.notes}</div>` : ''}
       <div style="text-align:center;margin-top:20px;font-size:13px;color:#666;font-style:italic">${footer}</div>
@@ -892,15 +901,15 @@ function buildGrnHtml(po, s) {
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
 <tr><td align="center">
   <table width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
-    <tr><td style="background:#1a56db;padding:24px;text-align:center">
+    <tr><td style="${BRAND_HEADER_STYLE}">
       <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
-      ${storeAddr ? `<div style="color:#bcd4ff;font-size:12px;margin-top:4px">${storeAddr}</div>` : ''}
-      ${storePhone ? `<div style="color:#bcd4ff;font-size:12px">${storePhone}</div>` : ''}
+      ${storeAddr ? `<div style="color:#ffffff;font-size:12px;margin-top:4px">${storeAddr}</div>` : ''}
+      ${storePhone ? `<div style="color:#ffffff;font-size:12px">${storePhone}</div>` : ''}
     </td></tr>
     <tr><td style="padding:20px 24px">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px">
         <div>
-          <div style="font-size:20px;font-weight:700;color:#111">GOODS RECEIVED NOTE</div>
+          <div style="font-size:20px;font-weight:700;color:${BRAND.black}">GOODS RECEIVED NOTE</div>
           <div style="font-size:13px;color:#888;margin-top:2px">${po.po_number}</div>
         </div>
         <div style="text-align:right;font-size:13px;color:#444">
@@ -956,15 +965,15 @@ function buildApprovedPoHtml(po, s, origin) {
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
 <tr><td align="center">
   <table width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
-    <tr><td style="background:#1a56db;padding:24px;text-align:center">
+    <tr><td style="${BRAND_HEADER_STYLE}">
       <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
-      ${storeAddr ? `<div style="color:#bcd4ff;font-size:12px;margin-top:4px">${storeAddr}</div>` : ''}
-      ${storePhone ? `<div style="color:#bcd4ff;font-size:12px">${storePhone}</div>` : ''}
+      ${storeAddr ? `<div style="color:#ffffff;font-size:12px;margin-top:4px">${storeAddr}</div>` : ''}
+      ${storePhone ? `<div style="color:#ffffff;font-size:12px">${storePhone}</div>` : ''}
     </td></tr>
     <tr><td style="padding:20px 24px">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px">
         <div>
-          <div style="font-size:20px;font-weight:700;color:#111">PURCHASE ORDER</div>
+          <div style="font-size:20px;font-weight:700;color:${BRAND.black}">PURCHASE ORDER</div>
           <div style="font-size:13px;color:#888;margin-top:2px">${po.po_number}</div>
         </div>
         <div style="text-align:right;font-size:13px;color:#444">
@@ -985,7 +994,7 @@ function buildApprovedPoHtml(po, s, origin) {
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
-      <div style="text-align:right;margin-top:10px;font-size:15px;font-weight:700;color:#111">Total: ${fmt(po.total)}</div>
+      <div style="text-align:right;margin-top:10px;font-size:15px;font-weight:700;color:${BRAND.black}">Total: ${fmt(po.total)}</div>
       ${po.notes ? `<div style="margin-top:16px;font-size:13px;color:#444"><strong>Notes:</strong> ${po.notes}</div>` : ''}
       ${po.approval_signature ? `
       <div style="margin-top:24px;padding-top:16px;border-top:1px solid #e8e8e8">
@@ -1119,7 +1128,7 @@ function buildStatementHtml(data, s, origin) {
             <td style="padding:4px 8px 4px 28px;font-size:11px;color:#555;border-bottom:1px solid #f0f0f0">↳ ${a.transaction_number}</td>
             <td style="padding:4px 8px;font-size:11px;color:#555;border-bottom:1px solid #f0f0f0">${new Date(a.invoice_date).toLocaleDateString()}</td>
             <td style="padding:4px 8px;font-size:11px;color:#555;border-bottom:1px solid #f0f0f0;text-align:right">${fmt(a.invoice_total)}</td>
-            <td style="padding:4px 8px;font-size:11px;color:#16a34a;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(a.amount)}</td>
+            <td style="padding:4px 8px;font-size:11px;color:${BRAND.green};border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(a.amount)}</td>
           </tr>`).join('')
       : `<tr style="background:#f9fafb"><td colspan="4" style="padding:4px 8px 4px 28px;font-size:11px;color:#aaa;border-bottom:1px solid #f0f0f0;font-style:italic">No invoice allocations</td></tr>`;
     return `
@@ -1127,7 +1136,7 @@ function buildStatementHtml(data, s, origin) {
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;font-weight:700;font-size:13px">${p.payment_number}</td>
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;font-size:13px">${new Date(p.created_at).toLocaleDateString()}</td>
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;font-size:13px">${(p.payment_method||'cash').replace(/_/g,' ').toUpperCase()}</td>
-        <td style="padding:8px;border-bottom:1px solid #e8e8e8;font-size:13px;text-align:right;font-weight:700;color:#16a34a">${fmt(p.amount)}</td>
+        <td style="padding:8px;border-bottom:1px solid #e8e8e8;font-size:13px;text-align:right;font-weight:700;color:${BRAND.green}">${fmt(p.amount)}</td>
       </tr>${allocRows}`;
   }).join('');
 
@@ -1140,17 +1149,17 @@ function buildStatementHtml(data, s, origin) {
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
 <tr><td align="center">
   <table width="640" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
-    <tr><td style="background:#1a56db;padding:24px;text-align:center">
+    <tr><td style="${BRAND_HEADER_STYLE}">
       ${origin ? `<div style="text-align:left;margin-bottom:8px">${logoImgTag(s, origin)}</div>` : ''}
       <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
-      ${storeAddr ? `<div style="color:#bcd4ff;font-size:12px;margin-top:4px">${storeAddr}</div>` : ''}
-      ${storePhone ? `<div style="color:#bcd4ff;font-size:12px">${storePhone}</div>` : ''}
+      ${storeAddr ? `<div style="color:#ffffff;font-size:12px;margin-top:4px">${storeAddr}</div>` : ''}
+      ${storePhone ? `<div style="color:#ffffff;font-size:12px">${storePhone}</div>` : ''}
     </td></tr>
     <tr><td style="padding:24px">
       <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px">
         <tr>
           <td style="vertical-align:top">
-            <div style="font-size:20px;font-weight:700;color:#111">ACCOUNT STATEMENT</div>
+            <div style="font-size:20px;font-weight:700;color:${BRAND.black}">ACCOUNT STATEMENT</div>
             <div style="font-size:13px;color:#888;margin-top:2px">Period: ${periodText}</div>
           </td>
           <td style="text-align:right;vertical-align:top;font-size:13px;color:#444">
@@ -1174,8 +1183,8 @@ function buildStatementHtml(data, s, origin) {
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444">
         <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:4px 0"></td></tr>
         <tr>
-          <td style="font-size:15px;font-weight:700;color:#111;padding:4px 0">Total Payments</td>
-          <td style="font-size:15px;font-weight:700;color:#16a34a;text-align:right;padding:4px 0">${fmt(totalPayments)}</td>
+          <td style="font-size:15px;font-weight:700;color:${BRAND.black};padding:4px 0">Total Payments</td>
+          <td style="font-size:15px;font-weight:700;color:${BRAND.green};text-align:right;padding:4px 0">${fmt(totalPayments)}</td>
         </tr>
         <tr>
           <td style="font-size:13px;color:#555;padding:2px 0">Outstanding Balance</td>
@@ -1389,16 +1398,16 @@ function buildWorkOrderInvoiceHtml(wo, s) {
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
 <tr><td align="center">
   <table width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
-    <tr><td style="background:#1a56db;padding:24px;text-align:center">
+    <tr><td style="${BRAND_HEADER_STYLE}">
       <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
-      ${wo.branch_name ? `<div style="color:#bcd4ff;font-size:13px;margin-top:4px">${wo.branch_name}</div>` : ''}
-      ${storeAddr ? `<div style="color:#bcd4ff;font-size:12px;margin-top:2px">${storeAddr}</div>` : ''}
-      ${storePhone ? `<div style="color:#bcd4ff;font-size:12px">${storePhone}</div>` : ''}
+      ${wo.branch_name ? `<div style="color:#ffffff;font-size:13px;margin-top:4px">${wo.branch_name}</div>` : ''}
+      ${storeAddr ? `<div style="color:#ffffff;font-size:12px;margin-top:2px">${storeAddr}</div>` : ''}
+      ${storePhone ? `<div style="color:#ffffff;font-size:12px">${storePhone}</div>` : ''}
     </td></tr>
     <tr><td style="padding:20px 24px">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px">
         <div>
-          <div style="font-size:20px;font-weight:700;color:#111">WORK ORDER TAX INVOICE</div>
+          <div style="font-size:20px;font-weight:700;color:${BRAND.black}">WORK ORDER TAX INVOICE</div>
           <div style="font-size:13px;color:#888;margin-top:2px">${wo.wo_number}</div>
         </div>
         <div style="text-align:right;font-size:13px;color:#444">
@@ -1424,14 +1433,14 @@ function buildWorkOrderInvoiceHtml(wo, s) {
         <tbody>${partRows}</tbody>
       </table>` : ''}
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-top:12px">
-        <tr><td style="padding:3px 0">Assessment Fee</td><td style="text-align:right">${fmt(wo.assessment_fee)}${wo.assessment_transaction_id ? ' <span style="color:#16a34a;font-size:11px">(paid)</span>' : ''}</td></tr>
+        <tr><td style="padding:3px 0">Assessment Fee</td><td style="text-align:right">${fmt(wo.assessment_fee)}${wo.assessment_transaction_id ? ' <span style="color:${BRAND.green};font-size:11px">(paid)</span>' : ''}</td></tr>
         ${assessmentTax > 0 ? `<tr><td style="padding:3px 0;color:#888;font-size:12px">Tax on Assessment Fee</td><td style="text-align:right;color:#888;font-size:12px">${fmt(assessmentTax)}</td></tr>` : ''}
         ${wo.status !== 'intake' ? `<tr><td style="padding:3px 0">Estimate (labor + consumables)${wo.is_express ? ' — express +25%' : ''}</td><td style="text-align:right">${fmt(estimateTotal)}</td></tr>` : ''}
         ${partsTotal > 0 ? `<tr><td style="padding:3px 0">Parts</td><td style="text-align:right">${fmt(partsTotal)}</td></tr>` : ''}
         ${(estimateTax + partsTax) > 0 ? `<tr><td style="padding:3px 0;color:#888;font-size:12px">Tax (estimate + parts)</td><td style="text-align:right;color:#888;font-size:12px">${fmt(estimateTax + partsTax)}</td></tr>` : ''}
-        ${parseFloat(wo.deposit_amount) > 0 ? `<tr><td style="padding:3px 0">Deposit Paid</td><td style="text-align:right">-${fmt(wo.deposit_amount)}${wo.deposit_transaction_id ? ' <span style="color:#16a34a;font-size:11px">(paid)</span>' : ''}</td></tr>` : ''}
+        ${parseFloat(wo.deposit_amount) > 0 ? `<tr><td style="padding:3px 0">Deposit Paid</td><td style="text-align:right">-${fmt(wo.deposit_amount)}${wo.deposit_transaction_id ? ' <span style="color:${BRAND.green};font-size:11px">(paid)</span>' : ''}</td></tr>` : ''}
         <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
-        <tr><td style="font-size:16px;font-weight:700;color:#111">BALANCE DUE</td><td style="font-size:16px;font-weight:700;color:#111;text-align:right">${fmt(balanceDue)}${wo.final_transaction_id ? ' <span style="color:#16a34a;font-size:11px;font-weight:400">(paid)</span>' : ''}</td></tr>
+        <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">BALANCE DUE</td><td style="font-size:16px;font-weight:700;color:${BRAND.black};text-align:right">${fmt(balanceDue)}${wo.final_transaction_id ? ' <span style="color:${BRAND.green};font-size:11px;font-weight:400">(paid)</span>' : ''}</td></tr>
       </table>
       ${wo.estimate_notes ? `<div style="margin-top:16px;font-size:13px;color:#444"><strong>Estimate Notes:</strong> ${wo.estimate_notes}</div>` : ''}
       <div style="text-align:center;margin-top:20px;font-size:13px;color:#666;font-style:italic">${footer}</div>
@@ -1549,11 +1558,11 @@ function buildMissedPickupConfirmationHtml(agreement, pause, s) {
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
 <tr><td align="center">
   <table width="480" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
-    <tr><td style="background:#1a56db;padding:24px;text-align:center">
+    <tr><td style="${BRAND_HEADER_STYLE}">
       <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
     </td></tr>
     <tr><td style="padding:20px 24px">
-      <div style="font-size:18px;font-weight:700;color:#111;margin-bottom:2px">Rental ${isContinue ? 'Continuation' : 'Stop'} Confirmation</div>
+      <div style="font-size:18px;font-weight:700;color:${BRAND.black};margin-bottom:2px">Rental ${isContinue ? 'Continuation' : 'Stop'} Confirmation</div>
       <div style="font-size:13px;color:#888;margin-bottom:14px">Ref: ${agreement.agreement_number}</div>
       ${agreement.customer_name ? `<div style="font-size:13px;color:#444;margin-bottom:10px"><strong>Customer:</strong> ${agreement.customer_name}</div>` : ''}
       <div style="font-size:14px;color:#333">${summary}</div>
