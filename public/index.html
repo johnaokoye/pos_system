@@ -264,10 +264,15 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .alert-warning { background: #FF9800; color: #fff; }
 @keyframes slideIn { from { opacity:0; transform: translateX(20px); } to { opacity:1; transform: translateX(0); } }
 
-/* Receipt */
-.receipt { font-family: 'Courier New', monospace; font-size: 12px; max-width: 72mm; margin: 0 auto; }
+/* Receipt — solid black throughout: thermal printers render any grey as
+   sparse dithered dots, which prints faint. The !important overrides the
+   greys hard-coded inline in the receipt templates (qty/notes lines);
+   coloured hints stay coloured on screen, and go black only in print. */
+.receipt { font-family: 'Courier New', monospace; font-size: 12px; max-width: 72mm; margin: 0 auto; color: #000; }
+.receipt [style*="color:#5"], .receipt [style*="color:#6"], .receipt [style*="color:#7"],
+.receipt [style*="color:#8"], .receipt [style*="color:#9"], .receipt [style*="color:#a"] { color: #000 !important; }
 .receipt-title { font-size: 15px; font-weight: bold; text-align: center; margin-bottom: 4px; }
-.receipt hr { border: none; border-top: 1px dashed #999; margin: 6px 0; }
+.receipt hr { border: none; border-top: 1px dashed #000; margin: 6px 0; }
 .receipt-row { display: flex; justify-content: space-between; gap: 4px; }
 .receipt-row span:last-child { white-space: nowrap; }
 .receipt-total { font-weight: bold; font-size: 13px; }
@@ -287,6 +292,14 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   .modal-header { display: none; }
   .modal-body { padding: 0 !important; }
   .modal-footer { display: none; }
+  /* Print every receipt glyph pure black and bold, including coloured
+     lines (e.g. tax-exempt green) that a thermal head would otherwise
+     dither to grey — Courier New's thin strokes print faint otherwise. */
+  .receipt, .receipt * { color: #000 !important; font-weight: bold !important; }
+  /* With every line bold, size is what sets the heading and totals apart —
+     one step up from screen (store/title 15→18px, totals 13→16px; body 12px). */
+  .receipt-store, .receipt-title { font-size: 18px !important; }
+  .receipt-total { font-size: 16px !important; }
 }
 
 /* Scrollbar */
@@ -3772,7 +3785,7 @@ const App = {
         </div>
         <div class="modal-body">
           <div class="receipt">
-            <div style="text-align:center;font-weight:700;font-size:15px;margin-bottom:6px">${storeName}</div>
+            <div class="receipt-store" style="text-align:center;font-weight:700;font-size:15px;margin-bottom:6px">${storeName}</div>
             ${this._printLogoTag(36)}
             ${tx.branch_name ? `<div class="receipt-title">${tx.branch_name}</div>` : ''}
             ${tx.branch_address ? `<div style="text-align:center;font-size:11px;color:#666">${tx.branch_address}${tx.branch_city ? ', ' + tx.branch_city : ''}${tx.branch_state ? ' ' + tx.branch_state : ''}${tx.branch_zip ? ' ' + tx.branch_zip : ''}</div>` : `<div style="text-align:center;font-size:11px;color:#666">${this.settings.store_address || ''}</div>`}
@@ -6740,7 +6753,7 @@ const App = {
         </div>
         <div class="modal-body">
           <div class="receipt">
-            <div style="text-align:center;font-weight:700;font-size:15px;margin-bottom:6px">${storeName}</div>
+            <div class="receipt-store" style="text-align:center;font-weight:700;font-size:15px;margin-bottom:6px">${storeName}</div>
             ${this._printLogoTag(36)}
             <div class="receipt-title" style="color:var(--danger)">RENTAL CANCELLATION</div>
             ${agreement.branch_name ? `<div style="text-align:center;font-size:12px;color:#444;font-weight:600">${agreement.branch_name}</div>` : ''}
@@ -12346,7 +12359,7 @@ const App = {
         </div>
         <div class="modal-body">
           <div class="receipt">
-            <div style="text-align:center;font-weight:700;font-size:15px;margin-bottom:6px">${storeName}</div>
+            <div class="receipt-store" style="text-align:center;font-weight:700;font-size:15px;margin-bottom:6px">${storeName}</div>
             ${this._printLogoTag(36)}
             <div class="receipt-title" style="color:var(--danger)">RETURN RECEIPT</div>
             ${ret.branch_name ? `<div style="text-align:center;font-size:12px;color:#444;font-weight:600">${ret.branch_name}</div>` : ''}
