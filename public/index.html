@@ -127,6 +127,14 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .modal-footer { padding: 14px 20px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; }
 .modal-close { background: none; border: none; cursor: pointer; color: var(--text-muted); padding: 4px; border-radius: 4px; }
 .modal-close:hover { color: var(--text); background: #f0f0f0; }
+/* Modal readability — darker text than the page-level greys. Re-scoping the
+   variables covers labels, hints and anything else using var(--text-muted);
+   the attribute selectors catch the light greys hard-coded inline in modal
+   templates (they need !important to beat an inline style). */
+.modal { --text: #111111; --text-muted: #4b4b4b; color: var(--text); }
+.modal input::placeholder, .modal textarea::placeholder { color: #6b6b6b; }
+.modal [style*="color:#666"], .modal [style*="color:#777"], .modal [style*="color:#888"],
+.modal [style*="color:#999"], .modal [style*="color:#aaa"] { color: #4b4b4b !important; }
 
 /* POS Layout */
 #pos-section { display: flex; gap: 16px; height: 100%; }
