@@ -532,7 +532,7 @@ const QUOTE_PRINT_STYLE = `<style>
 </style>`;
 
 // `print` lays the same document out for a US Letter page — used by GET
-// /quote-preview/:id (Print on an approved Special Project).
+// /quote-preview/:id (Print Quotation on retail quotes and approved Special Projects).
 function buildQuoteHtml(q, s, { print = false } = {}) {
   const storeName = s.store_name || 'My Store';
   const storeAddr = s.store_address || '';
