@@ -1023,6 +1023,9 @@ router.get('/quote-preview/:id', requireAuth, async (req, res) => {
     }
     const s = await getSettings();
     res.setHeader('Content-Type', 'text/html');
+    // Lets App.printQuoteLetter tell the real document apart from any other
+    // HTML (e.g. the SPA shell an outdated server returns for this path).
+    res.setHeader('X-Pos-Document', 'quotation');
     res.send(q.quote_type === 'rental' ? buildRentalQuoteHtml(q, s, { print: true }) : buildQuoteHtml(q, s, { print: true }));
   } catch(e) { res.status(500).send(`<p>Error: ${e.message}</p>`); }
 });

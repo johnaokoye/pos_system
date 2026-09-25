@@ -17747,10 +17747,35 @@ const App = {
   // (rental quotes, and Special Projects once approved) —
   // rendered server-side (GET /email/quote-preview/:id), same pattern as
   // printWorkOrderInvoice.
-  printQuoteLetter(id) {
-    const win = window.open(`/api/email/quote-preview/${id}`, '_blank', 'width=850,height=1000');
+  // Fetched first rather than opening the URL directly, so an error (not
+  // yet approved, no access, or a server that doesn't have this endpoint)
+  // shows as a message instead of printing whatever page came back. The
+  // window is opened synchronously, before the fetch, so it stays inside
+  // the click's user gesture and isn't blocked as a popup.
+  async printQuoteLetter(id) {
+    const win = window.open('', '_blank', 'width=850,height=1000');
     if (!win) { this.alert('Your browser blocked the print popup — allow popups for this site and try again', 'warning'); return; }
-    win.addEventListener('load', () => win.print());
+    win.document.write('<p style="font-family:Arial,sans-serif;padding:24px;color:#555">Preparing quotation…</p>');
+    let html;
+    try {
+      const res = await fetch(`/api/email/quote-preview/${id}`, { credentials: 'same-origin' });
+      const type = res.headers.get('content-type') || '';
+      if (type.includes('application/json')) throw new Error((await res.json()).error || `Request failed (${res.status})`);
+      html = await res.text();
+      if (!res.ok) throw new Error(html.replace(/<[^>]+>/g, '').trim() || `Request failed (${res.status})`);
+      if (res.headers.get('x-pos-document') !== 'quotation') throw new Error('the server returned something other than the quotation — it may be running an older version and need a restart');
+    } catch(e) {
+      win.close();
+      this.alert(`Could not print quotation: ${e.message}`, 'error');
+      return;
+    }
+    win.document.open();
+    win.document.write(html);
+    win.document.close();
+    win.focus();
+    // document.write() doesn't fire a fresh load event reliably across
+    // browsers — give layout a beat, then print.
+    setTimeout(() => win.print(), 300);
   },
 
   async updateQuoteStatus(id, status) {

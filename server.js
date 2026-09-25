@@ -104,6 +104,13 @@ app.use('/api', (err, req, res, next) => {
   res.status(err.status || 500).json({ error: err.message || 'Request failed' });
 });
 
+// An /api path no route matched is a 404, not the SPA — serving index.html
+// there made a missing endpoint (e.g. a server running older code than the
+// frontend it serves) look like a login page instead of an error.
+app.all('/api/*', (req, res) => {
+  res.status(404).json({ error: `API endpoint not found: ${req.method} ${req.path}` });
+});
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
