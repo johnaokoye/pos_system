@@ -17730,7 +17730,7 @@ const App = {
             <button class="btn btn-success" onclick="App.updateQuoteStatus(${q.id},'accepted')">Accept</button>
             <button class="btn btn-danger" onclick="App.updateQuoteStatus(${q.id},'declined')">Decline</button>
           ` : ''}
-          ${isRental ? `<button class="btn btn-secondary" onclick="App.printQuoteLetter(${q.id})">🖨️ Print</button>` : ''}
+          ${isRental || (isSpecialProject && !['draft','pending_approval'].includes(q.status)) ? `<button class="btn btn-secondary" onclick="App.printQuoteLetter(${q.id})" title="Opens the customer copy — choose Save as PDF in the print dialog to attach it to an email">🖨️ Print${isSpecialProject ? ' Quotation' : ''}</button>` : ''}
           <button class="btn btn-secondary" onclick="App.emailQuote(${q.id},'${(q.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email Quote</button>
           ${q.status!=='converted'&&q.status!=='declined'&&this.can('sales_manager') ? `
             <button class="btn btn-secondary" onclick="App.showReassignQuoteModal(${q.id},${q.employee_id||'null'})">Reassign</button>
@@ -17743,7 +17743,8 @@ const App = {
       </div>`);
   },
 
-  // Letter-size print of the same document the customer gets by email —
+  // Letter-size print of the same document the customer gets by email
+  // (rental quotes, and Special Projects once approved) —
   // rendered server-side (GET /email/quote-preview/:id), same pattern as
   // printWorkOrderInvoice.
   printQuoteLetter(id) {

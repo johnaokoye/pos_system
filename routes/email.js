@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const nodemailer = require('nodemailer');
 const { db } = require('../database');
-const { requireAuth, requirePermission } = require('../lib/permissions');
+const { requireAuth, requirePermission, can } = require('../lib/permissions');
 const { rentalQuoteSummary, attachRentalRates, attachRateBasis, rentalWindow, rateBasisLabel } = require('../lib/rentals');
 
 // Brand palette for every email sent out (receipts, quotes, invoices,
@@ -521,7 +521,19 @@ function buildRentalSummaryHtml(agreement, s) {
 </html>`;
 }
 
-function buildQuoteHtml(q, s) {
+// Letter-page overrides for the quote templates' print mode: drops the
+// email's grey backdrop, fixed card width and shadow.
+const QUOTE_PRINT_STYLE = `<style>
+  @page { size: letter; margin: 0.5in; }
+  body { background:#fff !important; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  .page-wrap { background:#fff !important; padding:0 !important; }
+  .page { width:100% !important; max-width:7.5in; box-shadow:none !important; border-radius:0 !important; }
+  tr { page-break-inside: avoid; }
+</style>`;
+
+// `print` lays the same document out for a US Letter page — used by GET
+// /quote-preview/:id (Print on an approved Special Project).
+function buildQuoteHtml(q, s, { print = false } = {}) {
   const storeName = s.store_name || 'My Store';
   const storeAddr = s.store_address || '';
   const storePhone = s.store_phone || '';
@@ -529,7 +541,7 @@ function buildQuoteHtml(q, s) {
 
   const rows = (q.items || []).map(i => `
     <tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku || ''}</span></td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku || ''}${parseFloat(i.discount_amount) > 0 ? `${i.sku ? ' · ' : ''}<span style="color:${BRAND.green}">Price includes ${fmt(i.discount_amount)} discount</span>` : ''}</span></td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${i.quantity}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${fmt(i.unit_price)}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(i.total)}</td>
@@ -537,11 +549,13 @@ function buildQuoteHtml(q, s) {
 
   return `<!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"><title>Quotation ${q.quote_number}</title></head>
+<head><meta charset="utf-8"><title>Quotation ${q.quote_number}</title>
+${print ? QUOTE_PRINT_STYLE : ''}
+</head>
 <body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
+<table class="page-wrap" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
 <tr><td align="center">
-  <table width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+  <table class="page" width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
     <tr><td style="${BRAND_HEADER_STYLE}">
       <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
       ${storeAddr ? `<div style="color:#ffffff;font-size:12px;margin-top:4px">${storeAddr}</div>` : ''}
@@ -659,13 +673,7 @@ function buildRentalQuoteHtml(q, s, { print = false } = {}) {
   return `<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><title>Rental Quotation ${q.quote_number}</title>
-${print ? `<style>
-  @page { size: letter; margin: 0.5in; }
-  body { background:#fff !important; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
-  .page-wrap { background:#fff !important; padding:0 !important; }
-  .page { width:100% !important; max-width:7.5in; box-shadow:none !important; border-radius:0 !important; }
-  tr, .keep { page-break-inside: avoid; }
-</style>` : ''}
+${print ? QUOTE_PRINT_STYLE : ''}
 </head>
 <body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
 <table class="page-wrap" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
@@ -1006,9 +1014,16 @@ router.get('/quote-preview/:id', requireAuth, async (req, res) => {
   try {
     const q = await loadQuoteForDocument(req.params.id);
     if (!q) return res.status(404).send('<p>Quotation not found</p>');
+    if (q.quote_type === 'special_project') {
+      const perms = req.employee && req.employee.permissions;
+      if (!req.apiKey && !can(perms, 'special_projects') && !can(perms, 'special_projects_approve')) return res.status(403).send('<p>Missing permission: special_projects</p>');
+      // Pricing isn't final until a supervisor signs off — a draft or
+      // pending project can't be printed for a customer.
+      if (['draft', 'pending_approval'].includes(q.status)) return res.status(400).send('<p>This special project must be approved before it can be printed.</p>');
+    }
     const s = await getSettings();
     res.setHeader('Content-Type', 'text/html');
-    res.send(q.quote_type === 'rental' ? buildRentalQuoteHtml(q, s, { print: true }) : buildQuoteHtml(q, s));
+    res.send(q.quote_type === 'rental' ? buildRentalQuoteHtml(q, s, { print: true }) : buildQuoteHtml(q, s, { print: true }));
   } catch(e) { res.status(500).send(`<p>Error: ${e.message}</p>`); }
 });
 
