@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { getOutstandingQty } = require('../lib/rentalAvailability');
-const { getBranchStock, feeFor, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, dueDateTime, requiredDepositReturnMethod, rentalDiscount } = require('../lib/rentals');
+const { getBranchStock, feeFor, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, dueDateTime, requiredDepositReturnMethod, rentalDiscount, attachRateBasis, rentalWindow } = require('../lib/rentals');
 const { requirePermission, requireAnyPermission, requireAuth, can, canManageRentals, requireRentalsManage } = require('../lib/permissions');
 const { runCreditCheck } = require('./customers');
 const { nextNumber } = require('../lib/nextNumber');
@@ -190,7 +190,7 @@ router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
       b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone,
       e.first_name || ' ' || e.last_name as employee_name,
       co.transaction_number as checkout_transaction_number, co.payment_method as checkout_payment_method, co.created_at as checkout_transaction_created_at,
-      co.subtotal as checkout_subtotal, co.tax_amount as checkout_tax_amount, co.discount_amount as checkout_discount_amount, co.total as checkout_total, co.amount_tendered as checkout_amount_tendered, co.change_amount as checkout_change_amount,
+      co.subtotal as checkout_subtotal, co.tax_amount as checkout_tax_amount, co.discount_amount as checkout_discount_amount, co.total as checkout_total, co.created_at as checkout_created_at, co.amount_tendered as checkout_amount_tendered, co.change_amount as checkout_change_amount,
       se.transaction_number as settlement_transaction_number, se.total as settlement_total,
       se.subtotal as settlement_subtotal, se.tax_amount as settlement_tax_amount, se.payment_method as settlement_payment_method, se.amount_tendered as settlement_amount_tendered, se.change_amount as settlement_change_amount, se.created_at as settlement_created_at,
       q.id as source_quote_id, q.quote_number as source_quote_number, qe.first_name || ' ' || qe.last_name as quote_created_by,
@@ -224,6 +224,10 @@ router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
     if (!agreement) return res.status(404).json({ error: 'Not found' });
     const { rows: items } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
     agreement.items = items;
+    // Rate shown per item = the blocks its fee was billed in: over the
+    // checkout window once paid, or from now for a pending hold (matching
+    // the estimate below).
+    attachRateBasis(items, rentalWindow(agreement.checkout_created_at || new Date(), agreement.due_date));
     // A 'pending' agreement (held, not yet paid) hasn't been charged yet —
     // the real rental_fee/deposit_amount on each item are still 0 (see
     // insertPendingAgreement) because they're only computed for real at
@@ -232,7 +236,8 @@ router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
     // Process Payment modal can show an estimated total — this is NOT
     // persisted and will be recomputed for real when checkout completes.
     if (agreement.status === 'pending' && items.length) {
-      const estCheckoutDateTime = new Date();
+      // Whole seconds, same as checkout below — see the note there.
+      const estCheckoutDateTime = new Date(Math.floor(Date.now() / 1000) * 1000);
       const estDueDateTime = new Date(`${agreement.due_date}T${estCheckoutDateTime.toISOString().slice(11, 19)}.000Z`);
       let estRentalSubtotal = 0, estTax = 0;
       for (const item of items) {
@@ -394,7 +399,8 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
 
     // The rental clock starts NOW — when the customer actually takes the item
     // and payment is collected — not when the hold was originally configured.
-    const checkoutDateTime = new Date();
+    // Truncated to whole seconds: the due time is built as HH:MM:SS.000, so a start with milliseconds made the window a hair short of N days and the hour-floor in lib/rentalPricing.js dropped a full billed hour.
+    const checkoutDateTime = new Date(Math.floor(Date.now() / 1000) * 1000);
     const dueDateTime = new Date(`${agreement.due_date}T${checkoutDateTime.toISOString().slice(11, 19)}.000Z`);
 
     let rentalSubtotal = 0, taxAmount = 0;

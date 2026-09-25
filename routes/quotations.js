@@ -5,7 +5,7 @@ const { requirePermission, requireAnyPermission, can } = require('../lib/permiss
 const { nextNumber } = require('../lib/nextNumber');
 const { isSerialNumberProduct, serialNumberLabel, serialNumberOf } = require('../lib/serialNumber');
 const { createTransfer } = require('../lib/transfers');
-const { feeFor, buildRentalLines, revalidateQuoteLines, insertPendingAgreement, assertRentalCustomerEligible, rentalQuoteSummary, attachRentalRates } = require('../lib/rentals');
+const { feeFor, buildRentalLines, revalidateQuoteLines, insertPendingAgreement, assertRentalCustomerEligible, rentalQuoteSummary, attachRentalRates, attachRateBasis, rentalWindow } = require('../lib/rentals');
 
 // Special Projects (quote_type='special_project') are gated by their own
 // `special_projects`/`special_projects_approve` permissions, deliberately
@@ -82,6 +82,7 @@ router.get('/:id', async (req, res) => {
     quote.items = await attachQuoteItemSources(items);
     if (quote.quote_type === 'rental') {
       await attachRentalRates(db, quote.items);
+      attachRateBasis(quote.items, rentalWindow(quote.created_at, quote.due_date));
       quote.rental_summary = rentalQuoteSummary(quote);
       quote.total = quote.rental_summary.total;
     }
@@ -182,7 +183,8 @@ async function processRentalQuoteItems(items, branch_id, due_date) {
   // Same window checkout bills (PATCH /rentals/agreements/:id/checkout):
   // due date at the same time of day the rental starts, not end of day —
   // otherwise the quote can bill an extra partial/whole day checkout won't.
-  const now = new Date();
+  // Whole seconds, same as checkout — see PATCH /rentals/agreements/:id/checkout.
+  const now = new Date(Math.floor(Date.now() / 1000) * 1000);
   const due = new Date(`${due_date}T${now.toISOString().slice(11, 19)}.000Z`);
 
   let subtotal = 0, tax_amount = 0;

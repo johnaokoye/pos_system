@@ -3,7 +3,7 @@ const router = express.Router();
 const nodemailer = require('nodemailer');
 const { db } = require('../database');
 const { requireAuth, requirePermission } = require('../lib/permissions');
-const { rentalQuoteSummary, attachRentalRates } = require('../lib/rentals');
+const { rentalQuoteSummary, attachRentalRates, attachRateBasis, rentalWindow, rateBasisLabel } = require('../lib/rentals');
 
 // Brand palette for every email sent out (receipts, quotes, invoices,
 // statements, notices): green header with a yellow accent stripe, black
@@ -410,6 +410,8 @@ function buildRentalSummaryHtml(agreement, s) {
       if (i.weekly_rate) rateParts.push(`${fmt(i.weekly_rate)}/wk`);
       if (i.monthly_rate) rateParts.push(`${fmt(i.monthly_rate)}/mo`);
     }
+    // The blocks the fee is actually billed in over the rental period, when known.
+    if (i.rate_basis && i.rate_basis.length) rateParts.splice(0, rateParts.length, rateBasisLabel(i.rate_basis, fmt));
     return `<tr>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}${tag}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${i.quantity}</td>
@@ -590,6 +592,7 @@ function buildQuoteHtml(q, s) {
 // (with automatic long-rental discounts); equipment has its own hourly/
 // weekly/monthly tiers — see lib/rentalPricing.js.
 function rentalRateCard(i) {
+  if (i.rate_basis && i.rate_basis.length) return rateBasisLabel(i.rate_basis, fmt);
   const parts = i.rental_classification === 'equipment'
     ? [['Hourly', i.hourly_rate], ['Daily', i.daily_rate], ['Weekly', i.weekly_rate], ['Monthly', i.monthly_rate]]
     : [['Daily', i.daily_rate]];
@@ -884,7 +887,7 @@ router.post('/send-rental-summary/:id', requireAuth, async (req, res) => {
   try {
     const { rows: [agreement] } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name,
       b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone,
-      co.payment_method as checkout_payment_method, co.subtotal as checkout_subtotal, co.tax_amount as checkout_tax_amount, co.discount_amount as checkout_discount_amount, co.total as checkout_total,
+      co.payment_method as checkout_payment_method, co.subtotal as checkout_subtotal, co.tax_amount as checkout_tax_amount, co.discount_amount as checkout_discount_amount, co.total as checkout_total, co.created_at as checkout_created_at,
       se.total as settlement_total, se.payment_method as settlement_payment_method, se.amount_tendered as settlement_amount_tendered, se.change_amount as settlement_change_amount, se.created_at as settlement_created_at,
       (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total) as balance_due,
       ise.first_name || ' ' || ise.last_name as issue_security_employee_name,
@@ -905,7 +908,7 @@ router.post('/send-rental-summary/:id', requireAuth, async (req, res) => {
       WHERE ra.id = ?`, args: [req.params.id] });
     if (!agreement) return res.status(404).json({ error: 'Rental agreement not found' });
     const { rows: items } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
-    agreement.items = items;
+    agreement.items = attachRateBasis(items, rentalWindow(agreement.checkout_created_at || new Date(), agreement.due_date));
 
     const s = await getSettings();
     try {
@@ -989,7 +992,10 @@ async function loadQuoteForDocument(id) {
   if (!q) return null;
   const { rows: items } = await db.execute({ sql: 'SELECT * FROM quotation_items WHERE quote_id = ? ORDER BY id', args: [id] });
   q.items = items;
-  if (q.quote_type === 'rental') await attachRentalRates(db, q.items);
+  if (q.quote_type === 'rental') {
+    await attachRentalRates(db, q.items);
+    attachRateBasis(q.items, rentalWindow(q.created_at, q.due_date));
+  }
   return q;
 }
 

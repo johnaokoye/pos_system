@@ -125,6 +125,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .modal-title { font-size: 16px; font-weight: 600; }
 .modal-body { padding: 20px; }
 .modal-footer { padding: 14px 20px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; }
+/* Action-heavy footers (quote / rental agreement views): wrap onto a second
+   row instead of overflowing off the left edge, one line per label. */
+.modal-footer.footer-wrap { flex-wrap: wrap; gap: 8px; }
+.modal-footer.footer-wrap .btn { white-space: nowrap; }
 .modal-close { background: none; border: none; cursor: pointer; color: var(--text-muted); padding: 4px; border-radius: 4px; }
 .modal-close:hover { color: var(--text); background: #f0f0f0; }
 /* Modal readability — darker text than the page-level greys. Re-scoping the
@@ -1371,6 +1375,18 @@ const App = {
   // everything after it (bit us in quotation/PR notes editing).
   escapeAttr(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); },
   fmt(n) { return new Intl.NumberFormat('en-US', { style: 'currency', currency: this.activeCurrency || this.settings.currency || 'USD' }).format(n || 0); },
+  // Mirrors lib/rentals.js's rateBasisLabel — "1 month @ $4,000.00/mo + 3
+  // days @ $250.00/day" from an item's server-computed rate_basis, i.e. the
+  // rate(s) that actually apply to the rental period.
+  _rateBasisLabel(lines) {
+    if (!lines || !lines.length) return '';
+    const units = { month: ['month', 'mo'], week: ['week', 'wk'], day: ['day', 'day'], hour: ['hr', 'hr'] };
+    return lines.map(l => {
+      const [name, per] = units[l.unit];
+      const count = Math.round(l.count * 100) / 100;
+      return `${count} ${name}${count === 1 ? '' : 's'} @ ${this.fmt(l.rate)}/${per}${l.tier ? ` (${l.tier} rate)` : ''}`;
+    }).join(' + ');
+  },
   fmtDate(d) { return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); },
   fmtDateTime(d) { return new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); },
 
@@ -6160,6 +6176,7 @@ const App = {
         if (i.weekly_rate) rateParts.push(`${this.fmt(i.weekly_rate)}/wk`);
         if (i.monthly_rate) rateParts.push(`${this.fmt(i.monthly_rate)}/mo`);
       }
+      if (i.rate_basis && i.rate_basis.length) rateParts.splice(0, rateParts.length, this._rateBasisLabel(i.rate_basis));
       return `<tr>
         <td style="padding:6px 8px;border-bottom:1px solid #e8e8e8">${i.product_name}${tag}</td>
         <td style="padding:6px 8px;border-bottom:1px solid #e8e8e8;text-align:center">${i.quantity}</td>
@@ -6296,7 +6313,7 @@ const App = {
     // why.
     const openMissedPickupPause = a.is_paused ? a.pauses?.find(p => !p.ended_at && p.reason === 'missed_pickup') : null;
     this.showModal(`
-      <div class="modal" style="max-width:640px">
+      <div class="modal" style="max-width:1100px">
         <div class="modal-header">
           <span class="modal-title">${a.agreement_number}</span>
           <button class="modal-close">✕</button>
@@ -6366,6 +6383,7 @@ const App = {
               if (rateParts) {
                 if (i.weekly_rate) rateParts.push(`${this.fmt(i.weekly_rate)}/wk`);
                 if (i.monthly_rate) rateParts.push(`${this.fmt(i.monthly_rate)}/mo`);
+                if (i.rate_basis && i.rate_basis.length) rateParts.splice(0, rateParts.length, this._rateBasisLabel(i.rate_basis));
               }
               return `<tr>
               <td>${i.product_name}${tag}</td>
@@ -6386,7 +6404,7 @@ const App = {
             <span>Deposit Refunded: ${this.fmt(a.deposit_refunded)}</span>
           </div>
         </div>
-        <div class="modal-footer">
+        <div class="modal-footer footer-wrap">
           ${a.status==='pending' && this.can('pos') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showFinalizeRentalModal(${a.id})">Process Payment</button>` : ''}
           ${a.status==='awaiting_issue' && this.can('rentals_issue') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showIssueRentalModal(${a.id})">Issue Rental</button>` : ''}
           ${a.checkout_transaction_id ? `<button class="btn btn-secondary" onclick="App.printRentalInvoice(${a.id})">🖨️ Tax Invoice</button>
@@ -17615,7 +17633,7 @@ const App = {
       : (q.converted_to_tx ? `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--teal,#14b8a6);border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:12px">
           Converted to invoice <a href="#" style="font-weight:700;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewTransaction(${q.converted_to_tx})">${q.converted_tx_number||'view transaction'}</a>
         </div>` : '');
-    const rentalRateCard = i => (i.rental_classification === 'equipment'
+    const rentalRateCard = i => (i.rate_basis && i.rate_basis.length) ? this._rateBasisLabel(i.rate_basis) : (i.rental_classification === 'equipment'
       ? [['Hourly', i.hourly_rate], ['Daily', i.daily_rate], ['Weekly', i.weekly_rate], ['Monthly', i.monthly_rate]]
       : [['Daily', i.daily_rate]]).filter(([, v]) => v > 0).map(([l, v]) => `${l} ${this.fmt(v)}`).join(' · ');
     const rentalDays = isRental && q.due_date
@@ -17627,7 +17645,7 @@ const App = {
       </div>` : ''}
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Product</th><th>Qty</th><th>Rates</th><th>Condition Out</th><th>Est. Fee</th></tr></thead>
+          <thead><tr><th>Product</th><th>Qty</th><th>Rate</th><th>Condition Out</th><th>Est. Fee</th></tr></thead>
           <tbody>
             ${q.items.map(i => {
               const tag = i.parent_item_id ? (i.is_mandatory ? ' <span class="badge-pill badge-success" style="font-size:10px">included</span>' : ' <span class="badge-pill badge-secondary" style="font-size:10px">accessory</span>') : '';
@@ -17654,7 +17672,7 @@ const App = {
         </table>
       </div>`;
     this.showModal(`
-      <div class="modal" style="max-width:680px">
+      <div class="modal" style="max-width:960px">
         <div class="modal-header">
           <span class="modal-title">${isSpecialProject ? 'Special Project' : 'Quotation'}: ${q.quote_number}</span>
           <div style="display:flex;gap:8px;align-items:center">
@@ -17697,7 +17715,7 @@ const App = {
             <div style="font-size:16px;font-weight:700">Total: ${this.fmt(q.total)}</div>
           </div>`}
         </div>
-        <div class="modal-footer">
+        <div class="modal-footer footer-wrap">
           ${isSpecialProject && q.status==='draft' ? `
             <button class="btn btn-secondary" onclick="App.closeModal();App.showQuoteForm(${q.id})">Edit</button>
             ${this.can('special_projects') ? `<button class="btn btn-primary" onclick="App.submitSpecialProjectForApproval(${q.id})">Submit for Approval</button>` : ''}
