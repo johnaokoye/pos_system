@@ -21448,37 +21448,68 @@ const App = {
     if (!el) return;
     const hdr = document.getElementById('drawer-hdr-actions');
     if (hdr) hdr.innerHTML = '';
-    const today = new Date().toISOString().slice(0,10);
-    this._drawerDate = this._drawerDate || today;
-    const sessions = await this.api('GET', `/drawers/sessions?date=${this._drawerDate}`);
+    // Local calendar day (not the UTC date — in Jamaica that rolls over at
+    // 7 pm), sent as a UTC opened_at range to match CURRENT_TIMESTAMP.
+    const localDate = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    const toDbUtc = d => d.toISOString().replace('T', ' ').slice(0, 19);
+    this._drawerDate = this._drawerDate || localDate(new Date());
+    const dayStart = new Date(`${this._drawerDate}T00:00:00`);
+    const dayEnd = new Date(dayStart); dayEnd.setDate(dayEnd.getDate() + 1);
+    // Any session not yet reconciled — open, or closed without a count —
+    // is listed on top regardless of when it was opened, so a drawer still
+    // held from a previous day can always be found and released here.
+    const [pending, daySessions] = await Promise.all([
+      this.api('GET', '/drawers/sessions?unreconciled=1'),
+      this.api('GET', `/drawers/sessions?from=${encodeURIComponent(toDbUtc(dayStart))}&to=${encodeURIComponent(toDbUtc(dayEnd))}`),
+    ]);
+    const pendingIds = new Set(pending.map(s => s.id));
+    const history = daySessions.filter(s => !pendingIds.has(s.id));
     const canReconcile = !!(this.currentUser?.permissions?.drawers_manage) || this.can('void_transactions');
-    const sc = { open:'badge-success', closed:'badge-secondary', reconciled:'badge-info' };
-    el.innerHTML = `
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap">
-        <label style="font-size:13px;font-weight:600">Date:</label>
-        <input type="date" value="${this._drawerDate}" onchange="App._drawerDate=this.value;App.renderDrawerSessions()" style="padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">
-      </div>
-      ${sessions.length === 0 ? '<div class="empty-state"><p>No drawer sessions for this date.</p></div>' : `
-      <table class="table">
-        <thead><tr><th>Drawer</th><th>Branch</th><th>Cashier</th><th>Float</th><th>Transactions</th><th>Total Sales</th><th>Opened</th><th>Status</th><th></th></tr></thead>
-        <tbody>${sessions.map(s => `
+    const sc = { open:'badge-success', closed:'badge-warning', reconciled:'badge-info' };
+    // opened_at is a UTC 'YYYY-MM-DD HH:MM:SS' with no zone marker.
+    const parseUtc = v => new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(String(v)) ? v : `${String(v).replace(' ', 'T')}Z`);
+    const todayStr = new Date().toDateString();
+    const openedLabel = v => {
+      if (!v) return '—';
+      const d = parseUtc(v);
+      const time = d.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+      return d.toDateString() === todayStr ? time : `${d.toLocaleDateString([], { month:'short', day:'numeric' })}, ${time}`;
+    };
+    const table = rows => `
+      <div class="table-wrap"><table class="table">
+        <thead><tr><th>Drawer</th><th>Branch</th><th>Cashier</th><th>Float</th><th>Txns</th><th>Total Sales</th><th>Opened</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rows.map(s => {
+          const stale = s.status === 'open' && parseUtc(s.opened_at).toDateString() !== todayStr;
+          return `
           <tr>
-            <td><strong>${s.drawer_name||'—'}</strong></td>
+            <td style="white-space:nowrap"><strong>${s.drawer_name||'—'}</strong></td>
             <td>${s.branch_name||'—'}</td>
             <td>${s.employee_name||'—'}</td>
             <td>$${parseFloat(s.opening_float||0).toFixed(2)}</td>
             <td><span class="badge badge-info">${s.tx_count}</span></td>
             <td><strong>$${parseFloat(s.tx_total||0).toFixed(2)}</strong></td>
-            <td style="color:var(--text-muted);font-size:12px">${s.opened_at ? new Date(s.opened_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '—'}</td>
-            <td><span class="badge ${sc[s.status]||'badge-secondary'}">${s.status}</span></td>
+            <td style="color:${stale?'var(--danger)':'var(--text-muted)'};font-size:12px">${openedLabel(s.opened_at)}${stale ? '<br><span class="badge-pill badge-danger" style="font-size:10px" title="Opened on a previous day and still holding this drawer">previous day</span>' : ''}</td>
+            <td><span class="badge ${sc[s.status]||'badge-secondary'}">${s.status === 'closed' ? 'unreconciled' : s.status}</span></td>
             <td style="text-align:right;white-space:nowrap">
               <button class="btn btn-sm btn-outline" onclick="App.viewDrawerReport(${s.id})">Report</button>
               ${canReconcile && s.status !== 'reconciled' ? `<button class="btn btn-sm btn-primary" onclick="App.showReconcileModal(${s.id})">Reconcile</button>` : ''}
               ${canReconcile && s.status === 'open' ? `<button class="btn btn-sm btn-secondary" onclick="App.closeDrawerSession(${s.id})">Close</button>` : ''}
             </td>
-          </tr>`).join('')}
+          </tr>`; }).join('')}
         </tbody>
-      </table>`}`;
+      </table></div>`;
+    el.innerHTML = `
+      <div style="margin-bottom:22px">
+        <h3 style="font-size:14px;margin:0 0 4px">Open &amp; Unreconciled <span class="badge badge-${pending.length ? 'warning' : 'secondary'}">${pending.length}</span></h3>
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px">Every session not yet reconciled, from any date. An <strong>open</strong> session holds its drawer until it's closed or reconciled; closing releases the drawer, reconciling finishes the session. <strong>Unreconciled</strong> sessions are closed but still need their count.</p>
+        ${pending.length ? table(pending) : '<div class="empty-state" style="padding:14px"><p>All drawer sessions are reconciled.</p></div>'}
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap">
+        <h3 style="font-size:14px;margin:0">Session History</h3>
+        <label style="font-size:13px;font-weight:600">Opened on:</label>
+        <input type="date" value="${this._drawerDate}" onchange="App._drawerDate=this.value;App.renderDrawerSessions()" style="width:auto;padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">
+      </div>
+      ${history.length === 0 ? '<div class="empty-state"><p>No reconciled sessions opened on this date.</p></div>' : table(history)}`;
   },
 
   async renderDrawerManage() {

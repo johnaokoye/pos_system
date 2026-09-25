@@ -59,7 +59,13 @@ router.delete('/:id', requirePermission('drawers'), async (req, res) => {
 // find the current user's own open session, regardless of drawers permission.
 router.get('/sessions', requireAuth, async (req, res) => {
   try {
-    const { branch_id, date, status, employee_id } = req.query;
+    // `unreconciled=1` returns every session not yet reconciled (open, or
+    // closed but not counted) regardless of when it was opened, so a drawer
+    // left open from a previous day is never hidden behind the date filter.
+    // `from`/`to` bound opened_at to a caller-local day (UTC 'YYYY-MM-DD
+    // HH:MM:SS', matching CURRENT_TIMESTAMP) — `date` alone matches the UTC
+    // calendar day, which splits a Jamaica evening across two dates.
+    const { branch_id, date, from, to, status, employee_id, unreconciled } = req.query;
     let sql = `
       SELECT ds.*,
         d.name as drawer_name,
@@ -79,6 +85,9 @@ router.get('/sessions', requireAuth, async (req, res) => {
     if (status)      { sql += ' AND ds.status = ?';       params.push(status); }
     if (employee_id) { sql += ' AND ds.employee_id = ?';  params.push(employee_id); }
     if (date)        { sql += ' AND DATE(ds.opened_at) = ?'; params.push(date); }
+    if (from)        { sql += ' AND ds.opened_at >= ?';   params.push(from); }
+    if (to)          { sql += ' AND ds.opened_at < ?';    params.push(to); }
+    if (unreconciled) { sql += " AND ds.status != 'reconciled'"; }
     sql += ' ORDER BY ds.opened_at DESC';
     const { rows } = await db.execute({ sql, args: params });
     res.json(rows);
