@@ -17712,6 +17712,7 @@ const App = {
             <button class="btn btn-success" onclick="App.updateQuoteStatus(${q.id},'accepted')">Accept</button>
             <button class="btn btn-danger" onclick="App.updateQuoteStatus(${q.id},'declined')">Decline</button>
           ` : ''}
+          ${isRental ? `<button class="btn btn-secondary" onclick="App.printQuoteLetter(${q.id})">🖨️ Print</button>` : ''}
           <button class="btn btn-secondary" onclick="App.emailQuote(${q.id},'${(q.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email Quote</button>
           ${q.status!=='converted'&&q.status!=='declined'&&this.can('sales_manager') ? `
             <button class="btn btn-secondary" onclick="App.showReassignQuoteModal(${q.id},${q.employee_id||'null'})">Reassign</button>
@@ -17722,6 +17723,15 @@ const App = {
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
+  },
+
+  // Letter-size print of the same document the customer gets by email —
+  // rendered server-side (GET /email/quote-preview/:id), same pattern as
+  // printWorkOrderInvoice.
+  printQuoteLetter(id) {
+    const win = window.open(`/api/email/quote-preview/${id}`, '_blank', 'width=850,height=1000');
+    if (!win) { this.alert('Your browser blocked the print popup — allow popups for this site and try again', 'warning'); return; }
+    win.addEventListener('load', () => win.print());
   },
 
   async updateQuoteStatus(id, status) {

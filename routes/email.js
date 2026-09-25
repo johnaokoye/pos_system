@@ -603,7 +603,9 @@ function rentalQuotePeriod(q) {
   return { start, due, days };
 }
 
-function buildRentalQuoteHtml(q, s) {
+// `print` swaps the email's fixed-width card for a full-width US Letter
+// page — used by GET /quote-preview/:id (Print on the quote view).
+function buildRentalQuoteHtml(q, s, { print = false } = {}) {
   const storeName = s.store_name || 'My Store';
   const storeAddr = s.store_address || '';
   const storePhone = s.store_phone || '';
@@ -653,11 +655,19 @@ function buildRentalQuoteHtml(q, s) {
 
   return `<!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"><title>Rental Quotation ${q.quote_number}</title></head>
+<head><meta charset="utf-8"><title>Rental Quotation ${q.quote_number}</title>
+${print ? `<style>
+  @page { size: letter; margin: 0.5in; }
+  body { background:#fff !important; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  .page-wrap { background:#fff !important; padding:0 !important; }
+  .page { width:100% !important; max-width:7.5in; box-shadow:none !important; border-radius:0 !important; }
+  tr, .keep { page-break-inside: avoid; }
+</style>` : ''}
+</head>
 <body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
+<table class="page-wrap" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
 <tr><td align="center">
-  <table width="600" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+  <table class="page" width="600" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
     <tr><td style="${BRAND_HEADER_STYLE}">
       <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
       ${storeAddr ? `<div style="color:#ffffff;font-size:12px;margin-top:4px">${storeAddr}</div>` : ''}
@@ -966,26 +976,45 @@ router.post('/send-rental-invoice/:id', requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+async function loadQuoteForDocument(id) {
+  const { rows: [q] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name,
+    c.customer_number, c.email as customer_email, c.phone as customer_phone,
+    c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
+    b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name
+    FROM quotations q
+    LEFT JOIN customers c ON q.customer_id = c.id
+    LEFT JOIN branches b ON q.branch_id = b.id
+    LEFT JOIN employees e ON q.employee_id = e.id
+    WHERE q.id = ?`, args: [id] });
+  if (!q) return null;
+  const { rows: items } = await db.execute({ sql: 'SELECT * FROM quotation_items WHERE quote_id = ? ORDER BY id', args: [id] });
+  q.items = items;
+  if (q.quote_type === 'rental') await attachRentalRates(db, q.items);
+  return q;
+}
+
+// Quotation print preview — opened directly in a browser tab (Print on the
+// quote view), same shared-template pattern as work-order-preview, so the
+// printed letter-size copy matches the emailed one.
+router.get('/quote-preview/:id', requireAuth, async (req, res) => {
+  try {
+    const q = await loadQuoteForDocument(req.params.id);
+    if (!q) return res.status(404).send('<p>Quotation not found</p>');
+    const s = await getSettings();
+    res.setHeader('Content-Type', 'text/html');
+    res.send(q.quote_type === 'rental' ? buildRentalQuoteHtml(q, s, { print: true }) : buildQuoteHtml(q, s));
+  } catch(e) { res.status(500).send(`<p>Error: ${e.message}</p>`); }
+});
+
 // Send quotation
 router.post('/send-quote/:id', requireAuth, async (req, res) => {
   const { to } = req.body;
   if (!to) return res.status(400).json({ error: 'Recipient email is required' });
 
   try {
-    const { rows: [q] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name,
-      c.customer_number, c.email as customer_email, c.phone as customer_phone,
-      c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
-      b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name
-      FROM quotations q
-      LEFT JOIN customers c ON q.customer_id = c.id
-      LEFT JOIN branches b ON q.branch_id = b.id
-      LEFT JOIN employees e ON q.employee_id = e.id
-      WHERE q.id = ?`, args: [req.params.id] });
+    const q = await loadQuoteForDocument(req.params.id);
     if (!q) return res.status(404).json({ error: 'Quotation not found' });
-    const { rows: items } = await db.execute({ sql: 'SELECT * FROM quotation_items WHERE quote_id = ? ORDER BY id', args: [req.params.id] });
-    q.items = items;
     const isRental = q.quote_type === 'rental';
-    if (isRental) await attachRentalRates(db, q.items);
 
     const s = await getSettings();
     try {
