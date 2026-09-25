@@ -521,9 +521,10 @@ function buildRentalSummaryHtml(agreement, s) {
 </html>`;
 }
 
-// Letter-page overrides for the quote templates' print mode: drops the
-// email's grey backdrop, fixed card width and shadow.
-const QUOTE_PRINT_STYLE = `<style>
+// Letter-page overrides for the printable templates' print mode (quotes,
+// work order invoices): drops the email's grey backdrop, fixed card width
+// and shadow.
+const PRINT_PAGE_STYLE = `<style>
   @page { size: letter; margin: 0.5in; }
   body { background:#fff !important; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
   .page-wrap { background:#fff !important; padding:0 !important; }
@@ -550,7 +551,7 @@ function buildQuoteHtml(q, s, { print = false } = {}) {
   return `<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><title>Quotation ${q.quote_number}</title>
-${print ? QUOTE_PRINT_STYLE : ''}
+${print ? PRINT_PAGE_STYLE : ''}
 </head>
 <body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
 <table class="page-wrap" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
@@ -673,7 +674,7 @@ function buildRentalQuoteHtml(q, s, { print = false } = {}) {
   return `<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><title>Rental Quotation ${q.quote_number}</title>
-${print ? QUOTE_PRINT_STYLE : ''}
+${print ? PRINT_PAGE_STYLE : ''}
 </head>
 <body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
 <table class="page-wrap" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
@@ -1551,7 +1552,7 @@ const WO_STATUS_LABELS = {
   awaiting_pickup: 'Awaiting Pickup', picked_up: 'Picked Up', cancelled: 'Cancelled', not_worth_fixing: 'Not Worth Fixing',
 };
 
-function buildWorkOrderInvoiceHtml(wo, s) {
+function buildWorkOrderInvoiceHtml(wo, s, { print = false } = {}) {
   const storeName = s.store_name || 'My Store';
   const storeAddr = s.store_address || '';
   const storePhone = s.store_phone || '';
@@ -1581,11 +1582,13 @@ function buildWorkOrderInvoiceHtml(wo, s) {
 
   return `<!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"><title>Work Order Tax Invoice ${wo.wo_number}</title></head>
+<head><meta charset="utf-8"><title>Work Order Tax Invoice ${wo.wo_number}</title>
+${print ? PRINT_PAGE_STYLE : ''}
+</head>
 <body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
+<table class="page-wrap" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
 <tr><td align="center">
-  <table width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+  <table class="page" width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
     <tr><td style="${BRAND_HEADER_STYLE}">
       <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
       ${wo.branch_name ? `<div style="color:#ffffff;font-size:13px;margin-top:4px">${wo.branch_name}</div>` : ''}
@@ -1649,7 +1652,8 @@ router.get('/work-order-preview/:id', requireAuth, async (req, res) => {
     if (!wo) return res.status(404).send('<p>Work order not found</p>');
     const s = await getSettings();
     res.setHeader('Content-Type', 'text/html');
-    res.send(buildWorkOrderInvoiceHtml(wo, s));
+    res.setHeader('X-Pos-Document', 'work-order-invoice');
+    res.send(buildWorkOrderInvoiceHtml(wo, s, { print: true }));
   } catch(e) { res.status(500).send(`<p>Error: ${e.message}</p>`); }
 });
 
