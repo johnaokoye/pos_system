@@ -1569,6 +1569,9 @@ async function _init() {
     'ALTER TABLE rental_agreements ADD COLUMN delivery_driver_confirmed_at DATETIME',
     'ALTER TABLE rental_agreements ADD COLUMN delivery_driver_signature TEXT',
     'ALTER TABLE rental_agreements ADD COLUMN issue_customer_name TEXT',
+    // Discount agreed on a rental quote — carried onto the agreement at
+    // conversion and taken off the total at checkout.
+    'ALTER TABLE rental_agreements ADD COLUMN discount_amount REAL DEFAULT 0',
     // Lets a rental customer with an incomplete compliance record (typically
     // one bulk-imported from a previous system — see routes/customers.js
     // POST /import) still be rented to: lib/rentals.js's

@@ -3930,6 +3930,7 @@ const App = {
       ['Sales Tax', this.fmt(tx.tax_amount)],
       ['Sales Total', this.fmt(rentalBreakdown.salesTotal)],
       ['Rental Deposit', this.fmt(rentalBreakdown.depositAmt)],
+      tx.discount_amount > 0 ? ['Discount', `-${this.fmt(tx.discount_amount)}`] : null,
     ] : [
       ['Subtotal', this.fmt(tx.subtotal)],
       tx.tax_exempt ? [`Tax Exempt${tx.tax_exemption_number ? ` — Ref: ${tx.tax_exemption_number}` : ''}`, '—'] : ['Tax', this.fmt(tx.tax_amount)],
@@ -6177,6 +6178,7 @@ const App = {
       serviceFeesTotal > 0 ? ['Delivery / Pickup / Operator Fees', this.fmt(serviceFeesTotal)] : null,
       ['Tax', this.fmt(a.checkout_tax_amount)],
       ['Deposit Collected', this.fmt(a.deposit_total)],
+      a.checkout_discount_amount > 0 ? ['Discount', `-${this.fmt(a.checkout_discount_amount)}`] : null,
       ['Total Charged at Checkout', this.fmt(a.checkout_total)],
       ['Payment Method', (a.checkout_payment_method||'').replace('_',' ').toUpperCase()],
     ].filter(Boolean) : [];
@@ -7431,6 +7433,7 @@ const App = {
               ${a.delivery_required ? `<div>Delivery Fee <span style="float:right">${this.fmt(a.delivery_cost)}</span></div>` : ''}
               ${a.pickup_required ? `<div>Pickup Fee <span style="float:right">${this.fmt(a.pickup_cost)}</span></div>` : ''}
               ${a.operator_required ? `<div>Operator Fee <span style="float:right">${this.fmt(a.operator_fee)}</span></div>` : ''}
+              ${a.estimated_discount > 0 ? `<div style="color:var(--success)">Quote Discount <span style="float:right">-${this.fmt(a.estimated_discount)}</span></div>` : ''}
             </div>
             <div style="border-top:1px solid var(--border);margin-top:8px;padding-top:8px;font-size:15px;font-weight:600">Grand Total <span style="float:right">${this.fmt(a.estimated_total || 0)}</span></div>
           </div>
@@ -16888,7 +16891,7 @@ const App = {
               </label>
             </div>
             <div id="qt-delivery-fields" style="display:${q&&q.delivery_required?'block':'none'}">
-              <div class="form-group" style="max-width:220px"><label style="font-size:11px">Delivery Cost</label><input type="number" id="qt-delivery-cost" value="${q&&q.delivery_cost||0}" min="0" step="0.01"></div>
+              <div class="form-group" style="max-width:220px"><label style="font-size:11px">Delivery Cost</label><input type="number" id="qt-delivery-cost" oninput="App.calcQuoteTotal()" value="${q&&q.delivery_cost||0}" min="0" step="0.01"></div>
               <div class="form-group"><label style="font-size:11px">Delivery Address</label><textarea id="qt-delivery-address" rows="2" placeholder="Leave blank to use the customer's address on file">${this.escapeAttr(q&&q.delivery_address)}</textarea></div>
             </div>
             <div class="form-group">
@@ -16898,7 +16901,7 @@ const App = {
               </label>
             </div>
             <div id="qt-pickup-fields" class="form-group" style="display:${q&&q.pickup_required?'block':'none'};max-width:220px">
-              <label style="font-size:11px">Pickup Cost</label><input type="number" id="qt-pickup-cost" value="${q&&q.pickup_cost||0}" min="0" step="0.01">
+              <label style="font-size:11px">Pickup Cost</label><input type="number" id="qt-pickup-cost" oninput="App.calcQuoteTotal()" value="${q&&q.pickup_cost||0}" min="0" step="0.01">
             </div>
             <div class="form-group">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:normal">
@@ -16907,7 +16910,7 @@ const App = {
               </label>
             </div>
             <div id="qt-operator-fields" class="form-group" style="display:${q&&q.operator_required?'block':'none'};max-width:220px">
-              <label style="font-size:11px">Operator Fee</label><input type="number" id="qt-operator-fee" value="${q&&q.operator_fee||0}" min="0" step="0.01">
+              <label style="font-size:11px">Operator Fee</label><input type="number" id="qt-operator-fee" oninput="App.calcQuoteTotal()" value="${q&&q.operator_fee||0}" min="0" step="0.01">
             </div>
           </div>
           <div style="text-align:right;font-size:15px;font-weight:700">Total: <span id="qt-total">$0.00</span></div>
@@ -17032,6 +17035,7 @@ const App = {
     const box = document.getElementById(`qt-${which}`);
     const fields = document.getElementById(`qt-${which}-fields`);
     if (fields) fields.style.display = box?.checked ? 'block' : 'none';
+    this.calcQuoteTotal();
   },
 
   addQuoteItem(prefill) {
@@ -17431,9 +17435,12 @@ const App = {
   calcQuoteTotal() {
     const el = document.getElementById('qt-total');
     if (this._quoteType === 'rental') {
-      // Rental fees are computed server-side (nonlinear month/week/day/hour
-      // billing) — no live client-side total for a rental quote.
-      if (el) el.textContent = 'Estimated at save';
+      // Rental fees (and the deposit that mirrors them) are computed
+      // server-side (nonlinear month/week/day/hour billing) — only the
+      // flat service fees can be shown live here.
+      const fee = (box, input) => document.getElementById(box)?.checked ? (parseFloat(document.getElementById(input)?.value) || 0) : 0;
+      const services = fee('qt-delivery', 'qt-delivery-cost') + fee('qt-pickup', 'qt-pickup-cost') + fee('qt-operator', 'qt-operator-fee');
+      if (el) el.textContent = services > 0 ? `${this.fmt(services)} services + rental fees, tax & deposit (calculated on save)` : 'Estimated at save';
       return;
     }
     let subtotal = 0;
@@ -17608,19 +17615,28 @@ const App = {
       : (q.converted_to_tx ? `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--teal,#14b8a6);border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:12px">
           Converted to invoice <a href="#" style="font-weight:700;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewTransaction(${q.converted_to_tx})">${q.converted_tx_number||'view transaction'}</a>
         </div>` : '');
+    const rentalRateCard = i => (i.rental_classification === 'equipment'
+      ? [['Hourly', i.hourly_rate], ['Daily', i.daily_rate], ['Weekly', i.weekly_rate], ['Monthly', i.monthly_rate]]
+      : [['Daily', i.daily_rate]]).filter(([, v]) => v > 0).map(([l, v]) => `${l} ${this.fmt(v)}`).join(' · ');
+    const rentalDays = isRental && q.due_date
+      ? Math.max(1, Math.round((new Date(`${String(q.due_date).slice(0,10)}T00:00:00Z`) - new Date(`${String(q.created_at).slice(0,10)}T00:00:00Z`)) / 86400000))
+      : null;
     const itemsTable = isRental ? `
+      ${rentalDays ? `<div style="border:1px solid var(--border);border-left:3px solid var(--primary);border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:12px">
+        <strong>Rental Period:</strong> ${this.fmtDate(q.created_at)} – ${this.fmtDate(q.due_date)} (${rentalDays} day${rentalDays===1?'':'s'})
+      </div>` : ''}
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Product</th><th>Qty</th><th>Condition Out</th><th>Est. Fee</th></tr></thead>
+          <thead><tr><th>Product</th><th>Qty</th><th>Rates</th><th>Condition Out</th><th>Est. Fee</th></tr></thead>
           <tbody>
             ${q.items.map(i => {
               const tag = i.parent_item_id ? (i.is_mandatory ? ' <span class="badge-pill badge-success" style="font-size:10px">included</span>' : ' <span class="badge-pill badge-secondary" style="font-size:10px">accessory</span>') : '';
-              return `<tr><td>${i.product_name}${tag}</td><td>${i.quantity}</td><td>${i.condition_out||'-'}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`;
+              return `<tr><td>${i.parent_item_id ? '↳ ' : ''}${i.product_name}${tag}</td><td>${i.quantity}</td><td style="font-size:11px;color:var(--text-muted)">${rentalRateCard(i) || '-'}</td><td>${i.condition_out||'-'}</td><td class="fw-600">${i.is_mandatory ? 'Included' : this.fmt(i.total)}</td></tr>`;
             }).join('')}
           </tbody>
         </table>
       </div>
-      <p style="font-size:11px;color:var(--text-muted);margin-top:6px">Estimated fees only — the real charge is computed when the rental is finalized at the register.</p>` : isSpecialProject ? `
+      <p style="font-size:11px;color:var(--text-muted);margin-top:6px">Rental fees are estimated for the period shown — the real charge is computed when the rental is finalized at the register.</p>` : isSpecialProject ? `
       <div class="table-wrap">
         <table>
           <thead><tr><th>Item</th><th>Qty</th><th>Cost</th><th>Price</th><th>Margin</th><th>Total</th></tr></thead>
@@ -17661,12 +17677,25 @@ const App = {
             ${q.operator_required ? `<div>Operator — ${this.fmt(q.operator_fee)}</div>` : ''}
             ${q.pickup_required ? `<div>Pickup — ${this.fmt(q.pickup_cost)}</div>` : ''}
           </div>` : ''}
-          <div style="text-align:right;margin-top:10px;font-size:13px;line-height:2">
+          ${isRental && q.rental_summary ? (() => {
+            const sm = q.rental_summary;
+            const row = (l, v) => `<div style="display:flex;justify-content:space-between"><span>${l}</span><span>${v}</span></div>`;
+            return `<div style="margin:10px 0 0 auto;max-width:340px;font-size:13px;line-height:2">
+              ${row('Rental Fees (est.)', this.fmt(sm.rental_fees))}
+              ${row('Sales Tax', this.fmt(sm.tax))}
+              ${q.delivery_required ? row('Delivery', this.fmt(sm.delivery)) : ''}
+              ${q.pickup_required ? row('Pickup', this.fmt(sm.pickup)) : ''}
+              ${q.operator_required ? row('Operator', this.fmt(sm.operator)) : ''}
+              ${row('Refundable Deposit', sm.deposit_waived ? 'Waived (operator)' : this.fmt(sm.deposit))}
+              ${sm.discount > 0 ? row('Discount', `-${this.fmt(sm.discount)}`) : ''}
+              <div style="display:flex;justify-content:space-between;border-top:2px solid var(--text);margin-top:4px;font-size:16px;font-weight:700"><span>Total Due at Checkout</span><span>${this.fmt(sm.total)}</span></div>
+            </div>`;
+          })() : `<div style="text-align:right;margin-top:10px;font-size:13px;line-height:2">
             <div>Subtotal: ${this.fmt(q.subtotal)}</div>
             <div>Tax: ${this.fmt(q.tax_amount)}</div>
             ${q.discount_amount > 0 ? `<div>Discount: -${this.fmt(q.discount_amount)}</div>` : ''}
-            <div style="font-size:16px;font-weight:700">${isRental?'Estimated Total':'Total'}: ${this.fmt(q.total)}</div>
-          </div>
+            <div style="font-size:16px;font-weight:700">Total: ${this.fmt(q.total)}</div>
+          </div>`}
         </div>
         <div class="modal-footer">
           ${isSpecialProject && q.status==='draft' ? `

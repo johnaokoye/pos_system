@@ -3,6 +3,7 @@ const router = express.Router();
 const nodemailer = require('nodemailer');
 const { db } = require('../database');
 const { requireAuth, requirePermission } = require('../lib/permissions');
+const { rentalQuoteSummary, attachRentalRates } = require('../lib/rentals');
 
 // Brand palette for every email sent out (receipts, quotes, invoices,
 // statements, notices): green header with a yellow accent stripe, black
@@ -371,7 +372,8 @@ function buildRentalInvoiceHtml(agreement, tx, s, origin) {
         <tr><td style="padding:3px 0">Sub-Total Amount</td><td style="text-align:right">${fmt(rentalBreakdown.subTotalAmount)}</td></tr>
         <tr><td style="padding:3px 0">Sales Tax</td><td style="text-align:right">${fmt(tx.tax_amount)}</td></tr>
         <tr><td style="padding:3px 0">Sales Total</td><td style="text-align:right">${fmt(rentalBreakdown.salesTotal)}</td></tr>
-        <tr><td style="padding:3px 0">Rental Deposit</td><td style="text-align:right">${fmt(rentalBreakdown.depositAmt)}</td></tr>` : `
+        <tr><td style="padding:3px 0">Rental Deposit</td><td style="text-align:right">${fmt(rentalBreakdown.depositAmt)}</td></tr>
+        ${parseFloat(tx.discount_amount) > 0 ? `<tr><td style="padding:3px 0;color:${BRAND.green}">Discount</td><td style="text-align:right;color:${BRAND.green}">-${fmt(tx.discount_amount)}</td></tr>` : ''}` : `
         <tr><td style="padding:3px 0">Subtotal</td><td style="text-align:right">${fmt(tx.subtotal)}</td></tr>
         <tr><td style="padding:3px 0">Tax</td><td style="text-align:right">${fmt(tx.tax_amount)}</td></tr>`}
         <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
@@ -425,6 +427,7 @@ function buildRentalSummaryHtml(agreement, s) {
     serviceFeesTotal > 0 ? ['Delivery / Pickup / Operator Fees', fmt(serviceFeesTotal)] : null,
     ['Tax', fmt(agreement.checkout_tax_amount)],
     ['Deposit Collected', fmt(agreement.deposit_total)],
+    agreement.checkout_discount_amount > 0 ? ['Discount', `-${fmt(agreement.checkout_discount_amount)}`] : null,
     ['Total Charged at Checkout', fmt(agreement.checkout_total)],
     ['Payment Method', (agreement.checkout_payment_method||'').replace('_',' ').toUpperCase()],
   ].filter(Boolean) : [];
@@ -574,6 +577,134 @@ function buildQuoteHtml(q, s) {
         <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">TOTAL</td><td style="font-size:16px;font-weight:700;color:${BRAND.black};text-align:right">${fmt(q.total)}</td></tr>
       </table>
       ${q.notes ? `<div style="margin-top:16px;font-size:13px;color:#444"><strong>Notes:</strong> ${q.notes}</div>` : ''}
+      <div style="text-align:center;margin-top:20px;font-size:13px;color:#666;font-style:italic">${footer}</div>
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body>
+</html>`;
+}
+
+// Rate card shown under each rental line. Tools bill on the daily rate only
+// (with automatic long-rental discounts); equipment has its own hourly/
+// weekly/monthly tiers — see lib/rentalPricing.js.
+function rentalRateCard(i) {
+  const parts = i.rental_classification === 'equipment'
+    ? [['Hourly', i.hourly_rate], ['Daily', i.daily_rate], ['Weekly', i.weekly_rate], ['Monthly', i.monthly_rate]]
+    : [['Daily', i.daily_rate]];
+  return parts.filter(([, v]) => parseFloat(v) > 0).map(([l, v]) => `${l} ${fmt(v)}`).join(' · ');
+}
+
+function rentalQuotePeriod(q) {
+  const start = new Date(`${String(q.created_at).slice(0, 10)}T00:00:00Z`);
+  const due = new Date(`${String(q.due_date).slice(0, 10)}T00:00:00Z`);
+  const days = Math.max(1, Math.round((due - start) / 86400000));
+  return { start, due, days };
+}
+
+function buildRentalQuoteHtml(q, s) {
+  const storeName = s.store_name || 'My Store';
+  const storeAddr = s.store_address || '';
+  const storePhone = s.store_phone || '';
+  const footer = s.receipt_footer || 'Thank you for your business!';
+  const sum = rentalQuoteSummary(q);
+  const period = q.due_date ? rentalQuotePeriod(q) : null;
+  const cell = 'padding:6px 8px;border-bottom:1px solid #f0f0f0';
+  const th = 'padding:8px;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8';
+  const section = title => `<div style="font-size:12px;font-weight:700;text-transform:uppercase;color:#666;border-bottom:1px solid #e8e8e8;padding-bottom:4px;margin:18px 0 6px">${title}</div>`;
+  const customerAddr = [q.customer_address, q.customer_city, q.customer_state, q.customer_zip].filter(Boolean).join(', ');
+
+  const rows = (q.items || []).map(i => {
+    const isChild = !!i.parent_item_id;
+    const tag = isChild ? (i.is_mandatory ? 'Included accessory' : 'Optional accessory') : '';
+    const rates = rentalRateCard(i);
+    const meta = [i.sku, rates, i.condition_out ? `Condition out: ${i.condition_out}` : ''].filter(Boolean).join(' · ');
+    return `
+    <tr>
+      <td style="${cell}${isChild ? ';padding-left:22px' : ''}">${isChild ? '↳ ' : ''}${i.product_name}${tag ? ` <span style="font-size:10px;color:${BRAND.green};font-weight:700">${tag.toUpperCase()}</span>` : ''}${meta ? `<br><span style="color:#888;font-size:11px">${meta}</span>` : ''}</td>
+      <td style="${cell};text-align:center">${i.quantity}</td>
+      <td style="${cell};text-align:right">${i.is_mandatory ? 'Included' : fmt(i.total)}</td>
+    </tr>`;
+  }).join('');
+
+  const services = [
+    q.delivery_required ? ['Delivery', q.delivery_address || (customerAddr ? `To: ${customerAddr}` : 'To the customer’s address on file'), sum.delivery] : null,
+    q.pickup_required ? ['Pickup', 'Collection of the equipment from the customer at the end of the rental', sum.pickup] : null,
+    q.operator_required ? ['Operator', 'Trained operator provided to run the equipment', sum.operator] : null,
+  ].filter(Boolean);
+  const servicesTable = services.length ? `${section('Additional Services')}
+      <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px">
+        ${services.map(([name, desc, amt]) => `<tr><td style="${cell}"><strong>${name}</strong><br><span style="color:#888;font-size:11px">${desc}</span></td><td style="${cell};text-align:right;font-weight:600">${fmt(amt)}</td></tr>`).join('')}
+      </table>` : '';
+
+  const line = (label, value, style = '') => `<tr><td style="padding:3px 0;${style}">${label}</td><td style="text-align:right;${style}">${value}</td></tr>`;
+  const summaryRows = [
+    line('Rental Fees (estimated)', fmt(sum.rental_fees)),
+    line('Sales Tax', fmt(sum.tax)),
+    q.delivery_required ? line('Delivery', fmt(sum.delivery)) : '',
+    q.pickup_required ? line('Pickup', fmt(sum.pickup)) : '',
+    q.operator_required ? line('Operator', fmt(sum.operator)) : '',
+    sum.deposit_waived
+      ? line('Refundable Deposit', 'Waived — operator provided')
+      : line('Refundable Deposit', fmt(sum.deposit)),
+    sum.discount > 0 ? line('Discount', `-${fmt(sum.discount)}`, `color:${BRAND.green}`) : '',
+  ].join('');
+
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Rental Quotation ${q.quote_number}</title></head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
+<tr><td align="center">
+  <table width="600" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+    <tr><td style="${BRAND_HEADER_STYLE}">
+      <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
+      ${storeAddr ? `<div style="color:#ffffff;font-size:12px;margin-top:4px">${storeAddr}</div>` : ''}
+      ${storePhone ? `<div style="color:#ffffff;font-size:12px">${storePhone}</div>` : ''}
+    </td></tr>
+    <tr><td style="padding:20px 24px">
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px">
+        <tr>
+          <td style="vertical-align:top">
+            <div style="font-size:20px;font-weight:700;color:${BRAND.black}">RENTAL QUOTATION</div>
+            <div style="font-size:13px;color:#888;margin-top:2px">${q.quote_number}</div>
+          </td>
+          <td style="vertical-align:top;text-align:right;font-size:13px;color:#444">
+            <div><strong>Date:</strong> ${new Date(q.created_at).toLocaleDateString()}</div>
+            ${q.branch_name ? `<div><strong>Branch:</strong> ${q.branch_name}</div>` : ''}
+            ${q.employee_name ? `<div><strong>Prepared By:</strong> ${q.employee_name}</div>` : ''}
+          </td>
+        </tr>
+      </table>
+      ${q.customer_name ? `<div style="background:#f9fafb;border:1px solid #e8e8e8;border-radius:6px;padding:12px;margin-bottom:12px;font-size:13px">
+        <strong>Customer:</strong><br>${q.customer_name}${q.customer_number ? ` (${q.customer_number})` : ''}${customerAddr ? `<br>${customerAddr}` : ''}${q.customer_phone ? `<br>${q.customer_phone}` : ''}${q.customer_email ? `<br>${q.customer_email}` : ''}
+      </div>` : ''}
+      ${period ? `<div style="background:#f9fafb;border:1px solid #e8e8e8;border-left:4px solid ${BRAND.green};border-radius:6px;padding:12px;font-size:13px">
+        <strong>Rental Period:</strong> ${period.start.toLocaleDateString(undefined, { timeZone: 'UTC' })} – ${period.due.toLocaleDateString(undefined, { timeZone: 'UTC' })} (${period.days} day${period.days === 1 ? '' : 's'})<br>
+        <strong>Return Due:</strong> ${period.due.toLocaleDateString(undefined, { timeZone: 'UTC' })}
+      </div>` : ''}
+      ${section('Rental Items')}
+      <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px">
+        <thead><tr style="background:#f9fafb">
+          <th style="${th};text-align:left">Item</th>
+          <th style="${th};text-align:center">Qty</th>
+          <th style="${th};text-align:right">Est. Rental Fee</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      ${servicesTable}
+      ${section('Quote Summary')}
+      <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444">
+        ${summaryRows}
+        <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
+        <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">TOTAL DUE AT CHECKOUT</td><td style="font-size:16px;font-weight:700;color:${BRAND.black};text-align:right">${fmt(sum.total)}</td></tr>
+      </table>
+      <div style="margin-top:16px;padding:10px 12px;background:#f9fafb;border:1px solid #e8e8e8;border-radius:6px;font-size:12px;color:#555;line-height:1.5">
+        ${sum.deposit_waived ? '' : `The refundable deposit (${fmt(sum.deposit)}) is returned when the equipment comes back on time and in the condition it went out; late return or damage charges are deducted from it.<br>`}
+        Rental fees are estimated for the period shown and are finalized at checkout based on the actual checkout time and return due date.
+      </div>
+      ${q.notes ? `<div style="margin-top:12px;font-size:13px;color:#444"><strong>Notes:</strong> ${q.notes}</div>` : ''}
       <div style="text-align:center;margin-top:20px;font-size:13px;color:#666;font-style:italic">${footer}</div>
     </td></tr>
   </table>
@@ -743,7 +874,7 @@ router.post('/send-rental-summary/:id', requireAuth, async (req, res) => {
   try {
     const { rows: [agreement] } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name,
       b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone,
-      co.payment_method as checkout_payment_method, co.subtotal as checkout_subtotal, co.tax_amount as checkout_tax_amount, co.total as checkout_total,
+      co.payment_method as checkout_payment_method, co.subtotal as checkout_subtotal, co.tax_amount as checkout_tax_amount, co.discount_amount as checkout_discount_amount, co.total as checkout_total,
       se.total as settlement_total, se.payment_method as settlement_payment_method, se.amount_tendered as settlement_amount_tendered, se.change_amount as settlement_change_amount, se.created_at as settlement_created_at,
       (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total) as balance_due,
       ise.first_name || ' ' || ise.last_name as issue_security_employee_name,
@@ -842,15 +973,19 @@ router.post('/send-quote/:id', requireAuth, async (req, res) => {
 
   try {
     const { rows: [q] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name,
-      c.email as customer_email, c.phone as customer_phone,
-      b.name as branch_name
+      c.customer_number, c.email as customer_email, c.phone as customer_phone,
+      c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
+      b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name
       FROM quotations q
       LEFT JOIN customers c ON q.customer_id = c.id
       LEFT JOIN branches b ON q.branch_id = b.id
+      LEFT JOIN employees e ON q.employee_id = e.id
       WHERE q.id = ?`, args: [req.params.id] });
     if (!q) return res.status(404).json({ error: 'Quotation not found' });
-    const { rows: items } = await db.execute({ sql: 'SELECT * FROM quotation_items WHERE quote_id = ?', args: [req.params.id] });
+    const { rows: items } = await db.execute({ sql: 'SELECT * FROM quotation_items WHERE quote_id = ? ORDER BY id', args: [req.params.id] });
     q.items = items;
+    const isRental = q.quote_type === 'rental';
+    if (isRental) await attachRentalRates(db, q.items);
 
     const s = await getSettings();
     try {
@@ -860,8 +995,8 @@ router.post('/send-quote/:id', requireAuth, async (req, res) => {
       await transporter.sendMail({
         from: `"${fromName}" <${fromAddr}>`,
         to,
-        subject: `Quotation ${q.quote_number} from ${s.store_name || 'Our Store'}`,
-        html: buildQuoteHtml(q, s),
+        subject: `${isRental ? 'Rental Quotation' : 'Quotation'} ${q.quote_number} from ${s.store_name || 'Our Store'}`,
+        html: isRental ? buildRentalQuoteHtml(q, s) : buildQuoteHtml(q, s),
       });
 
       // Auto-mark as sent if still in draft

@@ -71,12 +71,13 @@ async function calcRentalCommission(agreement, checkoutTx) {
   if (existing) return null;
 
   // Deposit is refundable collateral, not revenue — excluded here even
-  // though it's part of checkoutTx.subtotal. damage_fee_total/
+  // though it's part of checkoutTx.subtotal; a quote discount given at
+  // checkout is netted out too. damage_fee_total/
   // duration_adjustment_total/tax_adjustment_total are the settlement-time
   // accumulators on rental_agreements (already net of any credits for an
   // early return), added on top of the original checkout revenue.
   const revenueAmount = parseFloat((
-    (checkoutTx.subtotal - agreement.deposit_total) +
+    (checkoutTx.subtotal - agreement.deposit_total - (checkoutTx.discount_amount || 0)) +
     checkoutTx.tax_amount +
     (agreement.damage_fee_total || 0) +
     (agreement.duration_adjustment_total || 0) +

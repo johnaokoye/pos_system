@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { getOutstandingQty } = require('../lib/rentalAvailability');
-const { getBranchStock, feeFor, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, dueDateTime, requiredDepositReturnMethod } = require('../lib/rentals');
+const { getBranchStock, feeFor, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, dueDateTime, requiredDepositReturnMethod, rentalDiscount } = require('../lib/rentals');
 const { requirePermission, requireAnyPermission, requireAuth, can, canManageRentals, requireRentalsManage } = require('../lib/permissions');
 const { runCreditCheck } = require('./customers');
 const { nextNumber } = require('../lib/nextNumber');
@@ -190,7 +190,7 @@ router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
       b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone,
       e.first_name || ' ' || e.last_name as employee_name,
       co.transaction_number as checkout_transaction_number, co.payment_method as checkout_payment_method, co.created_at as checkout_transaction_created_at,
-      co.subtotal as checkout_subtotal, co.tax_amount as checkout_tax_amount, co.total as checkout_total, co.amount_tendered as checkout_amount_tendered, co.change_amount as checkout_change_amount,
+      co.subtotal as checkout_subtotal, co.tax_amount as checkout_tax_amount, co.discount_amount as checkout_discount_amount, co.total as checkout_total, co.amount_tendered as checkout_amount_tendered, co.change_amount as checkout_change_amount,
       se.transaction_number as settlement_transaction_number, se.total as settlement_total,
       se.subtotal as settlement_subtotal, se.tax_amount as settlement_tax_amount, se.payment_method as settlement_payment_method, se.amount_tendered as settlement_amount_tendered, se.change_amount as settlement_change_amount, se.created_at as settlement_created_at,
       q.id as source_quote_id, q.quote_number as source_quote_number, qe.first_name || ' ' || qe.last_name as quote_created_by,
@@ -258,7 +258,8 @@ router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
       agreement.estimated_rental_subtotal = parseFloat(estRentalSubtotal.toFixed(2));
       agreement.estimated_tax = parseFloat(estTax.toFixed(2));
       agreement.estimated_deposit_total = agreement.operator_required ? 0 : parseFloat((estRentalSubtotal + estTax).toFixed(2));
-      agreement.estimated_total = parseFloat((estRentalSubtotal + estTax + agreement.estimated_deposit_total + deliveryCost + pickupCost + operatorFee).toFixed(2));
+      agreement.estimated_discount = rentalDiscount(agreement.discount_amount, agreement.estimated_rental_subtotal, agreement.estimated_tax, deliveryCost + pickupCost + operatorFee);
+      agreement.estimated_total = parseFloat((estRentalSubtotal + estTax + agreement.estimated_deposit_total + deliveryCost + pickupCost + operatorFee - agreement.estimated_discount).toFixed(2));
     }
     const { rows: pauses } = await db.execute({ sql: `SELECT rp.*, pb.first_name || ' ' || pb.last_name as paused_by_name, ab.first_name || ' ' || ab.last_name as authorized_by_name, rb.first_name || ' ' || rb.last_name as resumed_by_name, cb.first_name || ' ' || cb.last_name as confirmed_by_name
       FROM rental_agreement_pauses rp
@@ -430,8 +431,12 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
     const pickupCost = agreement.pickup_required ? parseFloat(agreement.pickup_cost || 0) : 0;
     const operatorFee = agreement.operator_required ? parseFloat(agreement.operator_fee || 0) : 0;
     const serviceFeesTotal = parseFloat((deliveryCost + pickupCost + operatorFee).toFixed(2));
+    // Discount agreed on the rental quote this agreement was converted from
+    // (0 for a direct rental). Comes off the charge, never the deposit —
+    // the deposit is still refunded in full on a clean return.
+    const discountAmount = rentalDiscount(agreement.discount_amount, rentalSubtotal, taxAmount, serviceFeesTotal);
 
-    const total = parseFloat((rentalSubtotal + taxAmount + depositTotal + serviceFeesTotal).toFixed(2));
+    const total = parseFloat((rentalSubtotal + taxAmount + depositTotal + serviceFeesTotal - discountAmount).toFixed(2));
 
     if (isCredit && creditCustomer.credit_limit > 0 && parseFloat((creditCustomer.account_balance + total).toFixed(2)) > creditCustomer.credit_limit) {
       const available = Math.max(0, parseFloat((creditCustomer.credit_limit - creditCustomer.account_balance).toFixed(2)));
@@ -447,7 +452,7 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
     const tx = await db.transaction('write');
     let committed = false;
     try {
-      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, agreement.customer_id, finalizeEmployeeId || null, agreement.branch_id, drawer_session_id || null, rentalSubtotal + depositTotal + serviceFeesTotal, taxAmount, total, method, tendered, changeAmt, `Rental checkout ${agreement.agreement_number}`, 'pos'] });
+      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, agreement.customer_id, finalizeEmployeeId || null, agreement.branch_id, drawer_session_id || null, rentalSubtotal + depositTotal + serviceFeesTotal, taxAmount, discountAmount, total, method, tendered, changeAmt, `Rental checkout ${agreement.agreement_number}`, 'pos'] });
       const checkoutTxId = Number(txResult.lastInsertRowid);
 
       for (const item of existingItems) {
@@ -468,8 +473,9 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
         await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?)`, args: [checkoutTxId, 'Operator Fee', 'OPERATOR', 1, operatorFee, 0, operatorFee] });
       }
 
-      const loyaltyPts = Math.floor(rentalSubtotal * 0.5);
-      await tx.execute({ sql: 'UPDATE customers SET loyalty_points = loyalty_points + ?, total_spent = total_spent + ? WHERE id = ?', args: [loyaltyPts, rentalSubtotal, agreement.customer_id] });
+      const netRentalSpend = Math.max(0, parseFloat((rentalSubtotal - discountAmount).toFixed(2)));
+      const loyaltyPts = Math.floor(netRentalSpend * 0.5);
+      await tx.execute({ sql: 'UPDATE customers SET loyalty_points = loyalty_points + ?, total_spent = total_spent + ? WHERE id = ?', args: [loyaltyPts, netRentalSpend, agreement.customer_id] });
 
       if (isCredit) {
         await tx.execute({ sql: 'UPDATE customers SET account_balance = account_balance + ? WHERE id = ?', args: [total, agreement.customer_id] });
@@ -976,7 +982,7 @@ router.patch('/agreements/:id/cancel', requirePermission('rentals_returns'), asy
             // Loyalty was only ever accrued on the rental-fee portion of the
             // checkout, not the deposit (see POST /agreements) — reverse that
             // same amount, not the full subtotal, or this double-deducts the deposit.
-            const rentalFeePortion = (checkoutTx.subtotal || 0) - (agreement.deposit_total || 0);
+            const rentalFeePortion = Math.max(0, (checkoutTx.subtotal || 0) - (agreement.deposit_total || 0) - (checkoutTx.discount_amount || 0));
             const loyaltyPts = Math.floor(rentalFeePortion * 0.5);
             await tx.execute({ sql: 'UPDATE customers SET loyalty_points = MAX(0, loyalty_points - ?), total_spent = MAX(0, total_spent - ?) WHERE id = ?', args: [loyaltyPts, rentalFeePortion, checkoutTx.customer_id] });
             // The checkout billed the full total to the customer's account —
