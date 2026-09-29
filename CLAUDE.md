@@ -71,7 +71,7 @@ New columns must be appended to the `migrations` array in `database.js:_init()` 
 ### Permission keys
 The `security_groups.permissions` JSON blob uses these keys (all boolean). Module-level keys grant full access; sub-keys gate specific actions within a module — `App.can()` checks both directions.
 
-**Module keys:** `dashboard`, `pos`, `drawers`, `inventory`, `customers`, `transactions`, `reports`, `employees`, `suppliers`, `services`, `purchase_requests`, `purchasing`, `transfers`, `quotations`, `accounts`, `crm`, `commissions`, `warehouse`, `shipping`, `cycle-counts`, `branches`, `security`, `promotions`, `settings`
+**Module keys:** `dashboard`, `pos`, `drawers`, `inventory`, `customers`, `transactions`, `reports`, `employees`, `suppliers`, `services`, `purchase_requests`, `purchasing`, `transfers`, `quotations`, `accounts`, `crm`, `commissions`, `warehouse`, `shipping`, `cycle-counts`, `branches`, `security`, `user-sessions`, `assessment`, `promotions`, `settings`
 
 **Sub-permission keys** (stored and checked via `App.can()` exactly as shown):
 - `pos` → `pos_discounts`, `pos_discount_override`, `pos_refunds`, `pos_void_items`, `pos_hold`, `pos_customer_lookup`, `pos_item_lookup`, `pos_tax_exempt`, `pos_reprint_ticket`, `pos_pay_on_account`, `pos_change_quantity`, `pos_cancel_ticket`, `pos_payment`
@@ -94,6 +94,7 @@ The `security_groups.permissions` JSON blob uses these keys (all boolean). Modul
 - `cycle-counts` → `cyclecounts_create`, `cyclecounts_approve`
 - `branches` → `branches_add`, `branches_edit`, `branches_delete`
 - `security` → `security_manage`, `security_assign`
+- `user-sessions` → `sessions_logout` (Admin > Active Sessions; force-logout is the sub-key)
 - `promotions` → `promotions_create`, `promotions_codes`
 - `settings` → `settings_company`, `settings_tax`, `settings_payment`, `settings_integrations`
 

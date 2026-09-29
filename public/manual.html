@@ -776,16 +776,16 @@
     </section>
 
     <section class="module" id="user-sessions">
-      <h2 class="module">Active Sessions <span class="tag">security</span></h2>
+      <h2 class="module">Active Sessions <span class="tag">user-sessions</span></h2>
       <p class="module-intro">See who is logged in right now, where from, and what they've been doing.</p>
       <p>Open it from <strong>Admin → Active Sessions</strong>. The top row shows how many people are online (active in the last 5 minutes), how many are logged in overall, and the last 24 hours of sign-ins, actions, and failed login attempts. The screen refreshes itself every 30 seconds.</p>
       <p>Each logged-in session shows the employee, whether they're <strong>Online</strong> or <strong>Idle</strong>, the branch they're working in, the IP address they connected from (marked <em>local network</em> for in-store devices or <em>internet</em> for anything outside), the browser and device, the screen they currently have open, and their most recent action. Someone signed in on two devices appears twice. Switch the filter to <strong>All sessions (last 7 days)</strong> to include people who have since signed out or timed out. Click any row to see that session's full activity history.</p>
       <p>The <strong>Recent activity</strong> feed lists sign-ins, sign-outs, failed logins (with the username that was tried), screens opened, and every create/edit/delete an employee makes. Plain page views of data aren't logged individually — only which screen was opened. Activity older than 90 days is removed automatically.</p>
-      <p>Viewing this screen needs <span class="perm-pill">security</span>. The <strong>Log out</strong> button, which ends another person's session immediately (they're sent back to the login screen on their next click), needs <span class="perm-pill">security_manage</span>. You can't log out your own current session from here — use Sign Out.</p>
+      <p>Viewing this screen needs <span class="perm-pill">user-sessions</span> (<em>Active Sessions</em> in Security Groups). The <strong>Log out</strong> button, which ends another person's session immediately (they're sent back to the login screen on their next click), needs its sub-permission <span class="perm-pill">sessions_logout</span> (<em>Force Log Out Other Users</em>). Out of the box only Administrator has these. You can't log out your own current session from here — use Sign Out.</p>
     </section>
 
     <section class="module" id="assessment">
-      <h2 class="module">Training Assessment <span class="tag">employees</span></h2>
+      <h2 class="module">Training Assessment <span class="tag">assessment</span></h2>
       <p class="module-intro">Check which business processes each employee has completed on their own — useful for signing off training.</p>
       <p>Open it from <strong>Admin → Assessment</strong>. Each employee gets a card with one badge per process. A badge turns green the first time they take a real record all the way to the end, and the number on it shows how many times they've done it. An orange dashed badge means they've started that process but haven't finished one yet; a grey badge means they haven't tried it. When every badge on a card is earned, the employee gets the <strong>gold trophy</strong>.</p>
       <table class="ref">
@@ -805,7 +805,7 @@
         <tr><td>Cycle Count</td><td>runs a cycle count that is committed</td></tr>
       </table>
       <p>Only processes the employee's security group gives them access to appear on their card and count toward the trophy — a cashier isn't expected to receive purchase orders. Badges are worked out from the records already in the system, so work done before this screen existed counts too. To assess only a training period, set <strong>Count from</strong> to the date training started. Click any badge to see the actual records behind it (quote numbers, agreement numbers and so on), including any that are still in progress.</p>
-      <p>Credit goes to the employee each record is under — e.g. the person who created the quote or opened the rental — so trainees should log in as themselves, not on a shared login. Needs <span class="perm-pill">employees</span>.</p>
+      <p>Credit goes to the employee each record is under — e.g. the person who created the quote or opened the rental — so trainees should log in as themselves, not on a shared login. Needs <span class="perm-pill">assessment</span> (<em>Training Assessment</em> in Security Groups) — on by default for Administrator and Manager.</p>
     </section>
 
     <section class="module" id="security">
@@ -872,6 +872,8 @@
         <tr><td>cycle-counts</td><td>cyclecounts_create, cyclecounts_approve</td></tr>
         <tr><td>branches</td><td>branches_add, branches_edit, branches_delete</td></tr>
         <tr><td>security</td><td>security_manage, security_assign</td></tr>
+        <tr><td>user-sessions</td><td>sessions_logout</td></tr>
+        <tr><td>assessment</td><td>—</td></tr>
         <tr><td>promotions</td><td>promotions_create, promotions_codes</td></tr>
         <tr><td>discount-cards</td><td>(none)</td></tr>
         <tr><td>cash-back-cards</td><td>(none)</td></tr>

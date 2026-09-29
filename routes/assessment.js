@@ -160,7 +160,7 @@ function parseSince(v) {
   return /^\d{4}-\d{2}-\d{2}$/.test(v || '') ? v : '0000-00-00';
 }
 
-router.use(requirePermission('employees'));
+router.use(requirePermission('assessment'));
 
 router.get('/', async (req, res) => {
   try {

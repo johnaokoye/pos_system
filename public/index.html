@@ -1128,8 +1128,6 @@ const App = {
     if (section === 'rental-deposits') return this._canManageRentals();
     if (section === 'rental-dispatch') return this._canManageRentals();
     if (section === 'transfer-dispatch') return this.can('transfers');
-    if (section === 'user-sessions') return this.can('security');
-    if (section === 'assessment') return this.can('employees');
     if (section === 'purchase-requests') return this.can('purchase_requests');
     if (section === 'work-orders') return this.can('work_orders');
     if (section === 'wo-schedule') return this.can('work_orders');
@@ -1322,7 +1320,7 @@ const App = {
 
   async showSection(name) {
     const perms = this.currentUser?.permissions;
-    const sectionAllowed = name === 'driver-dashboard' ? !!this.currentUser?.is_driver : name === 'guard-dashboard' ? !!this.currentUser?.is_security : name === 'online-orders' ? this.can('transactions') : name === 'rentals' ? this._canManageRentals() : name === 'rental-items' ? this._canManageRentals() : name === 'rental-deposits' ? this._canManageRentals() : name === 'rental-dispatch' ? this._canManageRentals() : name === 'transfer-dispatch' ? this.can('transfers') : name === 'user-sessions' ? this.can('security') : name === 'assessment' ? this.can('employees') : name === 'purchase-requests' ? this.can('purchase_requests') : name === 'work-orders' ? this.can('work_orders') : name === 'wo-schedule' ? this.can('work_orders') : name === 'special-projects' ? (this.can('special_projects') || this.can('special_projects_approve')) : (name === 'reports-marketing' || name === 'reports-sales' || name === 'reports-accounts') ? this.can('reports') : this._hubGroups[name] ? this.canAccessHub(name) : this.can(name);
+    const sectionAllowed = name === 'driver-dashboard' ? !!this.currentUser?.is_driver : name === 'guard-dashboard' ? !!this.currentUser?.is_security : name === 'online-orders' ? this.can('transactions') : name === 'rentals' ? this._canManageRentals() : name === 'rental-items' ? this._canManageRentals() : name === 'rental-deposits' ? this._canManageRentals() : name === 'rental-dispatch' ? this._canManageRentals() : name === 'transfer-dispatch' ? this.can('transfers') : name === 'purchase-requests' ? this.can('purchase_requests') : name === 'work-orders' ? this.can('work_orders') : name === 'wo-schedule' ? this.can('work_orders') : name === 'special-projects' ? (this.can('special_projects') || this.can('special_projects_approve')) : (name === 'reports-marketing' || name === 'reports-sales' || name === 'reports-accounts') ? this.can('reports') : this._hubGroups[name] ? this.canAccessHub(name) : this.can(name);
     if (perms && !sectionAllowed) return;
     this.section = name;
     this._reportSection(name);
@@ -18951,7 +18949,7 @@ const App = {
   },
 
   _renderSessionsTable() {
-    const canRevoke = this.can('security_manage');
+    const canRevoke = this.can('sessions_logout');
     const tbody = document.getElementById('us-tbody');
     const data = this._sessionsData;
     if (!tbody || !data) return;
@@ -19007,7 +19005,7 @@ const App = {
           </div>
         </div>
         <div class="modal-footer">
-          ${this.can('security_manage') && !s.ended && !s.is_current ? `<button class="btn btn-danger" onclick="App.revokeUserSession(${s.id})">Log this session out</button>` : ''}
+          ${this.can('sessions_logout') && !s.ended && !s.is_current ? `<button class="btn btn-danger" onclick="App.revokeUserSession(${s.id})">Log this session out</button>` : ''}
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
@@ -19222,6 +19220,10 @@ const App = {
       { key: 'security_manage', label: 'Manage Groups' },
       { key: 'security_assign', label: 'Assign Employees' },
     ]},
+    { key: 'user-sessions', label: 'Active Sessions', subs: [
+      { key: 'sessions_logout', label: 'Force Log Out Other Users' },
+    ]},
+    { key: 'assessment', label: 'Training Assessment', subs: [] },
     { key: 'promotions', label: 'Promotions', subs: [
       { key: 'promotions_create', label: 'Create Promotions' },
       { key: 'promotions_codes', label: 'Manage Promo Codes' },
@@ -19260,12 +19262,20 @@ const App = {
     let g = { permissions: {} };
     if (id) g = await this.api('GET', `/security-groups/${id}`);
     const perms = g.permissions || {};
+    // Kept so saveSecurityGroup() can preserve keys this editor doesn't show.
+    this._sgEditingPerms = { ...perms };
+    // A sub-key that was never saved inherits its module's flag — the same
+    // fallback can() uses on both client and server. Without this, a group
+    // stored as just { security: true } (e.g. the seeded Administrator)
+    // rendered every sub unchecked, syncParent() then unticked the module
+    // too, and pressing Save silently revoked the whole module.
+    const subChecked = (mod, key) => (Object.prototype.hasOwnProperty.call(perms, key) ? !!perms[key] : !!perms[mod.key]);
     const moduleRows = this._permissionTree.map(mod => {
       const subsHtml = mod.subs.length ? `
         <div class="perm-subs">
           ${mod.subs.map(s => `
             <label class="perm-sub-item">
-              <input type="checkbox" id="perm-${s.key}" ${perms[s.key] ? 'checked' : ''}>
+              <input type="checkbox" id="perm-${s.key}" ${subChecked(mod, s.key) ? 'checked' : ''}>
               <span>${s.label}</span>
             </label>`).join('')}
         </div>` : '';
@@ -19324,8 +19334,12 @@ const App = {
           parentEl.checked = true;
           parentEl.indeterminate = true;
         } else {
-          parentEl.checked = false;
-          parentEl.indeterminate = false;
+          // No sub-actions ticked is NOT the same as no access: a module
+          // can be granted on its own for base access only (e.g. Cashier's
+          // layaway/work_orders). Leave the module box as the admin set it
+          // — untick the module header itself to revoke it — and show it as
+          // partial when it's still on.
+          parentEl.indeterminate = parentEl.checked;
         }
       };
 
@@ -19349,7 +19363,8 @@ const App = {
     const name = document.getElementById('sg-name').value.trim();
     const description = document.getElementById('sg-desc').value.trim();
     if (!name) { this.alert('Name required', 'error'); return; }
-    const permissions = { multi_branch_access: document.getElementById('sg-multi-branch')?.checked || false };
+    // Start from the stored blob so keys outside _permissionTree survive a save.
+    const permissions = { ...(id ? this._sgEditingPerms : {}), multi_branch_access: document.getElementById('sg-multi-branch')?.checked || false };
     this._permissionTree.forEach(mod => {
       permissions[mod.key] = document.getElementById(`perm-${mod.key}`)?.checked || false;
       mod.subs.forEach(s => { permissions[s.key] = document.getElementById(`perm-${s.key}`)?.checked || false; });

@@ -2053,6 +2053,27 @@ async function _init() {
     } catch(e) {}
   }
 
+  // Admin > Active Sessions (`user-sessions`, sub `sessions_logout`) and
+  // Admin > Assessment (`assessment`) got their own permission keys after
+  // launch — before that they piggybacked on `security` / `security_manage`
+  // and `employees`. Backfill each group from exactly those old keys so
+  // nobody gains or loses access on upgrade; after that they're
+  // independent and managed in Security Groups like any other key. Runs
+  // after the first-run group seed above so a brand-new DB gets them on
+  // its first boot too.
+  try {
+    const { can } = require('./lib/permissions');
+    const { rows: groups } = await db.execute({ sql: 'SELECT id, permissions FROM security_groups', args: [] });
+    for (const g of groups) {
+      const perms = JSON.parse(g.permissions || '{}');
+      let changed = false;
+      if (!('user-sessions' in perms)) { perms['user-sessions'] = can(perms, 'security'); changed = true; }
+      if (!('sessions_logout' in perms)) { perms.sessions_logout = can(perms, 'security_manage'); changed = true; }
+      if (!('assessment' in perms)) { perms.assessment = can(perms, 'employees'); changed = true; }
+      if (changed) await db.execute({ sql: 'UPDATE security_groups SET permissions = ? WHERE id = ?', args: [JSON.stringify(perms), g.id] });
+    }
+  } catch(e) {}
+
   // Seed categories and products
   const { rows: [catCount] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM categories', args: [] });
   if (Number(catCount.c) === 0) {

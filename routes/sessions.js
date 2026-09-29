@@ -5,9 +5,8 @@ const { requireAuth, requirePermission } = require('../lib/permissions');
 const { logActivity, clientIp, pruneActivity } = require('../lib/sessionActivity');
 
 // Admin > Active Sessions dashboard: who is logged in, where from, and what
-// they've been doing. Viewing is gated on the `security` module (same as
-// Security Groups, which sits beside it in the Admin hub); force-logging a
-// session out needs `security_manage`.
+// they've been doing. Viewing needs the `user-sessions` permission;
+// force-logging a session out needs its `sessions_logout` sub-permission.
 
 // A session counts as "online" if it made any request within this window.
 // The SPA doesn't poll on idle screens, so this is "recently active" rather
@@ -36,7 +35,7 @@ router.post('/section', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/', requirePermission('security'), async (req, res) => {
+router.get('/', requirePermission('user-sessions'), async (req, res) => {
   try {
     pruneActivity();
     const includeEnded = req.query.status === 'all';
@@ -88,7 +87,7 @@ router.get('/', requirePermission('security'), async (req, res) => {
 
 // Recent activity across every session (or one employee), newest first.
 // Failed logins have no session/employee, so they only show up here.
-router.get('/activity', requirePermission('security'), async (req, res) => {
+router.get('/activity', requirePermission('user-sessions'), async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
     const args = [];
@@ -112,7 +111,7 @@ router.get('/activity', requirePermission('security'), async (req, res) => {
 
 // Force-logout: the next request from that browser fails sessionAuth and the
 // SPA bounces it to the login screen.
-router.post('/:id/revoke', requirePermission('security_manage'), async (req, res) => {
+router.post('/:id/revoke', requirePermission('sessions_logout'), async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
     const { rows: [s] } = await db.execute({ sql: 'SELECT id, employee_id, revoked_at FROM sessions WHERE id = ?', args: [id] });
