@@ -160,6 +160,7 @@
       <a href="#employees">Employees</a>
       <a href="#branches">Branches</a>
       <a href="#user-sessions">Active Sessions</a>
+      <a href="#assessment">Training Assessment</a>
       <a href="#security">Security Groups</a>
       <a href="#settings">Settings &amp; Integrations</a>
     </div>
@@ -781,6 +782,30 @@
       <p>Each logged-in session shows the employee, whether they're <strong>Online</strong> or <strong>Idle</strong>, the branch they're working in, the IP address they connected from (marked <em>local network</em> for in-store devices or <em>internet</em> for anything outside), the browser and device, the screen they currently have open, and their most recent action. Someone signed in on two devices appears twice. Switch the filter to <strong>All sessions (last 7 days)</strong> to include people who have since signed out or timed out. Click any row to see that session's full activity history.</p>
       <p>The <strong>Recent activity</strong> feed lists sign-ins, sign-outs, failed logins (with the username that was tried), screens opened, and every create/edit/delete an employee makes. Plain page views of data aren't logged individually — only which screen was opened. Activity older than 90 days is removed automatically.</p>
       <p>Viewing this screen needs <span class="perm-pill">security</span>. The <strong>Log out</strong> button, which ends another person's session immediately (they're sent back to the login screen on their next click), needs <span class="perm-pill">security_manage</span>. You can't log out your own current session from here — use Sign Out.</p>
+    </section>
+
+    <section class="module" id="assessment">
+      <h2 class="module">Training Assessment <span class="tag">employees</span></h2>
+      <p class="module-intro">Check which business processes each employee has completed on their own — useful for signing off training.</p>
+      <p>Open it from <strong>Admin → Assessment</strong>. Each employee gets a card with one badge per process. A badge turns green the first time they take a real record all the way to the end, and the number on it shows how many times they've done it. An orange dashed badge means they've started that process but haven't finished one yet; a grey badge means they haven't tried it. When every badge on a card is earned, the employee gets the <strong>gold trophy</strong>.</p>
+      <table class="ref">
+        <tr><th>Badge</th><th>Earned when the employee…</th></tr>
+        <tr><td>POS Sale</td><td>completes a sale at the Point of Sale (rental, work order and layaway payments don't count)</td></tr>
+        <tr><td>Return / Refund</td><td>processes a return against a sale</td></tr>
+        <tr><td>Retail Quotation</td><td>creates a retail quote that gets converted into a sale</td></tr>
+        <tr><td>Special Project</td><td>creates a Special Project that gets converted</td></tr>
+        <tr><td>Rental Agreement</td><td>opens a rental agreement that is completed through to return</td></tr>
+        <tr><td>Work Order</td><td>takes in a work order that is completed through to customer pickup</td></tr>
+        <tr><td>Layaway</td><td>sets up a layaway plan that is paid off</td></tr>
+        <tr><td>Account Payment</td><td>records a payment on a customer account</td></tr>
+        <tr><td>Drawer Reconciliation</td><td>closes and reconciles a cash drawer</td></tr>
+        <tr><td>Purchase Request</td><td>raises a purchase request that is converted into a purchase order</td></tr>
+        <tr><td>Purchase Order</td><td>creates a purchase order that is received</td></tr>
+        <tr><td>Branch Transfer</td><td>creates a branch transfer that is fully received</td></tr>
+        <tr><td>Cycle Count</td><td>runs a cycle count that is committed</td></tr>
+      </table>
+      <p>Only processes the employee's security group gives them access to appear on their card and count toward the trophy — a cashier isn't expected to receive purchase orders. Badges are worked out from the records already in the system, so work done before this screen existed counts too. To assess only a training period, set <strong>Count from</strong> to the date training started. Click any badge to see the actual records behind it (quote numbers, agreement numbers and so on), including any that are still in progress.</p>
+      <p>Credit goes to the employee each record is under — e.g. the person who created the quote or opened the rental — so trainees should log in as themselves, not on a shared login. Needs <span class="perm-pill">employees</span>.</p>
     </section>
 
     <section class="module" id="security">
