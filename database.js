@@ -957,6 +957,23 @@ async function _init() {
       expires_at DATETIME NOT NULL,
       revoked_at DATETIME
     )` },
+    // Per-session activity feed for the Admin > Active Sessions dashboard.
+    // Written by lib/sessionActivity.js: login/logout events, section views
+    // reported by the SPA, and every mutating (non-GET) API call. GETs are
+    // deliberately not logged — the SPA fires dozens per screen and they'd
+    // drown out the actions an admin actually cares about. Pruned to 90 days.
+    { sql: `CREATE TABLE IF NOT EXISTS session_activity (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id INTEGER REFERENCES sessions(id),
+      employee_id INTEGER REFERENCES employees(id),
+      kind TEXT NOT NULL,
+      method TEXT,
+      path TEXT,
+      status INTEGER,
+      detail TEXT,
+      ip_address TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     // One row per salesperson — current-value targets, not date-ranged
     // history (matches how e.g. discount_card_types/cash_back_card_types
     // hold a current rate, not a log). "Current sales" for each period is
@@ -1586,6 +1603,15 @@ async function _init() {
     'ALTER TABLE customers ADD COLUMN rental_preapproved INTEGER DEFAULT 0',
     'ALTER TABLE customers ADD COLUMN rental_preapproved_by INTEGER REFERENCES employees(id)',
     'ALTER TABLE customers ADD COLUMN rental_preapproved_at DATETIME',
+    // Where a session was opened from and what it's doing now, for the
+    // Admin > Active Sessions dashboard (see lib/sessionActivity.js).
+    // ip_address/user_agent are captured at login and refreshed on each
+    // request (a laptop can change networks mid-shift); last_section is the
+    // SPA screen last reported via POST /sessions/section.
+    'ALTER TABLE sessions ADD COLUMN ip_address TEXT',
+    'ALTER TABLE sessions ADD COLUMN user_agent TEXT',
+    'ALTER TABLE sessions ADD COLUMN last_section TEXT',
+    'ALTER TABLE sessions ADD COLUMN branch_id INTEGER REFERENCES branches(id)',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
@@ -2318,6 +2344,9 @@ async function _init() {
     'CREATE INDEX IF NOT EXISTS idx_product_import_batch_items_product_id ON product_import_batch_items(product_id)',
     'CREATE INDEX IF NOT EXISTS idx_customer_import_batch_items_batch_id ON customer_import_batch_items(batch_id)',
     'CREATE INDEX IF NOT EXISTS idx_customer_import_batch_items_customer_id ON customer_import_batch_items(customer_id)',
+    'CREATE INDEX IF NOT EXISTS idx_session_activity_session_id ON session_activity(session_id)',
+    'CREATE INDEX IF NOT EXISTS idx_session_activity_employee_id ON session_activity(employee_id)',
+    'CREATE INDEX IF NOT EXISTS idx_session_activity_created_at ON session_activity(created_at)',
   ];
   for (const sql of indexes) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

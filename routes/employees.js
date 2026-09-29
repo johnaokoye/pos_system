@@ -3,6 +3,7 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const { db } = require('../database');
 const { createSession, destroySession, setSessionCookie, clearSessionCookie, readCookie } = require('../lib/sessionAuth');
+const { logActivity, clientIp } = require('../lib/sessionActivity');
 const { requireAuth, requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 
@@ -197,10 +198,15 @@ router.post('/login', async (req, res) => {
       const { rows: [row] } = await db.execute({ sql: `SELECT e.id, e.first_name, e.last_name, e.username, e.role, e.must_change_password, e.security_group_id, e.default_branch_id, e.is_driver, e.is_operator, e.is_security, e.is_salesperson, sg.name as security_group_name, sg.permissions, b.name as default_branch_name FROM employees e LEFT JOIN security_groups sg ON e.security_group_id = sg.id LEFT JOIN branches b ON e.default_branch_id = b.id WHERE e.username=? AND e.pin=? AND e.active=1`, args: [username, pin] });
       emp = row || null;
     }
-    if (!emp) return res.status(401).json({ error: 'Invalid credentials' });
+    if (!emp) {
+      // Surfaced on Admin > Active Sessions so repeated bad attempts stand out.
+      logActivity({ kind: 'login_failed', detail: String(username || '').slice(0, 100), ip: clientIp(req) });
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
     if (emp.permissions) emp.permissions = JSON.parse(emp.permissions);
     await attachBranches(emp);
-    const token = await createSession(emp.id);
+    const { token, sessionId } = await createSession(emp.id, req, emp.default_branch_id || null);
+    logActivity({ sessionId, employeeId: emp.id, kind: 'login', detail: password ? 'password' : 'pin', ip: clientIp(req) });
     setSessionCookie(req, res, token);
     res.json(emp);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -221,6 +227,7 @@ router.get('/me', requireAuth, async (req, res) => {
 router.post('/logout', requireAuth, async (req, res) => {
   try {
     await destroySession(readCookie(req));
+    logActivity({ sessionId: req.sessionId || null, employeeId: req.employee?.id || null, kind: 'logout', ip: clientIp(req) });
     clearSessionCookie(res);
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }

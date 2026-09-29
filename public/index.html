@@ -1067,6 +1067,7 @@ const App = {
     'admin-hub': { title: 'Admin', children: [
       { section: 'employees', label: 'Employees', color: '#2196F3', icon: '<path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>' },
       { section: 'branches', label: 'Branches', color: '#00897B', icon: '<path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>' },
+      { section: 'user-sessions', label: 'Active Sessions', color: '#3949ab', icon: '<path d="M21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h5v2h8v-2h5c1.1 0 1.99-.9 1.99-2L23 5c0-1.1-.9-2-2-2zm0 14H3V5h18v12zM12 7a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zm-4.5 9h9v-.75c0-1.5-3-2.25-4.5-2.25s-4.5.75-4.5 2.25V16z"/>' },
       { section: 'security', label: 'Security Groups', color: '#9c27b0', icon: '<path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/>' },
       { section: 'settings', label: 'Settings', color: '#FF9800', icon: '<path d="M19.14,12.94c0.04-0.3,0.06-0.61,0.06-0.94c0-0.32-0.02-0.64-0.07-0.94l2.03-1.58c0.18-0.14,0.23-0.41,0.12-0.61 l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39,0.96c-0.5-0.38-1.03-0.7-1.62-0.94L14.4,2.81c-0.04-0.24-0.24-0.41-0.48-0.41 h-3.84c-0.24,0-0.43,0.17-0.47,0.41L9.25,5.35C8.66,5.59,8.12,5.92,7.63,6.29L5.24,5.33c-0.22-0.08-0.47,0-0.59,0.22L2.74,8.87 C2.62,9.08,2.66,9.34,2.86,9.48l2.03,1.58C4.84,11.36,4.8,11.69,4.8,12s0.02,0.64,0.07,0.94l-2.03,1.58 c-0.18,0.14-0.23,0.41-0.12,0.61l1.92,3.32c0.12,0.22,0.37,0.29,0.59,0.22l2.39-0.96c0.5,0.38,1.03,0.7,1.62,0.94l0.36,2.54 c0.05,0.24,0.24,0.41,0.48,0.41h3.84c0.24,0,0.44-0.17,0.47-0.41l0.36-2.54c0.59-0.24,1.13-0.56,1.62-0.94l2.39,0.96 c0.22,0.08,0.47,0,0.59-0.22l1.92-3.32c0.12-0.22,0.07-0.47-0.12-0.61L19.14,12.94z M12,15.6c-1.98,0-3.6-1.62-3.6-3.6 s1.62-3.6,3.6-3.6s3.6,1.62,3.6,3.6S13.98,15.6,12,15.6z"/>' },
     ]},
@@ -1099,6 +1100,7 @@ const App = {
     if (section === 'rental-deposits') return this._canManageRentals();
     if (section === 'rental-dispatch') return this._canManageRentals();
     if (section === 'transfer-dispatch') return this.can('transfers');
+    if (section === 'user-sessions') return this.can('security');
     if (section === 'purchase-requests') return this.can('purchase_requests');
     if (section === 'work-orders') return this.can('work_orders');
     if (section === 'wo-schedule') return this.can('work_orders');
@@ -1291,9 +1293,10 @@ const App = {
 
   async showSection(name) {
     const perms = this.currentUser?.permissions;
-    const sectionAllowed = name === 'driver-dashboard' ? !!this.currentUser?.is_driver : name === 'guard-dashboard' ? !!this.currentUser?.is_security : name === 'online-orders' ? this.can('transactions') : name === 'rentals' ? this._canManageRentals() : name === 'rental-items' ? this._canManageRentals() : name === 'rental-deposits' ? this._canManageRentals() : name === 'rental-dispatch' ? this._canManageRentals() : name === 'transfer-dispatch' ? this.can('transfers') : name === 'purchase-requests' ? this.can('purchase_requests') : name === 'work-orders' ? this.can('work_orders') : name === 'wo-schedule' ? this.can('work_orders') : name === 'special-projects' ? (this.can('special_projects') || this.can('special_projects_approve')) : (name === 'reports-marketing' || name === 'reports-sales' || name === 'reports-accounts') ? this.can('reports') : this._hubGroups[name] ? this.canAccessHub(name) : this.can(name);
+    const sectionAllowed = name === 'driver-dashboard' ? !!this.currentUser?.is_driver : name === 'guard-dashboard' ? !!this.currentUser?.is_security : name === 'online-orders' ? this.can('transactions') : name === 'rentals' ? this._canManageRentals() : name === 'rental-items' ? this._canManageRentals() : name === 'rental-deposits' ? this._canManageRentals() : name === 'rental-dispatch' ? this._canManageRentals() : name === 'transfer-dispatch' ? this.can('transfers') : name === 'user-sessions' ? this.can('security') : name === 'purchase-requests' ? this.can('purchase_requests') : name === 'work-orders' ? this.can('work_orders') : name === 'wo-schedule' ? this.can('work_orders') : name === 'special-projects' ? (this.can('special_projects') || this.can('special_projects_approve')) : (name === 'reports-marketing' || name === 'reports-sales' || name === 'reports-accounts') ? this.can('reports') : this._hubGroups[name] ? this.canAccessHub(name) : this.can(name);
     if (perms && !sectionAllowed) return;
     this.section = name;
+    this._reportSection(name);
     this.closeModal();
     this.closeSidebar();
     document.querySelectorAll('.nav-item').forEach(el => {
@@ -1301,7 +1304,7 @@ const App = {
       const hub = this._hubGroups[ds];
       el.classList.toggle('active', ds === name || !!(hub && hub.children.some(c => c.section === name)));
     });
-    const titles = { dashboard: 'Dashboard', 'driver-dashboard': 'My Deliveries', 'guard-dashboard': 'My Verifications', pos: 'Point of Sale', inventory: 'Retail Inventory Management', services: 'Services & Non-Inventory Items', rentals: 'Rentals', 'rental-items': 'Rental Items', 'work-orders': 'Work Orders', 'wo-schedule': 'Technician Schedule', dispatch: 'Dispatch', 'rental-dispatch': 'Rental Dispatch', 'transfer-dispatch': 'Branch Transfer Dispatch', 'rental-deposits': 'Rental Deposits & Credit Notes', 'purchase-requests': 'Purchase Requests', layaway: 'Layaway', customers: 'Customers', transactions: 'Transactions', 'online-orders': 'Online Orders', reports: 'Reports & Analytics', employees: 'Employees', settings: 'Settings', suppliers: 'Suppliers', purchasing: 'Purchasing', quotations: 'Quotations', 'special-projects': 'Special Projects', accounts: 'Accounts Receivable', branches: 'Branch Management', security: 'Security Groups', transfers: 'Branch Transfers', crm: 'CRM & Sales', commissions: 'Commission Tracking', warehouse: 'Warehouse Management', shipping: 'Shipping', 'cycle-counts': 'Cycle Counts', drawers: 'Cash Drawers', promotions: 'Promotions', 'discount-cards': 'Discount Cards', 'cash-back-cards': 'Cash Back Cards', 'purchasing-hub': 'Purchasing', 'sales-hub': 'Sales', 'accounts-hub': 'Accounts', 'warehouse-hub': 'Warehouse', 'admin-hub': 'Admin', 'reports-hub': 'Reports', 'reports-marketing': 'Marketing Reports', 'reports-sales': 'Sales Reports', 'reports-accounts': 'Accounts Reports' };
+    const titles = { dashboard: 'Dashboard', 'driver-dashboard': 'My Deliveries', 'guard-dashboard': 'My Verifications', pos: 'Point of Sale', inventory: 'Retail Inventory Management', services: 'Services & Non-Inventory Items', rentals: 'Rentals', 'rental-items': 'Rental Items', 'work-orders': 'Work Orders', 'wo-schedule': 'Technician Schedule', dispatch: 'Dispatch', 'rental-dispatch': 'Rental Dispatch', 'transfer-dispatch': 'Branch Transfer Dispatch', 'rental-deposits': 'Rental Deposits & Credit Notes', 'purchase-requests': 'Purchase Requests', layaway: 'Layaway', customers: 'Customers', transactions: 'Transactions', 'online-orders': 'Online Orders', reports: 'Reports & Analytics', employees: 'Employees', settings: 'Settings', suppliers: 'Suppliers', purchasing: 'Purchasing', quotations: 'Quotations', 'special-projects': 'Special Projects', accounts: 'Accounts Receivable', branches: 'Branch Management', security: 'Security Groups', 'user-sessions': 'Active Sessions', transfers: 'Branch Transfers', crm: 'CRM & Sales', commissions: 'Commission Tracking', warehouse: 'Warehouse Management', shipping: 'Shipping', 'cycle-counts': 'Cycle Counts', drawers: 'Cash Drawers', promotions: 'Promotions', 'discount-cards': 'Discount Cards', 'cash-back-cards': 'Cash Back Cards', 'purchasing-hub': 'Purchasing', 'sales-hub': 'Sales', 'accounts-hub': 'Accounts', 'warehouse-hub': 'Warehouse', 'admin-hub': 'Admin', 'reports-hub': 'Reports', 'reports-marketing': 'Marketing Reports', 'reports-sales': 'Sales Reports', 'reports-accounts': 'Accounts Reports' };
     document.getElementById('topbar-title').innerHTML = this.buildBreadcrumb(name, titles[name] || name);
     const content = document.getElementById('content');
     content.style.padding = name === 'pos' ? '0' : '20px';
@@ -1311,7 +1314,7 @@ const App = {
     // `body.pos-kiosk` CSS) — removed so staff can navigate away without
     // using the in-page Exit button first. The content-area sizing above
     // still gives POS its own full-height layout within the remaining space.
-    const renders = { dashboard: () => this.renderDashboard(), 'driver-dashboard': () => this.renderDriverDashboard(), 'guard-dashboard': () => this.renderGuardDashboard(), pos: () => this.renderPOS(), inventory: () => this.renderInventory(), services: () => this.renderServices(), rentals: () => this.renderRentals(), 'rental-items': () => this.renderRentalItems(), 'work-orders': () => this.renderWorkOrders(), 'wo-schedule': () => this.renderWOSchedule(), dispatch: () => this.renderHub('dispatch'), 'rental-dispatch': () => this.renderRentalDispatch(), 'transfer-dispatch': () => this.renderTransferDispatch(), 'rental-deposits': () => this.renderRentalDeposits(), 'purchase-requests': () => this.renderPurchasing('requests'), layaway: () => this.renderLayaway(), customers: () => this.renderCustomers(), transactions: () => this.renderTransactions(), 'online-orders': () => this.renderOnlineOrders(), reports: () => this.renderReports(), employees: () => this.renderEmployees(), settings: () => this.renderSettings(), suppliers: () => this.renderSuppliers(), purchasing: () => this.renderPurchasing(), quotations: () => this.renderQuotations(), 'special-projects': () => this.renderSpecialProjects(), accounts: () => this.renderAccounts(), branches: () => this.renderBranches(), security: () => this.renderSecurity(), transfers: () => this.renderTransfers(), crm: () => this.renderCRM(), commissions: () => this.renderCommissions(), warehouse: () => this.renderWarehouse(), shipping: () => this.renderShipping(), 'cycle-counts': () => this.renderCycleCounts(), drawers: () => this.renderDrawers(), promotions: () => this.renderPromotions(), 'discount-cards': () => this.renderDiscountCards(), 'cash-back-cards': () => this.renderCashBackCards(), 'purchasing-hub': () => this.renderHub('purchasing-hub'), 'sales-hub': () => this.renderHub('sales-hub'), 'accounts-hub': () => this.renderHub('accounts-hub'), 'warehouse-hub': () => this.renderHub('warehouse-hub'), 'admin-hub': () => this.renderHub('admin-hub'), 'reports-hub': () => this.renderHub('reports-hub'), 'reports-marketing': () => this.renderReportsMarketing(), 'reports-sales': () => this.renderReportsSales(), 'reports-accounts': () => this.renderReportsAccounts() };
+    const renders = { dashboard: () => this.renderDashboard(), 'driver-dashboard': () => this.renderDriverDashboard(), 'guard-dashboard': () => this.renderGuardDashboard(), pos: () => this.renderPOS(), inventory: () => this.renderInventory(), services: () => this.renderServices(), rentals: () => this.renderRentals(), 'rental-items': () => this.renderRentalItems(), 'work-orders': () => this.renderWorkOrders(), 'wo-schedule': () => this.renderWOSchedule(), dispatch: () => this.renderHub('dispatch'), 'rental-dispatch': () => this.renderRentalDispatch(), 'transfer-dispatch': () => this.renderTransferDispatch(), 'rental-deposits': () => this.renderRentalDeposits(), 'purchase-requests': () => this.renderPurchasing('requests'), layaway: () => this.renderLayaway(), customers: () => this.renderCustomers(), transactions: () => this.renderTransactions(), 'online-orders': () => this.renderOnlineOrders(), reports: () => this.renderReports(), employees: () => this.renderEmployees(), settings: () => this.renderSettings(), suppliers: () => this.renderSuppliers(), purchasing: () => this.renderPurchasing(), quotations: () => this.renderQuotations(), 'special-projects': () => this.renderSpecialProjects(), accounts: () => this.renderAccounts(), branches: () => this.renderBranches(), security: () => this.renderSecurity(), 'user-sessions': () => this.renderUserSessions(), transfers: () => this.renderTransfers(), crm: () => this.renderCRM(), commissions: () => this.renderCommissions(), warehouse: () => this.renderWarehouse(), shipping: () => this.renderShipping(), 'cycle-counts': () => this.renderCycleCounts(), drawers: () => this.renderDrawers(), promotions: () => this.renderPromotions(), 'discount-cards': () => this.renderDiscountCards(), 'cash-back-cards': () => this.renderCashBackCards(), 'purchasing-hub': () => this.renderHub('purchasing-hub'), 'sales-hub': () => this.renderHub('sales-hub'), 'accounts-hub': () => this.renderHub('accounts-hub'), 'warehouse-hub': () => this.renderHub('warehouse-hub'), 'admin-hub': () => this.renderHub('admin-hub'), 'reports-hub': () => this.renderHub('reports-hub'), 'reports-marketing': () => this.renderReportsMarketing(), 'reports-sales': () => this.renderReportsSales(), 'reports-accounts': () => this.renderReportsAccounts() };
     if (renders[name]) await renders[name]();
   },
 
@@ -18586,6 +18589,248 @@ const App = {
   },
 
   // ─── Security Groups ──────────────────────────────────────
+  // ─── Admin > Active Sessions ─────────────────────────────
+  // Tells the server which screen this session is on, for the Active Sessions
+  // dashboard. Fire-and-forget: a failure here must never block navigation.
+  _reportSection(name) {
+    if (!this.currentUser) return;
+    const branchId = this.posBranch?.id || this.currentUser.default_branch_id || null;
+    fetch('/api/sessions/section', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ section: name, branch_id: Number.isInteger(branchId) ? branchId : null }),
+    }).catch(() => {});
+  },
+
+  // SQLite's datetime('now') / CURRENT_TIMESTAMP are UTC but carry no zone
+  // marker ("2026-09-29 14:05:00"); new Date() would read that as local time.
+  _utcDate(d) {
+    if (!d) return null;
+    return new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(d) ? d : String(d).replace(' ', 'T') + 'Z');
+  },
+
+  _timeAgo(d) {
+    const dt = this._utcDate(d);
+    if (!dt) return '-';
+    const sec = Math.max(0, Math.round((Date.now() - dt.getTime()) / 1000));
+    if (sec < 60) return 'just now';
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `${min}m ago`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `${hr}h ${min % 60}m ago`;
+    return this.fmtDateTime(dt);
+  },
+
+  // Rough browser/OS/device read from the User-Agent — enough for an admin
+  // to tell "the front-counter Windows PC" from "someone's phone".
+  _describeUserAgent(ua) {
+    if (!ua) return { browser: 'Unknown', os: 'Unknown', device: 'Unknown' };
+    const browser = /Edg\//.test(ua) ? 'Edge' : /OPR\/|Opera/.test(ua) ? 'Opera' : /SamsungBrowser/.test(ua) ? 'Samsung Internet'
+      : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : /curl|node|axios|python/i.test(ua) ? 'Script / API client' : 'Other';
+    const os = /Windows/.test(ua) ? 'Windows' : /Android/.test(ua) ? 'Android' : /iPhone|iPad|iPod/.test(ua) ? 'iOS'
+      : /Mac OS X|Macintosh/.test(ua) ? 'macOS' : /CrOS/.test(ua) ? 'ChromeOS' : /Linux/.test(ua) ? 'Linux' : 'Unknown';
+    const device = /iPad|Tablet/.test(ua) || (/Android/.test(ua) && !/Mobile/.test(ua)) ? 'Tablet' : /Mobi|iPhone|Android/.test(ua) ? 'Mobile' : 'Desktop';
+    return { browser, os, device };
+  },
+
+  _isPrivateIp(ip) {
+    return !ip || ip === '::1' || /^127\./.test(ip) || /^10\./.test(ip) || /^192\.168\./.test(ip) || /^172\.(1[6-9]|2\d|3[01])\./.test(ip) || /^f[cd]/i.test(ip) || /^fe80/i.test(ip);
+  },
+
+  _sectionLabel(key) {
+    if (!key) return '-';
+    for (const [hubKey, hub] of Object.entries(this._hubGroups)) {
+      if (hubKey === key) return hub.title;
+      const child = hub.children.find(c => c.section === key);
+      if (child) return child.label;
+    }
+    return key.replace(/[-_]/g, ' ').replace(/\b\w/g, ch => ch.toUpperCase());
+  },
+
+  // "PATCH /work-orders/12/signoff" -> "Updated work orders". The raw path
+  // is always shown next to it, this is just the scannable headline.
+  _describeAction(method, path) {
+    const seg = (path || '').split('/').filter(Boolean);
+    const resource = (seg[0] || '').replace(/[-_]/g, ' ');
+    const tail = seg.length > 1 && !/^\d+$/.test(seg[seg.length - 1]) ? seg[seg.length - 1].replace(/[-_]/g, ' ') : '';
+    const verb = { POST: tail ? '' : 'Created', PUT: 'Updated', PATCH: 'Updated', DELETE: 'Deleted' }[method] ?? method;
+    return [verb, tail, tail ? `(${resource})` : resource].filter(Boolean).join(' ').replace(/^\w/, ch => ch.toUpperCase());
+  },
+
+  _activityRow(a, showUser) {
+    const esc = v => this.escapeAttr(v);
+    const who = a.first_name ? `${esc(a.first_name)} ${esc(a.last_name)}` : '<span style="color:var(--text-muted)">—</span>';
+    let badge, text;
+    switch (a.kind) {
+      case 'login': badge = '<span class="badge-pill badge-success">Login</span>'; text = `Signed in with ${esc(a.detail || 'password')}`; break;
+      case 'logout': badge = '<span class="badge-pill badge-info">Logout</span>'; text = 'Signed out'; break;
+      case 'login_failed': badge = '<span class="badge-pill badge-danger">Failed login</span>'; text = `Bad credentials for username “${esc(a.detail)}”`; break;
+      case 'revoked': badge = '<span class="badge-pill badge-warning">Forced out</span>'; text = `Session ended ${esc(a.detail)}`; break;
+      case 'view': badge = '<span class="badge-pill" style="background:var(--bg-secondary);color:var(--text-muted)">View</span>'; text = `Opened ${esc(this._sectionLabel(a.detail))}`; break;
+      default: {
+        const failed = a.status >= 400;
+        badge = `<span class="badge-pill ${failed ? 'badge-danger' : 'badge-info'}">${esc(a.method)}${failed ? ` ${a.status}` : ''}</span>`;
+        text = `${esc(this._describeAction(a.method, a.path))} <span style="font-family:monospace;font-size:11px;color:var(--text-muted)">${esc(a.path)}</span>`;
+      }
+    }
+    const at = this._utcDate(a.created_at);
+    return `<tr>
+      <td style="white-space:nowrap" title="${at ? esc(at.toLocaleString()) : ''}">${this._timeAgo(a.created_at)}</td>
+      ${showUser ? `<td>${who}</td>` : ''}
+      <td>${badge}</td>
+      <td>${text}</td>
+      <td style="font-family:monospace;font-size:11px">${esc(a.ip_address || '-')}</td>
+    </tr>`;
+  },
+
+  async renderUserSessions() {
+    const c = document.getElementById('content');
+    if (!this._sessionsView) this._sessionsView = { status: 'active', search: '' };
+    if (!c.querySelector('#us-root')) c.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let data, activity;
+    try {
+      [data, activity] = await Promise.all([
+        this.api('GET', `/sessions?status=${this._sessionsView.status}`),
+        this.api('GET', '/sessions/activity?limit=100'),
+      ]);
+    } catch (e) {
+      if (this.section === 'user-sessions') c.innerHTML = `<div class="empty-state"><p>${this.escapeAttr(e.message)}</p></div>`;
+      return;
+    }
+    if (this.section !== 'user-sessions') return;
+    this._sessionsData = data;
+    const esc = v => this.escapeAttr(v);
+    const st = data.stats;
+    c.innerHTML = `<div id="us-root">
+      <div class="section-header">
+        <h2>Active Sessions</h2>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
+          <input id="us-search" placeholder="Search user, IP, branch…" value="${esc(this._sessionsView.search)}" style="width:220px;margin:0" oninput="App._sessionsView.search=this.value;App._renderSessionsTable()">
+          <select style="width:auto;margin:0" onchange="App._sessionsView.status=this.value;App.renderUserSessions()">
+            <option value="active" ${this._sessionsView.status === 'active' ? 'selected' : ''}>Logged in now</option>
+            <option value="all" ${this._sessionsView.status === 'all' ? 'selected' : ''}>All sessions (last 7 days)</option>
+          </select>
+          <button class="btn btn-secondary" onclick="App.renderUserSessions()">Refresh</button>
+        </div>
+      </div>
+      <div class="stats-grid">
+        <div class="stat-card green"><div class="stat-label">Online now</div><div class="stat-value">${st.online_now}</div><div class="stat-sub">active in last ${data.online_window_min} min</div></div>
+        <div class="stat-card blue"><div class="stat-label">Users logged in</div><div class="stat-value">${st.users_logged_in}</div><div class="stat-sub">${st.active_sessions} open session${st.active_sessions === 1 ? '' : 's'}</div></div>
+        <div class="stat-card purple"><div class="stat-label">Logins (24h)</div><div class="stat-value">${st.logins_24h}</div></div>
+        <div class="stat-card orange"><div class="stat-label">Actions (24h)</div><div class="stat-value">${st.actions_24h}</div><div class="stat-sub">creates, edits, deletes</div></div>
+        <div class="stat-card ${st.failed_logins_24h ? 'red' : ''}"><div class="stat-label">Failed logins (24h)</div><div class="stat-value">${st.failed_logins_24h}</div></div>
+      </div>
+      <div class="card" style="margin-bottom:18px">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>User</th><th>Status</th><th>Location</th><th>Device</th><th>Currently on</th><th>Last action</th><th>Signed in</th><th></th></tr></thead>
+            <tbody id="us-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px 0">
+          <h3 style="margin:0;font-size:15px">Recent activity</h3>
+          <span style="font-size:12px;color:var(--text-muted)">Logins, screens opened and every create/edit/delete — last 100 events</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>When</th><th>User</th><th>Event</th><th>Details</th><th>IP</th></tr></thead>
+            <tbody>${activity.length ? activity.map(a => this._activityRow(a, true)).join('') : '<tr><td colspan="5" class="empty-state">No activity recorded yet</td></tr>'}</tbody>
+          </table>
+        </div>
+      </div>
+    </div>`;
+    this._renderSessionsTable();
+    const search = document.getElementById('us-search');
+    if (this._sessionsView.focusSearch && search) { search.focus(); search.setSelectionRange(search.value.length, search.value.length); }
+
+    // Auto-refresh while this screen is open. The timer checks this.section
+    // itself so navigating away stops it without any teardown hook.
+    clearTimeout(this._sessionsTimer);
+    this._sessionsTimer = setTimeout(() => {
+      if (this.section !== 'user-sessions' || document.querySelector('.modal-overlay')) {
+        if (this.section === 'user-sessions') this._sessionsTimer = setTimeout(() => this.renderUserSessions(), 30000);
+        return;
+      }
+      this._sessionsView.focusSearch = document.activeElement?.id === 'us-search';
+      this.renderUserSessions();
+    }, 30000);
+  },
+
+  _renderSessionsTable() {
+    const canRevoke = this.can('security_manage');
+    const tbody = document.getElementById('us-tbody');
+    const data = this._sessionsData;
+    if (!tbody || !data) return;
+    const esc = v => this.escapeAttr(v);
+    const q = (this._sessionsView.search || '').toLowerCase();
+    const rows = data.sessions.filter(s => !q || `${s.first_name} ${s.last_name} ${s.username} ${s.ip_address} ${s.branch_name}`.toLowerCase().includes(q));
+    tbody.innerHTML = rows.length ? rows.map(s => {
+      const ua = this._describeUserAgent(s.user_agent);
+      const status = s.ended
+        ? `<span class="badge-pill" style="background:var(--bg-secondary);color:var(--text-muted)">${s.revoked_at ? 'Ended' : 'Expired'}</span>`
+        : s.online ? '<span class="badge-pill badge-success">Online</span>' : `<span class="badge-pill badge-warning">Idle ${s.idle_minutes >= 60 ? Math.floor(s.idle_minutes / 60) + 'h' : s.idle_minutes + 'm'}</span>`;
+      const signedIn = this._utcDate(s.created_at);
+      return `<tr style="cursor:pointer" onclick="App.showSessionActivity(${s.id})">
+        <td><div class="fw-600">${esc(s.first_name)} ${esc(s.last_name)}${s.is_current ? ' <span class="badge-pill badge-info">You</span>' : ''}</div>
+          <div style="font-size:11px;color:var(--text-muted)">${esc(s.username)} · ${esc(s.security_group_name || 'No group')}</div></td>
+        <td>${status}<div style="font-size:11px;color:var(--text-muted);margin-top:2px">seen ${this._timeAgo(s.last_seen_at)}</div></td>
+        <td><div>${esc(s.branch_name || 'No branch')}</div>
+          <div style="font-size:11px;font-family:monospace;color:var(--text-muted)">${esc(s.ip_address || 'unknown IP')}${s.ip_address ? (this._isPrivateIp(s.ip_address) ? ' (local network)' : ' (internet)') : ''}</div></td>
+        <td><div>${esc(ua.browser)} on ${esc(ua.os)}</div><div style="font-size:11px;color:var(--text-muted)">${esc(ua.device)}</div></td>
+        <td>${esc(this._sectionLabel(s.last_section))}</td>
+        <td>${s.last_action ? `<div>${esc(this._describeAction(...s.last_action.split(' ')))}</div><div style="font-size:11px;color:var(--text-muted)">${this._timeAgo(s.last_action_at)} · ${s.action_count} total</div>` : '<span style="color:var(--text-muted)">None yet</span>'}</td>
+        <td style="white-space:nowrap" title="${signedIn ? esc(signedIn.toLocaleString()) : ''}">${this._timeAgo(s.created_at)}</td>
+        <td onclick="event.stopPropagation()">${canRevoke && !s.ended && !s.is_current ? `<button class="btn btn-sm btn-danger" onclick="App.revokeUserSession(${s.id})">Log out</button>` : ''}</td>
+      </tr>`;
+    }).join('') : `<tr><td colspan="8" class="empty-state">${q ? 'No sessions match your search' : 'No one is logged in'}</td></tr>`;
+  },
+
+  async showSessionActivity(sessionId) {
+    const s = (this._sessionsData?.sessions || []).find(x => x.id === sessionId);
+    if (!s) return;
+    let activity;
+    try { activity = await this.api('GET', `/sessions/activity?session_id=${sessionId}&limit=300`); }
+    catch (e) { return this.alert(e.message, 'error'); }
+    const esc = v => this.escapeAttr(v);
+    const ua = this._describeUserAgent(s.user_agent);
+    const signedIn = this._utcDate(s.created_at);
+    this.showModal(`
+      <div class="modal" style="max-width:860px">
+        <div class="modal-header"><span class="modal-title">${esc(s.first_name)} ${esc(s.last_name)} — session activity</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:14px;font-size:13px">
+            <div><div class="stat-label">Signed in</div>${signedIn ? esc(signedIn.toLocaleString()) : '-'}</div>
+            <div><div class="stat-label">Branch</div>${esc(s.branch_name || 'No branch')}</div>
+            <div><div class="stat-label">IP address</div><span style="font-family:monospace">${esc(s.ip_address || '-')}</span></div>
+            <div><div class="stat-label">Device</div>${esc(ua.browser)} on ${esc(ua.os)} (${esc(ua.device)})</div>
+          </div>
+          <div style="font-size:11px;color:var(--text-muted);margin-bottom:12px;word-break:break-all">${esc(s.user_agent || '')}</div>
+          <div class="table-wrap" style="max-height:55vh;overflow:auto">
+            <table>
+              <thead><tr><th>When</th><th>Event</th><th>Details</th><th>IP</th></tr></thead>
+              <tbody>${activity.length ? activity.map(a => this._activityRow(a, false)).join('') : '<tr><td colspan="4" class="empty-state">No activity recorded for this session</td></tr>'}</tbody>
+            </table>
+          </div>
+        </div>
+        <div class="modal-footer">
+          ${this.can('security_manage') && !s.ended && !s.is_current ? `<button class="btn btn-danger" onclick="App.revokeUserSession(${s.id})">Log this session out</button>` : ''}
+          <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+        </div>
+      </div>`);
+  },
+
+  async revokeUserSession(id) {
+    const s = (this._sessionsData?.sessions || []).find(x => x.id === id);
+    if (!confirm(`Log ${s ? `${s.first_name} ${s.last_name}` : 'this user'} out? Any unsaved work on their screen will be lost.`)) return;
+    try {
+      await this.api('POST', `/sessions/${id}/revoke`);
+      this.closeModal();
+      this.alert('Session ended');
+      this.renderUserSessions();
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
   async renderSecurity() {
     const c = document.getElementById('content');
     c.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';

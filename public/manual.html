@@ -159,6 +159,7 @@
       <a href="#reports">Reports &amp; Analytics</a>
       <a href="#employees">Employees</a>
       <a href="#branches">Branches</a>
+      <a href="#user-sessions">Active Sessions</a>
       <a href="#security">Security Groups</a>
       <a href="#settings">Settings &amp; Integrations</a>
     </div>
@@ -771,6 +772,15 @@
       <p>Each branch carries a <strong>Price Tier %</strong> — a single positive or negative percentage that recalculates every retail item's price at that branch, with no per-product setup. A branch at <code>+10%</code> sells everything 10% above the catalog price; a branch at <code>-15%</code> sells 15% below it. Leave it at <code>0</code> for a branch that should just use the flat catalog price.</p>
       <div class="callout note"><strong>Where it applies</strong>The tier recalculates prices at the <strong>POS register</strong> (the product grid, cart, and checkout total once a branch is selected), <strong>Quotations</strong> (a quote's line prices follow whichever branch is picked on the quote, re-filling if the branch is changed), and <strong>Reports</strong>' branch retail-value figures. It does <strong>not</strong> affect the WooCommerce/online store, which always sells at the flat catalog price. The computed price is floor-clamped at 0 (a very negative tier can't push a price below zero) and rounded to the nearest cent; the untouched catalog price is always what's edited on the product itself — the tier is a multiplier applied on top, never stored per-product.</div>
       <p>Needs <span class="perm-pill">branches_add</span> / <span class="perm-pill">branches_edit</span> / <span class="perm-pill">branches_delete</span>.</p>
+    </section>
+
+    <section class="module" id="user-sessions">
+      <h2 class="module">Active Sessions <span class="tag">security</span></h2>
+      <p class="module-intro">See who is logged in right now, where from, and what they've been doing.</p>
+      <p>Open it from <strong>Admin → Active Sessions</strong>. The top row shows how many people are online (active in the last 5 minutes), how many are logged in overall, and the last 24 hours of sign-ins, actions, and failed login attempts. The screen refreshes itself every 30 seconds.</p>
+      <p>Each logged-in session shows the employee, whether they're <strong>Online</strong> or <strong>Idle</strong>, the branch they're working in, the IP address they connected from (marked <em>local network</em> for in-store devices or <em>internet</em> for anything outside), the browser and device, the screen they currently have open, and their most recent action. Someone signed in on two devices appears twice. Switch the filter to <strong>All sessions (last 7 days)</strong> to include people who have since signed out or timed out. Click any row to see that session's full activity history.</p>
+      <p>The <strong>Recent activity</strong> feed lists sign-ins, sign-outs, failed logins (with the username that was tried), screens opened, and every create/edit/delete an employee makes. Plain page views of data aren't logged individually — only which screen was opened. Activity older than 90 days is removed automatically.</p>
+      <p>Viewing this screen needs <span class="perm-pill">security</span>. The <strong>Log out</strong> button, which ends another person's session immediately (they're sent back to the login screen on their next click), needs <span class="perm-pill">security_manage</span>. You can't log out your own current session from here — use Sign Out.</p>
     </section>
 
     <section class="module" id="security">

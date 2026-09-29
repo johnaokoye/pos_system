@@ -9,6 +9,7 @@ const { ensureReady, db } = require('./database');
 const { router: woocommerceRouter, runSyncAll: wooSyncAll } = require('./routes/woocommerce');
 const { apiKeyAuth } = require('./lib/apiKeyAuth');
 const { sessionAuth } = require('./lib/sessionAuth');
+const { activityLogger } = require('./lib/sessionActivity');
 const { logActivity } = require('./routes/crm');
 const rentalsRouter = require('./routes/rentals');
 
@@ -60,6 +61,9 @@ app.use('/api', apiKeyAuth);
 // through with req.employee unset — enforcement happens per-route via
 // requireAuth()/requirePermission() (lib/permissions.js), not here.
 app.use('/api', sessionAuth);
+// Records mutating requests by logged-in employees for Admin > Active
+// Sessions (see lib/sessionActivity.js). Must come after sessionAuth.
+app.use('/api', activityLogger);
 
 app.use('/api/products',         require('./routes/products'));
 app.use('/api/product-imports',  require('./routes/product-imports'));
@@ -95,6 +99,7 @@ app.use('/api/rentals',        rentalsRouter);
 app.use('/api/layaway',        require('./routes/layaway'));
 app.use('/api/work-orders',    require('./routes/work-orders'));
 app.use('/api/sales-targets',  require('./routes/sales-targets'));
+app.use('/api/sessions',       require('./routes/sessions'));
 
 // Any error under /api (oversized body, malformed JSON, etc.) must come back
 // as JSON — App.api()'s res.json() call otherwise chokes on Express's default
