@@ -533,7 +533,7 @@ const PRINT_PAGE_STYLE = `<style>
 </style>`;
 
 // `print` lays the same document out for a US Letter page — used by GET
-// /quote-preview/:id (Print Quotation on retail quotes and approved Special Projects).
+// /quote-preview/:id (Print Quotation on retail and Special Project quotes).
 function buildQuoteHtml(q, s, { print = false } = {}) {
   const storeName = s.store_name || 'My Store';
   const storeAddr = s.store_address || '';
@@ -1018,9 +1018,6 @@ router.get('/quote-preview/:id', requireAuth, async (req, res) => {
     if (q.quote_type === 'special_project') {
       const perms = req.employee && req.employee.permissions;
       if (!req.apiKey && !can(perms, 'special_projects') && !can(perms, 'special_projects_approve')) return res.status(403).send('<p>Missing permission: special_projects</p>');
-      // Pricing isn't final until a supervisor signs off — a draft or
-      // pending project can't be printed for a customer.
-      if (['draft', 'pending_approval'].includes(q.status)) return res.status(400).send('<p>This special project must be approved before it can be printed.</p>');
     }
     const s = await getSettings();
     res.setHeader('Content-Type', 'text/html');
