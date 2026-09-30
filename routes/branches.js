@@ -6,9 +6,12 @@ const { requireAuth, requirePermission } = require('../lib/permissions');
 // requireAuth only — branches are used as a dropdown/lookup across nearly
 // every form in the app (employees, products, POS branch bar, etc.), not
 // just the Branches management screen.
+// Inactive branches are hidden from every lookup; only the Branch Management
+// screen passes ?include_inactive=1 so they can be viewed and reactivated.
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const { rows: branches } = await db.execute({ sql: 'SELECT * FROM branches ORDER BY name', args: [] });
+    const includeInactive = req.query.include_inactive === '1';
+    const { rows: branches } = await db.execute({ sql: `SELECT * FROM branches ${includeInactive ? '' : 'WHERE active = 1'} ORDER BY name`, args: [] });
     // One GROUP BY instead of one COUNT(*) query per branch — this list is
     // a lookup used across nearly every form (see comment above).
     const { rows: counts } = await db.execute({ sql: 'SELECT branch_id, COUNT(*) as c FROM employee_branches GROUP BY branch_id', args: [] });
@@ -45,8 +48,10 @@ router.post('/', requirePermission('branches'), async (req, res) => {
 
 router.put('/:id', requirePermission('branches'), async (req, res) => {
   const { name, address, city, state, zip, phone, email, manager, active, currency, is_warehouse, price_tier_percent } = req.body;
+  // The Branch Management form doesn't send is_warehouse (it's toggled from
+  // Warehouse > Locations), so an omitted value keeps the current flag.
   try {
-    await db.execute({ sql: 'UPDATE branches SET name=?,address=?,city=?,state=?,zip=?,phone=?,email=?,manager=?,active=?,currency=?,is_warehouse=?,price_tier_percent=? WHERE id=?', args: [name, address||null, city||null, state||null, zip||null, phone||null, email||null, manager||null, active??1, currency||null, is_warehouse?1:0, parseFloat(price_tier_percent) || 0, req.params.id] });
+    await db.execute({ sql: 'UPDATE branches SET name=?,address=?,city=?,state=?,zip=?,phone=?,email=?,manager=?,active=?,currency=?,is_warehouse=COALESCE(?, is_warehouse),price_tier_percent=? WHERE id=?', args: [name, address||null, city||null, state||null, zip||null, phone||null, email||null, manager||null, active??1, currency||null, is_warehouse === undefined ? null : (is_warehouse?1:0), parseFloat(price_tier_percent) || 0, req.params.id] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM branches WHERE id = ?', args: [req.params.id] });
     res.json(row);
   } catch(e) {

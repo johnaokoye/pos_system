@@ -29,7 +29,7 @@ async function attachBranches(emp) {
     emp.branches = branches;
   } else {
     emp.branches = emp.default_branch_id
-      ? (await db.execute({ sql: `SELECT b.id, b.branch_code, b.name, b.currency, 1 as is_default FROM branches b WHERE b.id = ?`, args: [emp.default_branch_id] })).rows
+      ? (await db.execute({ sql: `SELECT b.id, b.branch_code, b.name, b.currency, 1 as is_default FROM branches b WHERE b.id = ? AND b.active = 1`, args: [emp.default_branch_id] })).rows
       : [];
   }
 }
@@ -52,7 +52,7 @@ router.get('/', requireAuth, async (req, res) => {
     if (employees.length) {
       const placeholders = employees.map(() => '?').join(',');
       const { rows: allBranches } = await db.execute({
-        sql: `SELECT eb.employee_id, b.id, b.branch_code, b.name, eb.is_default FROM branches b JOIN employee_branches eb ON b.id = eb.branch_id WHERE eb.employee_id IN (${placeholders})`,
+        sql: `SELECT eb.employee_id, b.id, b.branch_code, b.name, eb.is_default FROM branches b JOIN employee_branches eb ON b.id = eb.branch_id WHERE b.active = 1 AND eb.employee_id IN (${placeholders})`,
         args: employees.map(e => e.id),
       });
       const byEmployee = {};

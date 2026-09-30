@@ -18459,7 +18459,7 @@ const App = {
   async renderBranches() {
     const c = document.getElementById('content');
     c.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
-    const branches = await this.api('GET', '/branches');
+    const branches = await this.api('GET', '/branches?include_inactive=1');
     if (this.section !== 'branches') return;
     c.innerHTML = `
       <div class="section-header">
