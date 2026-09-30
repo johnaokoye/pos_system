@@ -8,6 +8,7 @@ const fs = require('fs');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
+const { autoBills, createBill, dueDateFor, today } = require('../lib/payables');
 const { uploadSignature } = require('../lib/signatures');
 const { getSetting } = require('../lib/settings');
 
@@ -298,11 +299,13 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
 
     const tx = await db.transaction('write');
     try {
+      let receiptValue = 0;
       for (const { item_id, quantity_received } of (items || [])) {
         const qty = parseInt(quantity_received);
         if (!qty || qty <= 0) continue;
         const { rows: [item] } = await tx.execute({ sql: 'SELECT * FROM purchase_order_items WHERE id = ?', args: [item_id] });
         if (!item) continue;
+        receiptValue += qty * (Number(item.unit_cost) || 0);
         const newReceived = (item.quantity_received || 0) + qty;
         await tx.execute({ sql: 'UPDATE purchase_order_items SET quantity_received = ? WHERE id = ?', args: [newReceived, item_id] });
         if (item.product_id) {
@@ -328,6 +331,23 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
       // goods actually landed. Mirror the PO's fully-received state back onto it.
       if (allReceived) {
         await tx.execute({ sql: `UPDATE purchase_requests SET status = 'received' WHERE converted_to_po_id = ? AND status != 'received'`, args: [req.params.id] });
+      }
+      // Each receipt becomes an A/P bill for what was just received (plus the
+      // PO's tax in proportion), due per the vendor's terms — unless the
+      // vendor has Sync with A/P off or is set to "Not vouchered", in which
+      // case the bill is entered by hand from the PO later.
+      const { rows: [supplier] } = po.supplier_id
+        ? await tx.execute({ sql: 'SELECT payment_terms, sync_ap, voucher_default FROM suppliers WHERE id = ?', args: [po.supplier_id] })
+        : { rows: [] };
+      if (receiptValue > 0 && autoBills(supplier)) {
+        const tax = po.subtotal > 0 ? (Number(po.tax_amount) || 0) * receiptValue / po.subtotal : 0;
+        const billDate = today();
+        await createBill(tx, {
+          supplier_id: po.supplier_id, po_id: po.id, branch_id: po.branch_id,
+          bill_date: billDate, due_date: dueDateFor(supplier.payment_terms, billDate),
+          amount: receiptValue + tax, description: `Goods received on ${po.po_number}`,
+          source: 'receipt', created_by: req.employee?.id,
+        });
       }
       await tx.commit();
     } catch(e) {

@@ -1057,6 +1057,84 @@ async function _init() {
       reverse_outcome TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // Same reviewable/reversible batch pattern for CSV vendor imports
+    // (routes/supplier-imports.js). Reverse hard-deletes a created supplier
+    // nothing references yet (so its vendor number can be re-imported) and
+    // only deactivates one already used on a PO/product/purchase request —
+    // hence ON DELETE SET NULL on supplier_id, with supplier_number kept
+    // alongside so the row stays readable after the supplier is gone.
+    { sql: `CREATE TABLE IF NOT EXISTS supplier_import_batches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER REFERENCES employees(id),
+      status TEXT NOT NULL DEFAULT 'running',
+      started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      finished_at DATETIME,
+      reversed_at DATETIME,
+      reversed_by INTEGER REFERENCES employees(id)
+    )` },
+    // Accounts payable (routes/payables.js). A bill is what a vendor
+    // invoices us — created automatically when a PO is received (vendor has
+    // Sync with A/P on), from a PO by hand, or standalone (utilities,
+    // services). status is only 'open' or 'void'; paid/partial/overdue are
+    // derived from payment allocations and due_date at read time so they can
+    // never drift out of sync.
+    { sql: `CREATE TABLE IF NOT EXISTS ap_bills (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      bill_number TEXT UNIQUE NOT NULL,
+      supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
+      vendor_invoice_number TEXT,
+      po_id INTEGER REFERENCES purchase_orders(id),
+      branch_id INTEGER REFERENCES branches(id),
+      bill_date DATE NOT NULL,
+      due_date DATE NOT NULL,
+      amount REAL NOT NULL,
+      description TEXT,
+      source TEXT NOT NULL DEFAULT 'manual',
+      status TEXT NOT NULL DEFAULT 'open',
+      void_reason TEXT,
+      voided_by INTEGER REFERENCES employees(id),
+      voided_at DATETIME,
+      created_by INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    // A payment to a vendor, split across one or more of its bills by
+    // ap_payment_allocations (the allocations always sum to amount). Voiding
+    // a payment keeps its allocations for the record but they stop counting
+    // toward any bill's paid amount.
+    { sql: `CREATE TABLE IF NOT EXISTS ap_payments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      payment_number TEXT UNIQUE NOT NULL,
+      supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
+      payment_date DATE NOT NULL,
+      amount REAL NOT NULL,
+      method TEXT NOT NULL,
+      reference TEXT,
+      notes TEXT,
+      status TEXT NOT NULL DEFAULT 'posted',
+      void_reason TEXT,
+      voided_by INTEGER REFERENCES employees(id),
+      voided_at DATETIME,
+      created_by INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS ap_payment_allocations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      payment_id INTEGER NOT NULL REFERENCES ap_payments(id),
+      bill_id INTEGER NOT NULL REFERENCES ap_bills(id),
+      amount REAL NOT NULL
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS supplier_import_batch_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id INTEGER NOT NULL REFERENCES supplier_import_batches(id),
+      supplier_id INTEGER REFERENCES suppliers(id) ON DELETE SET NULL,
+      supplier_number TEXT,
+      row_label TEXT NOT NULL,
+      action TEXT NOT NULL,
+      duplicate_of_supplier_id INTEGER REFERENCES suppliers(id) ON DELETE SET NULL,
+      error_message TEXT,
+      reverse_outcome TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
   ], 'write');
 
   // Migrations — each in its own try/catch
@@ -1612,6 +1690,36 @@ async function _init() {
     'ALTER TABLE sessions ADD COLUMN user_agent TEXT',
     'ALTER TABLE sessions ADD COLUMN last_section TEXT',
     'ALTER TABLE sessions ADD COLUMN branch_id INTEGER REFERENCES branches(id)',
+    // Vendor fields carried over from the previous system's vendor records
+    // (see POST /suppliers/import): a second contact, fax/website, country,
+    // and our account number with the vendor ("Vendor's ref #").
+    'ALTER TABLE suppliers ADD COLUMN country TEXT',
+    'ALTER TABLE suppliers ADD COLUMN fax TEXT',
+    'ALTER TABLE suppliers ADD COLUMN website TEXT',
+    'ALTER TABLE suppliers ADD COLUMN contact2_name TEXT',
+    'ALTER TABLE suppliers ADD COLUMN phone2 TEXT',
+    'ALTER TABLE suppliers ADD COLUMN email2 TEXT',
+    'ALTER TABLE suppliers ADD COLUMN account_number TEXT',
+    // The rest of the previous system's vendor screen (Main / Address /
+    // Contacts tabs), so the supplier form and import carry every field.
+    // Stored for reference only; none of these drive app behavior.
+    "ALTER TABLE suppliers ADD COLUMN name_type TEXT DEFAULT 'Business'",
+    'ALTER TABLE suppliers ADD COLUMN salutation TEXT',
+    'ALTER TABLE suppliers ADD COLUMN first_name TEXT',
+    'ALTER TABLE suppliers ADD COLUMN last_name TEXT',
+    'ALTER TABLE suppliers ADD COLUMN category TEXT',
+    'ALTER TABLE suppliers ADD COLUMN ship_via TEXT',
+    'ALTER TABLE suppliers ADD COLUMN sync_ap INTEGER DEFAULT 1',
+    'ALTER TABLE suppliers ADD COLUMN ap_vendor_number TEXT',
+    'ALTER TABLE suppliers ADD COLUMN voucher_default TEXT',
+    'ALTER TABLE suppliers ADD COLUMN address2 TEXT',
+    'ALTER TABLE suppliers ADD COLUMN address3 TEXT',
+    'ALTER TABLE suppliers ADD COLUMN comment1 TEXT',
+    'ALTER TABLE suppliers ADD COLUMN comment2 TEXT',
+    'ALTER TABLE suppliers ADD COLUMN comment3 TEXT',
+    'ALTER TABLE suppliers ADD COLUMN fax2 TEXT',
+    'ALTER TABLE suppliers ADD COLUMN website2 TEXT',
+    "ALTER TABLE suppliers ADD COLUMN report_email TEXT DEFAULT 'email1'",
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
@@ -1654,6 +1762,18 @@ async function _init() {
   // PR/PO. SQLite can't alter a column's FK action in place, so both tables
   // are rebuilt with ON DELETE SET NULL instead. Guarded by inspecting the
   // live table SQL so this only runs once.
+  //
+  // On a brand-new DB this runs on the first boot, after the migrations
+  // above have already added later columns (work_order_item_id,
+  // discount_amount) — so the rebuilt tables declare those too, and rows are
+  // copied over by whatever columns the old and new tables share rather
+  // than a fixed list, so no column the old table had is silently dropped.
+  const copyCommonColumns = async (tx, from, to) => {
+    const cols = async t => (await tx.execute({ sql: `PRAGMA table_info(${t})`, args: [] })).rows.map(r => r.name);
+    const target = new Set(await cols(to));
+    const shared = (await cols(from)).filter(c => target.has(c)).join(', ');
+    await tx.execute({ sql: `INSERT INTO ${to} (${shared}) SELECT ${shared} FROM ${from}`, args: [] });
+  };
   try {
     const { rows: [pri] } = await db.execute({ sql: "SELECT sql FROM sqlite_master WHERE type='table' AND name='purchase_request_items'", args: [] });
     if (pri && !/quotation_item_id INTEGER REFERENCES quotation_items\(id\) ON DELETE SET NULL/.test(pri.sql)) {
@@ -1671,10 +1791,11 @@ async function _init() {
           total REAL DEFAULT 0,
           item_type TEXT DEFAULT 'sale',
           product_url TEXT,
-          quotation_item_id INTEGER REFERENCES quotation_items(id) ON DELETE SET NULL
+          quotation_item_id INTEGER REFERENCES quotation_items(id) ON DELETE SET NULL,
+          work_order_item_id INTEGER REFERENCES work_order_items(id),
+          discount_amount REAL DEFAULT 0
         )`, args: [] });
-        await tx.execute({ sql: `INSERT INTO purchase_request_items_new (id, pr_id, product_id, product_name, sku, quantity, unit_cost, notes, total, item_type, product_url, quotation_item_id)
-          SELECT id, pr_id, product_id, product_name, sku, quantity, unit_cost, notes, total, item_type, product_url, quotation_item_id FROM purchase_request_items`, args: [] });
+        await copyCommonColumns(tx, 'purchase_request_items', 'purchase_request_items_new');
         await tx.execute({ sql: 'DROP TABLE purchase_request_items', args: [] });
         await tx.execute({ sql: 'ALTER TABLE purchase_request_items_new RENAME TO purchase_request_items', args: [] });
         await tx.commit();
@@ -1699,10 +1820,11 @@ async function _init() {
           total REAL NOT NULL,
           quantity_damaged INTEGER DEFAULT 0,
           damage_notes TEXT,
-          quotation_item_id INTEGER REFERENCES quotation_items(id) ON DELETE SET NULL
+          quotation_item_id INTEGER REFERENCES quotation_items(id) ON DELETE SET NULL,
+          work_order_item_id INTEGER REFERENCES work_order_items(id),
+          discount_amount REAL DEFAULT 0
         )`, args: [] });
-        await tx.execute({ sql: `INSERT INTO purchase_order_items_new (id, po_id, product_id, product_name, sku, quantity_ordered, quantity_received, unit_cost, total, quantity_damaged, damage_notes, quotation_item_id)
-          SELECT id, po_id, product_id, product_name, sku, quantity_ordered, quantity_received, unit_cost, total, quantity_damaged, damage_notes, quotation_item_id FROM purchase_order_items`, args: [] });
+        await copyCommonColumns(tx, 'purchase_order_items', 'purchase_order_items_new');
         await tx.execute({ sql: 'DROP TABLE purchase_order_items', args: [] });
         await tx.execute({ sql: 'ALTER TABLE purchase_order_items_new RENAME TO purchase_order_items', args: [] });
         await tx.commit();
@@ -2063,13 +2185,23 @@ async function _init() {
   // its first boot too.
   try {
     const { can } = require('./lib/permissions');
-    const { rows: groups } = await db.execute({ sql: 'SELECT id, permissions FROM security_groups', args: [] });
+    const { rows: groups } = await db.execute({ sql: 'SELECT id, name, permissions FROM security_groups', args: [] });
     for (const g of groups) {
       const perms = JSON.parse(g.permissions || '{}');
       let changed = false;
       if (!('user-sessions' in perms)) { perms['user-sessions'] = can(perms, 'security'); changed = true; }
       if (!('sessions_logout' in perms)) { perms.sessions_logout = can(perms, 'security_manage'); changed = true; }
       if (!('assessment' in perms)) { perms.assessment = can(perms, 'employees'); changed = true; }
+      // Accounts Payable is new (no earlier key gated it). It starts out with
+      // full-access groups (those that manage Security Groups and Settings)
+      // plus any group named for payables — e.g. an existing "Accounts
+      // Payables" group set up ahead of this feature. Everyone else is
+      // granted it in Security Groups. Checked with `in` so it runs once per
+      // group and a later change in Security Groups sticks.
+      if (!('payables' in perms)) {
+        perms.payables = (can(perms, 'security') && can(perms, 'settings')) || /payable/i.test(g.name || '');
+        changed = true;
+      }
       if (changed) await db.execute({ sql: 'UPDATE security_groups SET permissions = ? WHERE id = ?', args: [JSON.stringify(perms), g.id] });
     }
   } catch(e) {}
@@ -2365,6 +2497,12 @@ async function _init() {
     'CREATE INDEX IF NOT EXISTS idx_product_import_batch_items_product_id ON product_import_batch_items(product_id)',
     'CREATE INDEX IF NOT EXISTS idx_customer_import_batch_items_batch_id ON customer_import_batch_items(batch_id)',
     'CREATE INDEX IF NOT EXISTS idx_customer_import_batch_items_customer_id ON customer_import_batch_items(customer_id)',
+    'CREATE INDEX IF NOT EXISTS idx_supplier_import_batch_items_batch_id ON supplier_import_batch_items(batch_id)',
+    'CREATE INDEX IF NOT EXISTS idx_ap_bills_supplier_id ON ap_bills(supplier_id)',
+    'CREATE INDEX IF NOT EXISTS idx_ap_bills_po_id ON ap_bills(po_id)',
+    'CREATE INDEX IF NOT EXISTS idx_ap_payments_supplier_id ON ap_payments(supplier_id)',
+    'CREATE INDEX IF NOT EXISTS idx_ap_payment_allocations_bill_id ON ap_payment_allocations(bill_id)',
+    'CREATE INDEX IF NOT EXISTS idx_ap_payment_allocations_payment_id ON ap_payment_allocations(payment_id)',
     'CREATE INDEX IF NOT EXISTS idx_session_activity_session_id ON session_activity(session_id)',
     'CREATE INDEX IF NOT EXISTS idx_session_activity_employee_id ON session_activity(employee_id)',
     'CREATE INDEX IF NOT EXISTS idx_session_activity_created_at ON session_activity(created_at)',

@@ -1076,6 +1076,7 @@ const App = {
     ]},
     'accounts-hub': { title: 'Accounts', children: [
       { section: 'accounts', label: 'Accounts / AR', color: '#2196F3', icon: '<path d="M11.8 10.9c-2.27-.59-3-1.2-3-2.15 0-1.09 1.01-1.85 2.7-1.85 1.78 0 2.44.85 2.5 2.1h2.21c-.07-1.72-1.12-3.3-3.21-3.81V3h-3v2.16c-1.94.42-3.5 1.68-3.5 3.61 0 2.31 1.91 3.46 4.7 4.13 2.5.6 3 1.48 3 2.41 0 .69-.49 1.79-2.7 1.79-2.06 0-2.87-.92-2.98-2.1h-2.2c.12 2.19 1.76 3.42 3.68 3.83V21h3v-2.15c1.95-.37 3.5-1.5 3.5-3.55 0-2.84-2.43-3.81-4.7-4.4z"/>' },
+      { section: 'payables', label: 'Accounts Payable', color: '#e53935', icon: '<path d="M20 4H4c-1.11 0-1.99.89-1.99 2L2 18c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V6c0-1.11-.89-2-2-2zm0 14H4v-6h16v6zm0-10H4V6h16v2z"/>' },
       { section: 'drawers', label: 'Cash Drawers', color: '#00897B', icon: '<path d="M20 6H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 14H4v-6h16v6zm0-10H4V8h16v2zM6 14h2v2H6zm4 0h6v2h-6z"/>' },
       { section: 'reports', label: 'Reports', color: '#4CAF50', icon: '<path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z"/>' },
     ]},
@@ -1331,7 +1332,7 @@ const App = {
       const hub = this._hubGroups[ds];
       el.classList.toggle('active', ds === name || !!(hub && hub.children.some(c => c.section === name)));
     });
-    const titles = { dashboard: 'Dashboard', 'driver-dashboard': 'My Deliveries', 'guard-dashboard': 'My Verifications', pos: 'Point of Sale', inventory: 'Retail Inventory Management', services: 'Services & Non-Inventory Items', rentals: 'Rentals', 'rental-items': 'Rental Items', 'work-orders': 'Work Orders', 'wo-schedule': 'Technician Schedule', dispatch: 'Dispatch', 'rental-dispatch': 'Rental Dispatch', 'transfer-dispatch': 'Branch Transfer Dispatch', 'rental-deposits': 'Rental Deposits & Credit Notes', 'purchase-requests': 'Purchase Requests', layaway: 'Layaway', customers: 'Customers', transactions: 'Transactions', 'online-orders': 'Online Orders', reports: 'Reports & Analytics', employees: 'Employees', settings: 'Settings', suppliers: 'Suppliers', purchasing: 'Purchasing', quotations: 'Quotations', 'special-projects': 'Special Projects', accounts: 'Accounts Receivable', branches: 'Branch Management', security: 'Security Groups', 'user-sessions': 'Active Sessions', assessment: 'Training Assessment', transfers: 'Branch Transfers', crm: 'CRM & Sales', commissions: 'Commission Tracking', warehouse: 'Warehouse Management', shipping: 'Shipping', 'cycle-counts': 'Cycle Counts', drawers: 'Cash Drawers', promotions: 'Promotions', 'discount-cards': 'Discount Cards', 'cash-back-cards': 'Cash Back Cards', 'purchasing-hub': 'Purchasing', 'sales-hub': 'Sales', 'accounts-hub': 'Accounts', 'warehouse-hub': 'Warehouse', 'admin-hub': 'Admin', 'reports-hub': 'Reports', 'reports-marketing': 'Marketing Reports', 'reports-sales': 'Sales Reports', 'reports-accounts': 'Accounts Reports' };
+    const titles = { dashboard: 'Dashboard', 'driver-dashboard': 'My Deliveries', 'guard-dashboard': 'My Verifications', pos: 'Point of Sale', inventory: 'Retail Inventory Management', services: 'Services & Non-Inventory Items', rentals: 'Rentals', 'rental-items': 'Rental Items', 'work-orders': 'Work Orders', 'wo-schedule': 'Technician Schedule', dispatch: 'Dispatch', 'rental-dispatch': 'Rental Dispatch', 'transfer-dispatch': 'Branch Transfer Dispatch', 'rental-deposits': 'Rental Deposits & Credit Notes', 'purchase-requests': 'Purchase Requests', layaway: 'Layaway', customers: 'Customers', transactions: 'Transactions', 'online-orders': 'Online Orders', reports: 'Reports & Analytics', employees: 'Employees', settings: 'Settings', suppliers: 'Suppliers', purchasing: 'Purchasing', quotations: 'Quotations', 'special-projects': 'Special Projects', accounts: 'Accounts Receivable', payables: 'Accounts Payable', branches: 'Branch Management', security: 'Security Groups', 'user-sessions': 'Active Sessions', assessment: 'Training Assessment', transfers: 'Branch Transfers', crm: 'CRM & Sales', commissions: 'Commission Tracking', warehouse: 'Warehouse Management', shipping: 'Shipping', 'cycle-counts': 'Cycle Counts', drawers: 'Cash Drawers', promotions: 'Promotions', 'discount-cards': 'Discount Cards', 'cash-back-cards': 'Cash Back Cards', 'purchasing-hub': 'Purchasing', 'sales-hub': 'Sales', 'accounts-hub': 'Accounts', 'warehouse-hub': 'Warehouse', 'admin-hub': 'Admin', 'reports-hub': 'Reports', 'reports-marketing': 'Marketing Reports', 'reports-sales': 'Sales Reports', 'reports-accounts': 'Accounts Reports' };
     document.getElementById('topbar-title').innerHTML = this.buildBreadcrumb(name, titles[name] || name);
     const content = document.getElementById('content');
     content.style.padding = name === 'pos' ? '0' : '20px';
@@ -1341,7 +1342,7 @@ const App = {
     // `body.pos-kiosk` CSS) — removed so staff can navigate away without
     // using the in-page Exit button first. The content-area sizing above
     // still gives POS its own full-height layout within the remaining space.
-    const renders = { dashboard: () => this.renderDashboard(), 'driver-dashboard': () => this.renderDriverDashboard(), 'guard-dashboard': () => this.renderGuardDashboard(), pos: () => this.renderPOS(), inventory: () => this.renderInventory(), services: () => this.renderServices(), rentals: () => this.renderRentals(), 'rental-items': () => this.renderRentalItems(), 'work-orders': () => this.renderWorkOrders(), 'wo-schedule': () => this.renderWOSchedule(), dispatch: () => this.renderHub('dispatch'), 'rental-dispatch': () => this.renderRentalDispatch(), 'transfer-dispatch': () => this.renderTransferDispatch(), 'rental-deposits': () => this.renderRentalDeposits(), 'purchase-requests': () => this.renderPurchasing('requests'), layaway: () => this.renderLayaway(), customers: () => this.renderCustomers(), transactions: () => this.renderTransactions(), 'online-orders': () => this.renderOnlineOrders(), reports: () => this.renderReports(), employees: () => this.renderEmployees(), settings: () => this.renderSettings(), suppliers: () => this.renderSuppliers(), purchasing: () => this.renderPurchasing(), quotations: () => this.renderQuotations(), 'special-projects': () => this.renderSpecialProjects(), accounts: () => this.renderAccounts(), branches: () => this.renderBranches(), security: () => this.renderSecurity(), 'user-sessions': () => this.renderUserSessions(), assessment: () => this.renderAssessment(), transfers: () => this.renderTransfers(), crm: () => this.renderCRM(), commissions: () => this.renderCommissions(), warehouse: () => this.renderWarehouse(), shipping: () => this.renderShipping(), 'cycle-counts': () => this.renderCycleCounts(), drawers: () => this.renderDrawers(), promotions: () => this.renderPromotions(), 'discount-cards': () => this.renderDiscountCards(), 'cash-back-cards': () => this.renderCashBackCards(), 'purchasing-hub': () => this.renderHub('purchasing-hub'), 'sales-hub': () => this.renderHub('sales-hub'), 'accounts-hub': () => this.renderHub('accounts-hub'), 'warehouse-hub': () => this.renderHub('warehouse-hub'), 'admin-hub': () => this.renderHub('admin-hub'), 'reports-hub': () => this.renderHub('reports-hub'), 'reports-marketing': () => this.renderReportsMarketing(), 'reports-sales': () => this.renderReportsSales(), 'reports-accounts': () => this.renderReportsAccounts() };
+    const renders = { dashboard: () => this.renderDashboard(), 'driver-dashboard': () => this.renderDriverDashboard(), 'guard-dashboard': () => this.renderGuardDashboard(), pos: () => this.renderPOS(), inventory: () => this.renderInventory(), services: () => this.renderServices(), rentals: () => this.renderRentals(), 'rental-items': () => this.renderRentalItems(), 'work-orders': () => this.renderWorkOrders(), 'wo-schedule': () => this.renderWOSchedule(), dispatch: () => this.renderHub('dispatch'), 'rental-dispatch': () => this.renderRentalDispatch(), 'transfer-dispatch': () => this.renderTransferDispatch(), 'rental-deposits': () => this.renderRentalDeposits(), 'purchase-requests': () => this.renderPurchasing('requests'), layaway: () => this.renderLayaway(), customers: () => this.renderCustomers(), transactions: () => this.renderTransactions(), 'online-orders': () => this.renderOnlineOrders(), reports: () => this.renderReports(), employees: () => this.renderEmployees(), settings: () => this.renderSettings(), suppliers: () => this.renderSuppliers(), purchasing: () => this.renderPurchasing(), quotations: () => this.renderQuotations(), 'special-projects': () => this.renderSpecialProjects(), accounts: () => this.renderAccounts(), payables: () => this.renderPayables(), branches: () => this.renderBranches(), security: () => this.renderSecurity(), 'user-sessions': () => this.renderUserSessions(), assessment: () => this.renderAssessment(), transfers: () => this.renderTransfers(), crm: () => this.renderCRM(), commissions: () => this.renderCommissions(), warehouse: () => this.renderWarehouse(), shipping: () => this.renderShipping(), 'cycle-counts': () => this.renderCycleCounts(), drawers: () => this.renderDrawers(), promotions: () => this.renderPromotions(), 'discount-cards': () => this.renderDiscountCards(), 'cash-back-cards': () => this.renderCashBackCards(), 'purchasing-hub': () => this.renderHub('purchasing-hub'), 'sales-hub': () => this.renderHub('sales-hub'), 'accounts-hub': () => this.renderHub('accounts-hub'), 'warehouse-hub': () => this.renderHub('warehouse-hub'), 'admin-hub': () => this.renderHub('admin-hub'), 'reports-hub': () => this.renderHub('reports-hub'), 'reports-marketing': () => this.renderReportsMarketing(), 'reports-sales': () => this.renderReportsSales(), 'reports-accounts': () => this.renderReportsAccounts() };
     if (renders[name]) await renders[name]();
   },
 
@@ -4390,7 +4391,7 @@ const App = {
         ${this.can('inventory_export') ? `<button class="btn btn-secondary btn-sm" onclick="App.exportInventoryCsv()" title="Export filtered products to CSV">&#8659; Export CSV</button>` : ''}
         ${this.can('inventory_missing_data') ? `<a class="btn btn-secondary btn-sm" href="/api/products/export/issues" download title="Export active products with $0 price, negative stock, or missing category/supplier/barcode">&#8659; Missing Data</a>` : ''}
         ${this.can('inventory_template') ? `<a class="btn btn-secondary btn-sm" href="/api/products/export/template" download title="Download import template">&#8659; Template</a>` : ''}
-        ${this.can('inventory_import') ? `<label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import products from CSV">&#8657; Import<input type="file" accept=".csv" style="display:none" onchange="App.importProductsCsv(this)"></label>` : ''}
+        ${this.can('inventory_import') ? `<label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import products from CSV or Excel">&#8657; Import<input type="file" accept=".csv,.tsv,.txt,.xls,.xlsx" style="display:none" onchange="App.importProductsCsv(this)"></label>` : ''}
         ${this.can('inventory_import_history') ? `<button class="btn btn-secondary btn-sm" onclick="App.showImportHistory()" title="Review or reverse past CSV imports">Import History</button>` : ''}
         ${this.can('inventory_scan_images') ? `<button class="btn btn-secondary btn-sm" onclick="App.scanProductImages()" title="Assign images already placed in uploads/products/ (named by SKU) to their matching products">Scan Images</button>` : ''}
         <button class="btn btn-secondary btn-sm" onclick="App.showBulkAssignBranchModal()" title="Assign every product with no branch stock yet (e.g. after a CSV import) to one branch">Bulk Assign to Branch</button>
@@ -5476,7 +5477,7 @@ const App = {
           <button class="btn btn-secondary btn-sm" onclick="App.exportRentalItemsCsv()" title="Export rental items to CSV">&#8659; Export CSV</button>
           ${this.can('rentals_manage_items') ? `
           <a class="btn btn-secondary btn-sm" href="/api/products/export/rentals/template" download title="Download import template">&#8659; Template</a>
-          <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import rental items from CSV">&#8657; Import<input type="file" accept=".csv" style="display:none" onchange="App.importRentalItemsCsv(this)"></label>
+          <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import rental items from CSV or Excel">&#8657; Import<input type="file" accept=".csv,.tsv,.txt,.xls,.xlsx" style="display:none" onchange="App.importRentalItemsCsv(this)"></label>
           <button class="btn btn-secondary btn-sm" onclick="App.showBulkRentalTaxRateModal()" title="Set the tax rate on rental items — all branches or just one">Bulk Tax Rate Change</button>
           <button class="btn btn-primary btn-sm" onclick="App.showRentalItemForm()">+ Add Rental Item</button>` : ''}
         </div>
@@ -5498,8 +5499,9 @@ const App = {
     const file = inputEl.files[0];
     inputEl.value = '';
     if (!file) return;
-    const text = await file.text();
-    const { headers, rows: rawRows } = this._parseCsv(text);
+    let parsed;
+    try { parsed = await this._readImportFile(file); } catch (e) { this.alert(e.message, 'error'); return; }
+    const { headers, rows: rawRows } = parsed;
     if (!rawRows.length) { this.alert('No data rows found in CSV', 'error'); return; }
 
     const mapping = await this._showFieldMappingModal({ title: 'Map Import Columns', headers, fields: this._rentalImportFields });
@@ -10188,8 +10190,9 @@ const App = {
     const file = inputEl.files[0];
     inputEl.value = '';
     if (!file) return;
-    const text = await file.text();
-    const { headers, rows: rawRows } = this._parseCsv(text);
+    let parsed;
+    try { parsed = await this._readImportFile(file); } catch (e) { this.alert(e.message, 'error'); return; }
+    const { headers, rows: rawRows } = parsed;
     if (!rawRows.length) { this.alert('No data rows found in CSV', 'error'); return; }
 
     const mapping = await this._showFieldMappingModal({ title: 'Map Import Columns', headers, fields: this._productImportFields });
@@ -10442,16 +10445,62 @@ const App = {
     if (btn) { btn.disabled = true; btn.textContent = 'Cancelling…'; }
   },
 
+  // Reads an import file picked by the user into the same { headers, rows }
+  // shape _parseCsv returns. Excel workbooks (.xlsx, and legacy .xls, which
+  // is what many older systems export) are detected by their file signature
+  // rather than the extension and read with SheetJS, loaded on first use;
+  // the first sheet is imported. Text files are decoded by BOM (UTF-8,
+  // UTF-16 LE/BE), falling back to UTF-16 when the bytes are NUL-interleaved
+  // and to Windows-1252 when they aren't valid UTF-8.
+  async _readImportFile(file) {
+    const buf = new Uint8Array(await file.arrayBuffer());
+    const isXlsx = buf[0] === 0x50 && buf[1] === 0x4B;
+    const isXls = buf[0] === 0xD0 && buf[1] === 0xCF && buf[2] === 0x11 && buf[3] === 0xE0;
+    if (isXlsx || isXls) {
+      if (!window.XLSX) {
+        await new Promise((resolve, reject) => {
+          const el = document.createElement('script');
+          el.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+          el.onload = resolve;
+          el.onerror = () => reject(new Error('Could not load the Excel reader. Check your internet connection, or save the file as CSV and try again.'));
+          document.head.appendChild(el);
+        });
+      }
+      const wb = XLSX.read(buf, { type: 'array' });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const grid = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: '', blankrows: false });
+      if (grid.length < 2) return { headers: [], rows: [] };
+      const headers = grid[0].map(h => String(h).trim());
+      const rows = grid.slice(1).filter(r => r.some(v => String(v).trim())).map(r =>
+        Object.fromEntries(headers.map((h, i) => [h, String(r[i] ?? '').trim()])));
+      return { headers, rows };
+    }
+    let encoding = 'utf-8';
+    if (buf[0] === 0xFF && buf[1] === 0xFE) encoding = 'utf-16le';
+    else if (buf[0] === 0xFE && buf[1] === 0xFF) encoding = 'utf-16be';
+    else if (buf.length > 3 && buf[1] === 0 && buf[3] === 0) encoding = 'utf-16le';
+    else if (buf.length > 3 && buf[0] === 0 && buf[2] === 0) encoding = 'utf-16be';
+    let text;
+    try { text = new TextDecoder(encoding, { fatal: encoding === 'utf-8' }).decode(buf); }
+    catch { text = new TextDecoder('windows-1252').decode(buf); }
+    return this._parseCsv(text.replace(/^\uFEFF/, ''));
+  },
+
   // Returns { headers, rows } — headers is the raw column order from the
   // file (used by _showFieldMappingModal to build the mapping UI), rows are
   // keyed by those same raw header strings (not yet mapped to backend field
   // names — see _remapCsvRows).
+  // The separator is sniffed from the header line (comma, tab, or
+  // semicolon), since Excel "Text"/"Unicode Text" saves and older POS
+  // exports are tab-separated.
   _parseCsv(text) {
     const lines = text.trim().split(/\r?\n/);
     if (lines.length < 2) return { headers: [], rows: [] };
-    const headers = this._parseCsvLine(lines[0]).map(h => h.trim());
+    const count = ch => lines[0].split(ch).length - 1;
+    const delim = ['\t', ';', ','].reduce((best, ch) => count(ch) > count(best) ? ch : best, ',');
+    const headers = this._parseCsvLine(lines[0], delim).map(h => h.trim());
     const rows = lines.slice(1).filter(l => l.trim()).map(line => {
-      const vals = this._parseCsvLine(line);
+      const vals = this._parseCsvLine(line, delim);
       return Object.fromEntries(headers.map((h, i) => [h, (vals[i] || '').trim()]));
     });
     return { headers, rows };
@@ -10530,6 +10579,48 @@ const App = {
     { key: 'rental_preapproved',              label: 'Preapproved (1/0) — bypasses missing-info check', group: 'Rental Compliance (optional)' },
   ],
 
+  // One target per column of the previous system's vendor screen (header +
+  // Main / Address / Contacts tabs); aliases are its on-screen labels and
+  // likely export column names, so its export auto-maps.
+  _supplierImportFields: [
+    { key: 'supplier_number',  label: 'Vendor Number',   aliases: ['Vendor number', 'Vendor #', 'Vendor No', 'VEND_NO'], group: 'Vendor' },
+    { key: 'name',             label: 'Name', required: true, aliases: ['Vendor Name', 'Company Name', 'NAM'], group: 'Vendor' },
+    { key: 'name_type',        label: 'Name Type (Business/Person)', aliases: ['NAM_TYP'], group: 'Vendor' },
+    { key: 'salutation',       label: 'Salutation',      aliases: ['SALUTATION'], group: 'Main' },
+    { key: 'first_name',       label: 'First Name',      aliases: ['FST_NAM'], group: 'Main' },
+    { key: 'last_name',        label: 'Last Name',       aliases: ['LST_NAM'], group: 'Main' },
+    { key: 'category',         label: 'Category',        aliases: ['CATEG_COD'], group: 'Main' },
+    { key: 'payment_terms',    label: 'Terms Code',      aliases: ['Terms', 'Payment Terms', 'TERMS_COD'], group: 'Main' },
+    { key: 'ship_via',         label: 'Ship-via Code',   aliases: ['Ship via', 'SHIP_VIA_COD'], group: 'Main' },
+    { key: 'sync_ap',          label: 'Sync with A/P (1/0)', aliases: ['Sync with AP'], group: 'Main' },
+    { key: 'ap_vendor_number', label: 'A/P Vendor #',    aliases: ['AP vendor #', 'AP_VEND_NO'], group: 'Main' },
+    { key: 'account_number',   label: "Vendor's Ref #",  aliases: ['Vendors ref #', 'VEND_REF_NO'], group: 'Main' },
+    { key: 'voucher_default',  label: 'Voucher Default', aliases: ['VOUCH_DFLT'], group: 'Main' },
+    { key: 'is_local',         label: 'Local Supplier (1/0)', group: 'Main' },
+    { key: 'address',          label: 'Address 1',       aliases: ['Address', 'ADRS_1'], group: 'Address' },
+    { key: 'address2',         label: 'Address 2',       aliases: ['ADRS_2'], group: 'Address' },
+    { key: 'address3',         label: 'Address 3',       aliases: ['ADRS_3'], group: 'Address' },
+    { key: 'city',             label: 'City',            group: 'Address' },
+    { key: 'state',            label: 'State',           aliases: ['Parish', 'State / Parish'], group: 'Address' },
+    { key: 'zip',              label: 'Zip Code',        aliases: ['ZIP', 'ZIP_COD'], group: 'Address' },
+    { key: 'country',          label: 'Country',         aliases: ['CNTRY'], group: 'Address' },
+    { key: 'comment1',         label: 'Comment 1',       aliases: ['COMMNT_1'], group: 'Address' },
+    { key: 'comment2',         label: 'Comment 2',       aliases: ['COMMNT_2'], group: 'Address' },
+    { key: 'comment3',         label: 'Comment 3',       aliases: ['COMMNT_3'], group: 'Address' },
+    { key: 'notes',            label: 'Notes',           group: 'Address' },
+    { key: 'contact_name',     label: 'Contact 1',       aliases: ['Contact', 'CONTCT_1'], group: 'Contacts' },
+    { key: 'phone',            label: 'Phone 1',         aliases: ['Phone', 'PHONE_1'], group: 'Contacts' },
+    { key: 'fax',              label: 'Fax 1',           aliases: ['Fax', 'FAX_1'], group: 'Contacts' },
+    { key: 'email',            label: 'Email 1',         aliases: ['E-mail 1', 'Email', 'EMAIL_ADRS_1'], group: 'Contacts' },
+    { key: 'website',          label: 'URL 1',           aliases: ['URL', 'Website', 'URL_1'], group: 'Contacts' },
+    { key: 'contact2_name',    label: 'Contact 2',       aliases: ['CONTCT_2'], group: 'Contacts' },
+    { key: 'phone2',           label: 'Phone 2',         aliases: ['PHONE_2'], group: 'Contacts' },
+    { key: 'fax2',             label: 'Fax 2',           aliases: ['FAX_2'], group: 'Contacts' },
+    { key: 'email2',           label: 'Email 2',         aliases: ['E-mail 2', 'EMAIL_ADRS_2'], group: 'Contacts' },
+    { key: 'website2',         label: 'URL 2',           aliases: ['URL_2'], group: 'Contacts' },
+    { key: 'report_email',     label: 'Receipt/Report E-mail (1/2)', aliases: ['Receipt/report e-mail'], group: 'Contacts' },
+  ],
+
   // Shown once per CSV import, right after the file is parsed and before any
   // other import-options prompt (existing-SKU mode, duplicate mode, ...).
   // Lets the user match each of our target fields to whichever column in
@@ -10538,14 +10629,16 @@ const App = {
   // lowercased with spaces/punctuation stripped, matches the target field's
   // key or label the same way (so a re-import of our own template, or a
   // file that already uses matching headers, auto-fills every field and
-  // just needs Continue). Resolves to a { targetField: csvHeader } mapping,
-  // or null if the user cancels.
+  // just needs Continue). A field may also list `aliases` — other header
+  // spellings it should auto-match (e.g. another system's export names).
+  // Resolves to a { targetField: csvHeader } mapping, or null if the user
+  // cancels.
   _showFieldMappingModal({ title, headers, fields }) {
     const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
     const normedHeaders = headers.map(h => ({ header: h, n: norm(h) }));
     const autoMap = {};
     for (const f of fields) {
-      const hit = normedHeaders.find(x => x.n === norm(f.key)) || normedHeaders.find(x => x.n === norm(f.label));
+      const hit = [f.key, f.label, ...(f.aliases || [])].map(norm).reduce((found, n) => found || normedHeaders.find(x => x.n === n), null);
       if (hit) autoMap[f.key] = hit.header;
     }
     return new Promise(resolve => {
@@ -10603,7 +10696,7 @@ const App = {
     return rows.map(row => Object.fromEntries(entries.map(([field, header]) => [field, row[header]])));
   },
 
-  _parseCsvLine(line) {
+  _parseCsvLine(line, delim = ',') {
     const result = [];
     let cur = '', inQuote = false;
     for (let i = 0; i < line.length; i++) {
@@ -10611,7 +10704,7 @@ const App = {
       if (ch === '"') {
         if (inQuote && line[i + 1] === '"') { cur += '"'; i++; }
         else { inQuote = !inQuote; }
-      } else if (ch === ',' && !inQuote) {
+      } else if (ch === delim && !inQuote) {
         result.push(cur); cur = '';
       } else { cur += ch; }
     }
@@ -10969,7 +11062,7 @@ const App = {
             <input type="text" id="cust-search" placeholder="Search customers..." style="width:260px">
           </div>
           ${this.can('customers_import') ? `<a class="btn btn-secondary btn-sm" href="/api/customers/export/template" download title="Download import template">&#8659; Template</a>` : ''}
-          ${this.can('customers_import') ? `<label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import customers from CSV">&#8657; Import<input type="file" accept=".csv" style="display:none" onchange="App.importCustomersCsv(this)"></label>` : ''}
+          ${this.can('customers_import') ? `<label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import customers from CSV or Excel">&#8657; Import<input type="file" accept=".csv,.tsv,.txt,.xls,.xlsx" style="display:none" onchange="App.importCustomersCsv(this)"></label>` : ''}
           ${this.can('customers_import_history') ? `<button class="btn btn-secondary btn-sm" onclick="App.showCustomerImportHistory()" title="Review or reverse past CSV imports">Import History</button>` : ''}
           ${this.can('customers_export_balances') ? `<button class="btn btn-secondary btn-sm" onclick="App.showCustomerBalancesExport()" title="Export AR balance, credit note total, and status by customer type">Export Balances</button>` : ''}
           ${this.can('customers_missing_rental_info') ? `<button class="btn btn-secondary btn-sm" onclick="App.showRentalIncompleteReport()" title="Rental customers missing the ID/reference/document info required to create a rental">🔑 Missing Rental Info</button>` : ''}
@@ -11430,8 +11523,9 @@ const App = {
     const file = inputEl.files[0];
     inputEl.value = '';
     if (!file) return;
-    const text = await file.text();
-    const { headers, rows: rawRows } = this._parseCsv(text);
+    let parsed;
+    try { parsed = await this._readImportFile(file); } catch (e) { this.alert(e.message, 'error'); return; }
+    const { headers, rows: rawRows } = parsed;
     if (!rawRows.length) { this.alert('No data rows found in CSV', 'error'); return; }
 
     // rental_preapproved only offered to map when the employee actually holds
@@ -11469,16 +11563,16 @@ const App = {
   // existing active customer should be skipped (the default) or created
   // anyway, since a bulk import can't pause per-row for a Link/Create choice
   // the way the single Add Customer form does.
-  _askCustomerDuplicateMode() {
+  _askCustomerDuplicateMode({ title = 'Possible Duplicate Customers', message = "Any row matching an existing active customer's email, phone, or full name is checked before import. What should happen to those rows?" } = {}) {
     return new Promise(resolve => {
       document.querySelectorAll('.modal-overlay').forEach(el => el.remove());
       const overlay = document.createElement('div');
       overlay.className = 'modal-overlay';
       overlay.innerHTML = `
         <div class="modal" style="max-width:420px">
-          <div class="modal-header"><span class="modal-title">Possible Duplicate Customers</span></div>
+          <div class="modal-header"><span class="modal-title">${title}</span></div>
           <div class="modal-body">
-            <p style="font-size:13px;color:var(--text-muted)">Any row matching an existing active customer's email, phone, or full name is checked before import. What should happen to those rows?</p>
+            <p style="font-size:13px;color:var(--text-muted)">${message}</p>
           </div>
           <div class="modal-footer" style="flex-wrap:wrap;gap:8px">
             <button class="btn btn-secondary btn-sm" id="import-dupmode-cancel">Cancel</button>
@@ -14591,10 +14685,22 @@ const App = {
     }
     if (this.section !== 'suppliers') return;
     this._allSuppliers = suppliers;
+    // Balance owed per vendor, for users who can see Accounts Payable.
+    this._supplierBalances = null;
+    if (this.can('payables')) {
+      const aging = await this.api('GET', `/payables/aging?as_of=${this._apToday()}`).catch(() => null);
+      if (this.section !== 'suppliers') return;
+      if (aging) this._supplierBalances = Object.fromEntries(aging.vendors.map(v => [v.supplier_id, v]));
+    }
     c.innerHTML = `
       <div class="section-header">
         <h2>Suppliers</h2>
-        <button class="btn btn-primary" onclick="App.showSupplierForm()">+ Add Supplier</button>
+        <div style="display:flex;gap:10px;align-items:center">
+          ${this.can('suppliers_add') ? `<a class="btn btn-secondary btn-sm" href="/api/suppliers/export/template" download title="Download import template">&#8659; Template</a>` : ''}
+          ${this.can('suppliers_add') ? `<label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import vendors from CSV or Excel">&#8657; Import<input type="file" accept=".csv,.tsv,.txt,.xls,.xlsx" style="display:none" onchange="App.importSuppliersCsv(this)"></label>` : ''}
+          ${this.can('suppliers_add') ? `<button class="btn btn-secondary btn-sm" onclick="App.showSupplierImportHistory()" title="Review or reverse past CSV imports">Import History</button>` : ''}
+          <button class="btn btn-primary" onclick="App.showSupplierForm()">+ Add Supplier</button>
+        </div>
       </div>
       <div class="card" style="margin-bottom:16px">
         <div class="search-bar">
@@ -14605,7 +14711,7 @@ const App = {
       <div class="card">
         <div class="table-wrap">
           <table>
-            <thead><tr><th>#</th><th>Name</th><th>Contact</th><th>Phone</th><th>Email</th><th>Terms</th><th>Status</th><th>Actions</th></tr></thead>
+            <thead><tr><th>#</th><th>Name</th><th>Contact</th><th>Phone</th><th>Email</th><th>Terms</th>${this._supplierBalances ? '<th style="text-align:right">Balance Owed</th>' : ''}<th>Status</th><th>Actions</th></tr></thead>
             <tbody id="sup-tbody"></tbody>
           </table>
         </div>
@@ -14633,47 +14739,144 @@ const App = {
         <td>${s.phone || '-'}</td>
         <td>${s.email || '-'}</td>
         <td><span class="badge-pill badge-info">${s.payment_terms}</span></td>
+        ${this._supplierBalances ? (() => {
+          const v = this._supplierBalances[s.id];
+          const overdue = v ? v.total - v.current : 0;
+          return `<td style="text-align:right">${v ? `<a href="#" style="color:${overdue > 0 ? 'var(--danger)' : 'inherit'};font-weight:600;text-decoration:none" title="${overdue > 0 ? `${this.fmt(overdue)} overdue — ` : ''}View statement" onclick="event.preventDefault();App.showVendorStatement(${s.id})">${this.fmt(v.total)}</a>` : '<span style="color:var(--text-muted)">—</span>'}</td>`;
+        })() : ''}
         <td><span class="badge-pill ${s.active ? 'badge-success' : 'badge-danger'}">${s.active ? 'Active' : 'Inactive'}</span></td>
         <td><button class="btn btn-sm btn-secondary" onclick="App.showSupplierForm(${s.id})">Edit</button></td>
-      </tr>`).join('') : '<tr><td colspan="8" class="empty-state">No suppliers found</td></tr>';
+      </tr>`).join('') : `<tr><td colspan="${this._supplierBalances ? 9 : 8}" class="empty-state">No suppliers found</td></tr>`;
   },
 
+  // Laid out like the previous system's vendor screen (header + Main /
+  // Address / Contacts tabs) so staff moving over find every field where
+  // they expect it. All tabs stay in the DOM (just hidden) so saveSupplier
+  // can read every input regardless of which tab is showing.
   async showSupplierForm(id) {
     let s = {};
     if (id) s = await this.api('GET', `/suppliers/${id}`);
+    const esc = v => String(v ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+    const val = k => esc(s[k]);
+    // Suggestions for the free-text lookup fields, from values already in use.
+    const used = k => [...new Set((this._allSuppliers || []).map(x => x[k]).filter(Boolean))].sort();
+    const datalist = (listId, values) => `<datalist id="${listId}">${values.map(v => `<option value="${esc(v)}">`).join('')}</datalist>`;
+    const terms = [...new Set(['Net 15','Net 30','Net 45','Net 60','COD','Prepaid', ...used('payment_terms')])];
+    const vouchers = ['Fully vouchered', 'Partially vouchered', 'Not vouchered'];
+    if (s.voucher_default && !vouchers.includes(s.voucher_default)) vouchers.unshift(s.voucher_default);
+    const field = (label, inputId, key, extra = '') => `<div class="form-group"><label>${label}</label><input id="${inputId}" value="${val(key)}" ${extra}></div>`;
     this.showModal(`
-      <div class="modal" style="max-width:620px">
+      <div class="modal" style="max-width:720px">
         <div class="modal-header"><span class="modal-title">${id ? 'Edit' : 'New'} Supplier</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
-          <div class="form-group"><label>Company Name *</label><input id="sf-name" value="${s.name||''}"></div>
           <div class="input-row">
-            <div class="form-group"><label>Contact Name</label><input id="sf-contact" value="${s.contact_name||''}"></div>
-            <div class="form-group"><label>Payment Terms</label>
-              <select id="sf-terms">
-                ${['Net 15','Net 30','Net 45','Net 60','COD','Prepaid'].map(t => `<option ${s.payment_terms===t?'selected':''}>${t}</option>`).join('')}
-              </select>
+            <div class="form-group"><label>Vendor Number</label>
+              <div style="display:flex;gap:6px">
+                <input id="sf-number" value="${val('supplier_number')}" placeholder="Leave blank to auto-assign" style="flex:1">
+                <button type="button" class="btn btn-secondary btn-sm" onclick="App._autoAssignSupplierNumber()">Auto-assign</button>
+              </div>
+            </div>
+            <div class="form-group"><label>Name Type</label>
+              <select id="sf-name-type">${['Business','Person'].map(t => `<option ${(s.name_type||'Business')===t?'selected':''}>${t}</option>`).join('')}</select>
             </div>
           </div>
-          <div class="input-row">
-            <div class="form-group"><label>Phone</label><input id="sf-phone" value="${s.phone||''}"></div>
-            <div class="form-group"><label>Email</label><input id="sf-email" type="email" value="${s.email||''}"></div>
+          <div class="form-group"><label>Name *</label><input id="sf-name" value="${val('name')}"></div>
+
+          <div class="var-tab-bar" style="padding:0;margin:8px 0 14px">
+            <div class="var-tab active" data-sftab="main" onclick="App._switchSupplierTab('main')">Main</div>
+            <div class="var-tab" data-sftab="address" onclick="App._switchSupplierTab('address')">Address</div>
+            <div class="var-tab" data-sftab="contacts" onclick="App._switchSupplierTab('contacts')">Contacts</div>
           </div>
-          <div class="form-group"><label>Address</label><input id="sf-addr" value="${s.address||''}"></div>
-          <div class="input-row-3">
-            <div class="form-group"><label>City</label><input id="sf-city" value="${s.city||''}"></div>
-            <div class="form-group"><label>State</label><input id="sf-state" value="${s.state||''}"></div>
-            <div class="form-group"><label>ZIP</label><input id="sf-zip" value="${s.zip||''}"></div>
+
+          <div data-sfpanel="main">
+            <div class="input-row-3">
+              ${field('Salutation', 'sf-salutation', 'salutation')}
+              ${field('First Name', 'sf-first', 'first_name')}
+              ${field('Last Name', 'sf-last', 'last_name')}
+            </div>
+            <div class="input-row">
+              ${field('Contact 1', 'sf-contact', 'contact_name', `oninput="document.getElementById('sf-contact-c').value=this.value"`)}
+              ${field('Phone 1', 'sf-phone', 'phone', `oninput="document.getElementById('sf-phone-c').value=this.value"`)}
+            </div>
+            <div class="input-row-3">
+              ${field('Category', 'sf-category', 'category', 'list="sf-category-list"')}
+              <div class="form-group"><label>Terms Code</label><input id="sf-terms" value="${esc(s.payment_terms || 'Net 30')}" list="sf-terms-list"></div>
+              ${field('Ship-via Code', 'sf-ship-via', 'ship_via', 'list="sf-ship-via-list"')}
+            </div>
+            ${datalist('sf-category-list', used('category'))}${datalist('sf-terms-list', terms)}${datalist('sf-ship-via-list', used('ship_via'))}
+            <div class="input-row">
+              ${field('A/P Vendor #', 'sf-ap-number', 'ap_vendor_number')}
+              ${field("Vendor's Ref # (our account # with them)", 'sf-account', 'account_number')}
+            </div>
+            <div class="input-row">
+              <div class="form-group"><label>Voucher Default</label>
+                <select id="sf-voucher">${vouchers.map(v => `<option ${(s.voucher_default||'Fully vouchered')===v?'selected':''}>${v}</option>`).join('')}</select>
+              </div>
+              <div class="form-group" style="display:flex;align-items:flex-end;padding-bottom:8px">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0">
+                  <input type="checkbox" id="sf-sync-ap" ${s.sync_ap === 0 ? '' : 'checked'} style="width:16px;height:16px"> Sync with A/P
+                </label>
+                <span style="font-size:11px;color:var(--text-muted);margin-left:8px">Receiving a PO creates the A/P bill automatically (unless Voucher Default is "Not vouchered")</span>
+              </div>
+            </div>
+            <div style="display:flex;gap:24px;align-items:center;margin-top:4px;flex-wrap:wrap">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:500">
+                <input type="checkbox" id="sf-local" ${s.is_local?'checked':''} style="width:16px;height:16px">
+                Local Supplier <span style="font-size:12px;color:var(--text-muted);font-weight:400">(default tax applies to purchases)</span>
+              </label>
+              ${id ? `<label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <span>Status:</span>
+                <select id="sf-active" style="margin:0"><option value="1" ${s.active?'selected':''}>Active</option><option value="0" ${!s.active?'selected':''}>Inactive</option></select>
+              </label>` : ''}
+            </div>
           </div>
-          <div class="form-group"><label>Notes</label><textarea id="sf-notes" rows="2">${s.notes||''}</textarea></div>
-          <div style="display:flex;gap:24px;align-items:center;margin-top:4px">
-            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:500">
-              <input type="checkbox" id="sf-local" ${s.is_local?'checked':''} style="width:16px;height:16px">
-              Local Supplier <span style="font-size:12px;color:var(--text-muted);font-weight:400">(default tax applies to purchases)</span>
-            </label>
-            ${id ? `<label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-              <span>Status:</span>
-              <select id="sf-active" style="margin:0"><option value="1" ${s.active?'selected':''}>Active</option><option value="0" ${!s.active?'selected':''}>Inactive</option></select>
-            </label>` : ''}
+
+          <div data-sfpanel="address" style="display:none">
+            ${field('Address 1', 'sf-addr', 'address')}
+            ${field('Address 2', 'sf-addr2', 'address2')}
+            ${field('Address 3', 'sf-addr3', 'address3')}
+            <div class="input-row">
+              ${field('City', 'sf-city', 'city')}
+              ${field('State / Parish', 'sf-state', 'state')}
+            </div>
+            <div class="input-row">
+              ${field('ZIP Code', 'sf-zip', 'zip')}
+              ${field('Country', 'sf-country', 'country')}
+            </div>
+            ${field('Comment 1', 'sf-comment1', 'comment1')}
+            ${field('Comment 2', 'sf-comment2', 'comment2')}
+            ${field('Comment 3', 'sf-comment3', 'comment3')}
+            <div class="form-group"><label>Notes</label><textarea id="sf-notes" rows="2">${esc(s.notes)}</textarea></div>
+          </div>
+
+          <div data-sfpanel="contacts" style="display:none">
+            <fieldset style="border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin:0 0 12px">
+              <legend style="font-size:12px;font-weight:600;padding:0 6px">Contact 1</legend>
+              ${field('Contact 1', 'sf-contact-c', 'contact_name', `oninput="document.getElementById('sf-contact').value=this.value"`)}
+              <div class="input-row">
+                ${field('Phone 1', 'sf-phone-c', 'phone', `oninput="document.getElementById('sf-phone').value=this.value"`)}
+                ${field('Fax 1', 'sf-fax', 'fax')}
+              </div>
+              <div class="input-row">
+                ${field('Email 1', 'sf-email', 'email', 'type="email"')}
+                ${field('URL 1', 'sf-website', 'website')}
+              </div>
+            </fieldset>
+            <fieldset style="border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin:0 0 12px">
+              <legend style="font-size:12px;font-weight:600;padding:0 6px">Contact 2</legend>
+              ${field('Contact 2', 'sf-contact2', 'contact2_name')}
+              <div class="input-row">
+                ${field('Phone 2', 'sf-phone2', 'phone2')}
+                ${field('Fax 2', 'sf-fax2', 'fax2')}
+              </div>
+              <div class="input-row">
+                ${field('Email 2', 'sf-email2', 'email2', 'type="email"')}
+                ${field('URL 2', 'sf-website2', 'website2')}
+              </div>
+            </fieldset>
+            <div class="form-group" style="max-width:260px"><label>Receipt / Report Email</label>
+              <select id="sf-report-email">${[['email1','Email 1'],['email2','Email 2']].map(([v,l]) => `<option value="${v}" ${(s.report_email||'email1')===v?'selected':''}>${l}</option>`).join('')}</select>
+            </div>
           </div>
         </div>
         <div class="modal-footer">
@@ -14683,18 +14886,56 @@ const App = {
       </div>`);
   },
 
+  _switchSupplierTab(tab) {
+    document.querySelectorAll('[data-sftab]').forEach(el => el.classList.toggle('active', el.dataset.sftab === tab));
+    document.querySelectorAll('[data-sfpanel]').forEach(el => { el.style.display = el.dataset.sfpanel === tab ? '' : 'none'; });
+  },
+
+  async _autoAssignSupplierNumber() {
+    try {
+      const { supplier_number } = await this.api('GET', '/suppliers/next-number');
+      document.getElementById('sf-number').value = supplier_number;
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
   async saveSupplier(id) {
+    const v = elId => document.getElementById(elId).value.trim();
     const data = {
-      name: document.getElementById('sf-name').value.trim(),
-      contact_name: document.getElementById('sf-contact').value.trim(),
-      payment_terms: document.getElementById('sf-terms').value,
-      phone: document.getElementById('sf-phone').value.trim(),
-      email: document.getElementById('sf-email').value.trim(),
-      address: document.getElementById('sf-addr').value.trim(),
-      city: document.getElementById('sf-city').value.trim(),
-      state: document.getElementById('sf-state').value.trim(),
-      zip: document.getElementById('sf-zip').value.trim(),
-      notes: document.getElementById('sf-notes').value.trim(),
+      supplier_number: v('sf-number'),
+      name: v('sf-name'),
+      name_type: v('sf-name-type'),
+      salutation: v('sf-salutation'),
+      first_name: v('sf-first'),
+      last_name: v('sf-last'),
+      contact_name: v('sf-contact'),
+      phone: v('sf-phone'),
+      category: v('sf-category'),
+      payment_terms: v('sf-terms'),
+      ship_via: v('sf-ship-via'),
+      sync_ap: document.getElementById('sf-sync-ap').checked ? 1 : 0,
+      ap_vendor_number: v('sf-ap-number'),
+      account_number: v('sf-account'),
+      voucher_default: v('sf-voucher'),
+      address: v('sf-addr'),
+      address2: v('sf-addr2'),
+      address3: v('sf-addr3'),
+      city: v('sf-city'),
+      state: v('sf-state'),
+      zip: v('sf-zip'),
+      country: v('sf-country'),
+      comment1: v('sf-comment1'),
+      comment2: v('sf-comment2'),
+      comment3: v('sf-comment3'),
+      notes: v('sf-notes'),
+      fax: v('sf-fax'),
+      email: v('sf-email'),
+      website: v('sf-website'),
+      contact2_name: v('sf-contact2'),
+      phone2: v('sf-phone2'),
+      fax2: v('sf-fax2'),
+      email2: v('sf-email2'),
+      website2: v('sf-website2'),
+      report_email: v('sf-report-email'),
       is_local: document.getElementById('sf-local').checked ? 1 : 0,
     };
     if (id) data.active = parseInt(document.getElementById('sf-active').value);
@@ -14705,6 +14946,117 @@ const App = {
       this.closeModal();
       this.alert('Supplier saved');
       this.renderSuppliers();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // Same flow as importCustomersCsv: parse, match columns to our fields,
+  // choose what to do with likely duplicates, then post in chunks.
+  async importSuppliersCsv(inputEl) {
+    const file = inputEl.files[0];
+    inputEl.value = '';
+    if (!file) return;
+    let parsed;
+    try { parsed = await this._readImportFile(file); } catch (e) { this.alert(e.message, 'error'); return; }
+    const { headers, rows: rawRows } = parsed;
+    if (!rawRows.length) { this.alert('No data rows found in the file', 'error'); return; }
+    const mapping = await this._showFieldMappingModal({ title: 'Map Vendor Import Columns', headers, fields: this._supplierImportFields });
+    if (!mapping) return;
+    const rows = this._remapCsvRows(rawRows, mapping);
+    const duplicateMode = await this._askCustomerDuplicateMode({
+      title: 'Possible Duplicate Vendors',
+      message: "Any row whose vendor number already exists, or whose name matches an active supplier, is checked before import. What should happen to those rows?",
+    });
+    if (duplicateMode === null) return;
+    // One batch id for every chunk, so the whole import can be reviewed and
+    // reversed as a unit (Import History).
+    const { id: batchId } = await this.api('POST', '/supplier-imports');
+    await this._runBatchedCsvImport({
+      rows, endpoint: '/suppliers/import', title: 'Importing Vendors',
+      extraBody: { duplicate_mode: duplicateMode, batch_id: batchId },
+      summarize: totals => `${totals.created||0} created${totals.skipped ? `, ${totals.skipped} skipped (possible duplicate)` : ''}`,
+      onFinish: async () => {
+        await this.api('PATCH', `/supplier-imports/${batchId}/finish`).catch(() => {});
+        this.renderSuppliers();
+        this.showSupplierImportBatchDetail(batchId);
+      },
+    });
+  },
+
+  async showSupplierImportHistory() {
+    const batches = await this.api('GET', '/supplier-imports');
+    const fmtDate = d => d ? new Date(d).toLocaleString('en-US', { month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit' }) : '—';
+    const th = 'padding:8px 12px;font-size:12px';
+    this.showModal(`
+      <div class="modal" style="max-width:720px">
+        <div class="modal-header"><span class="modal-title">Vendor Import History</span><button class="modal-close">✕</button></div>
+        <div class="modal-body" style="padding:0">
+          <table style="width:100%;border-collapse:collapse">
+            <thead><tr style="background:var(--bg-secondary,#f9fafb)">
+              <th style="${th};text-align:left">Started</th>
+              <th style="${th};text-align:left">By</th>
+              <th style="${th};text-align:center">Created</th>
+              <th style="${th};text-align:center">Skipped Dupes</th>
+              <th style="${th};text-align:center">Errors</th>
+              <th style="${th};text-align:left">Status</th>
+              <th style="padding:8px 12px"></th>
+            </tr></thead>
+            <tbody>
+              ${batches.length ? batches.map(b => `<tr style="border-top:1px solid var(--border,#e5e7eb)">
+                <td style="${th};white-space:nowrap">${fmtDate(b.started_at)}</td>
+                <td style="${th}">${b.employee_name || '—'}</td>
+                <td style="${th};text-align:center">${b.created_count || 0}</td>
+                <td style="${th};text-align:center">${b.skipped_count || 0}</td>
+                <td style="${th};text-align:center;${b.error_count ? 'color:var(--danger);font-weight:600' : ''}">${b.error_count || 0}</td>
+                <td style="${th}"><span class="badge-pill ${b.status==='reversed'?'badge-danger':b.status==='completed'?'badge-success':'badge-warning'}">${b.status}</span></td>
+                <td style="padding:8px 12px;text-align:right;white-space:nowrap"><button class="btn btn-secondary btn-sm" onclick="App.showSupplierImportBatchDetail(${b.id})">Review</button></td>
+              </tr>`).join('') : '<tr><td colspan="7" style="padding:24px;text-align:center;color:var(--text-muted)">No imports logged yet</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">Close</button></div>
+      </div>`);
+  },
+
+  async showSupplierImportBatchDetail(batchId) {
+    const { batch, counts, duplicates, errors, kept } = await this.api('GET', `/supplier-imports/${batchId}`);
+    const fmtDate = d => d ? new Date(d).toLocaleString('en-US', { month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit' }) : '—';
+    const c = counts || {};
+    const box = (title, rowsHtml, danger) => `<div style="padding:12px;border:1px solid var(--border,#e5e7eb);border-radius:6px;margin-bottom:12px">
+      <div style="font-weight:600;font-size:13px;margin-bottom:8px;${danger ? 'color:var(--danger)' : ''}">${title}</div>
+      <div style="max-height:180px;overflow-y:auto;font-size:12px">${rowsHtml}</div>
+    </div>`;
+    const line = html => `<div style="padding:3px 0;border-top:1px solid var(--border,#e5e7eb)">${html}</div>`;
+    this.showModal(`
+      <div class="modal" style="max-width:640px">
+        <div class="modal-header"><span class="modal-title">Vendor Import #${batch.id} Review</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">
+            Started ${fmtDate(batch.started_at)} by ${batch.employee_name || 'unknown'}
+            ${batch.status === 'reversed' ? ` · reversed ${fmtDate(batch.reversed_at)}` : ''}
+          </p>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px">
+            <div class="card" style="padding:10px;text-align:center"><div style="font-size:20px;font-weight:700">${c.created||0}</div><div style="font-size:11px;color:var(--text-muted)">Created</div></div>
+            <div class="card" style="padding:10px;text-align:center"><div style="font-size:20px;font-weight:700">${c.skipped_duplicate||0}</div><div style="font-size:11px;color:var(--text-muted)">Skipped (Duplicate)</div></div>
+            <div class="card" style="padding:10px;text-align:center"><div style="font-size:20px;font-weight:700;${c.error?'color:var(--danger)':''}">${c.error||0}</div><div style="font-size:11px;color:var(--text-muted)">Errors</div></div>
+          </div>
+          ${kept.length ? box('Deactivated instead of deleted (already in use)', kept.map(k => line(`${k.row_label}${k.supplier_number ? ` (${k.supplier_number})` : ''} — used on ${k.reverse_outcome.replace(/^deactivated:/, '')}`)).join('')) : ''}
+          ${duplicates.length ? box('Skipped as likely duplicates of an existing supplier', duplicates.map(d => line(`${d.row_label}${d.row_supplier_number ? ` (${d.row_supplier_number})` : ''} → matched ${d.name ? `<strong>${d.name}</strong> (${d.supplier_number})` : 'a supplier since removed'}`)).join('')) : ''}
+          ${errors.length ? box('Row errors', errors.map(e => line(`${e.row_label} — ${e.error_message}`)).join(''), true) : ''}
+        </div>
+        <div class="modal-footer" style="flex-wrap:wrap;gap:8px">
+          <button class="btn btn-secondary" onclick="App.showSupplierImportHistory()">Back</button>
+          ${batch.status !== 'reversed' && this.can('suppliers_delete') ? `<button class="btn btn-danger" onclick="App.reverseSupplierImportBatch(${batch.id})">Reverse This Import</button>` : ''}
+        </div>
+      </div>`);
+  },
+
+  async reverseSupplierImportBatch(batchId) {
+    if (!confirm('Reverse this import? Every vendor it created will be deleted. Vendors already used on a purchase order, product, or purchase request will be deactivated instead. This cannot be undone.')) return;
+    try {
+      const result = await this.api('POST', `/supplier-imports/${batchId}/reverse`);
+      this.alert(`Reversed: ${result.deleted} vendor(s) deleted${result.deactivated ? `, ${result.deactivated} deactivated (already in use)` : ''}.`, 'success');
+      this.renderSuppliers();
+      this.showSupplierImportBatchDetail(batchId);
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
@@ -15677,9 +16029,10 @@ const App = {
   },
 
   async viewPO(id) {
-    const [po, attachments] = await Promise.all([
+    const [po, attachments, billing] = await Promise.all([
       this.api('GET', `/purchase-orders/${id}`),
       this.api('GET', `/purchase-orders/${id}/attachments`),
+      this.can('payables') ? this.api('GET', `/payables/po/${id}`).catch(() => null) : null,
     ]);
     const statusColor = { draft:'badge-warning', sent:'badge-info', approved:'badge-teal', partial:'badge-purple', received:'badge-success', cancelled:'badge-danger' };
     const docTypeLabel = { purchase_request:'Purchase Request', supplier_quotation:'Supplier Quotation', other:'Other' };
@@ -15734,6 +16087,17 @@ const App = {
             </table>
           </div>
           <div style="text-align:right;margin-top:10px;font-size:15px;font-weight:700">Total: ${this.fmt(po.total)}</div>
+          ${billing ? `<div style="margin-top:20px;border-top:1px solid var(--border);padding-top:14px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+              <span style="font-weight:700;font-size:14px">Accounts Payable</span>
+              ${billing.unbilled > 0 && this.can('payables_bills') ? `<button class="btn btn-sm btn-outline" onclick="App.showBillForm(null, { po_id: ${po.id} })">+ Create Bill (${this.fmt(billing.unbilled)})</button>` : ''}
+            </div>
+            <div style="font-size:13px;margin-bottom:8px">Received: <strong>${this.fmt(billing.received_value)}</strong> &nbsp;·&nbsp; Billed: <strong>${this.fmt(billing.billed)}</strong> &nbsp;·&nbsp; Not yet billed: <strong style="${billing.unbilled > 0 ? 'color:var(--warning,#d97706)' : ''}">${this.fmt(billing.unbilled)}</strong></div>
+            ${billing.bills.map(b => `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;font-size:13px;cursor:pointer" onclick="App.viewBill(${b.id})">
+              <span><strong>${b.bill_number}</strong>${b.vendor_invoice_number ? ` · Inv ${this.escapeAttr(b.vendor_invoice_number)}` : ''} · due ${this._apDate(b.due_date)}</span>
+              <span>${this.fmt(b.amount)} <span class="badge-pill ${this._apStatusBadge[b.display_status] || ''}" style="margin-left:6px">${b.display_status}</span></span>
+            </div>`).join('')}
+          </div>` : ''}
           ${po.status==='approved' ? `<div style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px;font-size:13px">
             <strong>Approved by:</strong> ${po.approved_by_name||'-'} on ${this.fmtDateTime(po.approved_at)}
             ${po.approval_signature ? `<button type="button" class="btn btn-sm btn-outline" style="margin-left:8px;padding:1px 8px;font-size:11px" onclick="App.showRentalSignature('${po.approval_signature.replace(/'/g,"\\'")}','Approver Signature')">View Signature</button>` : ''}
@@ -18455,6 +18819,474 @@ const App = {
     modal.querySelectorAll('[id^="acct-"]').forEach(el => { el.style.display = el.id === tabId ? '' : 'none'; });
   },
 
+  // ─── Accounts Payable ─────────────────────────────────────
+  // What we owe vendors (routes/payables.js): bills — created automatically
+  // when a PO is received, entered from a PO, or entered by hand — payments
+  // applied against them, and aging by vendor.
+  _apStatusBadge: { open: 'badge-info', partial: 'badge-purple', overdue: 'badge-danger', paid: 'badge-success', void: 'badge-secondary' },
+  _apMethods: [['cheque', 'Cheque'], ['bank_transfer', 'Bank Transfer'], ['cash', 'Cash'], ['card', 'Card'], ['other', 'Other']],
+  // Bill/payment dates are plain YYYY-MM-DD; parsed as local midnight so
+  // they don't show as the previous day west of UTC.
+  _apDate(d) { return d ? this.fmtDate(`${String(d).slice(0, 10)}T00:00:00`) : '—'; },
+  _apToday() { return new Date().toLocaleDateString('en-CA'); },
+
+  async renderPayables(tab) {
+    if (tab) this._apTab = tab;
+    else this._apSuppliers = null; // re-fetch the vendor filter list on a fresh visit
+    tab = this._apTab || 'bills';
+    const c = document.getElementById('content');
+    c.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let aging;
+    try { aging = await this.api('GET', `/payables/aging?as_of=${this._apToday()}`); }
+    catch (e) { if (this.section === 'payables') c.innerHTML = `<div class="empty-state"><p>${this.escapeAttr(e.message)}</p></div>`; return; }
+    if (this.section !== 'payables') return;
+    const t = aging.totals;
+    const tile = (label, value, color) => `<div class="card" style="padding:14px 16px"><div style="font-size:12px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.03em">${label}</div><div style="font-size:22px;font-weight:700;margin-top:4px;${color ? `color:${color}` : ''}">${value}</div></div>`;
+    const overdue = t.d1_30 + t.d31_60 + t.d61_90 + t.d90_plus;
+    c.innerHTML = `
+      <div class="section-header">
+        <h2>Accounts Payable</h2>
+        <div style="display:flex;gap:10px">
+          ${this.can('payables_bills') ? `<button class="btn btn-secondary" onclick="App.showBillForm()">+ Enter Bill</button>` : ''}
+          ${this.can('payables_payments') ? `<button class="btn btn-primary" onclick="App.showPayVendorForm()">Pay Vendor</button>` : ''}
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px">
+        ${tile('Total Owed', this.fmt(t.total))}
+        ${tile('Overdue', this.fmt(overdue), overdue > 0 ? 'var(--danger)' : '')}
+        ${tile('Not Yet Due', this.fmt(t.current))}
+        ${tile('Vendors Owed', aging.vendors.length)}
+      </div>
+      <div class="var-tab-bar" style="padding:0;margin-bottom:14px">
+        ${[['bills', 'Bills'], ['payments', 'Payments'], ['aging', 'Aging by Vendor']].map(([k, l]) => `<div class="var-tab ${tab === k ? 'active' : ''}" onclick="App.renderPayables('${k}')">${l}</div>`).join('')}
+      </div>
+      <div id="ap-tab-body"></div>`;
+    if (tab === 'bills') this._renderApBills();
+    else if (tab === 'payments') this._renderApPayments();
+    else this._renderApAging(aging);
+  },
+
+  async _renderApBills() {
+    const el = document.getElementById('ap-tab-body');
+    const f = this._apBillFilter || (this._apBillFilter = { status: 'unpaid', supplier_id: '', search: '' });
+    if (!this._apSuppliers) this._apSuppliers = await this.api('GET', '/suppliers').catch(() => []);
+    el.innerHTML = `
+      <div class="card" style="margin-bottom:12px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+        <select id="ap-f-status" style="width:auto">
+          ${[['unpaid', 'Unpaid'], ['overdue', 'Overdue'], ['paid', 'Paid'], ['void', 'Void'], ['all', 'All']].map(([v, l]) => `<option value="${v}" ${f.status === v ? 'selected' : ''}>${l}</option>`).join('')}
+        </select>
+        <select id="ap-f-vendor" style="width:auto;min-width:200px">
+          <option value="">All vendors</option>
+          ${this._apSuppliers.map(s => `<option value="${s.id}" ${String(f.supplier_id) === String(s.id) ? 'selected' : ''}>${this.escapeAttr(s.name)}</option>`).join('')}
+        </select>
+        <input id="ap-f-search" placeholder="Bill #, vendor invoice #, PO #..." value="${this.escapeAttr(f.search)}" style="flex:1;min-width:200px">
+      </div>
+      <div class="card"><div class="table-wrap"><table>
+        <thead><tr><th>Bill #</th><th>Vendor</th><th>Vendor Inv #</th><th>PO</th><th>Bill Date</th><th>Due</th><th style="text-align:right">Amount</th><th style="text-align:right">Balance</th><th>Status</th><th></th></tr></thead>
+        <tbody id="ap-bills-tbody"><tr><td colspan="10" class="empty-state">Loading...</td></tr></tbody>
+      </table></div></div>`;
+    const load = async () => {
+      const qs = new URLSearchParams({ status: f.status, as_of: this._apToday() });
+      if (f.supplier_id) qs.set('supplier_id', f.supplier_id);
+      if (f.search) qs.set('search', f.search);
+      const bills = await this.api('GET', `/payables/bills?${qs}`);
+      const tbody = document.getElementById('ap-bills-tbody');
+      if (!tbody) return;
+      tbody.innerHTML = bills.length ? bills.map(b => `
+        <tr style="cursor:pointer" onclick="App.viewBill(${b.id})">
+          <td class="fw-600">${b.bill_number}</td>
+          <td>${this.escapeAttr(b.supplier_name)}</td>
+          <td>${b.vendor_invoice_number ? this.escapeAttr(b.vendor_invoice_number) : '<span style="color:var(--text-muted)">—</span>'}</td>
+          <td>${b.po_number || '—'}</td>
+          <td>${this._apDate(b.bill_date)}</td>
+          <td>${this._apDate(b.due_date)}</td>
+          <td style="text-align:right">${this.fmt(b.amount)}</td>
+          <td style="text-align:right" class="fw-600">${this.fmt(b.balance)}</td>
+          <td><span class="badge-pill ${this._apStatusBadge[b.display_status] || ''}">${b.display_status}</span></td>
+          <td onclick="event.stopPropagation()">${b.balance > 0 && this.can('payables_payments') ? `<button class="btn btn-sm btn-primary" onclick="App.showPayVendorForm(${b.supplier_id}, ${b.id})">Pay</button>` : ''}</td>
+        </tr>`).join('') : '<tr><td colspan="10" class="empty-state">No bills found</td></tr>';
+    };
+    document.getElementById('ap-f-status').addEventListener('change', e => { f.status = e.target.value; load(); });
+    document.getElementById('ap-f-vendor').addEventListener('change', e => { f.supplier_id = e.target.value; load(); });
+    let timer;
+    document.getElementById('ap-f-search').addEventListener('input', e => { clearTimeout(timer); timer = setTimeout(() => { f.search = e.target.value.trim(); load(); }, 300); });
+    await load();
+  },
+
+  async _renderApPayments() {
+    const el = document.getElementById('ap-tab-body');
+    const payments = await this.api('GET', '/payables/payments');
+    if (!el.isConnected) return;
+    const methodLabel = Object.fromEntries(this._apMethods);
+    el.innerHTML = `<div class="card"><div class="table-wrap"><table>
+      <thead><tr><th>Payment #</th><th>Date</th><th>Vendor</th><th>Method</th><th>Reference</th><th>Applied To</th><th style="text-align:right">Amount</th><th>Status</th><th></th></tr></thead>
+      <tbody>${payments.length ? payments.map(p => `
+        <tr style="${p.status === 'void' ? 'opacity:.6' : ''}">
+          <td class="fw-600">${p.payment_number}</td>
+          <td>${this._apDate(p.payment_date)}</td>
+          <td>${this.escapeAttr(p.supplier_name)}</td>
+          <td>${methodLabel[p.method] || p.method}</td>
+          <td>${this.escapeAttr(p.reference || '—')}</td>
+          <td style="font-size:12px">${p.bill_numbers || '—'}</td>
+          <td style="text-align:right" class="fw-600">${this.fmt(p.amount)}</td>
+          <td><span class="badge-pill ${p.status === 'void' ? 'badge-secondary' : 'badge-success'}" ${p.void_reason ? `title="${this.escapeAttr(p.void_reason)}"` : ''}>${p.status}</span></td>
+          <td>${p.status !== 'void' && this.can('payables_void') ? `<button class="btn btn-sm btn-outline" onclick="App.voidApPayment(${p.id}, '${p.payment_number}')">Void</button>` : ''}</td>
+        </tr>`).join('') : '<tr><td colspan="9" class="empty-state">No payments recorded yet</td></tr>'}
+      </tbody></table></div></div>`;
+  },
+
+  _renderApAging(aging) {
+    const el = document.getElementById('ap-tab-body');
+    const cell = (v, danger) => `<td style="text-align:right;${v > 0 && danger ? 'color:var(--danger)' : ''}">${v ? this.fmt(v) : '—'}</td>`;
+    const row = (v, isTotal) => `
+      <tr ${isTotal ? 'style="font-weight:700;border-top:2px solid var(--border)"' : `style="cursor:pointer" onclick="App.showVendorStatement(${v.supplier_id})"`}>
+        <td>${isTotal ? 'Total' : `<span class="fw-600">${this.escapeAttr(v.supplier_name)}</span> <span style="color:var(--text-muted);font-size:12px">${v.supplier_number || ''}</span>`}</td>
+        ${cell(v.current)}${cell(v.d1_30, true)}${cell(v.d31_60, true)}${cell(v.d61_90, true)}${cell(v.d90_plus, true)}
+        <td style="text-align:right" class="fw-600">${this.fmt(v.total)}</td>
+      </tr>`;
+    el.innerHTML = `<div class="card"><div class="table-wrap"><table>
+      <thead><tr><th>Vendor</th><th style="text-align:right">Current</th><th style="text-align:right">1–30 Days</th><th style="text-align:right">31–60 Days</th><th style="text-align:right">61–90 Days</th><th style="text-align:right">90+ Days</th><th style="text-align:right">Total Owed</th></tr></thead>
+      <tbody>${aging.vendors.length ? aging.vendors.map(v => row(v)).join('') + row(aging.totals, true) : '<tr><td colspan="7" class="empty-state">Nothing owed to any vendor</td></tr>'}</tbody>
+    </table></div>
+    <p style="font-size:12px;color:var(--text-muted);margin:10px 0 0">Days are counted past each bill's due date, as of today. Click a vendor for their statement.</p></div>`;
+  },
+
+  // Enter or edit a bill. `opts.po_id` preselects a PO (from the PO view),
+  // prefilling its vendor and whatever has been received but not yet billed.
+  async showBillForm(id, opts = {}) {
+    const [bill, suppliers] = await Promise.all([
+      id ? this.api('GET', `/payables/bills/${id}`) : Promise.resolve(null),
+      this.api('GET', '/suppliers'),
+    ]);
+    const b = bill || { bill_date: this._apToday(), supplier_id: opts.supplier_id || '', po_id: opts.po_id || '' };
+    if (opts.po_id && !id) {
+      const po = await this.api('GET', `/purchase-orders/${opts.po_id}`);
+      const billing = await this.api('GET', `/payables/po/${opts.po_id}`);
+      b.supplier_id = po.supplier_id;
+      b.branch_id = po.branch_id;
+      b.amount = billing.unbilled || '';
+      b.description = `Goods received on ${po.po_number}`;
+    }
+    this._apBillSuppliers = suppliers;
+    this.showModal(`
+      <div class="modal" style="max-width:600px">
+        <div class="modal-header"><span class="modal-title">${id ? `Edit Bill ${bill.bill_number}` : 'Enter Bill'}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div class="form-group"><label>Vendor *</label>
+            <select id="bf-ap-vendor" ${bill && bill.paid > 0 ? 'disabled' : ''} onchange="App._apBillVendorChanged()">
+              <option value="">— Select vendor —</option>
+              ${suppliers.map(s => `<option value="${s.id}" ${String(b.supplier_id) === String(s.id) ? 'selected' : ''}>${this.escapeAttr(s.name)} (${s.supplier_number})</option>`).join('')}
+            </select>
+          </div>
+          <div class="input-row">
+            <div class="form-group"><label>Vendor Invoice #</label><input id="bf-ap-invoice" value="${this.escapeAttr(b.vendor_invoice_number)}" placeholder="From the vendor's invoice"></div>
+            <div class="form-group"><label>Purchase Order</label><select id="bf-ap-po" onchange="App._apBillPOChanged()"><option value="">— None —</option></select></div>
+          </div>
+          <div class="input-row-3">
+            <div class="form-group"><label>Bill Date *</label><input id="bf-ap-date" type="date" value="${b.bill_date || ''}" onchange="App._apBillSetDue()"></div>
+            <div class="form-group"><label>Due Date</label><input id="bf-ap-due" type="date" value="${b.due_date || ''}"><div id="bf-ap-terms" style="font-size:11px;color:var(--text-muted);margin-top:3px"></div></div>
+            <div class="form-group"><label>Amount *</label><input id="bf-ap-amount" type="number" step="0.01" min="0" value="${b.amount ?? ''}"></div>
+          </div>
+          <div class="form-group"><label>Description</label><input id="bf-ap-desc" value="${this.escapeAttr(b.description)}" placeholder="e.g. Electricity for September"></div>
+          ${bill && bill.paid > 0 ? `<p style="font-size:12px;color:var(--text-muted)">${this.fmt(bill.paid)} has already been paid on this bill, so the vendor can't be changed and the amount can't go below that.</p>` : ''}
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.saveBill(${id || 'null'})">Save Bill</button>
+        </div>
+      </div>`);
+    this._apBillBranchId = b.branch_id || null;
+    this._apBillLinkedPo = b.po_id ? { id: b.po_id, po_number: b.po_number || 'Linked PO' } : null;
+    await this._apBillVendorChanged({ keepDue: !!b.due_date, poId: b.po_id });
+  },
+
+  // Loads the chosen vendor's POs into the PO picker and shows their terms.
+  async _apBillVendorChanged({ keepDue = false, poId } = {}) {
+    const vendorId = document.getElementById('bf-ap-vendor').value;
+    const poSel = document.getElementById('bf-ap-po');
+    const supplier = (this._apBillSuppliers || []).find(s => String(s.id) === vendorId);
+    document.getElementById('bf-ap-terms').textContent = supplier ? `Terms: ${supplier.payment_terms || 'Net 30'}` : '';
+    poSel.innerHTML = '<option value="">— None —</option>';
+    if (vendorId) {
+      const pos = await this.api('GET', `/purchase-orders?supplier_id=${vendorId}`).catch(() => []);
+      poSel.innerHTML += pos.filter(p => String(p.supplier_id) === vendorId && p.status !== 'cancelled')
+        .map(p => `<option value="${p.id}" ${String(poId) === String(p.id) ? 'selected' : ''}>${p.po_number} · ${p.status} · ${this.fmt(p.total)}</option>`).join('');
+      // The PO list needs the Purchasing permission; keep an existing link
+      // selectable anyway so saving the bill doesn't silently drop it.
+      const linked = this._apBillLinkedPo;
+      if (linked && poId && String(linked.id) === String(poId) && !poSel.querySelector(`option[value="${linked.id}"]`)) {
+        poSel.innerHTML += `<option value="${linked.id}" selected>${linked.po_number}</option>`;
+      }
+    }
+    if (!keepDue) this._apBillSetDue();
+  },
+
+  // Picking a PO fills the amount with what's been received on it but not billed yet.
+  async _apBillPOChanged() {
+    const poId = document.getElementById('bf-ap-po').value;
+    if (!poId) return;
+    const billing = await this.api('GET', `/payables/po/${poId}`).catch(() => null);
+    const amt = document.getElementById('bf-ap-amount');
+    if (billing && !amt.value) amt.value = billing.unbilled || '';
+    if (billing && billing.unbilled === 0) this.alert('Everything received on this PO has already been billed', 'warning');
+  },
+
+  // Due date = bill date + the vendor's terms days (same rule as the server).
+  _apBillSetDue() {
+    const vendorId = document.getElementById('bf-ap-vendor').value;
+    const billDate = document.getElementById('bf-ap-date').value;
+    const supplier = (this._apBillSuppliers || []).find(s => String(s.id) === vendorId);
+    if (!billDate || !supplier) return;
+    const m = String(supplier.payment_terms || 'Net 30').match(/\d+/);
+    const d = new Date(`${billDate}T00:00:00`);
+    d.setDate(d.getDate() + (m ? parseInt(m[0], 10) : 0));
+    document.getElementById('bf-ap-due').value = d.toLocaleDateString('en-CA');
+  },
+
+  async saveBill(id) {
+    const data = {
+      supplier_id: document.getElementById('bf-ap-vendor').value,
+      vendor_invoice_number: document.getElementById('bf-ap-invoice').value.trim(),
+      po_id: document.getElementById('bf-ap-po').value || null,
+      bill_date: document.getElementById('bf-ap-date').value,
+      due_date: document.getElementById('bf-ap-due').value || null,
+      amount: parseFloat(document.getElementById('bf-ap-amount').value),
+      description: document.getElementById('bf-ap-desc').value.trim(),
+      branch_id: this._apBillBranchId,
+    };
+    if (!data.supplier_id) return this.alert('Choose a vendor', 'error');
+    if (!(data.amount > 0)) return this.alert('Enter the bill amount', 'error');
+    try {
+      const saved = id ? await this.api('PUT', `/payables/bills/${id}`, data) : await this.api('POST', '/payables/bills', data);
+      this.alert(id ? 'Bill updated' : `Bill ${saved.bill_number} entered`);
+      this.closeModal();
+      this._afterApChange();
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  // Refreshes whichever screen the A/P action was taken from.
+  _afterApChange() {
+    if (this.section === 'payables') this.renderPayables();
+    else if (this.section === 'suppliers') this.renderSuppliers();
+    if (this._viewingPOId && this.section === 'purchasing') this.viewPO(this._viewingPOId);
+  },
+
+  async viewBill(id) {
+    const b = await this.api('GET', `/payables/bills/${id}`);
+    const methodLabel = Object.fromEntries(this._apMethods);
+    const sourceLabel = { receipt: 'Created automatically when the PO was received', po: 'Entered from a purchase order', manual: 'Entered manually' };
+    this.showModal(`
+      <div class="modal" style="max-width:620px">
+        <div class="modal-header">
+          <span class="modal-title">Bill ${b.bill_number}</span>
+          <div style="display:flex;gap:8px;align-items:center"><span class="badge-pill ${this._apStatusBadge[b.display_status] || ''}">${b.display_status}</span><button class="modal-close">✕</button></div>
+        </div>
+        <div class="modal-body">
+          <div class="two-col" style="font-size:13px;margin-bottom:14px">
+            <div>
+              <strong>Vendor:</strong> ${this.escapeAttr(b.supplier_name)} (${b.supplier_number})<br>
+              <strong>Vendor Invoice #:</strong> ${b.vendor_invoice_number ? this.escapeAttr(b.vendor_invoice_number) : '<span style="color:var(--text-muted)">not entered</span>'}<br>
+              <strong>PO:</strong> ${b.po_id ? (this.can('purchasing') ? `<a href="#" style="color:var(--primary)" onclick="event.preventDefault();App.closeModal();App.showSection('purchasing').then(()=>App.viewPO(${b.po_id}))">${b.po_number}</a>` : b.po_number) : '—'}<br>
+              ${b.branch_name ? `<strong>Branch:</strong> ${this.escapeAttr(b.branch_name)}<br>` : ''}
+            </div>
+            <div>
+              <strong>Bill Date:</strong> ${this._apDate(b.bill_date)}<br>
+              <strong>Due:</strong> ${this._apDate(b.due_date)}<br>
+              <strong>Entered:</strong> ${b.created_by_name || 'System'}<br>
+              <span style="font-size:12px;color:var(--text-muted)">${sourceLabel[b.source] || ''}</span>
+            </div>
+          </div>
+          ${b.description ? `<p style="font-size:13px;margin-bottom:14px">${this.escapeAttr(b.description)}</p>` : ''}
+          ${b.status === 'void' ? `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:10px 12px;margin-bottom:14px;font-size:13px;color:#991b1b"><strong>Void:</strong> ${this.escapeAttr(b.void_reason)}</div>` : ''}
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px">
+            <div class="card" style="padding:10px;text-align:center"><div style="font-size:18px;font-weight:700">${this.fmt(b.amount)}</div><div style="font-size:11px;color:var(--text-muted)">Amount</div></div>
+            <div class="card" style="padding:10px;text-align:center"><div style="font-size:18px;font-weight:700">${this.fmt(b.paid)}</div><div style="font-size:11px;color:var(--text-muted)">Paid</div></div>
+            <div class="card" style="padding:10px;text-align:center"><div style="font-size:18px;font-weight:700;${b.balance > 0 ? 'color:var(--danger)' : ''}">${this.fmt(b.balance)}</div><div style="font-size:11px;color:var(--text-muted)">Balance</div></div>
+          </div>
+          <div style="font-weight:600;font-size:13px;margin-bottom:6px">Payments</div>
+          ${b.payments.length ? `<table style="width:100%;font-size:13px"><tbody>${b.payments.map(p => `
+            <tr style="border-top:1px solid var(--border);${p.status === 'void' ? 'opacity:.55;text-decoration:line-through' : ''}">
+              <td style="padding:6px 0">${p.payment_number}</td><td>${this._apDate(p.payment_date)}</td><td>${methodLabel[p.method] || p.method}${p.reference ? ` · ${this.escapeAttr(p.reference)}` : ''}</td>
+              <td style="text-align:right">${this.fmt(p.applied)}</td>
+            </tr>`).join('')}</tbody></table>` : '<p style="font-size:13px;color:var(--text-muted)">No payments yet.</p>'}
+        </div>
+        <div class="modal-footer" style="flex-wrap:wrap;gap:8px">
+          ${b.status !== 'void' && b.paid === 0 && this.can('payables_void') ? `<button class="btn btn-danger" onclick="App.voidBill(${b.id}, '${b.bill_number}')">Void Bill</button>` : ''}
+          ${b.status !== 'void' && this.can('payables_bills') ? `<button class="btn btn-outline" onclick="App.showBillForm(${b.id})">Edit</button>` : ''}
+          <button class="btn btn-secondary" onclick="App.showVendorStatement(${b.supplier_id})">Vendor Statement</button>
+          ${b.balance > 0 && this.can('payables_payments') ? `<button class="btn btn-primary" onclick="App.showPayVendorForm(${b.supplier_id}, ${b.id})">Pay</button>` : ''}
+          <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+        </div>
+      </div>`);
+  },
+
+  async voidBill(id, number) {
+    const reason = prompt(`Void bill ${number}? Enter a reason:`);
+    if (reason === null) return;
+    if (!reason.trim()) return this.alert('A reason is required', 'error');
+    try {
+      await this.api('POST', `/payables/bills/${id}/void`, { reason: reason.trim() });
+      this.alert(`Bill ${number} voided`);
+      this.closeModal();
+      this._afterApChange();
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  async voidApPayment(id, number) {
+    const reason = prompt(`Void payment ${number}? The bills it paid will show as owing again. Enter a reason:`);
+    if (reason === null) return;
+    if (!reason.trim()) return this.alert('A reason is required', 'error');
+    try {
+      await this.api('POST', `/payables/payments/${id}/void`, { reason: reason.trim() });
+      this.alert(`Payment ${number} voided`);
+      this._afterApChange();
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  // Pay one vendor across any of their unpaid bills. Typing a total spreads
+  // it over the bills oldest-due first; each bill's amount can then be
+  // adjusted, and the total follows.
+  async showPayVendorForm(supplierId, billId) {
+    const suppliers = await this.api('GET', '/suppliers');
+    this.showModal(`
+      <div class="modal" style="max-width:720px">
+        <div class="modal-header"><span class="modal-title">Pay Vendor</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div class="form-group"><label>Vendor *</label>
+            <select id="pv-vendor" onchange="App._pvLoadBills()">
+              <option value="">— Select vendor —</option>
+              ${suppliers.map(s => `<option value="${s.id}" ${String(supplierId) === String(s.id) ? 'selected' : ''}>${this.escapeAttr(s.name)} (${s.supplier_number})</option>`).join('')}
+            </select>
+          </div>
+          <div class="input-row-3">
+            <div class="form-group"><label>Payment Date *</label><input id="pv-date" type="date" value="${this._apToday()}"></div>
+            <div class="form-group"><label>Method *</label><select id="pv-method">${this._apMethods.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></div>
+            <div class="form-group"><label>Cheque / Reference #</label><input id="pv-ref"></div>
+          </div>
+          <div class="input-row">
+            <div class="form-group"><label>Payment Amount *</label><input id="pv-amount" type="number" step="0.01" min="0" oninput="App._pvSpread()"></div>
+            <div class="form-group"><label>Notes</label><input id="pv-notes"></div>
+          </div>
+          <div id="pv-bills" style="margin-top:6px"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.savePayVendor()">Record Payment</button>
+        </div>
+      </div>`);
+    this._pvPreselect = billId || null;
+    if (supplierId) await this._pvLoadBills();
+  },
+
+  async _pvLoadBills() {
+    const vendorId = document.getElementById('pv-vendor').value;
+    const el = document.getElementById('pv-bills');
+    this._pvBills = [];
+    if (!vendorId) { el.innerHTML = ''; return; }
+    this._pvBills = await this.api('GET', `/payables/bills?supplier_id=${vendorId}&status=unpaid&as_of=${this._apToday()}`);
+    if (!this._pvBills.length) { el.innerHTML = '<p style="font-size:13px;color:var(--text-muted)">This vendor has no unpaid bills.</p>'; return; }
+    el.innerHTML = `
+      <div style="font-weight:600;font-size:13px;margin-bottom:6px">Apply to bills</div>
+      <table style="width:100%;font-size:13px">
+        <thead><tr style="color:var(--text-muted);font-size:12px"><th style="text-align:left">Bill #</th><th style="text-align:left">Vendor Inv #</th><th style="text-align:left">Due</th><th style="text-align:right">Balance</th><th style="text-align:right;width:140px">Pay</th></tr></thead>
+        <tbody>${this._pvBills.map(b => `
+          <tr style="border-top:1px solid var(--border)">
+            <td style="padding:6px 0">${b.bill_number}</td>
+            <td>${this.escapeAttr(b.vendor_invoice_number || '—')}</td>
+            <td style="${b.display_status === 'overdue' ? 'color:var(--danger)' : ''}">${this._apDate(b.due_date)}</td>
+            <td style="text-align:right">${this.fmt(b.balance)}</td>
+            <td style="text-align:right"><input type="number" step="0.01" min="0" max="${b.balance}" data-pv-bill="${b.id}" style="width:120px;text-align:right" oninput="App._pvSum()"></td>
+          </tr>`).join('')}</tbody>
+      </table>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;font-size:13px">
+        <button type="button" class="btn btn-sm btn-outline" onclick="App._pvPayAll()">Pay all (${this.fmt(this._pvBills.reduce((s, b) => s + b.balance, 0))})</button>
+        <span>Applied: <strong id="pv-applied">${this.fmt(0)}</strong></span>
+      </div>`;
+    const pre = this._pvBills.find(b => b.id === this._pvPreselect);
+    if (pre) {
+      document.querySelector(`[data-pv-bill="${pre.id}"]`).value = pre.balance.toFixed(2);
+      this._pvSum();
+    }
+    this._pvPreselect = null;
+  },
+
+  _pvSpread() {
+    let left = Math.round((parseFloat(document.getElementById('pv-amount').value) || 0) * 100);
+    for (const b of this._pvBills || []) {
+      const take = Math.min(left, Math.round(b.balance * 100));
+      document.querySelector(`[data-pv-bill="${b.id}"]`).value = take > 0 ? (take / 100).toFixed(2) : '';
+      left -= Math.max(take, 0);
+    }
+    this._pvSum(false);
+  },
+
+  _pvPayAll() {
+    for (const b of this._pvBills || []) document.querySelector(`[data-pv-bill="${b.id}"]`).value = b.balance.toFixed(2);
+    this._pvSum();
+  },
+
+  _pvSum(updateAmount = true) {
+    const cents = [...document.querySelectorAll('[data-pv-bill]')].reduce((s, i) => s + Math.round((parseFloat(i.value) || 0) * 100), 0);
+    document.getElementById('pv-applied').textContent = this.fmt(cents / 100);
+    if (updateAmount) document.getElementById('pv-amount').value = cents ? (cents / 100).toFixed(2) : '';
+  },
+
+  async savePayVendor() {
+    const allocations = [...document.querySelectorAll('[data-pv-bill]')]
+      .map(i => ({ bill_id: Number(i.dataset.pvBill), amount: parseFloat(i.value) || 0 }))
+      .filter(a => a.amount > 0);
+    const data = {
+      supplier_id: document.getElementById('pv-vendor').value,
+      payment_date: document.getElementById('pv-date').value,
+      method: document.getElementById('pv-method').value,
+      reference: document.getElementById('pv-ref').value.trim(),
+      notes: document.getElementById('pv-notes').value.trim(),
+      amount: parseFloat(document.getElementById('pv-amount').value) || 0,
+      allocations,
+    };
+    if (!data.supplier_id) return this.alert('Choose a vendor', 'error');
+    if (!allocations.length) return this.alert('Enter how much to pay on at least one bill', 'error');
+    try {
+      const r = await this.api('POST', '/payables/payments', data);
+      this.alert(`Payment ${r.payment_number} recorded`);
+      this.closeModal();
+      this._afterApChange();
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  async showVendorStatement(supplierId) {
+    const st = await this.api('GET', `/payables/vendors/${supplierId}/statement`);
+    this.showModal(`
+      <div class="modal" style="max-width:760px">
+        <div class="modal-header"><span class="modal-title">Statement — ${this.escapeAttr(st.supplier.name)}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body" style="padding:0">
+          <table style="width:100%;border-collapse:collapse;font-size:13px">
+            <thead><tr style="background:var(--bg-secondary,#f9fafb)">
+              <th style="padding:8px 12px;text-align:left">Date</th><th style="padding:8px 12px;text-align:left">Document</th><th style="padding:8px 12px;text-align:left">Details</th>
+              <th style="padding:8px 12px;text-align:right">Billed</th><th style="padding:8px 12px;text-align:right">Paid</th><th style="padding:8px 12px;text-align:right">Balance</th>
+            </tr></thead>
+            <tbody>${st.lines.length ? st.lines.map(l => `
+              <tr style="border-top:1px solid var(--border);${l.void ? 'opacity:.5' : ''}${l.type === 'bill' ? ';cursor:pointer' : ''}" ${l.type === 'bill' ? `onclick="App.viewBill(${l.id})"` : ''}>
+                <td style="padding:7px 12px;white-space:nowrap">${this._apDate(l.date)}</td>
+                <td style="padding:7px 12px">${l.number}${l.void ? ' <span class="badge-pill badge-secondary" style="font-size:10px">void</span>' : ''}</td>
+                <td style="padding:7px 12px">${this.escapeAttr(l.reference || '')}</td>
+                <td style="padding:7px 12px;text-align:right">${l.charge ? this.fmt(l.charge) : ''}</td>
+                <td style="padding:7px 12px;text-align:right">${l.payment ? this.fmt(l.payment) : ''}</td>
+                <td style="padding:7px 12px;text-align:right" class="fw-600">${this.fmt(l.balance)}</td>
+              </tr>`).join('') : '<tr><td colspan="6" style="padding:24px;text-align:center;color:var(--text-muted)">No bills or payments for this vendor yet</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+        <div class="modal-footer" style="justify-content:space-between">
+          <span style="font-size:15px">Balance owed: <strong>${this.fmt(st.balance)}</strong></span>
+          <div style="display:flex;gap:8px">
+            ${st.balance > 0 && this.can('payables_payments') ? `<button class="btn btn-primary" onclick="App.showPayVendorForm(${supplierId})">Pay Vendor</button>` : ''}
+            <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+          </div>
+        </div>
+      </div>`);
+  },
+
   // ─── Branches ─────────────────────────────────────────────
   async renderBranches() {
     const c = document.getElementById('content');
@@ -19188,6 +20020,11 @@ const App = {
       { key: 'accounts_create', label: 'Create Invoices' },
       { key: 'accounts_payments', label: 'Record Payments' },
       { key: 'accounts_writeoff', label: 'Write Off Debt' },
+    ]},
+    { key: 'payables', label: 'Accounts Payable', subs: [
+      { key: 'payables_bills', label: 'Enter & Edit Bills' },
+      { key: 'payables_payments', label: 'Pay Vendors' },
+      { key: 'payables_void', label: 'Void Bills & Payments' },
     ]},
     { key: 'crm', label: 'CRM & Sales', subs: [
       { key: 'crm_leads', label: 'Manage Leads' },

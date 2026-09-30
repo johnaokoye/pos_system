@@ -66,12 +66,13 @@ New columns must be appended to the `migrations` array in `database.js:_init()` 
 - Warehouse: `warehouse_zones` → `storage_bins` → `product_bin_assignments`; `cycle_count_sessions` / `cycle_count_items` for inventory counts
 - Cash drawers: `cash_drawers` → `drawer_sessions` → `drawer_reconciliations` + `reconciliation_note_counts`; `currency_denominations` provides the note/coin values used during reconciliation
 - Accounts (AR): `customers` with `credit_enabled=1` carry `account_balance` / `credit_limit`; credit sales use `payment_method='credit'`; payments recorded in `account_payments`; `runCreditCheck` auto-blocks customers who exceed payment terms
+- Accounts payable: `ap_bills` (vendor bills; `status` is only `open`/`void` — paid/partial/overdue are derived from `ap_payment_allocations` of non-void `ap_payments`), routes in `routes/payables.js`, shared helpers in `lib/payables.js`. `PATCH /purchase-orders/:id/receive` creates a bill per receipt (inside its transaction) when the vendor has `sync_ap` on and `voucher_default` isn't "Not vouchered"
 - Inter-branch stock: `branch_transfers` records movement between branches; `transfers` permission gates the UI
 
 ### Permission keys
 The `security_groups.permissions` JSON blob uses these keys (all boolean). Module-level keys grant full access; sub-keys gate specific actions within a module — `App.can()` checks both directions.
 
-**Module keys:** `dashboard`, `pos`, `drawers`, `inventory`, `customers`, `transactions`, `reports`, `employees`, `suppliers`, `services`, `purchase_requests`, `purchasing`, `transfers`, `quotations`, `accounts`, `crm`, `commissions`, `warehouse`, `shipping`, `cycle-counts`, `branches`, `security`, `user-sessions`, `assessment`, `promotions`, `settings`
+**Module keys:** `dashboard`, `pos`, `drawers`, `inventory`, `customers`, `transactions`, `reports`, `employees`, `suppliers`, `services`, `purchase_requests`, `purchasing`, `transfers`, `quotations`, `accounts`, `payables`, `crm`, `commissions`, `warehouse`, `shipping`, `cycle-counts`, `branches`, `security`, `user-sessions`, `assessment`, `promotions`, `settings`
 
 **Sub-permission keys** (stored and checked via `App.can()` exactly as shown):
 - `pos` → `pos_discounts`, `pos_discount_override`, `pos_refunds`, `pos_void_items`, `pos_hold`, `pos_customer_lookup`, `pos_item_lookup`, `pos_tax_exempt`, `pos_reprint_ticket`, `pos_pay_on_account`, `pos_change_quantity`, `pos_cancel_ticket`, `pos_payment`
@@ -87,6 +88,7 @@ The `security_groups.permissions` JSON blob uses these keys (all boolean). Modul
 - `transfers` → `transfers_create`, `transfers_approve`, `transfers_pickup`, `transfers_dropoff`
 - `quotations` → `quotations_create`, `quotations_approve`, `quotations_convert`
 - `accounts` → `accounts_create`, `accounts_payments`, `accounts_writeoff`
+- `payables` → `payables_bills`, `payables_payments`, `payables_void`
 - `crm` → `crm_leads`, `crm_opportunities`
 - `commissions` → `commissions_plans`, `commissions_approve`, `commissions_pay`
 - `warehouse` → `warehouse_bins`, `warehouse_assign`
