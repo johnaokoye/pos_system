@@ -576,6 +576,14 @@
       <p class="module-intro">Things you sell that aren't physical stock — labor, installation, warranties, etc.</p>
       <p>These are ordinary products under the hood (same catalog, same <code>/products</code> data), just flagged as a service or non-inventory item, which turns off stock tracking for them entirely. They won't ever show up in low-stock alerts or stock reports, and selling one never touches a stock number.</p>
       <p>One service, <strong>SN</strong>, is created automatically: it exists only to record a serial number on a ticket or quote (see <a href="#pos">Point of Sale</a> → Recording serial numbers). Its SKU must stay <code>SN</code> for the serial prompt to appear; its name, price or active status can be changed like any other item.</p>
+      <h3>Moving services between servers (Export / Import)</h3>
+      <p><strong>Export CSV</strong> on the Services screen downloads every service (active and inactive) with its SKU, name, description, category, unit, price, cost, tax rate and active flag. That same file can be loaded with <strong>Import</strong> on another server — e.g. to move services set up on the test server into production once they're ready. Excel files work too.</p>
+      <ul>
+        <li>Rows are matched by <strong>SKU</strong>: an existing service with that SKU is updated, anything else is created as a new service.</li>
+        <li>Categories are matched by name; a category that doesn't exist on the receiving server yet is created automatically.</li>
+        <li>A row whose SKU already belongs to a regular inventory or rental item is skipped and listed as an error — it's never converted into a service.</li>
+        <li>A blank tax rate falls back to the store's default; a blank Active column means active.</li>
+      </ul>
     </section>
 
     <section class="module" id="purchasing">

@@ -5128,7 +5128,11 @@ const App = {
     c.innerHTML = `
       <div class="section-header">
         <h2>Services &amp; Non-Inventory Items</h2>
-        <button class="btn btn-primary" onclick="App.showServiceForm()">+ Add Service</button>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <a class="btn btn-secondary btn-sm" href="/api/products/export/services" download title="Export all services to CSV — the file can be imported straight into another server">&#8659; Export CSV</a>
+          <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import services from CSV or Excel — updates matching SKUs, creates the rest">&#8657; Import<input type="file" accept=".csv,.tsv,.txt,.xls,.xlsx" style="display:none" onchange="App.importServicesCsv(this)"></label>
+          <button class="btn btn-primary" onclick="App.showServiceForm()">+ Add Service</button>
+        </div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
         <div class="search-bar" style="flex:0 0 auto">
@@ -5254,6 +5258,26 @@ const App = {
       this.alert(id ? 'Service updated' : 'Service created');
       this.renderServices();
     } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async importServicesCsv(inputEl) {
+    const file = inputEl.files[0];
+    inputEl.value = '';
+    if (!file) return;
+    let parsed;
+    try { parsed = await this._readImportFile(file); } catch (e) { this.alert(e.message, 'error'); return; }
+    const { headers, rows: rawRows } = parsed;
+    if (!rawRows.length) { this.alert('No data rows found in CSV', 'error'); return; }
+
+    const mapping = await this._showFieldMappingModal({ title: 'Map Import Columns', headers, fields: this._serviceImportFields });
+    if (!mapping) return;
+    const rows = this._remapCsvRows(rawRows, mapping);
+
+    await this._runBatchedCsvImport({
+      rows, endpoint: '/products/import/services', title: 'Importing Services',
+      summarize: t => `${t.created||0} created, ${t.updated||0} updated${t.categories_created ? `, ${t.categories_created} new categor${t.categories_created === 1 ? 'y' : 'ies'} added` : ''}`,
+      onFinish: () => this.renderServices(),
+    });
   },
 
   async deleteService(id) {
@@ -10558,6 +10582,17 @@ const App = {
     { key: 'min_stock',      label: 'Min Stock' },
     { key: 'active',         label: 'Active (1/0)' },
     { key: 'supplier_name',  label: 'Supplier' },
+  ],
+  _serviceImportFields: [
+    { key: 'sku',           label: 'SKU',          required: true },
+    { key: 'name',          label: 'Name',         required: true },
+    { key: 'description',   label: 'Description' },
+    { key: 'category_name', label: 'Category' },
+    { key: 'unit',          label: 'Unit / Billing Type' },
+    { key: 'price',         label: 'Price' },
+    { key: 'cost',          label: 'Cost' },
+    { key: 'tax_rate',      label: 'Tax Rate (%)' },
+    { key: 'active',        label: 'Active (1/0)' },
   ],
   _rentalImportFields: [
     { key: 'sku',                    label: 'SKU',        required: true },

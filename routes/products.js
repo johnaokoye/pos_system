@@ -695,6 +695,92 @@ router.post('/import/rentals', requirePermission('rentals_manage_items'), async 
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ─── Services export/import ────────────────────────────────────────────────
+// Built for moving services set up on a test server into production: the
+// export file round-trips straight back into the import. Upserts by SKU.
+// Categories are matched by name and created if missing, so the receiving
+// server doesn't need its category list set up first. A SKU that already
+// belongs to a non-service product is rejected rather than converted.
+const SERVICE_CSV_HEADERS = ['sku','name','description','category_name','unit','price','cost','tax_rate','active'];
+
+router.get('/export/services', requirePermission('services'), async (req, res) => {
+  try {
+    const { rows: services } = await db.execute({ sql: `SELECT p.sku, p.name, p.description, c.name as category_name, p.unit, p.price, p.cost, p.tax_rate, p.active
+      FROM products p LEFT JOIN categories c ON p.category_id = c.id
+      WHERE p.is_service = 1 ORDER BY p.name`, args: [] });
+
+    const escape = v => {
+      if (v == null) return '';
+      const s = String(v);
+      return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+
+    const csvRows = [SERVICE_CSV_HEADERS.join(',')];
+    for (const s of services) csvRows.push(SERVICE_CSV_HEADERS.map(h => escape(s[h])).join(','));
+
+    const timestamp = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="services_export_${timestamp}.csv"`);
+    res.send(csvRows.join('\r\n'));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/import/services', requirePermission('services'), async (req, res) => {
+  try {
+    const { rows } = req.body;
+    if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ error: 'No rows provided' });
+
+    const { rows: catRows } = await db.execute({ sql: 'SELECT id, name FROM categories', args: [] });
+    const catMap = Object.fromEntries(catRows.map(c => [c.name.trim().toLowerCase(), c.id]));
+    const defaultTaxRate = parseFloat(await getSetting('tax_rate', 8.5)) || 8.5;
+
+    let created = 0, updated = 0, categories_created = 0;
+    const errors = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const rowNum = i + 2;
+      const sku = (row.sku || '').trim();
+      const name = (row.name || '').trim();
+      if (!sku || !name) { errors.push(`Row ${rowNum}: SKU and name are required`); continue; }
+
+      try {
+        let category_id = null;
+        const catName = (row.category_name || '').trim();
+        if (catName) {
+          category_id = catMap[catName.toLowerCase()];
+          if (category_id == null) {
+            const result = await db.execute({ sql: 'INSERT INTO categories (name) VALUES (?)', args: [catName] });
+            category_id = Number(result.lastInsertRowid);
+            catMap[catName.toLowerCase()] = category_id;
+            categories_created++;
+          }
+        }
+
+        const taxRaw = parseNum(row.tax_rate);
+        const vals = [
+          name, (row.description || '').trim() || null, category_id, (row.unit || '').trim() || null,
+          parseNum(row.price) || 0, parseNum(row.cost) || 0,
+          row.tax_rate === '' || row.tax_rate == null || isNaN(taxRaw) ? defaultTaxRate : taxRaw,
+          row.active === '' || row.active == null ? 1 : (parseNum(row.active) ? 1 : 0),
+        ];
+
+        const { rows: [existing] } = await db.execute({ sql: 'SELECT id, is_service FROM products WHERE sku = ?', args: [sku] });
+        if (existing && !existing.is_service) { errors.push(`Row ${rowNum} (${sku}): SKU already belongs to a non-service product`); continue; }
+        if (existing) {
+          await db.execute({ sql: 'UPDATE products SET name=?,description=?,category_id=?,unit=?,price=?,cost=?,tax_rate=?,active=? WHERE id=?', args: [...vals, existing.id] });
+          updated++;
+        } else {
+          await db.execute({ sql: 'INSERT INTO products (sku,name,description,category_id,unit,price,cost,tax_rate,active,is_service,stock_qty,min_stock) VALUES (?,?,?,?,?,?,?,?,?,1,0,0)', args: [sku, ...vals] });
+          created++;
+        }
+      } catch (e) { errors.push(`Row ${rowNum} (${sku}): ${e.message}`); }
+    }
+
+    res.json({ created, updated, categories_created, errors, total: rows.length });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET per-product stock movement history (sales, transfers, adjustments)
 router.get('/:id/movements', requirePermission('inventory'), async (req, res) => {
   try {
