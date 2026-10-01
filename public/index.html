@@ -1735,8 +1735,11 @@ const App = {
   // Collects 2+ tender rows (method + amount, plus a ref/approval code for
   // methods that need one) that together must add up to the total. Charge
   // Account is intentionally excluded — see routes/transactions.js.
-  showSplitTenderModal(total) {
+  // `exclude` drops further methods from the picker (e.g. rental checkout
+  // can't take Gift Card for a deposit — see routes/rentals.js).
+  showSplitTenderModal(total, { exclude = [] } = {}) {
     this._stmTotal = total;
+    this._stmExclude = exclude;
     return new Promise(resolve => {
       document.querySelectorAll('.modal-overlay').forEach(el => el.remove());
       const overlay = document.createElement('div');
@@ -1749,7 +1752,7 @@ const App = {
               <div style="font-size:12px;color:var(--text-muted);margin-bottom:2px;text-transform:uppercase;letter-spacing:.5px">Total Due</div>
               <div style="font-size:26px;font-weight:700">${this.fmt(total)}</div>
             </div>
-            <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px">Add two or more tenders that together cover the full total. Charge Account isn't available as a split leg.</p>
+            <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px">Add two or more tenders that together cover the full total. Charge Account${exclude.includes('gift_card') ? ' and Gift Card aren\'t' : ' isn\'t'} available as a split leg.</p>
             <div id="stm-rows"></div>
             <button type="button" class="btn btn-secondary btn-sm" onclick="App._addStmRow()" style="margin-top:4px">+ Add Tender</button>
             <div id="stm-summary" style="text-align:right;font-size:13px;font-weight:600;margin-top:12px"></div>
@@ -1789,7 +1792,8 @@ const App = {
   },
 
   _stmMethodOptionsHtml(selected) {
-    const methods = [['cash', 'Cash'], ['credit_card', 'Credit Card'], ['debit_card', 'Debit Card'], ['check', 'Check'], ['gift_card', 'Gift Card'], ['direct_deposit', 'Direct Deposit']];
+    const methods = [['cash', 'Cash'], ['credit_card', 'Credit Card'], ['debit_card', 'Debit Card'], ['check', 'Check'], ['gift_card', 'Gift Card'], ['direct_deposit', 'Direct Deposit']]
+      .filter(([v]) => !(this._stmExclude || []).includes(v));
     return `<option value="">Method…</option>` + methods.map(([v, l]) => `<option value="${v}" ${v === selected ? 'selected' : ''}>${l}</option>`).join('');
   },
 
@@ -7496,6 +7500,7 @@ const App = {
               <option value="check">Check</option>
               <option value="direct_deposit">Direct Deposit</option>
               <option value="credit">Charge Account (Credit)</option>
+              <option value="split">Split Tender (Multiple Methods)</option>
             </select>
           </div>
           <div class="form-group" id="rf-tendered-group" style="display:none">
@@ -7589,6 +7594,15 @@ const App = {
     // checkout posts, per feeFor in routes/rentals.js) may drift by a few
     // seconds' worth of rental fee, so this is a UX guard, not authoritative.
     let amount_tendered = null;
+    // Split tender replaces this modal with the shared split modal (it clears
+    // any open overlay), so cancelling there reopens this checkout.
+    let tenders = null, splitForeignCash = null;
+    if (payment_method === 'split') {
+      const split = await this.showSplitTenderModal(this._rfEstimatedTotal, { exclude: ['gift_card'] });
+      if (!split) { this.showFinalizeRentalModal(id); return; }
+      tenders = split.tenders;
+      splitForeignCash = split.foreignCash;
+    }
     if (payment_method === 'cash' || payment_method === 'check') {
       const tenderedRaw = document.getElementById('rf-tendered')?.value;
       amount_tendered = tenderedRaw ? parseFloat(tenderedRaw) : this._rfEstimatedTotal;
@@ -7603,9 +7617,11 @@ const App = {
     // and/or a colliding transaction_number) and flashes a raw error toast
     // even though the rental already went through.
     const btn = document.getElementById('rf-complete-btn');
-    if (btn.disabled) return;
-    btn.disabled = true;
-    btn.textContent = 'Processing…';
+    if (btn) {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      btn.textContent = 'Processing…';
+    }
     try {
       const agreement = await this.api('PATCH', `/rentals/agreements/${id}/checkout`, {
         payment_method,
@@ -7613,6 +7629,7 @@ const App = {
         drawer_session_id: this.currentDrawerSession?.id || null,
         customer_po_number,
         amount_tendered,
+        tenders,
       });
       this.closeModal();
       this.alert(`Rental ${agreement.agreement_number} checked out`);
@@ -7625,12 +7642,16 @@ const App = {
       // instead of the cart.
       if (agreement.checkout_transaction_id) {
         const tx = await this.api('GET', `/transactions/${agreement.checkout_transaction_id}`);
-        this.showReceipt(tx, tx.change_amount || 0);
+        this.showReceipt(tx, tx.change_amount || 0, null, splitForeignCash);
       }
     } catch(e) {
       this.alert(e.message, 'error');
-      btn.disabled = false;
-      btn.textContent = 'Complete Checkout';
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = 'Complete Checkout';
+      } else if (tenders) {
+        this.showFinalizeRentalModal(id);
+      }
     }
   },
 
@@ -7975,6 +7996,7 @@ const App = {
                 <option value="check">Check</option>
                 <option value="gift_card">Gift Card</option>
                 <option value="direct_deposit">Direct Deposit</option>
+                <option value="split">Split Tender (Multiple Methods)</option>
               </select>
             </div>
             <div class="form-group" id="rb-tendered-group" style="display:none">
@@ -7985,7 +8007,7 @@ const App = {
           </div>
           <div class="modal-footer">
             <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-            <button class="btn btn-primary" onclick="App.confirmRentalBalancePayment(${id})">Confirm Payment</button>
+            <button class="btn btn-primary" onclick="App.confirmRentalBalancePayment(${id}, ${balance})">Confirm Payment</button>
           </div>
         </div>`);
       this._toggleRentalBalanceTenderFields();
@@ -8018,19 +8040,31 @@ const App = {
     }
   },
 
-  async confirmRentalBalancePayment(id) {
+  async confirmRentalBalancePayment(id, balance) {
     const payment_method = document.getElementById('rb-paymethod')?.value;
     const amount_tendered = document.getElementById('rb-tendered')?.value || undefined;
+    // Same pattern as finalizeRentalCheckout: the split modal replaces this
+    // one, so cancelling (or a failed post) reopens the balance modal.
+    let tenders = null, splitForeignCash = null;
+    if (payment_method === 'split') {
+      const split = await this.showSplitTenderModal(balance);
+      if (!split) { this.showRentalBalanceDueModal(id); return; }
+      tenders = split.tenders;
+      splitForeignCash = split.foreignCash;
+    }
     try {
       const settled = await this.api('PATCH', `/rentals/agreements/${id}/collect-balance`, {
-        payment_method, amount_tendered, employee_id: this.currentUser.id, drawer_session_id: this.currentDrawerSession?.id || null,
+        payment_method, amount_tendered, tenders, employee_id: this.currentUser.id, drawer_session_id: this.currentDrawerSession?.id || null,
       });
       this.closeModal();
       const tx = await this.api('GET', `/transactions/${settled.id}`);
-      this.showReceipt(tx, tx.change_amount || 0);
+      this.showReceipt(tx, tx.change_amount || 0, null, splitForeignCash);
       this.updateHoldBadge();
       if (this.section === 'rentals') this.renderRentals();
-    } catch(e) { this.alert(e.message, 'error'); }
+    } catch(e) {
+      this.alert(e.message, 'error');
+      if (tenders) this.showRentalBalanceDueModal(id);
+    }
   },
 
   // ─── Work Orders (service/repair tickets) ──────────────────────────────────

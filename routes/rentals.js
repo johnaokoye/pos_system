@@ -368,15 +368,27 @@ router.post('/agreements', requirePermission('rentals_checkout'), async (req, re
 // held orders.
 router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout', 'pos'), async (req, res) => {
   try {
-    const { payment_method, amount_tendered, drawer_session_id, employee_id, customer_po_number } = req.body;
+    const { payment_method, amount_tendered, drawer_session_id, employee_id, customer_po_number, tenders } = req.body;
     const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
     if (!agreement) return res.status(404).json({ error: 'Not found' });
     if (agreement.status !== 'pending') return res.status(400).json({ error: `This agreement is ${agreement.status}, not awaiting checkout` });
 
+    // Split tender: same {method, amount, approval_code} legs as POST
+    // /transactions. Charge Account is excluded for the same reason as there
+    // (its AR side effects assume the whole total), and Gift Card for the
+    // deposit reason below.
+    let tenderLegs = null;
+    if (Array.isArray(tenders) && tenders.length) {
+      if (tenders.some(leg => leg.method === 'credit')) return res.status(400).json({ error: 'Charge Account cannot be combined with other payment methods in a split payment' });
+      if (tenders.some(leg => leg.method === 'gift_card')) return res.status(400).json({ error: 'Gift Card cannot be used to pay a rental deposit — choose another payment method' });
+      if (tenders.some(leg => !leg.method || !(parseFloat(leg.amount) > 0))) return res.status(400).json({ error: 'Each split tender needs a payment method and an amount' });
+      tenderLegs = tenders.map(leg => ({ payment_method: leg.method, amount: parseFloat(parseFloat(leg.amount).toFixed(2)), approval_code: leg.approval_code || null }));
+    }
+
     const { rows: existingItems } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
     if (!existingItems.length) return res.status(400).json({ error: 'This agreement has no items' });
 
-    const method = payment_method || 'cash';
+    const method = tenderLegs ? (tenderLegs.length > 1 ? 'split' : tenderLegs[0].payment_method) : (payment_method || 'cash');
     // Gift cards aren't accepted for a rental deposit — the store's refund
     // policy (see lib/rentals.js's requiredDepositReturnMethod) has no rule
     // for reversing a gift card charge, so this is blocked at the source
@@ -449,8 +461,18 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
       return res.status(400).json({ error: `This rental (${total.toFixed(2)}) would exceed the customer's credit limit. Available credit: ${available.toFixed(2)}` });
     }
 
-    const tendered = isCredit ? 0 : parseFloat(amount_tendered || total);
-    const changeAmt = isCredit ? 0 : Math.max(0, parseFloat((tendered - total).toFixed(2)));
+    // The total is recomputed here at the checkout instant, so it can drift
+    // slightly from the estimate the cashier split against (e.g. crossing a
+    // billed-hour boundary while the modal was open) — reject rather than
+    // silently re-weighting a card leg's amount.
+    if (tenderLegs) {
+      const legSum = parseFloat(tenderLegs.reduce((sum, leg) => sum + leg.amount, 0).toFixed(2));
+      if (Math.abs(legSum - total) > 0.01) return res.status(400).json({ error: `Split tender amounts (${legSum.toFixed(2)}) don't match the rental total (${total.toFixed(2)}) — the total may have changed since checkout was opened. Please re-enter the split.` });
+    }
+
+    const tendered = isCredit ? 0 : tenderLegs ? total : parseFloat(amount_tendered || total);
+    const changeAmt = isCredit || tenderLegs ? 0 : Math.max(0, parseFloat((tendered - total).toFixed(2)));
+    const approvalCode = tenderLegs && tenderLegs.length === 1 ? tenderLegs[0].approval_code : null;
 
     const transaction_number = await nextNumber(db, 'transactions', 'transaction_number', 'TXN-', 6);
     const finalizeEmployeeId = employee_id || agreement.employee_id;
@@ -458,8 +480,16 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
     const tx = await db.transaction('write');
     let committed = false;
     try {
-      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, agreement.customer_id, finalizeEmployeeId || null, agreement.branch_id, drawer_session_id || null, rentalSubtotal + depositTotal + serviceFeesTotal, taxAmount, discountAmount, total, method, tendered, changeAmt, `Rental checkout ${agreement.agreement_number}`, 'pos'] });
+      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,total,payment_method,amount_tendered,change_amount,notes,source,approval_code) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, agreement.customer_id, finalizeEmployeeId || null, agreement.branch_id, drawer_session_id || null, rentalSubtotal + depositTotal + serviceFeesTotal, taxAmount, discountAmount, total, method, tendered, changeAmt, `Rental checkout ${agreement.agreement_number}`, 'pos', approvalCode] });
       const checkoutTxId = Number(txResult.lastInsertRowid);
+      // Per-leg rows are what drawer reconciliation and the tender reports
+      // sum for a split sale (single-method checkouts fall back to
+      // transactions.payment_method there, as before).
+      if (tenderLegs) {
+        for (const leg of tenderLegs) {
+          await tx.execute({ sql: 'INSERT INTO transaction_payments (transaction_id, payment_method, amount, approval_code) VALUES (?,?,?,?)', args: [checkoutTxId, leg.payment_method, leg.amount, leg.approval_code] });
+        }
+      }
 
       for (const item of existingItems) {
         await tx.execute({ sql: 'UPDATE rental_agreement_items SET rental_fee = ?, deposit_amount = ? WHERE id = ?', args: [item.rentalFee, item.depositAmount, item.id] });
@@ -1312,7 +1342,7 @@ router.patch('/agreements/:id/collect-balance', (req, res, next) => {
   return res.status(403).json({ error: 'Missing permission: pos or rentals' });
 }, async (req, res) => {
   try {
-    const { payment_method, amount_tendered, employee_id, drawer_session_id, branch_id } = req.body;
+    const { payment_method, amount_tendered, employee_id, drawer_session_id, branch_id, tenders } = req.body;
     const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
     if (!agreement) return res.status(404).json({ error: 'Not found' });
     if (agreement.status !== 'returned') return res.status(400).json({ error: `This rental is ${agreement.status}, not awaiting balance payment` });
@@ -1321,15 +1351,32 @@ router.patch('/agreements/:id/collect-balance', (req, res, next) => {
     const balance = parseFloat((agreement.damage_fee_total + agreement.duration_adjustment_total - agreement.deposit_total + agreement.tax_adjustment_total).toFixed(2));
     if (balance <= 0) return res.status(400).json({ error: 'No balance is due on this rental' });
 
+    // Split tender — same leg shape and Charge Account exclusion as checkout
+    // above. The balance is fixed at return time, so no drift to allow for.
+    let tenderLegs = null;
+    if (Array.isArray(tenders) && tenders.length) {
+      if (tenders.some(leg => leg.method === 'credit')) return res.status(400).json({ error: 'Charge Account cannot be combined with other payment methods in a split payment' });
+      if (tenders.some(leg => !leg.method || !(parseFloat(leg.amount) > 0))) return res.status(400).json({ error: 'Each split tender needs a payment method and an amount' });
+      tenderLegs = tenders.map(leg => ({ payment_method: leg.method, amount: parseFloat(parseFloat(leg.amount).toFixed(2)), approval_code: leg.approval_code || null }));
+      const legSum = parseFloat(tenderLegs.reduce((sum, leg) => sum + leg.amount, 0).toFixed(2));
+      if (Math.abs(legSum - balance) > 0.01) return res.status(400).json({ error: `Split tender amounts (${legSum.toFixed(2)}) don't match the balance due (${balance.toFixed(2)})` });
+    }
+
     let settlementTxId;
     const tx = await db.transaction('write');
     try {
-      const method = payment_method || 'cash';
-      const tendered = parseFloat(amount_tendered || balance);
-      const changeAmt = Math.max(0, parseFloat((tendered - balance).toFixed(2)));
+      const method = tenderLegs ? (tenderLegs.length > 1 ? 'split' : tenderLegs[0].payment_method) : (payment_method || 'cash');
+      const tendered = tenderLegs ? balance : parseFloat(amount_tendered || balance);
+      const changeAmt = tenderLegs ? 0 : Math.max(0, parseFloat((tendered - balance).toFixed(2)));
+      const approvalCode = tenderLegs && tenderLegs.length === 1 ? tenderLegs[0].approval_code : null;
       const transaction_number = await nextNumber(tx, 'transactions', 'transaction_number', 'TXN-', 6);
-      const settleResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, agreement.customer_id, employee_id || agreement.employee_id, branch_id || agreement.branch_id, drawer_session_id || null, parseFloat((balance - agreement.tax_adjustment_total).toFixed(2)), agreement.tax_adjustment_total, balance, method, tendered, changeAmt, `Rental settlement ${agreement.agreement_number}`, 'pos'] });
+      const settleResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source,approval_code) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, agreement.customer_id, employee_id || agreement.employee_id, branch_id || agreement.branch_id, drawer_session_id || null, parseFloat((balance - agreement.tax_adjustment_total).toFixed(2)), agreement.tax_adjustment_total, balance, method, tendered, changeAmt, `Rental settlement ${agreement.agreement_number}`, 'pos', approvalCode] });
       settlementTxId = Number(settleResult.lastInsertRowid);
+      if (tenderLegs) {
+        for (const leg of tenderLegs) {
+          await tx.execute({ sql: 'INSERT INTO transaction_payments (transaction_id, payment_method, amount, approval_code) VALUES (?,?,?,?)', args: [settlementTxId, leg.payment_method, leg.amount, leg.approval_code] });
+        }
+      }
 
       if (agreement.duration_adjustment_total !== 0) {
         const label = agreement.duration_adjustment_total > 0 ? 'Additional Rental Time' : 'Rental Fee Credit (returned early)';
