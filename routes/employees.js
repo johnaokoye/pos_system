@@ -71,13 +71,41 @@ router.get('/', requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// "Copy from existing employee" on create. The employee-row fields (security
+// group, default branch, driver/operator/security/salesperson flags, skills)
+// are prefilled by the form and sent as normal fields; this copies the
+// associations that live in other tables and aren't on the form. Each
+// option defaults to on unless explicitly false. Commission assignments
+// are copied only if still current or upcoming, starting no earlier than
+// today so the new hire isn't back-dated onto a plan.
+async function copyEmployeeAssociations(sourceId, newId, opts) {
+  if (opts.branches !== false) {
+    await db.execute({ sql: `INSERT OR IGNORE INTO employee_branches (employee_id, branch_id, is_default)
+      SELECT ?, branch_id, 0 FROM employee_branches WHERE employee_id = ?`, args: [newId, sourceId] });
+  }
+  if (opts.drawers !== false) {
+    await db.execute({ sql: `INSERT OR IGNORE INTO drawer_employee_access (drawer_id, employee_id, can_use, can_reconcile)
+      SELECT drawer_id, ?, can_use, can_reconcile FROM drawer_employee_access WHERE employee_id = ?`, args: [newId, sourceId] });
+  }
+  if (opts.commissions !== false) {
+    const today = new Date().toISOString().slice(0, 10);
+    await db.execute({ sql: `INSERT INTO employee_commission_plans (employee_id, plan_id, effective_from, effective_to)
+      SELECT ?, plan_id, MAX(effective_from, ?), effective_to FROM employee_commission_plans
+      WHERE employee_id = ? AND (effective_to IS NULL OR effective_to >= ?)`, args: [newId, today, sourceId, today] });
+  }
+  if (opts.targets !== false) {
+    await db.execute({ sql: `INSERT OR IGNORE INTO sales_targets (employee_id, hourly_target, daily_target, weekly_target, monthly_target)
+      SELECT ?, hourly_target, daily_target, weekly_target, monthly_target FROM sales_targets WHERE employee_id = ?`, args: [newId, sourceId] });
+  }
+}
+
 // Matches the "+ Add Employee" button's actual frontend gate — it's shown
 // to anyone with the `employees` module permission, not a finer sub-key
 // (the tree defines employees_add/_edit/_delete but the UI never checks
 // them individually), so enforcing a sub-key here would 403 users the UI
 // itself let through.
 router.post('/', requirePermission('employees'), async (req, res) => {
-  const { first_name, last_name, username, pin, password, must_change_password, security_group_id, default_branch_id, is_driver, is_operator, is_security, is_salesperson, skill_ids } = req.body;
+  const { first_name, last_name, username, pin, password, must_change_password, security_group_id, default_branch_id, is_driver, is_operator, is_security, is_salesperson, skill_ids, copy_from_id, copy_options } = req.body;
   if (!first_name || !last_name || !username || !pin) return res.status(400).json({ error: 'Required fields missing' });
   try {
     const employee_number = await nextNumber(db, 'employees', 'employee_number', 'EMP-', 4);
@@ -92,6 +120,7 @@ router.post('/', requirePermission('employees'), async (req, res) => {
         await db.execute({ sql: 'INSERT OR IGNORE INTO employee_skills (employee_id, skill_id) VALUES (?,?)', args: [newId, skillId] });
       }
     }
+    if (copy_from_id) await copyEmployeeAssociations(Number(copy_from_id), newId, copy_options || {});
     const { rows: [emp] } = await db.execute({ sql: `SELECT e.id,e.employee_number,e.first_name,e.last_name,e.username,e.role,e.active,e.security_group_id,e.default_branch_id,e.is_driver,e.is_operator,e.is_security,e.is_salesperson,sg.name as security_group_name,b.name as default_branch_name FROM employees e LEFT JOIN security_groups sg ON e.security_group_id=sg.id LEFT JOIN branches b ON e.default_branch_id=b.id WHERE e.id=?`, args: [newId] });
     res.status(201).json(emp);
   } catch (e) {

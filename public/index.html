@@ -13741,7 +13741,7 @@ const App = {
               <td>${e.default_branch_name||'<span style="color:var(--text-muted)">None</span>'}</td>
               <td>${(e.branches||[]).map(b => `<span class="badge-pill badge-teal" style="margin-right:2px">${b.name}</span>`).join('')||'-'}</td>
               <td><span class="badge-pill ${e.active?'badge-success':'badge-danger'}">${e.active?'Active':'Inactive'}</span></td>
-              <td><button class="btn btn-secondary btn-sm" onclick="App.showEmployeeForm(${e.id})">Edit</button></td>
+              <td style="white-space:nowrap"><button class="btn btn-secondary btn-sm" onclick="App.showEmployeeForm(${e.id})">Edit</button> <button class="btn btn-secondary btn-sm" title="New employee with this employee's security group, roles and access" onclick="App.showEmployeeForm(null, ${e.id})">Copy</button></td>
             </tr>`).join('')}
             </tbody>
           </table>
@@ -13749,7 +13749,11 @@ const App = {
       </div>`;
   },
 
-  async showEmployeeForm(id) {
+  // copyFromId (new employees only) prefills the form from an existing
+  // employee — security group, default branch, role flags, skills — and on
+  // save the server also copies their branch/drawer access, commission plans
+  // and sales targets. Name and login credentials are never copied.
+  async showEmployeeForm(id, copyFromId) {
     const [empList, secGroups, branches, skills] = await Promise.all([
       this.api('GET', '/employees'),
       this.api('GET', '/security-groups'),
@@ -13758,10 +13762,28 @@ const App = {
     ]);
     const emp = (id ? empList.find(x => x.id === id) : null) || {};
     const empSkillIds = (emp.skills || []).map(s => s.id);
+    this._efEmpList = empList;
     this.showModal(`
       <div class="modal" style="max-width:520px">
         <div class="modal-header"><span class="modal-title">${id ? 'Edit Employee' : 'Add Employee'}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
+          ${id ? '' : `<div style="background:var(--bg-secondary,rgba(0,0,0,.03));border:1px solid var(--border);border-radius:6px;padding:10px 12px;margin-bottom:12px">
+            <div class="form-group" style="margin-bottom:0"><label>Copy From Existing Employee</label>
+              <select id="ef-copy-from" onchange="App.applyEmployeeCopySource(this.value)">
+                <option value="">-- Start blank --</option>
+                ${empList.map(x => `<option value="${x.id}">${x.first_name} ${x.last_name} (${x.employee_number})${x.security_group_name ? ' — ' + x.security_group_name : ''}${x.active ? '' : ' [inactive]'}</option>`).join('')}
+              </select>
+            </div>
+            <div id="ef-copy-opts" style="display:none;margin-top:8px;font-size:13px">
+              <div style="color:var(--text-muted);margin-bottom:6px">Security group, default branch, role designations and skills are filled in below. Also copy:</div>
+              <div style="display:flex;flex-wrap:wrap;gap:12px">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:normal"><input type="checkbox" id="ef-copy-branches" checked style="width:16px;height:16px">Branch access</label>
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:normal"><input type="checkbox" id="ef-copy-drawers" checked style="width:16px;height:16px">Cash drawer access</label>
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:normal"><input type="checkbox" id="ef-copy-commissions" checked style="width:16px;height:16px">Commission plans</label>
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:normal"><input type="checkbox" id="ef-copy-targets" checked style="width:16px;height:16px">Sales targets</label>
+              </div>
+            </div>
+          </div>`}
           <div class="input-row">
             <div class="form-group"><label>First Name *</label><input id="ef-first" value="${emp.first_name||''}"></div>
             <div class="form-group"><label>Last Name *</label><input id="ef-last" value="${emp.last_name||''}"></div>
@@ -13846,6 +13868,26 @@ const App = {
           <button class="btn btn-primary" onclick="App.saveEmployee(${id||'null'})">Save</button>
         </div>
       </div>`);
+    if (!id && copyFromId) {
+      document.getElementById('ef-copy-from').value = String(copyFromId);
+      this.applyEmployeeCopySource(copyFromId);
+    }
+  },
+
+  // Fills the Add Employee form's non-personal fields from an existing
+  // employee. Leaves name, username, PIN and password untouched.
+  applyEmployeeCopySource(srcId) {
+    const src = (this._efEmpList || []).find(x => x.id === parseInt(srcId));
+    document.getElementById('ef-copy-opts').style.display = src ? '' : 'none';
+    if (!src) return;
+    document.getElementById('ef-sg').value = src.security_group_id || '';
+    document.getElementById('ef-branch').value = src.default_branch_id || '';
+    document.getElementById('ef-driver').checked = !!src.is_driver;
+    document.getElementById('ef-operator').checked = !!src.is_operator;
+    document.getElementById('ef-security').checked = !!src.is_security;
+    document.getElementById('ef-salesperson').checked = !!src.is_salesperson;
+    const skillIds = (src.skills || []).map(s => s.id);
+    document.querySelectorAll('.ef-skill').forEach(el => { el.checked = skillIds.includes(parseInt(el.value)); });
   },
 
   async saveEmployee(id) {
@@ -13870,6 +13912,16 @@ const App = {
     };
     if (!data.pin) delete data.pin;
     if (!data.password) delete data.password;
+    const copyFrom = !id && parseInt(document.getElementById('ef-copy-from')?.value);
+    if (copyFrom) {
+      data.copy_from_id = copyFrom;
+      data.copy_options = {
+        branches: document.getElementById('ef-copy-branches').checked,
+        drawers: document.getElementById('ef-copy-drawers').checked,
+        commissions: document.getElementById('ef-copy-commissions').checked,
+        targets: document.getElementById('ef-copy-targets').checked,
+      };
+    }
     try {
       if (id) await this.api('PUT', `/employees/${id}`, data);
       else await this.api('POST', '/employees', { ...data, pin: data.pin || '0000' });
