@@ -3976,7 +3976,7 @@ const App = {
       }
     }
 
-    const summaryRows = rentalBreakdown ? [
+    const summaryRows = (rentalBreakdown ? [
       ['Sub-Total Amount', this.fmt(rentalBreakdown.subTotalAmount)],
       ['Sales Tax', this.fmt(tx.tax_amount)],
       ['Sales Total', this.fmt(rentalBreakdown.salesTotal)],
@@ -3986,7 +3986,7 @@ const App = {
       ['Subtotal', this.fmt(tx.subtotal)],
       tx.tax_exempt ? [`Tax Exempt${tx.tax_exemption_number ? ` — Ref: ${tx.tax_exemption_number}` : ''}`, '—'] : ['Tax', this.fmt(tx.tax_amount)],
       tx.discount_amount > 0 ? [`Discount${tx.promotion_code ? ` (${tx.promotion_code})` : ''}`, `-${this.fmt(tx.discount_amount)}`] : null,
-    ].filter(Boolean);
+    ]).filter(Boolean);
 
     const tenderRows = [];
     if (tx.payment_method === 'split') {
