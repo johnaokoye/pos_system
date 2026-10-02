@@ -2236,6 +2236,7 @@ const App = {
         <div class="modal-header"><span class="modal-title">Security Sign-Off — ${a.agreement_number}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">${a.item_summary || 'Item'} is going out for delivery. Sign below to confirm it's clear to leave.</p>
+          <div id="ss-fleet-units"></div>
           ${this._sigPadHtml('ss-guard-sig', 'Guard Signature', 'required — confirms this item is clear to leave')}
         </div>
         <div class="modal-footer">
@@ -2244,12 +2245,15 @@ const App = {
         </div>
       </div>`);
     this._sigPadInit('ss-guard-sig');
+    this._fleetUnitPickerLoad(id, 'ss-fleet-units');
   },
 
   async submitSecuritySignoff(id) {
     if (!this._sigPadHasDrawn('ss-guard-sig')) { this.alert('Signature is required to sign off', 'error'); return; }
+    const fleetUnits = this._fleetUnitSelections('ss-fleet-units');
+    if (fleetUnits === false) return;
     try {
-      await this.api('PATCH', `/rentals/agreements/${id}/security-signoff`, { security_signature: this._sigPadDataUrl('ss-guard-sig') });
+      await this.api('PATCH', `/rentals/agreements/${id}/security-signoff`, { security_signature: this._sigPadDataUrl('ss-guard-sig'), fleet_units: fleetUnits });
       this.closeModal();
       this.alert('Signed off — this delivery is now available to drivers');
       this.renderGuardDashboard();
@@ -7708,6 +7712,7 @@ const App = {
                 ${accs.length ? `<div style="font-size:11px;color:var(--text-muted)">+ ${accs.map(x=>x.product_name).join(', ')}</div>` : ''}</div>`;
             }).join('')}
           </div>
+          <div id="ri-fleet-units"></div>
           <div class="form-group" style="margin-bottom:12px">
             <label>Start Date / Time</label>
             <input type="datetime-local" id="ri-issued-at" value="${defaultIssuedAt}" max="${defaultIssuedAt}">
@@ -7756,6 +7761,7 @@ const App = {
       </div>`);
     this._sigPadInit('ri-guard-sig');
     this._sigPadInit('ri-customer-sig');
+    this._fleetUnitPickerLoad(id, 'ri-fleet-units');
   },
 
   // ─── Signature pad (canvas-ID-parameterized) ───────────────────────────
@@ -7831,6 +7837,38 @@ const App = {
   _sigPadHasDrawn(canvasId) { return !!this._sigPads?.[canvasId]?.hasDrawn; },
   _sigPadDataUrl(canvasId) { return document.getElementById(canvasId)?.toDataURL('image/png'); },
 
+  // FleetHub unit picker (see lib/fleethub.js). Renders nothing unless
+  // FleetHub is configured and tracks a product on this agreement. Units that
+  // haven't passed their pre-rental checklist are listed but can't be picked.
+  async _fleetUnitPickerLoad(agreementId, containerId) {
+    const el = document.getElementById(containerId);
+    if (!el) return;
+    let plan;
+    try { plan = await this.api('GET', `/rentals/agreements/${agreementId}/fleet-units`); }
+    catch(e) { el.innerHTML = `<div style="font-size:12px;color:var(--danger);margin-bottom:12px">FleetHub: ${this.escapeAttr(e.message)}</div>`; return; }
+    if (!plan.enabled || !plan.items.length) return;
+    el.innerHTML = `<div class="form-group" style="margin-bottom:12px">
+      <label>Fleet Units <span style="font-weight:400;color:var(--text-muted)">(required — only units that passed their pre-rental checklist)</span></label>
+      ${plan.items.map(item => Array.from({ length: item.quantity }, (_, n) => `
+        <div style="font-size:12px;margin:6px 0 2px">${this.escapeAttr(item.product_name)}${item.quantity > 1 ? ` #${n + 1}` : ''}</div>
+        <select data-fleet-item="${item.item_id}">
+          <option value="">-- Select unit --</option>
+          ${item.units.map(u => `<option value="${this.escapeAttr(u.unitNumber)}" ${u.ready ? '' : 'disabled'} ${item.assigned[n] === u.unitNumber ? 'selected' : ''}>${this.escapeAttr(u.unitNumber)} — ${this.escapeAttr(u.name)} ${u.ready ? '✓ ready' : `✗ ${this.escapeAttr((u.reasons || []).join('; '))}`}</option>`).join('')}
+        </select>`).join('')).join('')}
+    </div>`;
+  },
+
+  // { [item_id]: [unitNumber, ...] } from a picker, null if there is none, or
+  // false (after alerting) if a unit is left unselected.
+  _fleetUnitSelections(containerId) {
+    const selects = [...document.querySelectorAll(`#${containerId} select[data-fleet-item]`)];
+    if (!selects.length) return null;
+    if (selects.some(s => !s.value)) { this.alert('Select a fleet unit for every rental item', 'error'); return false; }
+    const out = {};
+    for (const s of selects) (out[s.dataset.fleetItem] = out[s.dataset.fleetItem] || []).push(s.value);
+    return out;
+  },
+
   async confirmIssueRental(id) {
     const deliveryDriverEl = document.getElementById('ri-delivery-driver');
     const operatorEl = document.getElementById('ri-operator-id');
@@ -7850,6 +7888,8 @@ const App = {
     // resolves it against the browser's local clock, then toISOString() makes
     // it unambiguous for the server regardless of what timezone it runs in.
     const issuedAt = new Date(issuedAtRaw).toISOString();
+    const fleetUnits = this._fleetUnitSelections('ri-fleet-units');
+    if (fleetUnits === false) return;
     try {
       const agreement = await this.api('PATCH', `/rentals/agreements/${id}/issue`, {
         employee_id: this.currentUser?.id || null,
@@ -7859,6 +7899,7 @@ const App = {
         security_employee_id: securityEl ? parseInt(securityEl.value) : null,
         security_signature: hasSecuritySigPad ? this._sigPadDataUrl('ri-guard-sig') : null,
         customer_signature: this._sigPadDataUrl('ri-customer-sig'),
+        fleet_units: fleetUnits,
       });
       this.closeModal();
       this.alert(`Rental ${agreement.agreement_number} issued — clock started`);

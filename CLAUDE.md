@@ -109,12 +109,22 @@ Three built-in groups seed on first run: **Administrator** (all true), **Manager
 ### WooCommerce integration
 `routes/woocommerce.js` syncs products and orders between the POS and a WooCommerce store. Credentials (`woo_url`, `woo_consumer_key`, `woo_consumer_secret`) are stored in the `settings` table. HTTP stores use OAuth 1.0a signing (implemented locally); HTTPS stores use Basic Auth. `server.js` polls every 60 seconds and fires a full sync when `woo_sync_interval` minutes have elapsed since `woo_last_auto_sync`. The route also exports `runSyncAll`, imported by `server.js` for that auto-sync.
 
+### FleetHub integration (fleet unit checklists)
+`lib/fleethub.js` connects rentals to FleetHub (`~/fleethub`, a separate Next.js app on :3100). FleetHub owns per-unit servicing checklists. It is off unless `FLEETHUB_URL` is set.
+- A rental line is "fleet-tracked" when FleetHub has units whose POS SKU equals the line's `sku`.
+- The specific unit(s) are picked in the Issue modal (counter) or the Security Sign-Off modal (delivery), via `GET /rentals/agreements/:id/fleet-units`, and stored in `rental_fleet_units`.
+- `PATCH .../issue` checks the units out in FleetHub **before** activating the agreement and fails closed (409) if a unit isn't ready or FleetHub is unreachable. If the agreement update then fails, the FleetHub checkouts are cancelled.
+- FleetHub also reads this POS's rental products (`GET /api/products?is_rental=1`) with a POS API key scoped `products:read`, to map its units to rental SKUs. Removing or renaming a rental product's SKU unlinks FleetHub's units from it.
+- Returns (and cancelling an active agreement) never block on FleetHub. Units are marked `sync_pending=1` and retried by a 5-minute poller in `server.js`. A partially returned line keeps its units "out" until the whole line is back.
+
 ### Environment variables
 | Variable | Purpose | Default |
 |---|---|---|
 | `PORT` | HTTP listen port | `3001` |
 | `TURSO_DATABASE_URL` | Remote Turso DB URL | local `file:pos.db` |
 | `TURSO_AUTH_TOKEN` | Turso auth token | (none) |
+| `FLEETHUB_URL` | FleetHub base URL; enables the fleet checklist gate | (disabled) |
+| `FLEETHUB_API_KEY` | Bearer key for FleetHub's `/api/pos/*` (FleetHub's `POS_API_KEY`) | (none) |
 
 Email/SMTP is configured through the Settings UI and persisted in the `settings` table — not via env vars.
 

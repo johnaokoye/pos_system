@@ -12,6 +12,7 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const { cloudUpload } = require('../lib/cloudinary');
+const fleethub = require('../lib/fleethub');
 
 const localPoAttachmentDir = path.join(__dirname, '../uploads/rental-po-attachments');
 
@@ -670,23 +671,42 @@ router.patch('/agreements/:id/issue', requireAnyPermission('rentals_issue', 'ren
     const securityConfirmedAt = securityAlreadyDone ? agreement.issue_security_confirmed_at : issuedAt.toISOString();
     const deliveryDriverId = agreement.delivery_required ? (delivery_driver_id || agreement.delivery_driver_id || null) : null;
 
-    await db.execute({
-      sql: `UPDATE rental_agreements SET
-        status = 'active',
-        checkout_date = ?, checkout_datetime = ?,
-        issued_at = ?, issued_by = ?,
-        delivery_driver_id = ?, operator_id = ?,
-        issue_security_employee_id = ?, issue_security_confirmed_at = ?, issue_customer_name = ?, issue_customer_signature = ?, issue_security_signature = ?
-        WHERE id = ?`,
-      args: [
-        today, issuedAt.toISOString(),
-        issuedAt.toISOString(), employee_id || agreement.employee_id || null,
-        deliveryDriverId,
-        agreement.operator_required ? (operator_id || null) : null,
-        securityEmployeeId, securityConfirmedAt, (customer_name || agreement.issue_customer_name || null), customerSigPath, guardSigPath,
-        req.params.id,
-      ],
-    });
+    // FleetHub gate: every fleet-tracked unit must pass its pre-rental
+    // checklist before it leaves. Checked out in FleetHub first, and undone
+    // below if this agreement update then fails.
+    let fleetRefs = [];
+    if (fleethub.enabled()) {
+      try {
+        await fleethub.assignUnits(db, agreement, req.body.fleet_units);
+        fleetRefs = await fleethub.checkoutAssigned(db, agreement);
+      } catch(e) {
+        if (e instanceof fleethub.FleetHubError) return res.status(409).json({ error: e.message });
+        throw e;
+      }
+    }
+    try {
+      await db.execute({
+        sql: `UPDATE rental_agreements SET
+          status = 'active',
+          checkout_date = ?, checkout_datetime = ?,
+          issued_at = ?, issued_by = ?,
+          delivery_driver_id = ?, operator_id = ?,
+          issue_security_employee_id = ?, issue_security_confirmed_at = ?, issue_customer_name = ?, issue_customer_signature = ?, issue_security_signature = ?
+          WHERE id = ?`,
+        args: [
+          today, issuedAt.toISOString(),
+          issuedAt.toISOString(), employee_id || agreement.employee_id || null,
+          deliveryDriverId,
+          agreement.operator_required ? (operator_id || null) : null,
+          securityEmployeeId, securityConfirmedAt, (customer_name || agreement.issue_customer_name || null), customerSigPath, guardSigPath,
+          req.params.id,
+        ],
+      });
+    } catch(e) {
+      await fleethub.cancelCheckouts(fleetRefs);
+      throw e;
+    }
+    if (fleetRefs.length) await fleethub.markIssued(db, req.params.id);
 
     const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
     const { rows: agItems } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
@@ -708,6 +728,17 @@ router.patch('/agreements/:id/issue', requireAnyPermission('rentals_issue', 'ren
 // `status` — a claimed-but-not-yet-signed-for delivery is still
 // 'awaiting_issue' underneath, just displayed as 'out_for_delivery' (see the
 // display_status CASE expressions below).
+// ─── FleetHub unit selection (see lib/fleethub.js) ───────────────────────
+// Fleet-tracked lines on this agreement, FleetHub's candidate units for each
+// (with checklist readiness) and what's already assigned. Used by the Issue
+// and Security Sign-Off modals to pick which physical unit goes out.
+router.get('/agreements/:id/fleet-units', requireAnyPermission('rentals_issue', 'rentals_security_signoff'), async (req, res) => {
+  try {
+    if (!fleethub.enabled()) return res.json({ enabled: false, items: [] });
+    res.json({ enabled: true, items: await fleethub.fleetPlan(db, req.params.id) });
+  } catch(e) { res.status(e instanceof fleethub.FleetHubError ? 502 : 500).json({ error: e.message }); }
+});
+
 router.patch('/agreements/:id/security-signoff', requirePermission('rentals_security_signoff'), async (req, res) => {
   try {
     if (!req.employee.is_security) return res.status(403).json({ error: 'Only security-flagged employees can sign off on a delivery' });
@@ -717,6 +748,13 @@ router.patch('/agreements/:id/security-signoff', requirePermission('rentals_secu
     if (!agreement.delivery_required) return res.status(400).json({ error: 'This agreement does not require delivery' });
     if (agreement.status !== 'awaiting_issue') return res.status(400).json({ error: `This agreement is ${agreement.status}, not awaiting issue` });
     if (agreement.issue_security_employee_id) return res.status(400).json({ error: 'Security has already signed off on this delivery' });
+    // The guard is the one verifying what physically leaves, so the FleetHub
+    // unit(s) are picked here for deliveries — the driver's later issue step
+    // just checks out whatever was assigned.
+    if (fleethub.enabled()) {
+      try { await fleethub.assignUnits(db, agreement, req.body.fleet_units); }
+      catch(e) { if (e instanceof fleethub.FleetHubError) return res.status(409).json({ error: e.message }); throw e; }
+    }
     const sigPath = await uploadSignature(security_signature, `rental-${req.params.id}-issue-guard`);
     if (!sigPath) return res.status(400).json({ error: 'Signature is required to sign off' });
     await db.execute({ sql: 'UPDATE rental_agreements SET issue_security_employee_id = ?, issue_security_confirmed_at = ?, issue_security_signature = ? WHERE id = ?', args: [req.employee.id, new Date().toISOString(), sigPath, req.params.id] });
@@ -1045,6 +1083,13 @@ router.patch('/agreements/:id/cancel', requirePermission('rentals_returns'), asy
       await tx.execute({ sql: `UPDATE quotations SET status = 'accepted', converted_to_agreement_id = NULL WHERE converted_to_agreement_id = ?`, args: [req.params.id] });
       await tx.execute({ sql: "UPDATE rental_agreements SET status = 'cancelled', cancellation_reason = ?, cancelled_by = ?, cancelled_at = CURRENT_TIMESTAMP WHERE id = ?", args: [reason || null, employee_id || null, req.params.id] });
       await tx.commit();
+      // An issued (active) rental's units physically went out, so FleetHub
+      // treats them as returned; units only picked for a not-yet-issued one
+      // never left and are just released.
+      try {
+        if (agreement.status === 'active') await fleethub.returnUnits(db, req.params.id, null);
+        await db.execute({ sql: "DELETE FROM rental_fleet_units WHERE agreement_id = ? AND status = 'assigned'", args: [req.params.id] });
+      } catch(e) { console.error('FleetHub cancel sync failed:', e.message); }
       if (reversedCreditCustomerId) { try { await runCreditCheck(reversedCreditCustomerId); } catch(e) {} }
       try {
         await logActivity({
@@ -1302,6 +1347,13 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
     const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
     const { rows: updatedItems } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
     updated.items = updatedItems;
+
+    // Hand fully-returned fleet units back to FleetHub (they now need a fresh
+    // pre-rental checklist). A partially returned line keeps its units out
+    // until the whole line is back. Never blocks the return — see lib/fleethub.js.
+    try {
+      await fleethub.returnUnits(db, req.params.id, updatedItems.filter(i => i.quantity_returned >= i.quantity).map(i => i.id));
+    } catch(e) { console.error('FleetHub return sync failed:', e.message); }
 
     // Only fires once the agreement is fully closed (every item returned) —
     // a partial return correctly leaves this alone. Credit-financed rentals

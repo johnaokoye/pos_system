@@ -604,6 +604,22 @@ async function _init() {
       damage_fee REAL DEFAULT 0,
       returned_at DATETIME
     )` },
+    // Which physical FleetHub unit went out on each rental line — see lib/fleethub.js.
+    // status: assigned (picked, not yet issued) -> issued -> returned.
+    // sync_pending=1 means FleetHub hasn't been told about the return yet.
+    { sql: `CREATE TABLE IF NOT EXISTS rental_fleet_units (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agreement_id INTEGER NOT NULL REFERENCES rental_agreements(id),
+      item_id INTEGER NOT NULL REFERENCES rental_agreement_items(id),
+      unit_number TEXT NOT NULL,
+      pos_ref TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL DEFAULT 'assigned',
+      sync_pending INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      issued_at DATETIME,
+      returned_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS rental_agreement_pauses (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       agreement_id INTEGER NOT NULL REFERENCES rental_agreements(id),

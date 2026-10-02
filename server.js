@@ -181,6 +181,15 @@ if (!process.env.VERCEL) {
       await rentalsRouter.checkMissedPickups();
     } catch (e) {}
   }, 5 * 60000);
+
+  // FleetHub return sync retry — a return is never blocked on FleetHub being
+  // reachable, so any unit whose return didn't reach it is retried here.
+  setInterval(async () => {
+    try {
+      await ensureReady();
+      await require('./lib/fleethub').retryPendingReturns(db);
+    } catch (e) {}
+  }, 5 * 60000);
 }
 
 // Vercel serverless export
