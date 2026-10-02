@@ -1,0 +1,30 @@
+# HTTPS in front of the POS app (see the `caddy` service in docker-compose.yml).
+#
+# This server is internal-only, so Let's Encrypt can't reach it to verify a
+# domain — `local_certs` makes Caddy issue the certificate from its own
+# local CA instead. Each browser/device has to trust that CA's root once
+# (see "Trusting the certificate" in docker-compose.yml). The CA and the
+# certificate live in the caddy_data volume; keep it, or every device has to
+# re-trust a new root.
+{
+	local_certs
+	# There's no system trust store worth installing into inside the
+	# container — devices are trusted by hand instead.
+	skip_install_trust
+	# Browsers don't send a server name (SNI) when you browse by IP, so
+	# Caddy can't tell which certificate to present and the handshake fails.
+	# This picks the one to fall back to — set POS_DEFAULT_SNI to the IP in
+	# POS_HOST if staff browse by IP. Harmless when everyone uses a name.
+	default_sni {$POS_DEFAULT_SNI:localhost}
+}
+
+# POS_HOST is the name and/or IP staff type into the browser, set as a
+# Portainer stack environment variable — comma-separate several, e.g.
+# "pos.office.lan, 192.168.1.20". The certificate covers exactly these, so
+# browsing by any other name or IP will show a certificate warning.
+# Plain http:// on these is redirected to https:// automatically.
+{$POS_HOST:localhost} {
+	# Caddy sets X-Forwarded-Proto: https, which (with `trust proxy` in
+	# server.js) makes the session cookie Secure — see lib/sessionAuth.js.
+	reverse_proxy app:3001
+}

@@ -120,3 +120,5 @@ Email/SMTP is configured through the Settings UI and persisted in the `settings`
 
 ### Deployment
 `vercel.json` routes all traffic to `server.js` as a serverless function. Switch the DB to Turso for stateful production use (local `pos.db` is ephemeral on Vercel).
+
+Self-hosted production runs from `docker-compose.yml` as a Portainer Git stack: `app` (internal-only :3001) behind a `caddy` service that terminates HTTPS. The server is internal, so `Caddyfile` uses `local_certs` (Caddy's own CA, which each device must trust once) rather than Let's Encrypt. It's configured by stack env vars (`POS_HOST`, `POS_DEFAULT_SNI` for by-IP access, `HTTPS_PORT`/`HTTP_PORT`). The Caddyfile is baked in via `Dockerfile.caddy`, not bind-mounted, because relative bind mounts don't reliably resolve in Portainer Git stacks. The `caddy_data` volume holds the CA, so losing it means every device re-trusts a new root.
