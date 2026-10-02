@@ -7,7 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 const { requireAuth, requirePermission, can } = require('../lib/permissions');
-const { getOutstandingQty } = require('../lib/rentalAvailability');
+const { getOutstandingQty, getOutOfServiceQty } = require('../lib/rentalAvailability');
 const { mergeProducts } = require('../lib/productMerge');
 const { HAS_ISSUE_SQL, ISSUE_LABEL_SQL, rowsToCsv } = require('../lib/productIssues');
 const { getSetting } = require('../lib/settings');
@@ -130,9 +130,20 @@ router.get('/', requireAuth, async (req, res) => {
     // kept in sync with lib/rentalAvailability.js's getOutstandingQty() (same
     // status list, including 'pending' — a held-for-checkout agreement
     // reserves the unit same as an active one).
-    const rentalOutstandingExpr = (branchScoped) => `(SELECT COALESCE(SUM(rai.quantity - rai.quantity_returned),0)
+    //
+    // Units held out of service (lib/rentalAvailability.js's
+    // getOutOfServiceQty) are folded into rental_outstanding_qty too — every
+    // picker computes "available" as stock_qty - rental_outstanding_qty, and a
+    // faulty unit is no more rentable than one that's out on hire. They're
+    // also returned on their own as rental_out_of_service_qty. The
+    // branch-scoped variant matches on the branches JOIN (b.id) rather than
+    // binding another ?, so the param order below is unchanged.
+    const outOfServiceExpr = (branchScoped) => `(SELECT COALESCE(SUM(ros.quantity),0) FROM rental_out_of_service ros
+        WHERE ros.product_id = p.id AND ros.returned_to_service_at IS NULL${branchScoped ? ' AND ros.branch_id = b.id' : ''})`;
+    const rentalOutstandingExpr = (branchScoped) => `((SELECT COALESCE(SUM(rai.quantity - rai.quantity_returned),0)
         FROM rental_agreement_items rai JOIN rental_agreements ra ON rai.agreement_id = ra.id
-        WHERE rai.product_id = p.id AND ra.status IN ('active', 'pending', 'awaiting_issue')${branchScoped ? ' AND ra.branch_id = ?' : ''}) as rental_outstanding_qty`;
+        WHERE rai.product_id = p.id AND ra.status IN ('active', 'pending', 'awaiting_issue')${branchScoped ? ' AND ra.branch_id = ?' : ''}) + ${outOfServiceExpr(branchScoped)}) as rental_outstanding_qty,
+        ${outOfServiceExpr(branchScoped)} as rental_out_of_service_qty`;
 
     if (branch_id) {
       // price is recalculated against the branch's price_tier_percent (a
@@ -932,6 +943,10 @@ router.put('/:id', async (req, res, next) => {
         const outstanding = await getOutstandingQty(db, req.params.id, oldBranchId);
         if (outstanding > 0) {
           return res.status(400).json({ error: `${outstanding} unit(s) are still out on active rentals from its current branch — use Branch Transfers to move the available stock instead, or wait until they're returned.` });
+        }
+        const outOfService = await getOutOfServiceQty(db, req.params.id, oldBranchId);
+        if (outOfService > 0) {
+          return res.status(400).json({ error: `${outOfService} unit(s) are held out of service at its current branch — return them to service (Rentals > Out of Service) before moving this item to another branch.` });
         }
       }
     }

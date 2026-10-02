@@ -618,6 +618,46 @@ async function _init() {
       resumed_by INTEGER REFERENCES employees(id),
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // Swapping a faulty rental unit for another while the agreement is
+    // paused for replacement (POST /rentals/agreements/:id/replace-item). One
+    // row per swap — the audit trail. item_id is the line now holding the
+    // replacement; original_item_id is the line it was split from when only
+    // some of a line's units were swapped (equal to item_id otherwise). The
+    // billing side of a swap lives on the line itself (rate_segments).
+    { sql: `CREATE TABLE IF NOT EXISTS rental_item_replacements (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agreement_id INTEGER NOT NULL REFERENCES rental_agreements(id),
+      pause_id INTEGER REFERENCES rental_agreement_pauses(id),
+      item_id INTEGER NOT NULL REFERENCES rental_agreement_items(id),
+      original_item_id INTEGER NOT NULL REFERENCES rental_agreement_items(id),
+      quantity INTEGER NOT NULL,
+      old_product_id INTEGER REFERENCES products(id),
+      old_product_name TEXT,
+      old_sku TEXT,
+      new_product_id INTEGER REFERENCES products(id),
+      new_product_name TEXT,
+      new_sku TEXT,
+      billable_ms_before INTEGER NOT NULL DEFAULT 0,
+      notes TEXT,
+      replaced_by INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    // Rental units held out of service (e.g. the faulty unit swapped out by
+    // a replacement) — counted as unavailable at branch_id until someone
+    // returns them to service. See lib/rentalAvailability.js.
+    { sql: `CREATE TABLE IF NOT EXISTS rental_out_of_service (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_id INTEGER NOT NULL REFERENCES products(id),
+      branch_id INTEGER REFERENCES branches(id),
+      quantity INTEGER NOT NULL DEFAULT 1,
+      reason TEXT,
+      agreement_id INTEGER REFERENCES rental_agreements(id),
+      replacement_id INTEGER REFERENCES rental_item_replacements(id),
+      created_by INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      returned_to_service_at DATETIME,
+      returned_to_service_by INTEGER REFERENCES employees(id)
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS product_accessories (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       product_id INTEGER NOT NULL REFERENCES products(id),
@@ -1720,6 +1760,9 @@ async function _init() {
     'ALTER TABLE suppliers ADD COLUMN fax2 TEXT',
     'ALTER TABLE suppliers ADD COLUMN website2 TEXT',
     "ALTER TABLE suppliers ADD COLUMN report_email TEXT DEFAULT 'email1'",
+    // JSON array of the rate periods before each replacement swap on this
+    // line — see lib/rentals.js's blendedFeePerUnit.
+    'ALTER TABLE rental_agreement_items ADD COLUMN rate_segments TEXT',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

@@ -1,8 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
-const { getOutstandingQty } = require('../lib/rentalAvailability');
-const { getBranchStock, feeFor, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, dueDateTime, requiredDepositReturnMethod, rentalDiscount, attachRateBasis, rentalWindow } = require('../lib/rentals');
+const { getOutstandingQty, getOutOfServiceQty } = require('../lib/rentalAvailability');
+const { getBranchStock, feeFor, blendedFeePerUnit, checkAvailability, parseDbTime, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, dueDateTime, requiredDepositReturnMethod, rentalDiscount, attachRateBasis, rentalWindow } = require('../lib/rentals');
 const { requirePermission, requireAnyPermission, requireAuth, can, canManageRentals, requireRentalsManage } = require('../lib/permissions');
 const { runCreditCheck } = require('./customers');
 const { nextNumber } = require('../lib/nextNumber');
@@ -274,6 +274,10 @@ router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
       LEFT JOIN employees cb ON rp.confirmed_by = cb.id
       WHERE rp.agreement_id = ? ORDER BY rp.id`, args: [req.params.id] });
     agreement.pauses = pauses;
+    const { rows: replacements } = await db.execute({ sql: `SELECT rr.*, e.first_name || ' ' || e.last_name as replaced_by_name
+      FROM rental_item_replacements rr LEFT JOIN employees e ON rr.replaced_by = e.id
+      WHERE rr.agreement_id = ? ORDER BY rr.id`, args: [req.params.id] });
+    agreement.replacements = replacements;
     attachDepositReturnPolicy(agreement);
     res.json(agreement);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -289,7 +293,8 @@ router.get('/availability', requireRentalsManage, async (req, res) => {
     if (!product) return res.status(404).json({ error: 'Product not found' });
     const stockQty = await getBranchStock(db, product_id, branch_id, product.stock_qty);
     const outstanding = await getOutstandingQty(db, product_id, branch_id || null);
-    res.json({ product_id: product.id, stock_qty: stockQty, outstanding_qty: outstanding, available_qty: Math.max(0, stockQty - outstanding) });
+    const outOfService = await getOutOfServiceQty(db, product_id, branch_id || null);
+    res.json({ product_id: product.id, stock_qty: stockQty, outstanding_qty: outstanding, out_of_service_qty: outOfService, available_qty: Math.max(0, stockQty - outstanding - outOfService) });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -900,6 +905,139 @@ router.patch('/agreements/:id/resume', requireRentalsManage, async (req, res) =>
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ─── Item replacement (while paused for replacement) ────────────────────────
+// Swaps some or all outstanding units on a line for another rental product
+// while the agreement sits paused with reason='replacement' — the pause
+// already took a manager PIN, so this doesn't ask for another. The faulty
+// unit is held out of service (rental_out_of_service) until someone returns
+// it to service; the replacement has to be available at the agreement's
+// branch like any checkout.
+//
+// Billing: the replacement is billed at its own rates from the swap on. The
+// line's pre-swap rates are pushed onto rate_segments with until_ms = the
+// billable time (checkout -> start of this pause, minus earlier pauses), and
+// the return route blends them (lib/rentals.js's blendedFeePerUnit). Nothing
+// is charged here — rental_fee (the checkout estimate) and the deposit stay
+// as charged, and the return's duration adjustment trues it all up.
+// Swapping fewer units than the line holds splits it: the swapped units move
+// to a new line with their pro-rata share of rental_fee/deposit_amount.
+router.post('/agreements/:id/replace-item', requireRentalsManage, async (req, res) => {
+  try {
+    const { item_id, product_id, notes, condition_out, employee_id } = req.body;
+    const qty = parseInt(req.body.quantity);
+    if (!item_id || !product_id) return res.status(400).json({ error: 'Select the item being replaced and its replacement' });
+    if (!notes || !notes.trim()) return res.status(400).json({ error: 'Notes are required for a replacement' });
+
+    const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    if (!agreement) return res.status(404).json({ error: 'Not found' });
+    if (agreement.status !== 'active' || !agreement.is_paused) return res.status(400).json({ error: 'Items can only be replaced on an active rental that is paused for replacement' });
+    const { rows: [openPause] } = await db.execute({ sql: 'SELECT * FROM rental_agreement_pauses WHERE agreement_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1', args: [req.params.id] });
+    if (!openPause || openPause.reason !== 'replacement') return res.status(400).json({ error: 'This rental is not paused for replacement — pause it with reason "Replacement of Item" first' });
+
+    const { rows: [item] } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE id = ? AND agreement_id = ?', args: [item_id, req.params.id] });
+    if (!item) return res.status(404).json({ error: 'Item not found on this agreement' });
+    const outstanding = item.quantity - item.quantity_returned;
+    if (!qty || qty <= 0 || qty > outstanding) return res.status(400).json({ error: `Quantity must be between 1 and ${outstanding} (units still out on this line)` });
+
+    const { rows: [product] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [product_id] });
+    if (!product || !product.is_rental || !product.active) return res.status(400).json({ error: 'The replacement must be an active rental item' });
+
+    const checkoutDateTime = agreement.checkout_datetime || `${agreement.checkout_date}T00:00:00.000Z`;
+    const { rows: closedPauses } = await db.execute({ sql: 'SELECT started_at, ended_at FROM rental_agreement_pauses WHERE agreement_id = ? AND ended_at IS NOT NULL', args: [req.params.id] });
+    const closedMs = closedPauses.reduce((sum, p) => sum + Math.max(0, parseDbTime(p.ended_at) - parseDbTime(p.started_at)), 0);
+    const billableMsBefore = Math.max(0, Math.round(parseDbTime(openPause.started_at) - new Date(checkoutDateTime) - closedMs));
+
+    let segments = [];
+    try { segments = item.rate_segments ? JSON.parse(item.rate_segments) : []; } catch { segments = []; }
+    segments.push({
+      product_id: item.product_id, product_name: item.product_name, sku: item.sku,
+      rental_classification: item.rental_classification, daily_rate: item.daily_rate, weekly_rate: item.weekly_rate,
+      monthly_rate: item.monthly_rate, hourly_rate: item.hourly_rate, until_ms: billableMsBefore,
+    });
+    const rateSegments = JSON.stringify(segments);
+    const newRates = [product.rental_classification || 'tool', product.rental_rate || 0, product.rental_weekly_rate || 0, product.rental_monthly_rate || 0, product.rental_hourly_rate || 0];
+
+    const tx = await db.transaction('write');
+    let committed = false;
+    try {
+      // Checked inside the write transaction so two concurrent swaps (or a
+      // swap racing a checkout) can't both claim the last available unit.
+      await checkAvailability(tx, product, qty, agreement.branch_id);
+
+      let newItemId = item.id;
+      if (qty < item.quantity) {
+        const share = qty / item.quantity;
+        const feeShare = parseFloat((item.rental_fee * share).toFixed(2));
+        const depositShare = parseFloat((item.deposit_amount * share).toFixed(2));
+        await tx.execute({ sql: 'UPDATE rental_agreement_items SET quantity = quantity - ?, rental_fee = rental_fee - ?, deposit_amount = deposit_amount - ? WHERE id = ?', args: [qty, feeShare, depositShare, item.id] });
+        const ins = await tx.execute({ sql: `INSERT INTO rental_agreement_items
+          (agreement_id,parent_item_id,product_id,product_name,sku,quantity,rate_type,rate_amount,rental_classification,daily_rate,weekly_rate,monthly_rate,hourly_rate,tax_rate,is_mandatory,rental_fee,deposit_amount,replacement_value,late_fee_rate,condition_out,rate_segments)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          args: [item.agreement_id, item.parent_item_id, product.id, product.name, product.sku, qty, item.rate_type, product.rental_rate || 0, ...newRates, item.tax_rate, item.is_mandatory, feeShare, depositShare, product.replacement_value || 0, item.late_fee_rate, condition_out || null, rateSegments] });
+        newItemId = Number(ins.lastInsertRowid);
+      } else {
+        await tx.execute({ sql: `UPDATE rental_agreement_items SET product_id = ?, product_name = ?, sku = ?, rate_amount = ?, rental_classification = ?, daily_rate = ?, weekly_rate = ?, monthly_rate = ?, hourly_rate = ?, replacement_value = ?, condition_out = COALESCE(?, condition_out), rate_segments = ? WHERE id = ?`,
+          args: [product.id, product.name, product.sku, product.rental_rate || 0, ...newRates, product.replacement_value || 0, condition_out || null, rateSegments, item.id] });
+      }
+
+      const rep = await tx.execute({ sql: `INSERT INTO rental_item_replacements
+        (agreement_id,pause_id,item_id,original_item_id,quantity,old_product_id,old_product_name,old_sku,new_product_id,new_product_name,new_sku,billable_ms_before,notes,replaced_by)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        args: [agreement.id, openPause.id, newItemId, item.id, qty, item.product_id, item.product_name, item.sku, product.id, product.name, product.sku, billableMsBefore, notes.trim(), employee_id || null] });
+      const replacementId = Number(rep.lastInsertRowid);
+      if (item.product_id) {
+        await tx.execute({ sql: 'INSERT INTO rental_out_of_service (product_id,branch_id,quantity,reason,agreement_id,replacement_id,created_by) VALUES (?,?,?,?,?,?,?)',
+          args: [item.product_id, agreement.branch_id || null, qty, `Swapped out of ${agreement.agreement_number}: ${notes.trim()}`, agreement.id, replacementId, employee_id || null] });
+      }
+      await tx.commit();
+      committed = true;
+      try {
+        await logActivity({
+          customerId: agreement.customer_id, employeeId: employee_id,
+          type: 'rental', subject: `Rental ${agreement.agreement_number} — replaced ${qty} x ${item.product_name} with ${product.name}`,
+          description: notes.trim(), completed: true,
+        });
+      } catch(e) {}
+      res.json({ replacement_id: replacementId, item_id: newItemId });
+    } catch(e) {
+      if (!committed) await tx.rollback();
+      res.status(committed ? 500 : 400).json({ error: e.message });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Units held out of service — currently held by default, or ?status=all for
+// the last 200 including ones already returned to service.
+router.get('/out-of-service', requireRentalsManage, async (req, res) => {
+  try {
+    const { branch_id, status } = req.query;
+    let sql = `SELECT ros.*, p.name as product_name, p.sku, b.name as branch_name, ra.agreement_number,
+      cb.first_name || ' ' || cb.last_name as created_by_name, rb.first_name || ' ' || rb.last_name as returned_to_service_by_name
+      FROM rental_out_of_service ros
+      LEFT JOIN products p ON ros.product_id = p.id
+      LEFT JOIN branches b ON ros.branch_id = b.id
+      LEFT JOIN rental_agreements ra ON ros.agreement_id = ra.id
+      LEFT JOIN employees cb ON ros.created_by = cb.id
+      LEFT JOIN employees rb ON ros.returned_to_service_by = rb.id
+      WHERE 1=1`;
+    const args = [];
+    if (status !== 'all') sql += ' AND ros.returned_to_service_at IS NULL';
+    if (branch_id) { sql += ' AND ros.branch_id = ?'; args.push(branch_id); }
+    sql += ' ORDER BY ros.id DESC LIMIT 200';
+    const { rows } = await db.execute({ sql, args });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.patch('/out-of-service/:id/return-to-service', requireRentalsManage, async (req, res) => {
+  try {
+    const { employee_id } = req.body;
+    const result = await db.execute({ sql: 'UPDATE rental_out_of_service SET returned_to_service_at = ?, returned_to_service_by = ? WHERE id = ? AND returned_to_service_at IS NULL', args: [new Date().toISOString(), employee_id || null, req.params.id] });
+    if (!result.rowsAffected) return res.status(400).json({ error: 'Not found, or already returned to service' });
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ─── Missed pickup: contact + customer decision ─────────────────────────────
 // Both routes below operate on the currently-open pause row with
 // reason='missed_pickup' — created by checkMissedPickups() (exported at the
@@ -1179,16 +1317,12 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
         // Recompute the real fee for the units returned right now, using the
         // item's own snapshotted classification/rates over the ACTUAL elapsed
         // time (checkout -> this moment, minus any paused time) — this
-        // replaces the old flat late fee.
+        // replaces the old flat late fee. A line that had a unit swapped
+        // mid-rental is billed at each item's rates for its share of that
+        // time (see lib/rentals.js's blendedFeePerUnit).
         let actualFeePerUnit = 0;
         if (!item.is_mandatory) {
-          actualFeePerUnit = feeFor({
-            rental_classification: item.rental_classification,
-            rental_rate: item.daily_rate,
-            rental_weekly_rate: item.weekly_rate,
-            rental_monthly_rate: item.monthly_rate,
-            rental_hourly_rate: item.hourly_rate,
-          }, 1, checkoutDateTime, effectiveNow);
+          actualFeePerUnit = blendedFeePerUnit(item, checkoutDateTime, effectiveNow);
         }
         const thisReturnActualFee = parseFloat((actualFeePerUnit * qty).toFixed(2));
         const originalEstimatePerUnit = item.quantity ? item.rental_fee / item.quantity : 0;

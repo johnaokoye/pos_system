@@ -5298,6 +5298,7 @@ const App = {
     { key: 'all',            label: 'All Agreements' },
     { key: 'returned',       label: 'Returned' },
     { key: 'cancelled',      label: 'Cancelled' },
+    { key: 'out_of_service', label: 'Out of Service' },
   ],
 
   async renderRentals() {
@@ -5337,7 +5338,45 @@ const App = {
   async loadRentalTab() {
     const hdr = document.getElementById('rental-header-actions');
     if (hdr) hdr.innerHTML = `${this.can('quotations') ? `<button class="btn btn-secondary btn-sm" style="margin-right:8px" onclick="App.showQuoteForm(null,'rental')">Rental Quote</button>` : ''}${this.can('rentals_issue') ? `<button class="btn btn-secondary btn-sm" style="margin-right:8px" onclick="App.showSection('rental-dispatch')">Rental Dispatch</button>` : ''}${this.can('rentals_checkout') ? `<button class="btn btn-primary btn-sm" onclick="App.showRentalCheckoutModal()">+ New Rental</button>` : ''}`;
-    await this.loadRentalAgreements();
+    if (this.rentalTab === 'out_of_service') await this.loadRentalOutOfService();
+    else await this.loadRentalAgreements();
+  },
+
+  // Rental units held out of service — today that's the faulty unit from an
+  // item replacement (see showReplaceRentalItemModal). They don't count as
+  // available anywhere until returned to service here.
+  async loadRentalOutOfService() {
+    const el = document.getElementById('rental-content');
+    if (!el) return;
+    const showAll = !!this._oosShowAll;
+    const rows = await this.api('GET', `/rentals/out-of-service${showAll ? '?status=all' : ''}`);
+    if (!document.getElementById('rental-content') || this.rentalTab !== 'out_of_service') return;
+    const toggle = `<label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:10px"><input type="checkbox" ${showAll ? 'checked' : ''} onchange="App._oosShowAll=this.checked;App.loadRentalOutOfService()" style="width:auto;margin:0"> Include units already returned to service</label>`;
+    el.innerHTML = toggle + (!rows.length ? '<div class="empty-state"><p>No rental units are out of service.</p></div>' : `
+      <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>Item</th><th>Qty</th><th>Branch</th><th>Reason</th><th>Agreement</th><th>Since</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rows.map(r => `<tr>
+          <td class="fw-600">${r.product_name || '—'}${r.sku ? `<div style="font-size:11px;color:var(--text-muted);font-family:monospace">${r.sku}</div>` : ''}</td>
+          <td>${r.quantity}</td>
+          <td>${r.branch_name || '—'}</td>
+          <td style="font-size:12px;max-width:320px">${r.reason || '—'}</td>
+          <td>${r.agreement_id ? `<a href="#" onclick="event.preventDefault();App.viewRentalAgreement(${r.agreement_id})">${r.agreement_number}</a>` : '—'}</td>
+          <td style="font-size:12px">${this.fmtDateTime(r.created_at)}${r.created_by_name ? `<div style="color:var(--text-muted)">${r.created_by_name}</div>` : ''}</td>
+          <td>${r.returned_to_service_at ? `<span class="badge-pill badge-success">Returned ${this.fmtDate(r.returned_to_service_at)}</span>${r.returned_to_service_by_name ? `<div style="font-size:11px;color:var(--text-muted)">${r.returned_to_service_by_name}</div>` : ''}` : '<span class="badge-pill badge-warning">Out of service</span>'}</td>
+          <td>${r.returned_to_service_at ? '' : `<button class="btn btn-sm btn-primary" onclick="App.returnRentalUnitToService(${r.id})">Return to Service</button>`}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+      </div>`);
+  },
+
+  async returnRentalUnitToService(id) {
+    if (!confirm('Return this unit to service? It will show as available to rent again.')) return;
+    try {
+      await this.api('PATCH', `/rentals/out-of-service/${id}/return-to-service`, { employee_id: this.currentUser.id });
+      this.alert('Returned to service');
+      this.loadRentalOutOfService();
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   // ─── Dispatch (standalone page — left-pane link + "Rental Dispatch" button
@@ -6372,6 +6411,7 @@ const App = {
     // silently extends by however long it's been paused with no record of
     // why.
     const openMissedPickupPause = a.is_paused ? a.pauses?.find(p => !p.ended_at && p.reason === 'missed_pickup') : null;
+    const openReplacementPause = a.is_paused ? a.pauses?.find(p => !p.ended_at && p.reason === 'replacement') : null;
     this.showModal(`
       <div class="modal" style="max-width:1100px">
         <div class="modal-header">
@@ -6418,7 +6458,7 @@ const App = {
                   <button class="btn btn-sm btn-secondary" onclick="App.showMissedPickupContactModal(${a.id},'phone')">📞 Log Call</button>
                   <button class="btn btn-sm btn-primary" onclick="App.showMissedPickupConfirmModal(${a.id})">Record Customer Decision</button>
                 </div>
-              </div>` : `<div style="padding:8px 12px;background:rgba(217,119,6,0.1);border-left:3px solid #d97706;border-radius:4px;font-size:12px;color:#d97706;margin-bottom:12px">Paused — this rental is currently out for ${a.pauses?.find(p=>!p.ended_at)?.reason || 'maintenance'}. Resume it before processing a return.</div>`) : ''}
+              </div>` : `<div style="padding:8px 12px;background:rgba(217,119,6,0.1);border-left:3px solid #d97706;border-radius:4px;font-size:12px;color:#d97706;margin-bottom:12px">Paused — this rental is currently out for ${a.pauses?.find(p=>!p.ended_at)?.reason || 'maintenance'}.${openReplacementPause ? ' Use Replace Item to swap the faulty unit, then resume.' : ''} Resume it before processing a return.</div>`) : ''}
           ${a.pauses?.length ? `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:12px">
             <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Pause History</strong>
             ${a.pauses.map(p => `<div style="margin-top:4px">
@@ -6426,6 +6466,14 @@ const App = {
               ${p.notes ? `<div style="color:var(--text-muted)">${p.notes}</div>` : ''}
               ${p.customer_confirmation ? `<div style="color:var(--text-muted)">Customer confirmed: <strong style="text-transform:capitalize">${p.customer_confirmation}</strong>${p.confirmed_by_name ? ` (logged by ${p.confirmed_by_name})` : ''}</div>` : ''}
               <div style="color:var(--text-muted);font-size:11px">Paused by ${p.paused_by_name || (p.reason==='missed_pickup' ? 'System (auto-pause)' : '—')}, authorized by ${p.authorized_by_name||'—'}${p.ended_at ? `, resumed by ${p.resumed_by_name||'—'}` : ''}${p.due_date_after ? ` — due date extended to ${this.fmtDate(p.due_date_after)}` : ''}</div>
+            </div>`).join('')}
+          </div>` : ''}
+          ${a.replacements?.length ? `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:12px">
+            <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Item Replacements</strong>
+            ${a.replacements.map(r => `<div style="margin-top:4px">
+              ${this.fmtDateTime(r.created_at)} — <strong>${r.quantity} x ${r.old_product_name}</strong>${r.old_sku ? ` (${r.old_sku})` : ''} → <strong>${r.new_product_name}</strong>${r.new_sku ? ` (${r.new_sku})` : ''}
+              ${r.notes ? `<div style="color:var(--text-muted)">${r.notes}</div>` : ''}
+              <div style="color:var(--text-muted);font-size:11px">Replaced by ${r.replaced_by_name || '—'} — the original is held out of service; time before the swap is billed at its rates, time after at the replacement's</div>
             </div>`).join('')}
           </div>` : ''}
           ${!notYetIssued ? `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:12px">
@@ -6472,6 +6520,7 @@ const App = {
           <button class="btn btn-secondary" onclick="App.closeModal();App.launchRentalSummary(${a.id})">📋 Full Summary</button>` : ''}
           ${a.status==='active' ? `<button class="btn btn-secondary" onclick="App.printRentalDeliveryNote(${a.id})">🖨️ Delivery Note</button>` : ''}
           ${a.status==='active' && !a.is_paused ? `<button class="btn btn-secondary" onclick="App.closeModal();App.showPauseRentalModal(${a.id})">⏸ Pause Rental</button>` : ''}
+          ${openReplacementPause && a.status==='active' ? `<button class="btn btn-secondary" onclick="App.closeModal();App.showReplaceRentalItemModal(${a.id})">🔁 Replace Item</button>` : ''}
           ${a.status==='active' && a.is_paused && !openMissedPickupPause ? `<button class="btn btn-primary" onclick="App.resumeRentalAgreement(${a.id})">▶ Resume Rental</button>` : ''}
           ${a.status==='active' && !a.is_paused && this.can('rentals_returns') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showRentalReturnModal(${a.id})">Process Return</button>` : ''}
           ${(a.status==='active'||a.status==='pending'||a.status==='awaiting_issue') && !a.items.some(i=>i.quantity_returned>0) && this.can('rentals_returns') ? `<button class="btn btn-danger" onclick="App.cancelRentalAgreement(${a.id})">${a.status==='pending'?'Cancel Hold':'Cancel Agreement'}</button>` : ''}
@@ -6542,6 +6591,97 @@ const App = {
       this.viewRentalAgreement(id);
       this.renderRentals();
     } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // Swap a faulty unit while the rental is paused for replacement (POST
+  // /rentals/agreements/:id/replace-item). Only rental items available at
+  // the agreement's branch are offered — the same product is fine (a
+  // like-for-like unit). The original is held out of service server-side.
+  async showReplaceRentalItemModal(id) {
+    const a = await this.api('GET', `/rentals/agreements/${id}`);
+    const lines = a.items.filter(i => i.quantity_returned < i.quantity);
+    if (!lines.length) { this.alert('No items are still out on this agreement', 'warning'); return; }
+    const products = await this.api('GET', `/products?is_rental=1&active=1${a.branch_id ? '&branch_id=' + a.branch_id : ''}`);
+    this._replaceProducts = products
+      .map(p => ({ ...p, available: (p.stock_qty || 0) - (p.rental_outstanding_qty || 0) }))
+      .filter(p => p.available > 0)
+      .sort((x, y) => x.name.localeCompare(y.name));
+    if (!this._replaceProducts.length) { this.alert(`No rental items are available${a.branch_name ? ' at ' + a.branch_name : ''} to use as a replacement`, 'warning'); return; }
+    const esc = v => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+    this.showModal(`
+      <div class="modal" style="max-width:520px">
+        <div class="modal-header">
+          <span class="modal-title">Replace Item — ${a.agreement_number}</span>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px">The original unit is held out of service until it's returned to service (Rentals &gt; Out of Service). Time before the swap is billed at the original item's rates, time after at the replacement's — settled when the rental is returned.</p>
+          <div class="form-group"><label>Item being replaced</label>
+            <select id="rpl-item" onchange="App._replaceItemChanged()">
+              ${lines.map(i => `<option value="${i.id}" data-out="${i.quantity - i.quantity_returned}" data-product="${i.product_id || ''}">${esc(i.product_name)}${i.sku ? ` (${esc(i.sku)})` : ''} — ${i.quantity - i.quantity_returned} out</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group"><label>Quantity to replace</label><input type="number" id="rpl-qty" min="1" value="1"></div>
+          <div class="form-group"><label>Replacement item</label>
+            <select id="rpl-product" onchange="App._replaceItemChanged()">
+              ${this._replaceProducts.map(p => `<option value="${p.id}">${esc(p.name)}${p.sku ? ` (${esc(p.sku)})` : ''} — ${p.available} available</option>`).join('')}
+            </select>
+            <div id="rpl-rates" style="font-size:12px;color:var(--text-muted);margin-top:4px"></div>
+          </div>
+          <div class="form-group"><label>Condition Out (replacement)</label><input id="rpl-cond" placeholder="e.g. Good condition"></div>
+          <div class="form-group"><label>Notes</label><textarea id="rpl-notes" rows="3" placeholder="What was wrong with the original unit"></textarea></div>
+          <div id="rpl-err" style="color:var(--danger);font-size:13px;min-height:16px;text-align:center"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal();App.viewRentalAgreement(${a.id})">Cancel</button>
+          <button class="btn btn-primary" id="rpl-submit" onclick="App.submitReplaceRentalItem(${a.id})">Replace Item</button>
+        </div>
+      </div>`);
+    // Default the replacement to the same product when a spare is on hand —
+    // the common like-for-like swap.
+    const sel = document.getElementById('rpl-item');
+    const same = this._replaceProducts.find(p => String(p.id) === sel.selectedOptions[0].dataset.product);
+    if (same) document.getElementById('rpl-product').value = same.id;
+    this._replaceItemChanged();
+  },
+
+  _replaceItemChanged() {
+    const itemOpt = document.getElementById('rpl-item')?.selectedOptions[0];
+    const qtyEl = document.getElementById('rpl-qty');
+    if (itemOpt && qtyEl) {
+      qtyEl.max = itemOpt.dataset.out;
+      if (parseInt(qtyEl.value) > parseInt(itemOpt.dataset.out)) qtyEl.value = itemOpt.dataset.out;
+    }
+    const p = this._replaceProducts?.find(x => String(x.id) === document.getElementById('rpl-product')?.value);
+    const ratesEl = document.getElementById('rpl-rates');
+    if (p && ratesEl) {
+      const parts = [`${this.fmt(p.rental_rate)}/day`];
+      if (p.rental_weekly_rate) parts.push(`${this.fmt(p.rental_weekly_rate)}/wk`);
+      if (p.rental_monthly_rate) parts.push(`${this.fmt(p.rental_monthly_rate)}/mo`);
+      ratesEl.textContent = `Billed at ${parts.join(' · ')} from the swap on`;
+    }
+  },
+
+  async submitReplaceRentalItem(id) {
+    const errEl = document.getElementById('rpl-err');
+    const item_id = parseInt(document.getElementById('rpl-item').value);
+    const quantity = parseInt(document.getElementById('rpl-qty').value);
+    const product_id = parseInt(document.getElementById('rpl-product').value);
+    const notes = document.getElementById('rpl-notes').value.trim();
+    const condition_out = document.getElementById('rpl-cond').value.trim();
+    if (!notes) { errEl.textContent = 'Notes are required.'; return; }
+    if (!quantity || quantity < 1) { errEl.textContent = 'Enter a quantity.'; return; }
+    const btn = document.getElementById('rpl-submit');
+    btn.disabled = true;
+    try {
+      await this.api('POST', `/rentals/agreements/${id}/replace-item`, { item_id, quantity, product_id, notes, condition_out: condition_out || null, employee_id: this.currentUser.id });
+      this.closeModal();
+      this.alert('Item replaced — the original is held out of service');
+      this.viewRentalAgreement(id);
+    } catch(e) {
+      errEl.textContent = e.message;
+      btn.disabled = false;
+    }
   },
 
   // Contacting the customer after an auto-pause (see database.js's
