@@ -5992,7 +5992,7 @@ const App = {
           <td>${(a.status==='pending'||a.status==='awaiting_issue') ? '—' : this.fmtDate(a.checkout_date)}</td>
           <td>${this.fmtDate(a.due_date)}${a.current_pause_started_at ? `<div style="font-size:11px;color:var(--warning)">Paused since ${this.fmtDateTime(a.current_pause_started_at)}</div>` : ''}</td>
           <td>${(a.status==='pending'||a.status==='awaiting_issue') ? '—' : this.rentalDurationLabel(a.checkout_date, a.due_date, a.returned_at)}</td>
-          <td><span class="badge badge-info">${a.item_count}</span></td>
+          <td style="max-width:220px;font-size:13px">${a.item_summary||'—'}</td>
           <td>${a.delivery_required ? (a.delivery_driver_name || notAssigned) : (a.customer_pickup ? customerPickupTag : none)}</td>
           <td>${this._pickupDriverCell(a)}</td>
           <td>${a.operator_required ? (a.operator_name || notAssigned) : none}</td>
