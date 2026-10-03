@@ -1,5 +1,0 @@
-# Bakes the Caddyfile into the image rather than bind-mounting ./Caddyfile —
-# a relative-path bind mount in a Portainer Git stack doesn't reliably resolve
-# to the cloned repo, while a build context does (same as the app's `build: .`).
-FROM caddy:2-alpine
-COPY Caddyfile /etc/caddy/Caddyfile
