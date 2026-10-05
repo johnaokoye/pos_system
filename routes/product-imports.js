@@ -166,6 +166,11 @@ router.post('/:id/reverse', requirePermission('inventory_import_history'), async
           sql: `UPDATE products SET sku=?,barcode=?,name=?,description=?,category_id=?,price=?,cost=?,tax_rate=?,stock_qty=?,min_stock=?,active=?,supplier_id=? WHERE id=?`,
           args: [prev.sku, prev.barcode, prev.name, prev.description, prev.category_id, prev.price, prev.cost, prev.tax_rate, prev.stock_qty, prev.min_stock, prev.active, prev.supplier_id, item.product_id],
         });
+        // Snapshots taken before long_description existed don't carry the key —
+        // leave the current value alone for those rather than nulling it.
+        if (Object.prototype.hasOwnProperty.call(prev, 'long_description')) {
+          await tx.execute({ sql: 'UPDATE products SET long_description = ? WHERE id = ?', args: [prev.long_description, item.product_id] });
+        }
         await tx.execute({ sql: "UPDATE product_import_batch_items SET reverse_outcome = 'restored' WHERE id = ?", args: [item.id] });
       }
 

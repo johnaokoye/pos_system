@@ -4507,6 +4507,7 @@ const App = {
           <td style="color:var(--text-muted)">${this.fmt(p.cost)}</td>
           <td>${p.stock_qty}</td>
           <td style="white-space:nowrap">
+            <button class="btn btn-outline btn-sm" onclick="App.showProductCard(${p.id})">View</button>
             <button class="btn btn-secondary btn-sm" onclick="App.showProductForm(${p.id})">Edit</button>
             <button class="btn btn-primary btn-sm" onclick="App.promoteToInventory(${p.id})">Add to Warehouse Inventory</button>
           </td>
@@ -4584,6 +4585,7 @@ const App = {
           </td>
           <td><span class="badge-pill ${p.active ? 'badge-success' : 'badge-danger'}">${p.active ? 'Active' : 'Inactive'}</span></td>
           <td style="white-space:nowrap">
+            <button class="btn btn-outline btn-sm" onclick="App.showProductCard(${p.id})">View</button>
             <button class="btn btn-secondary btn-sm" onclick="App.showProductForm(${p.id})">Edit</button>
             ${this.can('inventory_adjust') ? `<button class="btn btn-outline btn-sm" onclick="App.showStockAdjust(${p.id},'${p.name}',${p.stock_qty}${branchId ? `,${branchId},'${branchName}'` : ''})">Stock</button>` : ''}
             <button class="btn btn-secondary btn-sm" id="inv-hist-btn-${p.id}" onclick="App.toggleProductHistory(${p.id})" title="Stock history" style="padding:4px 7px">
@@ -4723,6 +4725,83 @@ const App = {
     }
   },
 
+  // Read-only product card (View button on the Inventory and Rental Items
+  // lists) — photo, pricing/rates, stock, and both descriptions, including
+  // the detailed website copy, without opening the edit form.
+  async showProductCard(id) {
+    let p, accessories = [];
+    try {
+      p = await this.api('GET', `/products/${id}`);
+      if (p.is_rental) accessories = await this.api('GET', `/products/${id}/accessories`).catch(() => []);
+      // Same as showRentalItemForm: once assigned to a branch, branch_inventory
+      // is the real stock figure, not the (possibly stale) global column.
+      if (p.is_rental && p.assigned_branch_id) {
+        const scoped = await this.api('GET', `/products/${id}?branch_id=${p.assigned_branch_id}`);
+        p.stock_qty = scoped.branch_stock_qty;
+      }
+    } catch(e) { this.alert(e.message, 'error'); return; }
+    const esc = v => this.escapeAttr(v);
+    const isRental = !!p.is_rental;
+    const isEquipment = p.rental_classification === 'equipment';
+    const row = (label, value) => value === null || value === undefined || value === '' ? '' :
+      `<div style="display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px solid var(--border);font-size:13px"><span style="color:var(--text-muted)">${label}</span><span style="text-align:right;font-weight:600">${value}</span></div>`;
+    const rates = !isRental ? row('Price', this.fmt(p.price)) : isEquipment
+      ? [['Hourly', p.rental_hourly_rate], ['Daily', p.rental_rate], ['Weekly', p.rental_weekly_rate], ['Monthly', p.rental_monthly_rate]].filter(([, v]) => v > 0).map(([l, v]) => row(`${l} Rate`, this.fmt(v))).join('')
+      : (() => { const t = this._toolTierDayRates(p.rental_rate); return row('Daily Rate', this.fmt(p.rental_rate)) + row('Weekly Tier', `${this.fmt(t.weekTierDayRate)}/day`) + row('Monthly Tier', `${this.fmt(t.monthTierDayRate)}/day`); })();
+    const canEdit = isRental ? this.can('rentals_manage_items') : true;
+    const editCall = isRental ? `App.showRentalItemForm(${p.id})` : `App.showProductForm(${p.id})`;
+    this.showModal(`
+      <div class="modal" style="max-width:720px">
+        <div class="modal-header">
+          <span class="modal-title">${esc(p.name)}</span>
+          <div style="display:flex;gap:6px;align-items:center">
+            ${isRental ? `<span class="badge-pill ${isEquipment?'badge-info':'badge-secondary'}" style="font-size:10px">${isEquipment?'RENTAL · EQUIPMENT':'RENTAL · TOOL'}</span>` : ''}
+            ${p.online_available ? '<span class="badge-pill badge-info" style="font-size:10px">ONLINE</span>' : ''}
+            <span class="badge-pill ${p.active ? 'badge-success' : 'badge-danger'}" style="font-size:10px">${p.active ? 'Active' : 'Inactive'}</span>
+            <button class="modal-close">✕</button>
+          </div>
+        </div>
+        <div class="modal-body">
+          <div style="display:flex;gap:20px;flex-wrap:wrap">
+            <div style="flex:0 0 220px;max-width:100%">
+              ${p.image_path
+                ? `<img src="${esc(p.image_path)}" alt="" style="width:100%;max-height:240px;object-fit:contain;border:1px solid var(--border);border-radius:8px;background:#fff">`
+                : '<div style="width:100%;height:180px;border:1px dashed var(--border);border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:13px">No photo</div>'}
+            </div>
+            <div style="flex:1;min-width:240px">
+              ${row('SKU', `<span style="font-family:monospace">${esc(p.sku)}</span>`)}
+              ${row('Barcode', p.barcode ? esc(p.barcode) : '')}
+              ${row('Category', p.category_name ? esc(p.category_name) : '')}
+              ${row('Brand', p.brand ? esc(p.brand) : '')}
+              ${row('Model', p.model_number ? esc(p.model_number) : '')}
+              ${row('Size', p.size ? esc(p.size) : '')}
+              ${rates}
+              ${isRental && p.rental_allow_sale ? row('Sale Price', this.fmt(p.price)) : ''}
+              ${isRental && p.rental_deposit > 0 ? row('Deposit', this.fmt(p.rental_deposit)) : ''}
+              ${isRental && p.replacement_value > 0 ? row('Replacement Value', this.fmt(p.replacement_value)) : ''}
+              ${p.is_service ? '' : row('Stock', `${p.stock_qty}${p.unit ? ' ' + esc(p.unit) : ''}`)}
+              ${row('Tax', p.taxable === 0 ? 'Not taxable' : `${p.tax_rate}%`)}
+            </div>
+          </div>
+          ${p.description ? `<p style="margin:16px 0 0;font-size:14px">${esc(p.description)}</p>` : ''}
+          <div style="margin-top:16px">
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;color:var(--text-muted);margin-bottom:6px">Detailed Description${p.online_available ? ' · shown on website' : ''}</div>
+            ${p.long_description
+              ? `<div style="font-size:13px;line-height:1.6;white-space:pre-wrap;border:1px solid var(--border);border-radius:6px;padding:10px 12px;max-height:280px;overflow-y:auto">${esc(p.long_description)}</div>`
+              : '<div style="font-size:13px;color:var(--text-muted)">No detailed description yet.</div>'}
+          </div>
+          ${accessories.length ? `<div style="margin-top:16px">
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;color:var(--text-muted);margin-bottom:6px">Accessories</div>
+            ${accessories.map(a => `<div style="font-size:13px;padding:3px 0">${esc(a.name)} <span style="color:var(--text-muted);font-family:monospace;font-size:11px">${esc(a.sku)}</span> <span class="badge-pill ${a.is_mandatory?'badge-success':'badge-secondary'}" style="font-size:10px">${a.is_mandatory?'included':'optional'}</span></div>`).join('')}
+          </div>` : ''}
+        </div>
+        <div class="modal-footer">
+          ${canEdit ? `<button class="btn btn-secondary" onclick="App.closeModal();${editCall}">Edit</button>` : ''}
+          <button class="btn btn-primary" onclick="App.closeModal()">Close</button>
+        </div>
+      </div>`);
+  },
+
   async showProductForm(id) {
     const [categories, brands, branches, suppliers] = await Promise.all([
       this.api('GET', '/categories'),
@@ -4742,6 +4821,7 @@ const App = {
       </div>
       <div class="form-group"><label>Name *</label><input id="pf-name" value="${p.name||''}"></div>
       <div class="form-group"><label>Description</label><input id="pf-desc" value="${p.description||''}"></div>
+      <div class="form-group"><label>Detailed Description <span style="font-size:11px;color:var(--text-muted);font-weight:400">(shown on the website)</span></label><textarea id="pf-long-desc" rows="5" placeholder="Features, specifications, what's included, care/usage notes…">${this.escapeAttr(p.long_description)}</textarea></div>
       <div class="input-row-3">
         <div class="form-group"><label>Category</label>
           <select id="pf-cat"><option value="">— None —</option>${categories.map(c => `<option value="${c.id}" ${p.category_id==c.id?'selected':''}>${c.name}</option>`).join('')}</select>
@@ -4897,6 +4977,7 @@ const App = {
       barcode: document.getElementById('pf-barcode').value.trim() || null,
       name: document.getElementById('pf-name').value.trim(),
       description: document.getElementById('pf-desc').value.trim() || null,
+      long_description: document.getElementById('pf-long-desc').value.trim() || null,
       category_id: document.getElementById('pf-cat').value || null,
       supplier_id: document.getElementById('pf-supplier').value || null,
       brand: document.getElementById('pf-brand').value.trim() || null,
@@ -5634,6 +5715,7 @@ const App = {
               <td class="${(p.stock_qty - (p.rental_outstanding_qty||0)) <= 0 ? 'color-danger fw-600' : ''}">${p.stock_qty - (p.rental_outstanding_qty||0)}</td>
               <td><span class="badge-pill ${p.active ? 'badge-success' : 'badge-danger'}">${p.active ? 'Active' : 'Inactive'}</span></td>
               <td style="white-space:nowrap">
+                <button class="btn btn-sm btn-outline" onclick="App.showProductCard(${p.id})">View</button>
                 ${this.can('rentals_manage_items') ? `<button class="btn btn-sm btn-secondary" onclick="App.showRentalItemForm(${p.id})">Edit</button>
                 <button class="btn btn-sm btn-outline" onclick="App.showRentalAccessoriesModal(${p.id}, '${p.name.replace(/'/g,"\\'")}')">Accessories</button>` : ''}
                 ${this.can('transfers') && p.assigned_branch_id ? `<button class="btn btn-sm btn-outline" onclick="App.showTransferForm({fromBranchId:${p.assigned_branch_id},productId:${p.id}})">Transfer</button>` : ''}
@@ -5680,6 +5762,7 @@ const App = {
           </div>
           <div class="form-group"><label>Name *</label><input id="rf-name" value="${p.name||''}"></div>
           <div class="form-group"><label>Description</label><input id="rf-desc" value="${p.description||''}"></div>
+          <div class="form-group"><label>Detailed Description <span style="font-size:11px;color:var(--text-muted);font-weight:400">(shown on the website)</span></label><textarea id="rf-long-desc" rows="5" placeholder="Features, specifications, what's included, care/usage notes…">${this.escapeAttr(p.long_description)}</textarea></div>
           <div class="input-row-3">
             <div class="form-group"><label>Brand</label><input id="rf-brand" value="${p.brand||''}"></div>
             <div class="form-group"><label>Model Number</label><input id="rf-model" value="${p.model_number||''}"></div>
@@ -5850,6 +5933,7 @@ const App = {
       sku,
       name,
       description: document.getElementById('rf-desc').value.trim() || null,
+      long_description: document.getElementById('rf-long-desc').value.trim() || null,
       brand: document.getElementById('rf-brand').value.trim() || null,
       model_number: document.getElementById('rf-model').value.trim() || null,
       size: document.getElementById('rf-size').value.trim() || null,
@@ -10706,7 +10790,7 @@ const App = {
   // semicolon), since Excel "Text"/"Unicode Text" saves and older POS
   // exports are tab-separated.
   _parseCsv(text) {
-    const lines = text.trim().split(/\r?\n/);
+    const lines = this._splitCsvRecords(text.trim());
     if (lines.length < 2) return { headers: [], rows: [] };
     const count = ch => lines[0].split(ch).length - 1;
     const delim = ['\t', ';', ','].reduce((best, ch) => count(ch) > count(best) ? ch : best, ',');
@@ -10716,6 +10800,24 @@ const App = {
       return Object.fromEntries(headers.map((h, i) => [h, (vals[i] || '').trim()]));
     });
     return { headers, rows };
+  },
+
+  // Splits CSV text into records on line breaks that fall OUTSIDE quoted
+  // cells, so a multi-line value (e.g. a Detailed Description, which our own
+  // exports write as one quoted cell) stays in its row. Doubled "" escapes
+  // toggle the quote state twice, so they net out correctly.
+  _splitCsvRecords(text) {
+    const records = [];
+    let cur = '', inQuote = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (ch === '"') inQuote = !inQuote;
+      if (ch === '\n' && !inQuote) { records.push(cur.replace(/\r$/, '')); cur = ''; continue; }
+      if (ch === '\r' && inQuote && text[i + 1] === '\n') continue;
+      cur += ch;
+    }
+    records.push(cur.replace(/\r$/, ''));
+    return records;
   },
 
   // ─── Import Column Mapping ────────────────────────────────
@@ -10728,6 +10830,7 @@ const App = {
     { key: 'barcode',        label: 'Barcode' },
     { key: 'name',           label: 'Name',             required: true },
     { key: 'description',    label: 'Description' },
+    { key: 'long_description', label: 'Detailed Description (website)', aliases: ['Detailed Description', 'Long Description', 'Web Description'] },
     { key: 'category_name',  label: 'Category' },
     { key: 'price',          label: 'Price' },
     { key: 'cost',           label: 'Cost' },
@@ -10752,6 +10855,7 @@ const App = {
     { key: 'sku',                    label: 'SKU',        required: true },
     { key: 'name',                   label: 'Name',       required: true },
     { key: 'description',            label: 'Description' },
+    { key: 'long_description',       label: 'Detailed Description (website)', aliases: ['Detailed Description', 'Long Description', 'Web Description'] },
     { key: 'model_number',           label: 'Model Number' },
     { key: 'size',                   label: 'Size' },
     { key: 'category_name',          label: 'Category' },

@@ -292,7 +292,11 @@ async function syncProducts() {
         type: 'simple',
         sku: p.sku,
         regular_price: String(p.price),
-        description: p.description || '',
+        // Detailed copy is the storefront's main description when present,
+        // with the POS one-liner as the short description; otherwise the
+        // one-liner stays the description as before.
+        description: p.long_description || p.description || '',
+        ...(p.long_description ? { short_description: p.description || '' } : {}),
         manage_stock: true,
         stock_quantity: p.web_allotment != null ? Math.min(p.branch_stock_qty, p.web_allotment) : p.branch_stock_qty,
         status: 'publish',

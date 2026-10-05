@@ -105,7 +105,7 @@ router.get('/', requireAuth, async (req, res) => {
       } else {
         stockExpr = `CASE WHEN p.web_allotment IS NOT NULL THEN MIN(COALESCE(p.stock_qty, 0), p.web_allotment) ELSE COALESCE(p.stock_qty, 0) END`;
       }
-      let onlineSql = `SELECT p.id, p.sku, p.name, p.description, p.category_id, p.price, p.cost,
+      let onlineSql = `SELECT p.id, p.sku, p.name, p.description, p.long_description, p.category_id, p.price, p.cost,
         p.tax_rate, p.active, p.image_path, p.is_service, p.unit, p.is_rental,
         p.online_available, p.web_allotment, p.stock_qty as global_stock_qty,
         ${stockExpr} as stock_qty,
@@ -256,7 +256,7 @@ router.get('/export', requirePermission('inventory_export'), async (req, res) =>
     let sql;
 
     if (branch_id) {
-      sql = `SELECT p.id, p.sku, p.barcode, p.name, p.description, p.category_id, p.price, p.cost, p.tax_rate, p.active, p.created_at, p.supplier_id, p.image_path,
+      sql = `SELECT p.id, p.sku, p.barcode, p.name, p.description, p.long_description, p.category_id, p.price, p.cost, p.tax_rate, p.active, p.created_at, p.supplier_id, p.image_path,
         COALESCE(bi.stock_qty, 0) as stock_qty,
         COALESCE(bi.min_stock, p.min_stock) as min_stock,
         p.stock_qty as global_stock_qty,
@@ -302,7 +302,7 @@ router.get('/export', requirePermission('inventory_export'), async (req, res) =>
       return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
     };
 
-    const headers = ['sku','barcode','name','description','category_name','price','cost','tax_rate','stock_qty','min_stock','active','supplier_name'];
+    const headers = ['sku','barcode','name','description','long_description','category_name','price','cost','tax_rate','stock_qty','min_stock','active','supplier_name'];
     const csvRows = [headers.join(',')];
     for (const p of products) {
       csvRows.push(headers.map(h => escape(p[h])).join(','));
@@ -343,8 +343,10 @@ router.get('/export/issues', requirePermission('inventory_missing_data'), async 
 
 // GET CSV template for bulk import
 router.get('/export/template', requirePermission('inventory_template'), (req, res) => {
-  const headers = ['sku','barcode','name','description','category_name','price','cost','tax_rate','stock_qty','min_stock','active','supplier_name'];
-  const example = ['PROD-001','0001234567890','Example Product','Product description','Electronics','19.99','9.99','8.5','100','10','1','TechSupply Co'];
+  const headers = ['sku','barcode','name','description','long_description','category_name','price','cost','tax_rate','stock_qty','min_stock','active','supplier_name'];
+  // long_description is quoted: it's free text that may hold commas, and a
+  // quoted cell can also span several lines (the importer keeps them).
+  const example = ['PROD-001','0001234567890','Example Product','Product description','"Detailed website copy: features, specs, what\'s included."','Electronics','19.99','9.99','8.5','100','10','1','TechSupply Co'];
   const csv = [headers.join(','), example.join(',')].join('\r\n');
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename="product_import_template.csv"');
@@ -386,6 +388,9 @@ router.post('/import', requirePermission('inventory_import'), async (req, res) =
       const row = rows[i];
       const rowNum = i + 2;
       const { sku, barcode, name, description, category_name, price, cost, tax_rate, stock_qty, min_stock, active, supplier_name } = row;
+      // Only touched when the file actually maps this column — an older
+      // export/template without it must not wipe existing website copy.
+      const hasLongDesc = Object.prototype.hasOwnProperty.call(row, 'long_description');
       if (!sku || !name) {
         const msg = `Row ${rowNum}: SKU and name are required`;
         errors.push(msg);
@@ -405,11 +410,12 @@ router.post('/import', requirePermission('inventory_import'), async (req, res) =
           await logItem(sku, existing.id, 'skipped', null, null);
         } else if (existing) {
           await db.execute({ sql: 'UPDATE products SET barcode=?,name=?,description=?,category_id=?,price=?,cost=?,tax_rate=?,stock_qty=?,min_stock=?,active=?,supplier_id=? WHERE sku=?', args: [...vals, sku] });
+          if (hasLongDesc) await db.execute({ sql: 'UPDATE products SET long_description = ? WHERE id = ?', args: [row.long_description || null, existing.id] });
           updated++;
           productId = existing.id;
           await logItem(sku, existing.id, 'updated', existing, null);
         } else {
-          const result = await db.execute({ sql: 'INSERT INTO products (sku,barcode,name,description,category_id,price,cost,tax_rate,stock_qty,min_stock,active,supplier_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', args: [sku, ...vals] });
+          const result = await db.execute({ sql: 'INSERT INTO products (sku,barcode,name,description,category_id,price,cost,tax_rate,stock_qty,min_stock,active,supplier_id,long_description) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [sku, ...vals, (hasLongDesc && row.long_description) || null] });
           productId = Number(result.lastInsertRowid);
           created++;
           await logItem(sku, productId, 'created', null, null);
@@ -598,7 +604,7 @@ router.post('/bulk-tax-rate-rentals', requirePermission('rentals_manage_items'),
 // columns (rates, classification, replacement value) instead of cost/supplier.
 router.get('/export/rentals', requirePermission('rentals_manage_items'), async (req, res) => {
   try {
-    const { rows: rentals } = await db.execute({ sql: `SELECT p.sku, p.name, p.description, p.model_number, p.size, c.name as category_name,
+    const { rows: rentals } = await db.execute({ sql: `SELECT p.sku, p.name, p.description, p.long_description, p.model_number, p.size, c.name as category_name,
       (SELECT b.name FROM branch_inventory bi JOIN branches b ON bi.branch_id = b.id WHERE bi.product_id = p.id LIMIT 1) as branch_name,
       p.stock_qty, p.min_stock, p.tax_rate, p.taxable, p.rental_classification,
       p.rental_rate as daily_rate, p.rental_weekly_rate as weekly_rate, p.rental_monthly_rate as monthly_rate, p.rental_hourly_rate as hourly_rate,
@@ -612,7 +618,7 @@ router.get('/export/rentals', requirePermission('rentals_manage_items'), async (
       return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
     };
 
-    const headers = ['sku','name','description','model_number','size','category_name','branch_name','stock_qty','min_stock','tax_rate','taxable','rental_classification','daily_rate','weekly_rate','monthly_rate','hourly_rate','replacement_value','is_accessory','active'];
+    const headers = ['sku','name','description','long_description','model_number','size','category_name','branch_name','stock_qty','min_stock','tax_rate','taxable','rental_classification','daily_rate','weekly_rate','monthly_rate','hourly_rate','replacement_value','is_accessory','active'];
     const csvRows = [headers.join(',')];
     for (const p of rentals) csvRows.push(headers.map(h => escape(p[h])).join(','));
 
@@ -625,8 +631,8 @@ router.get('/export/rentals', requirePermission('rentals_manage_items'), async (
 
 // GET CSV template for bulk rental item import
 router.get('/export/rentals/template', requirePermission('rentals_manage_items'), (req, res) => {
-  const headers = ['sku','name','description','model_number','size','category_name','branch_name','stock_qty','min_stock','tax_rate','taxable','rental_classification','daily_rate','weekly_rate','monthly_rate','hourly_rate','replacement_value','is_accessory','active'];
-  const example = ['RENT-001','Example Drill','18V cordless drill','DW-18V','Standard','Tools','Drax Hall','5','1','8.5','1','tool','15.00','80.00','300.00','0','200.00','0','1'];
+  const headers = ['sku','name','description','long_description','model_number','size','category_name','branch_name','stock_qty','min_stock','tax_rate','taxable','rental_classification','daily_rate','weekly_rate','monthly_rate','hourly_rate','replacement_value','is_accessory','active'];
+  const example = ['RENT-001','Example Drill','18V cordless drill','"Detailed website copy: what\'s included, specs, safety notes."','DW-18V','Standard','Tools','Drax Hall','5','1','8.5','1','tool','15.00','80.00','300.00','0','200.00','0','1'];
   const csv = [headers.join(','), example.join(',')].join('\r\n');
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename="rental_items_import_template.csv"');
@@ -660,6 +666,8 @@ router.post('/import/rentals', requirePermission('rentals_manage_items'), async 
         replacement_value, is_accessory, active,
       } = row;
       if (!sku || !name) { errors.push(`Row ${rowNum}: SKU and name are required`); continue; }
+      // Same rule as the retail import: only when the file maps the column.
+      const hasLongDesc = Object.prototype.hasOwnProperty.call(row, 'long_description');
       const category_id = category_name ? (catMap[category_name.toLowerCase()] ?? null) : null;
       const branch_id = branch_name ? (branchMap[branch_name.toLowerCase()] ?? null) : null;
       if (branch_name && !branch_id) { errors.push(`Row ${rowNum} (${sku}): branch "${branch_name}" not found`); continue; }
@@ -681,11 +689,12 @@ router.post('/import/rentals', requirePermission('rentals_manage_items'), async 
           await db.execute({ sql: `UPDATE products SET name=?,description=?,model_number=?,size=?,category_id=?,tax_rate=?,taxable=?,stock_qty=?,min_stock=?,
             rental_classification=?,rental_rate=?,rental_weekly_rate=?,rental_monthly_rate=?,rental_hourly_rate=?,
             replacement_value=?,is_accessory=?,active=?,is_rental=1 WHERE id=?`, args: [...vals, productId] });
+          if (hasLongDesc) await db.execute({ sql: 'UPDATE products SET long_description = ? WHERE id = ?', args: [row.long_description || null, productId] });
           updated++;
         } else {
           const result = await db.execute({ sql: `INSERT INTO products (sku,name,description,model_number,size,category_id,tax_rate,taxable,stock_qty,min_stock,
             rental_classification,rental_rate,rental_weekly_rate,rental_monthly_rate,rental_hourly_rate,
-            replacement_value,is_accessory,active,is_rental,price) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,0)`, args: [sku, ...vals] });
+            replacement_value,is_accessory,active,is_rental,price,long_description) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,0,?)`, args: [sku, ...vals, (hasLongDesc && row.long_description) || null] });
           productId = Number(result.lastInsertRowid);
           created++;
         }
@@ -848,7 +857,7 @@ router.get('/:id', requireAuth, async (req, res) => {
         stockExpr = `CASE WHEN p.web_allotment IS NOT NULL THEN MIN(COALESCE(p.stock_qty, 0), p.web_allotment) ELSE COALESCE(p.stock_qty, 0) END`;
       }
       const { rows: [product] } = await db.execute({
-        sql: `SELECT p.id, p.sku, p.name, p.description, p.category_id, p.price, p.cost, p.tax_rate,
+        sql: `SELECT p.id, p.sku, p.name, p.description, p.long_description, p.category_id, p.price, p.cost, p.tax_rate,
           p.active, p.image_path, p.is_service, p.unit,
           p.online_available, p.web_allotment, p.stock_qty as global_stock_qty,
           ${stockExpr} as stock_qty, c.name as category_name
@@ -893,7 +902,7 @@ router.post('/', (req, res, next) => requireProductPermission(!!req.body.is_rent
     // Rate), not the 8.5 schema default — the frontend's own product forms
     // already send it explicitly, so this only matters for those callers.
     const taxRateFinal = tax_rate ?? (parseFloat(await getSetting('tax_rate', 8.5)) || 8.5);
-    const result = await db.execute({ sql: `INSERT INTO products (sku,barcode,name,description,category_id,price,cost,tax_rate,stock_qty,min_stock,active,supplier_id,is_service,unit,online_available,web_allotment,is_rental,rental_rate_type,rental_rate,rental_deposit,rental_late_fee_rate,replacement_value,rental_classification,rental_weekly_rate,rental_monthly_rate,rental_hourly_rate,rental_allow_sale,is_accessory,is_layaway_eligible,model_number,size,brand,taxable) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, taxRateFinal, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null, rnt, rental_rate_type||'daily', rental_rate||0, rental_deposit||0, rental_late_fee_rate||0, replacement_value||0, rental_classification||'tool', rental_weekly_rate||0, rental_monthly_rate||0, rental_hourly_rate||0, allowSale, acc, lay, model_number||null, size||null, brand||null, tax] });
+    const result = await db.execute({ sql: `INSERT INTO products (sku,barcode,name,description,long_description,category_id,price,cost,tax_rate,stock_qty,min_stock,active,supplier_id,is_service,unit,online_available,web_allotment,is_rental,rental_rate_type,rental_rate,rental_deposit,rental_late_fee_rate,replacement_value,rental_classification,rental_weekly_rate,rental_monthly_rate,rental_hourly_rate,rental_allow_sale,is_accessory,is_layaway_eligible,model_number,size,brand,taxable) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [sku, barcode||null, name, description||null, req.body.long_description||null, category_id||null, price||0, cost||0, taxRateFinal, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null, rnt, rental_rate_type||'daily', rental_rate||0, rental_deposit||0, rental_late_fee_rate||0, replacement_value||0, rental_classification||'tool', rental_weekly_rate||0, rental_monthly_rate||0, rental_hourly_rate||0, allowSale, acc, lay, model_number||null, size||null, brand||null, tax] });
     const productId = Number(result.lastInsertRowid);
     if (!svc && branch_id && (parseInt(stock_qty) || 0) > 0) {
       await db.execute({ sql: 'INSERT OR IGNORE INTO branch_inventory (product_id, branch_id, stock_qty, min_stock) VALUES (?, ?, ?, ?)', args: [productId, branch_id, parseInt(stock_qty) || 0, parseInt(min_stock) || 5] });
@@ -951,6 +960,12 @@ router.put('/:id', async (req, res, next) => {
       }
     }
     await db.execute({ sql: `UPDATE products SET sku=?,barcode=?,name=?,description=?,category_id=?,price=?,cost=?,tax_rate=?,stock_qty=?,min_stock=?,active=?,supplier_id=?,is_service=?,unit=?,online_available=?,web_allotment=?,is_rental=?,rental_rate_type=?,rental_rate=?,rental_deposit=?,rental_late_fee_rate=?,replacement_value=?,rental_classification=?,rental_weekly_rate=?,rental_monthly_rate=?,rental_hourly_rate=?,rental_allow_sale=?,is_accessory=?,is_layaway_eligible=?,model_number=?,size=?,brand=?,taxable=? WHERE id=?`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, taxRateFinal, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null, rnt, rental_rate_type||'daily', rental_rate||0, rental_deposit||0, rental_late_fee_rate||0, replacement_value||0, rental_classification||'tool', rental_weekly_rate||0, rental_monthly_rate||0, rental_hourly_rate||0, allowSale, acc, lay, model_number||null, size||null, brand||null, tax, req.params.id] });
+    // Only when the caller sent it — PUT otherwise overwrites every column, and
+    // older callers (imports, API clients) that predate this field would
+    // silently wipe the website copy.
+    if ('long_description' in req.body) {
+      await db.execute({ sql: 'UPDATE products SET long_description = ? WHERE id = ?', args: [req.body.long_description || null, req.params.id] });
+    }
     if (rnt && branch_id !== undefined) {
       await db.execute({ sql: 'DELETE FROM branch_inventory WHERE product_id = ? AND branch_id != ?', args: [req.params.id, branch_id || 0] });
       if (branch_id) {

@@ -1777,6 +1777,9 @@ async function _init() {
     // JSON array of the rate periods before each replacement swap on this
     // line — see lib/rentals.js's blendedFeePerUnit.
     'ALTER TABLE rental_agreement_items ADD COLUMN rate_segments TEXT',
+    // Long-form product copy for the e-commerce site (retail and rental
+    // items) — `description` stays the short one-liner used in the POS.
+    'ALTER TABLE products ADD COLUMN long_description TEXT',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
