@@ -871,6 +871,20 @@ async function _init() {
       file_size INTEGER,
       uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // Supporting documents on a quotation (retail, rental or Special
+    // Project) — customer POs, supplier quotes, drawings/specs. Same
+    // Cloudinary-or-local storage pattern as po_attachments.
+    { sql: `CREATE TABLE IF NOT EXISTS quote_attachments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      quote_id INTEGER NOT NULL REFERENCES quotations(id) ON DELETE CASCADE,
+      document_type TEXT NOT NULL DEFAULT 'other',
+      original_name TEXT NOT NULL,
+      stored_name TEXT NOT NULL,
+      mime_type TEXT,
+      file_size INTEGER,
+      uploaded_by INTEGER REFERENCES employees(id),
+      uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS purchase_requests (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       pr_number TEXT UNIQUE NOT NULL,

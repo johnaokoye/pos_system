@@ -9,6 +9,7 @@ const { ensureReady, db } = require('./database');
 const { router: woocommerceRouter, runSyncAll: wooSyncAll } = require('./routes/woocommerce');
 const { apiKeyAuth } = require('./lib/apiKeyAuth');
 const { sessionAuth } = require('./lib/sessionAuth');
+const { PROTECTED_UPLOAD_DIRS } = require('./lib/protectedUploads');
 const { activityLogger } = require('./lib/sessionActivity');
 const { logActivity } = require('./routes/crm');
 const rentalsRouter = require('./routes/rentals');
@@ -44,12 +45,30 @@ app.use(compression());
 // requests don't get rejected before reaching the route handler.
 app.use(bodyParser.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Initialize DB before handling any request
 app.use(async (req, res, next) => {
   try { await ensureReady(); next(); } catch(e) { res.status(500).json({ error: 'Database initialization failed' }); }
 });
+
+// Document attachments are only ever served through their authenticated
+// /api/.../download routes — never hand them out as public static files,
+// even to someone holding the stored filename.
+app.use(['/uploads/quote-attachments', '/uploads/po-attachments', '/uploads/rental-po-attachments'], (req, res) => res.status(404).json({ error: 'Not found' }));
+// Customer ID/address-proof scans and captured signatures are shown by the
+// SPA straight from their /uploads path (<img src>), so they stay static
+// files — but only for a signed-in session (the pos_session cookie is
+// Path=/, so the app's own image requests carry it). A logged-out browser
+// is sent to the login screen and brought back afterwards (see
+// App._resumeDownloadAfterLogin). Emailed documents embed signatures inline
+// instead of linking here (lib/protectedUploads.js). Product images and the
+// branding logo stay public — WooCommerce and the login screen need them.
+app.use(PROTECTED_UPLOAD_DIRS.map(d => `/uploads/${d}`), sessionAuth, (req, res, next) => {
+  if (req.employee) return next();
+  if (req.method === 'GET' && req.accepts(['json', 'html']) === 'html') return res.redirect(`/?next=${encodeURIComponent(req.originalUrl)}`);
+  res.status(401).json({ error: 'Authentication required' });
+});
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // API key authentication — validates X-API-Key / Authorization: Bearer headers.
 // Requests without a key pass through unchanged (frontend browser sessions).
@@ -61,6 +80,20 @@ app.use('/api', apiKeyAuth);
 // through with req.employee unset — enforcement happens per-route via
 // requireAuth()/requirePermission() (lib/permissions.js), not here.
 app.use('/api', sessionAuth);
+// A document download link opened in a browser with no (or an expired)
+// session — e.g. pasted into a new tab — goes to the login screen instead of
+// a bare JSON 401; the SPA re-opens the download after sign-in (see
+// App._resumeDownloadAfterLogin). The route itself still enforces auth.
+const DOWNLOAD_PATH = /^\/[\w-]+\/\d+\/attachments\/\d+\/download$/;
+const RENTAL_DOWNLOAD_PATH = /^\/rentals\/agreements\/\d+\/po-attachment\/download$/;
+app.use('/api', (req, res, next) => {
+  if (req.method === 'GET' && !req.employee && !req.apiKey
+      && (DOWNLOAD_PATH.test(req.path) || RENTAL_DOWNLOAD_PATH.test(req.path))
+      && req.accepts(['json', 'html']) === 'html') {
+    return res.redirect(`/?next=${encodeURIComponent(req.originalUrl)}`);
+  }
+  next();
+});
 // Records mutating requests by logged-in employees for Admin > Active
 // Sessions (see lib/sessionActivity.js). Must come after sessionAuth.
 app.use('/api', activityLogger);

@@ -3,6 +3,7 @@ const router = express.Router();
 const nodemailer = require('nodemailer');
 const { db } = require('../database');
 const { requireAuth, requirePermission, can } = require('../lib/permissions');
+const { inlineProtectedImages } = require('../lib/protectedUploads');
 const { rentalQuoteSummary, attachRentalRates, attachRateBasis, rentalWindow, rateBasisLabel } = require('../lib/rentals');
 
 // Brand palette for every email sent out (receipts, quotes, invoices,
@@ -928,7 +929,8 @@ router.post('/send-rental-summary/:id', requireAuth, async (req, res) => {
         from: `"${fromName}" <${fromAddr}>`,
         to,
         subject: `Rental Agreement Summary - ${agreement.agreement_number} from ${s.store_name || 'Our Store'}`,
-        html: buildRentalSummaryHtml(agreement, s),
+        // Signatures are login-only on this server — embed them in the email.
+        ...inlineProtectedImages(buildRentalSummaryHtml(agreement, s)),
       });
       res.json({ success: true, message: `Rental agreement summary sent to ${to}` });
     } catch (e) {
@@ -979,7 +981,8 @@ router.post('/send-rental-invoice/:id', requireAuth, async (req, res) => {
         from: `"${fromName}" <${fromAddr}>`,
         to,
         subject: `Rental Tax Invoice - ${agreement.agreement_number} from ${s.store_name || 'Our Store'}`,
-        html: buildRentalInvoiceHtml(agreement, tx, s, origin),
+        // Signatures are login-only on this server — embed them in the email.
+        ...inlineProtectedImages(buildRentalInvoiceHtml(agreement, tx, s, origin)),
       });
       res.json({ success: true, message: `Rental tax invoice sent to ${to}` });
     } catch (e) {
@@ -1249,7 +1252,8 @@ router.post('/send-po/:id', requireAuth, async (req, res) => {
         from: `"${fromName}" <${fromAddr}>`,
         to,
         subject: `Purchase Order ${po.po_number} from ${s.store_name || 'Our Store'}`,
-        html: buildApprovedPoHtml(po, s, origin),
+        // Signatures are login-only on this server — embed them in the email.
+        ...inlineProtectedImages(buildApprovedPoHtml(po, s, origin)),
       });
       res.json({ success: true, message: `Purchase order sent to ${to}` });
     } catch (e) {

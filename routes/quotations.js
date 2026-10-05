@@ -6,6 +6,10 @@ const { nextNumber } = require('../lib/nextNumber');
 const { isSerialNumberProduct, serialNumberLabel, serialNumberOf } = require('../lib/serialNumber');
 const { createTransfer } = require('../lib/transfers');
 const { feeFor, buildRentalLines, revalidateQuoteLines, insertPendingAgreement, assertRentalCustomerEligible, rentalQuoteSummary, attachRentalRates, attachRateBasis, rentalWindow } = require('../lib/rentals');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 
 // Special Projects (quote_type='special_project') are gated by their own
 // `special_projects`/`special_projects_approve` permissions, deliberately
@@ -743,6 +747,115 @@ router.post('/:id/convert', async (req, res) => {
       if (!committed) await convTx.rollback();
       res.status(committed ? 500 : 400).json({ error: e.message });
     }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Attachments ──────────────────────────────────────────────
+// Supporting documents (customer PO, supplier quote, drawings/specs) on any
+// quotation, Special Projects included. Mirrors the PO attachment routes in
+// routes/purchase-orders.js. On a Special Project, viewing/downloading
+// follows the same rule as GET /:id (special_projects or
+// special_projects_approve); adding/removing needs special_projects.
+
+const localUploadDir = path.join(__dirname, '../uploads/quote-attachments');
+const QUOTE_DOC_TYPES = ['customer_po', 'supplier_quotation', 'specification', 'other'];
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowed = ['application/pdf','image/jpeg','image/png','image/gif','image/webp',
+      'application/msword','application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-excel','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'text/plain'];
+    cb(null, allowed.includes(file.mimetype));
+  },
+});
+
+// Loads the quote and enforces Special Project visibility/edit rights.
+// Sends the error response itself and returns null when access is denied.
+async function quoteForAttachments(req, res, write) {
+  const { rows: [quote] } = await db.execute({ sql: 'SELECT id, quote_type FROM quotations WHERE id = ?', args: [req.params.id] });
+  if (!quote) { res.status(404).json({ error: 'Not found' }); return null; }
+  if (quote.quote_type === 'special_project') {
+    if (!canSeeSpecialProjects(req)) { res.status(403).json({ error: 'Missing permission: special_projects' }); return null; }
+    if (write && !can(req.employee && req.employee.permissions, 'special_projects')) { res.status(403).json({ error: 'Missing permission: special_projects' }); return null; }
+  }
+  return quote;
+}
+
+router.get('/:id/attachments', async (req, res) => {
+  try {
+    if (!await quoteForAttachments(req, res, false)) return;
+    const { rows } = await db.execute({ sql: `SELECT qa.*, e.first_name || ' ' || e.last_name as uploaded_by_name FROM quote_attachments qa LEFT JOIN employees e ON qa.uploaded_by = e.id WHERE qa.quote_id = ? ORDER BY qa.uploaded_at DESC`, args: [req.params.id] });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/:id/attachments', (req, res, next) => {
+  // Surface multer's size-limit error as a 400 instead of Express's HTML 500.
+  upload.single('file')(req, res, err => err ? res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'File is larger than 20 MB' : err.message }) : next());
+}, async (req, res) => {
+  try {
+    const quote = await quoteForAttachments(req, res, true);
+    if (!quote) return;
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded or file type not allowed' });
+    const docType = QUOTE_DOC_TYPES.includes(req.body.document_type) ? req.body.document_type : 'other';
+
+    const cloudResult = await cloudUpload(req.file.buffer, {
+      folder: 'pos-system/quote-attachments',
+      public_id: `${Date.now()}-${Math.round(Math.random() * 1e6)}`,
+      resource_type: 'auto',
+    });
+
+    let storedName;
+    if (cloudResult) {
+      storedName = cloudResult.secure_url;
+    } else {
+      fs.mkdirSync(localUploadDir, { recursive: true });
+      const unique = `${Date.now()}-${Math.round(Math.random() * 1e6)}`;
+      storedName = `${unique}${path.extname(req.file.originalname)}`;
+      fs.writeFileSync(path.join(localUploadDir, storedName), req.file.buffer);
+    }
+
+    const result = await db.execute({ sql: 'INSERT INTO quote_attachments (quote_id, document_type, original_name, stored_name, mime_type, file_size, uploaded_by) VALUES (?,?,?,?,?,?,?)', args: [quote.id, docType, req.file.originalname, storedName, req.file.mimetype, req.file.size, (req.employee && req.employee.id) || null] });
+    const { rows: [row] } = await db.execute({ sql: `SELECT qa.*, e.first_name || ' ' || e.last_name as uploaded_by_name FROM quote_attachments qa LEFT JOIN employees e ON qa.uploaded_by = e.id WHERE qa.id = ?`, args: [Number(result.lastInsertRowid)] });
+    res.status(201).json(row);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/:id/attachments/:aid/download', async (req, res) => {
+  try {
+    if (!await quoteForAttachments(req, res, false)) return;
+    const { rows: [att] } = await db.execute({ sql: 'SELECT * FROM quote_attachments WHERE id = ? AND quote_id = ?', args: [req.params.aid, req.params.id] });
+    if (!att) return res.status(404).json({ error: 'Not found' });
+    if (att.stored_name.startsWith('https://')) {
+      // Cloud file — redirect with fl_attachment to force browser download
+      return res.redirect(att.stored_name.replace('/upload/', '/upload/fl_attachment/'));
+    }
+    const filePath = path.join(localUploadDir, att.stored_name);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File missing on server' });
+    res.setHeader('Content-Type', att.mime_type || 'application/octet-stream');
+    res.attachment(att.original_name);
+    res.sendFile(filePath);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/:id/attachments/:aid', async (req, res) => {
+  try {
+    if (!await quoteForAttachments(req, res, true)) return;
+    const { rows: [att] } = await db.execute({ sql: 'SELECT * FROM quote_attachments WHERE id = ? AND quote_id = ?', args: [req.params.aid, req.params.id] });
+    if (!att) return res.status(404).json({ error: 'Not found' });
+    if (att.stored_name.startsWith('https://')) {
+      // resource_type 'auto' files PDFs/images under image/, Office docs under
+      // raw/ — read it back from the URL rather than guessing from the mime.
+      const resourceType = (att.stored_name.match(/\/(image|raw|video)\/upload\//) || [])[1] || 'raw';
+      await cloudDestroy(att.stored_name, resourceType);
+    } else {
+      try { if (fs.existsSync(path.join(localUploadDir, att.stored_name))) fs.unlinkSync(path.join(localUploadDir, att.stored_name)); } catch(e) {}
+    }
+    await db.execute({ sql: 'DELETE FROM quote_attachments WHERE id = ?', args: [att.id] });
+    res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
