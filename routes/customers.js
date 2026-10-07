@@ -23,18 +23,53 @@ const uploadDoc = multer({
   fileFilter: (req, file, cb) => cb(null, /^image\//.test(file.mimetype) || file.mimetype === 'application/pdf'),
 });
 
-// Shared by POST / (single create) and POST /import (CSV bulk create):
-// active customers matching the given email, phone, or full name — used to
-// warn about/block a likely duplicate before a new customer is inserted.
-async function findDuplicateCustomers({ email, phone, first_name, last_name }) {
+// Phone numbers are typed every which way ("(876) 555-1234", "876-555-1234",
+// "+1 876 555 1234"), so compare digits only. Numbers of 10+ digits are
+// matched on their last 10 so an optional leading country code doesn't
+// hide a duplicate; anything shorter must match in full.
+function normalizePhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length > 10 ? digits.slice(-10) : digits;
+}
+const PHONE_DIGITS_SQL = `REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone,' ',''),'-',''),'(',''),')',''),'.',''),'+',''),'/','')`;
+const PHONE_MATCH_SQL = `(phone IS NOT NULL AND phone != '' AND (CASE WHEN LENGTH(${PHONE_DIGITS_SQL}) > 10 THEN SUBSTR(${PHONE_DIGITS_SQL}, -10) ELSE ${PHONE_DIGITS_SQL} END) = ?)`;
+
+// Shared by POST / (single create), PUT /:id and POST /import (CSV bulk
+// create): active customers matching the given email, phone, or full name.
+// Each match carries `match_on` (['phone','email','name']). A phone or email
+// match is a hard duplicate — the contact details belong to someone else, so
+// the record is refused outright; a name-only match is just a warning (two
+// people can share a name) that the caller may override with `force`.
+async function findDuplicateCustomers({ email, phone, first_name, last_name }, excludeCustomerId = null) {
+  const phoneNorm = normalizePhone(phone);
+  const emailNorm = String(email || '').trim().toLowerCase();
   const { rows } = await db.execute({
-    sql: `SELECT * FROM customers WHERE active = 1 AND (
-      (email IS NOT NULL AND email != '' AND LOWER(email) = LOWER(?))
-      OR (phone IS NOT NULL AND phone != '' AND phone = ?)
+    sql: `SELECT * FROM customers WHERE active = 1 AND id != ? AND (
+      (email IS NOT NULL AND email != '' AND LOWER(TRIM(email)) = ?)
+      OR ${PHONE_MATCH_SQL}
       OR (LOWER(first_name) = LOWER(?) AND LOWER(last_name) = LOWER(?)))`,
-    args: [email || '', phone || '', first_name || '', last_name || ''],
+    args: [excludeCustomerId || 0, emailNorm || '\u0000', phoneNorm || '\u0000', first_name || '', last_name || ''],
   });
-  return rows;
+  return rows.map(r => {
+    const match_on = [];
+    if (phoneNorm && normalizePhone(r.phone) === phoneNorm) match_on.push('phone');
+    if (emailNorm && String(r.email || '').trim().toLowerCase() === emailNorm) match_on.push('email');
+    if (first_name && last_name && String(r.first_name || '').toLowerCase() === String(first_name).toLowerCase()
+      && String(r.last_name || '').toLowerCase() === String(last_name).toLowerCase()) match_on.push('name');
+    return { ...r, match_on };
+  });
+}
+
+const isHardDuplicate = m => m.match_on.includes('phone') || m.match_on.includes('email');
+
+// 409 body for a phone/email clash — `blocking: true` tells the frontend not
+// to offer "Create Anyway".
+function hardDuplicateError(matches) {
+  const hard = matches.filter(isHardDuplicate);
+  const fields = [...new Set(hard.flatMap(m => m.match_on.filter(f => f !== 'name')))];
+  const label = fields.map(f => f === 'phone' ? 'contact number' : 'email').join(' and ');
+  const who = hard.map(m => `${m.first_name} ${m.last_name} (${m.customer_number})`).join(', ');
+  return { error: `This ${label} is already used by ${who}`, matches: hard, blocking: true };
 }
 
 // Resolves the three rental_preapproved* columns for a customer create/
@@ -359,12 +394,12 @@ router.post('/', requirePermission('customers_add'), async (req, res) => {
   if (!first_name || !last_name) return res.status(400).json({ error: 'First and last name required' });
   try {
     // Guard against creating a duplicate customer record: match on email,
-    // phone, or full name against active customers. `force` skips this once
-    // the caller has already confirmed they want a separate record anyway.
-    if (!req.body.force) {
-      const matches = await findDuplicateCustomers({ email, phone, first_name, last_name });
-      if (matches.length) return res.status(409).json({ error: 'Possible duplicate customer', matches });
-    }
+    // phone, or full name against active customers.
+    // Phone/email clashes are always refused; `force` only overrides a
+    // name-only match.
+    const matches = await findDuplicateCustomers({ email, phone, first_name, last_name });
+    if (matches.some(isHardDuplicate)) return res.status(409).json(hardDuplicateError(matches));
+    if (matches.length && !req.body.force) return res.status(409).json({ error: 'Possible duplicate customer', matches });
     const cardError = await validateDiscountCard(discount_card_type_id, discount_card_number, null);
     if (cardError) return res.status(400).json({ error: cardError });
     const cashBackCardError = await validateCashBackCard(cash_back_card_type_id, cash_back_card_number, null);
@@ -419,7 +454,19 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
     if (cardError) return res.status(400).json({ error: cardError });
     const cashBackCardError = await validateCashBackCard(cash_back_card_type_id, cash_back_card_number, req.params.id);
     if (cashBackCardError) return res.status(400).json({ error: cashBackCardError });
-    const { rows: [existing] } = await db.execute({ sql: 'SELECT rental_preapproved, rental_preapproved_by, rental_preapproved_at FROM customers WHERE id = ?', args: [req.params.id] });
+    const { rows: [existing] } = await db.execute({ sql: 'SELECT phone, email, rental_preapproved, rental_preapproved_by, rental_preapproved_at FROM customers WHERE id = ?', args: [req.params.id] });
+    // Changing a customer's phone/email to one another active customer
+    // already uses is refused, same as on create. Only checked when the value
+    // actually changes, so records that already shared a number before this
+    // rule existed can still be edited.
+    if (existing) {
+      const phoneChanged = normalizePhone(phone) !== normalizePhone(existing.phone);
+      const emailChanged = String(email || '').trim().toLowerCase() !== String(existing.email || '').trim().toLowerCase();
+      if (phoneChanged || emailChanged) {
+        const clashes = (await findDuplicateCustomers({ phone: phoneChanged ? phone : null, email: emailChanged ? email : null }, req.params.id)).filter(isHardDuplicate);
+        if (clashes.length) return res.status(409).json(hardDuplicateError(clashes));
+      }
+    }
     const type = customer_type || 'cash';
     const creditEnabled = type === 'credit' ? 1 : 0;
     const terms = parseInt(credit_terms_days) || 30;
@@ -467,7 +514,8 @@ router.delete('/:id', requirePermission('customers_delete'), async (req, res) =>
 // (POST /:id/reverse). Every row runs through the same duplicate check as
 // POST / (email/phone/full name against active customers): by default a
 // match skips the row instead of creating it — pass `duplicate_mode:
-// 'force'` to create every row regardless of matches.
+// 'force'` to create rows whose only match is by name (phone/email
+// matches are always skipped).
 // TEMPORARY bulk utility (Customers screen button) — flags every active
 // customer as a rental customer and preapproves them, so rentals can be
 // created for anyone despite missing ID/reference info. Customers already
@@ -534,9 +582,11 @@ router.post('/import', requirePermission('customers_import'), async (req, res) =
         continue;
       }
       try {
-        if (!force) {
+        {
+          // 'force' only overrides name-only matches — a row whose phone or
+          // email is already in use is always skipped.
           const matches = await findDuplicateCustomers({ email, phone, first_name, last_name });
-          if (matches.length) {
+          if (matches.some(isHardDuplicate) || (matches.length && !force)) {
             skipped++;
             duplicates.push({ row: rowLabel, matches: matches.map(m => ({ id: m.id, customer_number: m.customer_number, name: `${m.first_name} ${m.last_name}` })) });
             await logItem(rowLabel, null, 'skipped_duplicate', matches[0].id, null);
@@ -752,3 +802,5 @@ router.delete('/:id/address-proof', requirePermission('customers_edit'), async (
 module.exports = router;
 module.exports.runCreditCheck = runCreditCheck;
 module.exports.findDuplicateCustomers = findDuplicateCustomers;
+module.exports.isHardDuplicate = isHardDuplicate;
+module.exports.hardDuplicateError = hardDuplicateError;

@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { calcCommission } = require('./commissions');
-const { findDuplicateCustomers } = require('./customers');
+const { findDuplicateCustomers, isHardDuplicate, hardDuplicateError } = require('./customers');
 const { requirePermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 
@@ -131,9 +131,11 @@ router.post('/leads/:id/convert', async (req, res) => {
     // Guard against creating a duplicate customer record: match on email,
     // phone, or full name. Skipped once the caller has already chosen how
     // to proceed (linking to a specific match, or forcing a new record).
-    if (!link_customer_id && !force) {
+    // A phone/email match can't be forced past — only linked to.
+    if (!link_customer_id) {
       const matches = await findDuplicateCustomers({ email: lead.email, phone: lead.phone, first_name: lead.first_name, last_name: lead.last_name });
-      if (matches.length) return res.status(409).json({ error: 'Possible duplicate customer', matches });
+      if (matches.some(isHardDuplicate)) return res.status(409).json(hardDuplicateError(matches));
+      if (matches.length && !force) return res.status(409).json({ error: 'Possible duplicate customer', matches });
     }
 
     if (link_customer_id) {
