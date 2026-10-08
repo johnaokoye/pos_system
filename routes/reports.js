@@ -1069,4 +1069,98 @@ router.get('/sales-by-department', requirePermission('reports'), async (req, res
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Sales by Promotion — completed sales that carried a promotion, per branch
+// per promotion. A promotion is recorded on the ticket as
+// transactions.promotion_name (auto-applied promos have no promotion_code,
+// so this keys on the name, unlike /promotions above). Discount Card sales
+// reuse promotion_name as "{type} Discount Card" and are excluded — they
+// have their own report (/discount-card-utilization).
+router.get('/sales-by-promotion', requirePermission('reports'), async (req, res) => {
+  try {
+    const { start, end, branch_id } = req.query;
+    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+    const e = end || new Date().toISOString().slice(0, 10);
+    const bf = branch_id ? ' AND t.branch_id = ?' : '';
+    const bp = branch_id ? [branch_id] : [];
+
+    const { rows } = await db.execute({
+      sql: `SELECT t.branch_id, b.name as branch_name, t.promotion_name,
+              GROUP_CONCAT(DISTINCT t.promotion_code) as codes,
+              COUNT(*) as transaction_count,
+              COALESCE(SUM(t.discount_amount), 0) as discount, COALESCE(SUM(t.total), 0) as total
+            FROM transactions t
+            LEFT JOIN branches b ON t.branch_id = b.id
+            WHERE t.status = 'completed' AND t.promotion_name IS NOT NULL AND t.promotion_name <> ''
+              AND t.promotion_name NOT LIKE '%Discount Card%'
+              AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}
+            GROUP BY t.branch_id, t.promotion_name`,
+      args: [s, e, ...bp],
+    });
+    // All completed sales per branch, so promo sales can be shown as a share.
+    const { rows: allSales } = await db.execute({
+      sql: `SELECT t.branch_id, COALESCE(SUM(t.total), 0) as total FROM transactions t
+            WHERE t.status = 'completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}
+            GROUP BY t.branch_id`,
+      args: [s, e, ...bp],
+    });
+
+    const round = n => parseFloat((n || 0).toFixed(2));
+    const allByBranch = new Map(allSales.map(r => [r.branch_id ?? 'none', r.total]));
+    const blank = () => ({ transaction_count: 0, discount: 0, total: 0 });
+    const add = (target, r) => { target.transaction_count += r.transaction_count; target.discount += r.discount; target.total += r.total; };
+    const promoMap = new Map();
+    const branchMap = new Map();
+    const totals = { ...blank(), all_sales: allSales.reduce((sum, r) => sum + r.total, 0) };
+    for (const r of rows) {
+      if (!promoMap.has(r.promotion_name)) promoMap.set(r.promotion_name, { promotion_name: r.promotion_name, codes: new Set(), ...blank() });
+      const promo = promoMap.get(r.promotion_name);
+      for (const c of (r.codes || '').split(',').filter(Boolean)) promo.codes.add(c);
+      const key = r.branch_id ?? 'none';
+      if (!branchMap.has(key)) branchMap.set(key, { branch_id: r.branch_id, branch_name: r.branch_name || 'No Branch', all_sales: allByBranch.get(key) || 0, promotions: {}, ...blank() });
+      const branch = branchMap.get(key);
+      branch.promotions[r.promotion_name] = { transaction_count: r.transaction_count, discount: round(r.discount), total: round(r.total) };
+      add(promo, r); add(branch, r); add(totals, r);
+    }
+    const finish = o => { o.discount = round(o.discount); o.total = round(o.total); if ('all_sales' in o) o.all_sales = round(o.all_sales); return o; };
+    const promotions = [...promoMap.values()].map(p => finish({ ...p, codes: [...p.codes] })).sort((a, b) => b.total - a.total);
+    const branches = [...branchMap.values()].map(finish).sort((a, b) => b.total - a.total);
+
+    res.json({ start: s, end: e, promotions, branches, totals: finish(totals) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Online Sales — completed transactions that came in from an online channel
+// (transactions.source: 'online' = the e-commerce API, 'woocommerce' = the
+// Woo sync; same set the Online Orders screen uses). Orders whose
+// fulfillment_status is 'cancelled' are listed in the fulfillment breakdown
+// but kept out of the sales totals.
+router.get('/online-sales', requirePermission('reports'), async (req, res) => {
+  try {
+    const { start, end, branch_id } = req.query;
+    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+    const e = end || new Date().toISOString().slice(0, 10);
+    const bf = branch_id ? ' AND t.branch_id = ?' : '';
+    const bp = branch_id ? [branch_id] : [];
+    const base = `t.status = 'completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}`;
+    const online = `t.source IN ('online','woocommerce')`;
+    const counted = `${online} AND COALESCE(t.fulfillment_status,'') <> 'cancelled'`;
+    const args = [s, e, ...bp];
+    const agg = `COUNT(*) as order_count, COALESCE(SUM(t.total), 0) as total, COALESCE(SUM(t.tax_amount), 0) as tax, COALESCE(SUM(t.discount_amount), 0) as discount`;
+
+    const [{ rows: [totals] }, { rows: [all] }, { rows: byChannel }, { rows: byFulfillment }, { rows: byBranch }, { rows: byDay }, { rows: topProducts }] = await Promise.all([
+      db.execute({ sql: `SELECT ${agg} FROM transactions t WHERE ${base} AND ${counted}`, args }),
+      db.execute({ sql: `SELECT COALESCE(SUM(t.total), 0) as total FROM transactions t WHERE ${base}`, args }),
+      db.execute({ sql: `SELECT t.source, ${agg} FROM transactions t WHERE ${base} AND ${counted} GROUP BY t.source ORDER BY total DESC`, args }),
+      db.execute({ sql: `SELECT COALESCE(t.fulfillment_status, 'pending') as fulfillment_status, ${agg} FROM transactions t WHERE ${base} AND ${online} GROUP BY 1 ORDER BY order_count DESC`, args }),
+      db.execute({ sql: `SELECT t.branch_id, b.name as branch_name, ${agg} FROM transactions t LEFT JOIN branches b ON t.branch_id = b.id WHERE ${base} AND ${counted} GROUP BY t.branch_id ORDER BY total DESC`, args }),
+      db.execute({ sql: `SELECT date(t.created_at) as date, ${agg} FROM transactions t WHERE ${base} AND ${counted} GROUP BY date(t.created_at) ORDER BY date`, args }),
+      db.execute({ sql: `SELECT ti.product_name, ti.sku, SUM(ti.quantity) as quantity, COUNT(DISTINCT t.id) as order_count, COALESCE(SUM(ti.total), 0) as total
+            FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id
+            WHERE ${base} AND ${counted} GROUP BY COALESCE(ti.product_id, ti.sku) ORDER BY total DESC LIMIT 15`, args }),
+    ]);
+
+    res.json({ start: s, end: e, totals: { ...totals, all_sales: all.total }, byChannel, byFulfillment, byBranch, byDay, topProducts });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 module.exports = router;

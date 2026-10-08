@@ -12953,13 +12953,15 @@ const App = {
       ${this._reportButtonCard('Customer Segment Report', 'Sales and margin by Customer Category, to see whether each category\'s auto-discount is driving volume.', 'App.showCustomerSegmentReport()')}
       ${this._reportButtonCard('Loyalty & Cash-Back Engagement', 'Points issued vs. redeemed, redemption rate, and top point earners.', 'App.showLoyaltyEngagementReport()')}
       ${this._reportButtonCard('Discount Card Utilization', 'Active discount cards vs. actually used in a sale, to spot cards issued but never redeemed.', 'App.showDiscountCardReport()')}
-      ${this._reportButtonCard('New vs. Repeat Customer Rate', 'New vs. returning customers over a period, and the revenue split between them.', 'App.showCustomerRetentionReport()')}`;
+      ${this._reportButtonCard('New vs. Repeat Customer Rate', 'New vs. returning customers over a period, and the revenue split between them.', 'App.showCustomerRetentionReport()')}
+      ${this._reportButtonCard('Sales by Promotion', 'Sales made under each promotion, broken down by branch, with the discount given.', 'App.showSalesByPromotionReport()')}`;
   },
 
   renderReportsSales() {
     document.getElementById('content').innerHTML = `
       <div class="section-header"><h2>Sales Reports</h2></div>
       ${this._reportButtonCard('Sales by Branch &amp; Department', 'Total sales per branch, broken down into Retail, Rental, Work Orders, and Special Projects.', 'App.showSalesByDepartmentReport()')}
+      ${this._reportButtonCard('Online Sales', 'Orders from the website and WooCommerce — by channel, branch, fulfillment status and day, with top-selling products.', 'App.showOnlineSalesReport()')}
       ${this._reportButtonCard('Salesperson Leaderboard', 'Quotes created/converted, win rate, and total credited sales per salesperson.', 'App.showSalesLeaderboardReport()')}
       ${this._reportButtonCard('Quote Funnel &amp; Cycle Time', 'How many quotes sit in each status, and the average days spent between Draft, Sent, Accepted, and Converted.', 'App.showQuoteFunnelReport()')}
       ${(this.can('special_projects') || this.can('special_projects_approve')) ? this._reportButtonCard('Special Projects Margin Report', "Realized markup per Special Project, from each line's Cost vs. Price.", 'App.showSpecialProjectsMarginReport()') : ''}
@@ -13324,6 +13326,153 @@ const App = {
         </div>
       </div>`).join('')}`}
       <p style="font-size:11px;color:var(--text-muted)">Completed transactions, tax included. Rental figures exclude refundable security deposits; Work Order figures include assessment fees, deposits, and final payments as collected.</p>`;
+  },
+
+  // ─── Sales by Promotion ─────────────────────────────────────────────────
+
+  showSalesByPromotionReport() {
+    this._showReportModal('Sales by Promotion', this._reportDateRangeFilters('sbp-start','sbp-end'), 'loadSalesByPromotionReport');
+  },
+
+  async loadSalesByPromotionReport() {
+    const start = document.getElementById('sbp-start')?.value || '';
+    const end = document.getElementById('sbp-end')?.value || '';
+    const content = document.getElementById('rpt-modal-content');
+    if (!content) return;
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let data;
+    try { data = await this.api('GET', `/reports/sales-by-promotion?start=${start}&end=${end}`); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    if (!document.getElementById('rpt-modal-content')) return;
+
+    const { promotions, branches, totals } = data;
+    const esc = s => this.escapeAttr(s);
+    const pct = (part, whole) => whole ? (part / whole * 100).toFixed(1) + '%' : '—';
+    const money = n => this.fmt(n).replace(/ /g, ' ');
+    const valStyle = 'font-size:18px;line-height:1.25;overflow-wrap:anywhere';
+    const codes = p => p.codes.length ? ` <span style="font-family:monospace;font-size:11px;color:var(--text-muted)">${p.codes.map(esc).join(', ')}</span>` : '';
+    content.innerHTML = `
+      <div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:18px">
+        <div class="stat-card blue" style="min-width:0;padding:14px"><div class="stat-label">Promotion Sales</div><div class="stat-value" style="${valStyle}">${money(totals.total)}</div><div class="stat-sub">${pct(totals.total, totals.all_sales)} of all sales</div></div>
+        <div class="stat-card orange" style="min-width:0;padding:14px"><div class="stat-label">Discount Given</div><div class="stat-value" style="${valStyle}">${money(totals.discount)}</div><div class="stat-sub">${pct(totals.discount, totals.total + totals.discount)} off pre-discount</div></div>
+        <div class="stat-card" style="min-width:0;padding:14px"><div class="stat-label">Transactions</div><div class="stat-value" style="${valStyle}">${totals.transaction_count}</div><div class="stat-sub">avg ${money(totals.transaction_count ? totals.total / totals.transaction_count : 0)}</div></div>
+        <div class="stat-card purple" style="min-width:0;padding:14px"><div class="stat-label">Promotions Used</div><div class="stat-value" style="${valStyle}">${promotions.length}</div><div class="stat-sub">across ${branches.length} branch${branches.length === 1 ? '' : 'es'}</div></div>
+      </div>
+      ${!promotions.length ? '<div class="empty-state"><p>No sales with a promotion in this range.</p></div>' : `
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">Promotion Sales by Branch</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Branch</th>${promotions.map(p => `<th>${esc(p.promotion_name)}</th>`).join('')}<th>Branch Total</th></tr></thead>
+            <tbody>${branches.map(b => `
+              <tr>
+                <td class="fw-600">${esc(b.branch_name)}</td>
+                ${promotions.map(p => `<td>${b.promotions[p.promotion_name] ? this.fmt(b.promotions[p.promotion_name].total) : '—'}</td>`).join('')}
+                <td class="fw-600">${this.fmt(b.total)}</td>
+              </tr>`).join('')}
+              <tr style="border-top:2px solid var(--border)">
+                <td class="fw-600">All Branches</td>
+                ${promotions.map(p => `<td class="fw-600">${this.fmt(p.total)}</td>`).join('')}
+                <td class="fw-600">${this.fmt(totals.total)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">By Promotion</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Promotion</th><th>Transactions</th><th>Discount Given</th><th>Sales</th><th>Avg Sale</th><th>% of Promo Sales</th></tr></thead>
+            <tbody>${promotions.map(p => `
+              <tr>
+                <td class="fw-600">${esc(p.promotion_name)}${codes(p)}</td>
+                <td>${p.transaction_count}</td>
+                <td>${this.fmt(p.discount)}</td>
+                <td>${this.fmt(p.total)}</td>
+                <td>${this.fmt(p.transaction_count ? p.total / p.transaction_count : 0)}</td>
+                <td>${pct(p.total, totals.total)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      ${branches.map(b => `
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">${esc(b.branch_name)} — ${this.fmt(b.total)}</span><span style="font-size:12px;color:var(--text-muted)">${pct(b.total, b.all_sales)} of branch sales</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Promotion</th><th>Transactions</th><th>Discount Given</th><th>Sales</th><th>% of Branch Promo Sales</th></tr></thead>
+            <tbody>${promotions.filter(p => b.promotions[p.promotion_name]).map(p => { const r = b.promotions[p.promotion_name]; return `
+              <tr>
+                <td class="fw-600">${esc(p.promotion_name)}</td>
+                <td>${r.transaction_count}</td>
+                <td>${this.fmt(r.discount)}</td>
+                <td>${this.fmt(r.total)}</td>
+                <td>${pct(r.total, b.total)}</td>
+              </tr>`; }).join('')}
+              <tr style="border-top:2px solid var(--border)">
+                <td class="fw-600">Branch Total</td>
+                <td class="fw-600">${b.transaction_count}</td>
+                <td class="fw-600">${this.fmt(b.discount)}</td>
+                <td class="fw-600">${this.fmt(b.total)}</td>
+                <td></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>`).join('')}`}
+      <p style="font-size:11px;color:var(--text-muted)">Completed transactions that carried a promotion (auto-applied or via promo code), tax included, after the discount. Discount Card sales are excluded — see the Discount Card Utilization report.</p>`;
+  },
+
+  // ─── Online Sales ───────────────────────────────────────────────────────
+
+  showOnlineSalesReport() {
+    this._showReportModal('Online Sales', this._reportDateRangeFilters('ons-start','ons-end'), 'loadOnlineSalesReport');
+  },
+
+  async loadOnlineSalesReport() {
+    const start = document.getElementById('ons-start')?.value || '';
+    const end = document.getElementById('ons-end')?.value || '';
+    const content = document.getElementById('rpt-modal-content');
+    if (!content) return;
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let data;
+    try { data = await this.api('GET', `/reports/online-sales?start=${start}&end=${end}`); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    if (!document.getElementById('rpt-modal-content')) return;
+
+    const { totals, byChannel, byFulfillment, byBranch, byDay, topProducts } = data;
+    const esc = s => this.escapeAttr(s);
+    const pct = (part, whole) => whole ? (part / whole * 100).toFixed(1) + '%' : '—';
+    const money = n => this.fmt(n).replace(/ /g, ' ');
+    const valStyle = 'font-size:18px;line-height:1.25;overflow-wrap:anywhere';
+    const channelLabels = { online: 'Website', woocommerce: 'WooCommerce' };
+    const avg = r => this.fmt(r.order_count ? r.total / r.order_count : 0);
+    const table = (title, head, rows) => `
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">${title}</span></div>
+        <div class="table-wrap"><table><thead><tr>${head.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>
+      </div>`;
+    content.innerHTML = `
+      <div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:18px">
+        <div class="stat-card blue" style="min-width:0;padding:14px"><div class="stat-label">Online Sales</div><div class="stat-value" style="${valStyle}">${money(totals.total)}</div><div class="stat-sub">${pct(totals.total, totals.all_sales)} of all sales</div></div>
+        <div class="stat-card" style="min-width:0;padding:14px"><div class="stat-label">Orders</div><div class="stat-value" style="${valStyle}">${totals.order_count}</div><div class="stat-sub">excl. cancelled</div></div>
+        <div class="stat-card green" style="min-width:0;padding:14px"><div class="stat-label">Avg Order</div><div class="stat-value" style="${valStyle}">${money(totals.order_count ? totals.total / totals.order_count : 0)}</div><div class="stat-sub">tax included</div></div>
+        <div class="stat-card orange" style="min-width:0;padding:14px"><div class="stat-label">Tax Collected</div><div class="stat-value" style="${valStyle}">${money(totals.tax)}</div><div class="stat-sub">${money(totals.discount)} discounts</div></div>
+      </div>
+      ${!byFulfillment.length ? '<div class="empty-state"><p>No online orders in this range.</p></div>' : `
+      ${table('By Channel', ['Channel', 'Orders', 'Tax', 'Sales', 'Avg Order', '% of Online'], byChannel.map(r => `
+        <tr><td class="fw-600">${channelLabels[r.source] || esc(r.source)}</td><td>${r.order_count}</td><td>${this.fmt(r.tax)}</td><td>${this.fmt(r.total)}</td><td>${avg(r)}</td><td>${pct(r.total, totals.total)}</td></tr>`).join(''))}
+      ${table('By Branch', ['Branch', 'Orders', 'Tax', 'Sales', 'Avg Order', '% of Online'], byBranch.map(r => `
+        <tr><td class="fw-600">${esc(r.branch_name || 'No Branch')}</td><td>${r.order_count}</td><td>${this.fmt(r.tax)}</td><td>${this.fmt(r.total)}</td><td>${avg(r)}</td><td>${pct(r.total, totals.total)}</td></tr>`).join(''))}
+      ${table('By Fulfillment Status', ['Status', 'Orders', 'Order Value'], byFulfillment.map(r => `
+        <tr><td class="fw-600" style="text-transform:capitalize">${esc(r.fulfillment_status)}</td><td>${r.order_count}</td><td>${this.fmt(r.total)}${r.fulfillment_status === 'cancelled' ? ' <span style="font-size:11px;color:var(--text-muted)">(not in totals)</span>' : ''}</td></tr>`).join(''))}
+      ${topProducts.length ? table('Top Products', ['Product', 'SKU', 'Qty Sold', 'Orders', 'Sales'], topProducts.map(r => `
+        <tr><td class="fw-600">${esc(r.product_name)}</td><td style="font-family:monospace;font-size:12px">${esc(r.sku)}</td><td>${r.quantity}</td><td>${r.order_count}</td><td>${this.fmt(r.total)}</td></tr>`).join('')) : ''}
+      ${table('By Day', ['Date', 'Orders', 'Sales'], byDay.map(r => `
+        <tr><td>${r.date}</td><td>${r.order_count}</td><td>${this.fmt(r.total)}</td></tr>`).join(''))}`}
+      <p style="font-size:11px;color:var(--text-muted)">Completed transactions from the website (e-commerce API) and WooCommerce, tax included. Orders with a Cancelled fulfillment status are excluded from totals.</p>`;
   },
 
   // ─── Salesperson Leaderboard ────────────────────────────────────────────
