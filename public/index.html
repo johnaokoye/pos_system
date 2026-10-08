@@ -13268,10 +13268,14 @@ const App = {
     const labels = { retail: 'Retail', rental: 'Rental', work_order: 'Work Orders', special_project: 'Special Projects' };
     const colors = { retail: 'blue', rental: 'orange', work_order: 'purple', special_project: 'green' };
     const pct = (part, whole) => whole ? (part / whole * 100).toFixed(1) + '%' : '—';
+    // Intl puts a non-breaking space after the currency code ("JMD 868,049.85"),
+    // so a big total can't wrap and spills out of a narrow card — let it break there.
+    const money = n => this.fmt(n).replace(/\u00a0/g, ' ');
+    const valStyle = 'font-size:18px;line-height:1.25;overflow-wrap:anywhere';
     content.innerHTML = `
-      <div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));margin-bottom:18px">
-        <div class="stat-card"><div class="stat-label">Total Sales</div><div class="stat-value" style="font-size:20px">${this.fmt(totals.total)}</div><div class="stat-sub">${totals.transaction_count} transactions</div></div>
-        ${departments.map(d => `<div class="stat-card ${colors[d]}"><div class="stat-label">${labels[d]}</div><div class="stat-value" style="font-size:20px">${this.fmt(totals.departments[d].total)}</div><div class="stat-sub">${pct(totals.departments[d].total, totals.total)} of total</div></div>`).join('')}
+      <div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:18px">
+        <div class="stat-card" style="grid-column:1/-1;min-width:0"><div class="stat-label">Total Sales</div><div class="stat-value" style="font-size:24px;overflow-wrap:anywhere">${money(totals.total)}</div><div class="stat-sub">${totals.transaction_count} transactions</div></div>
+        ${departments.map(d => `<div class="stat-card ${colors[d]}" style="min-width:0;padding:14px"><div class="stat-label">${labels[d]}</div><div class="stat-value" style="${valStyle}">${money(totals.departments[d].total)}</div><div class="stat-sub">${pct(totals.departments[d].total, totals.total)} of total</div></div>`).join('')}
       </div>
       ${!branches.length ? '<div class="empty-state"><p>No completed sales in this range.</p></div>' : `
       <div class="card" style="margin-bottom:16px">
