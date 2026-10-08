@@ -1005,4 +1005,68 @@ router.get('/gross-margin', requirePermission('reports'), async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Sales by branch & department. A transaction's department comes from the
+// same FK links the Transactions list uses (rental_agreements checkout /
+// settlement, work_orders assessment / deposit / final, a special_project
+// quote's converted_to_tx); everything else is Retail. EXISTS subqueries
+// instead of LEFT JOINs so one transaction can never fan out into two rows.
+// Rental checkout totals include the refundable security deposit and the
+// settlement subtracts it again, so it's backed out of both to report rental
+// revenue rather than deposit cash flow.
+const SALES_DEPARTMENTS = ['retail', 'rental', 'work_order', 'special_project'];
+router.get('/sales-by-department', requirePermission('reports'), async (req, res) => {
+  try {
+    const { start, end, branch_id } = req.query;
+    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+    const e = end || new Date().toISOString().slice(0, 10);
+    const bf = branch_id ? ' AND t.branch_id = ?' : '';
+    const bp = branch_id ? [branch_id] : [];
+
+    const { rows } = await db.execute({
+      sql: `SELECT x.branch_id, b.name as branch_name, x.department,
+              COUNT(*) as transaction_count, COALESCE(SUM(x.amount), 0) as total, COALESCE(SUM(x.tax_amount), 0) as tax
+            FROM (
+              SELECT t.id, t.branch_id, t.tax_amount,
+                CASE
+                  WHEN EXISTS (SELECT 1 FROM quotations q WHERE q.converted_to_tx = t.id AND q.quote_type = 'special_project') THEN 'special_project'
+                  WHEN EXISTS (SELECT 1 FROM rental_agreements ra WHERE ra.checkout_transaction_id = t.id OR ra.settlement_transaction_id = t.id) THEN 'rental'
+                  WHEN EXISTS (SELECT 1 FROM work_orders wo WHERE wo.assessment_transaction_id = t.id OR wo.deposit_transaction_id = t.id OR wo.final_transaction_id = t.id) THEN 'work_order'
+                  ELSE 'retail'
+                END as department,
+                t.total
+                  - COALESCE((SELECT SUM(ra.deposit_total) FROM rental_agreements ra WHERE ra.checkout_transaction_id = t.id), 0)
+                  + COALESCE((SELECT SUM(ra.deposit_total) FROM rental_agreements ra WHERE ra.settlement_transaction_id = t.id), 0) as amount
+              FROM transactions t
+              WHERE t.status = 'completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}
+            ) x
+            LEFT JOIN branches b ON x.branch_id = b.id
+            GROUP BY x.branch_id, x.department`,
+      args: [s, e, ...bp],
+    });
+
+    const round = n => parseFloat((n || 0).toFixed(2));
+    const emptyDepts = () => Object.fromEntries(SALES_DEPARTMENTS.map(d => [d, { total: 0, tax: 0, transaction_count: 0 }]));
+    const branchMap = new Map();
+    const totals = { departments: emptyDepts(), total: 0, tax: 0, transaction_count: 0 };
+    for (const r of rows) {
+      const key = r.branch_id ?? 'none';
+      if (!branchMap.has(key)) branchMap.set(key, { branch_id: r.branch_id, branch_name: r.branch_name || 'No Branch', departments: emptyDepts(), total: 0, tax: 0, transaction_count: 0 });
+      const branch = branchMap.get(key);
+      for (const target of [branch, totals]) {
+        const d = target.departments[r.department];
+        d.total += r.total; d.tax += r.tax; d.transaction_count += r.transaction_count;
+        target.total += r.total; target.tax += r.tax; target.transaction_count += r.transaction_count;
+      }
+    }
+    const finish = obj => {
+      obj.total = round(obj.total); obj.tax = round(obj.tax);
+      for (const d of Object.values(obj.departments)) { d.total = round(d.total); d.tax = round(d.tax); }
+      return obj;
+    };
+    const branches = [...branchMap.values()].map(finish).sort((a, b) => b.total - a.total);
+
+    res.json({ start: s, end: e, departments: SALES_DEPARTMENTS, branches, totals: finish(totals) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 module.exports = router;

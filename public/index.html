@@ -12959,6 +12959,7 @@ const App = {
   renderReportsSales() {
     document.getElementById('content').innerHTML = `
       <div class="section-header"><h2>Sales Reports</h2></div>
+      ${this._reportButtonCard('Sales by Branch &amp; Department', 'Total sales per branch, broken down into Retail, Rental, Work Orders, and Special Projects.', 'App.showSalesByDepartmentReport()')}
       ${this._reportButtonCard('Salesperson Leaderboard', 'Quotes created/converted, win rate, and total credited sales per salesperson.', 'App.showSalesLeaderboardReport()')}
       ${this._reportButtonCard('Quote Funnel &amp; Cycle Time', 'How many quotes sit in each status, and the average days spent between Draft, Sent, Accepted, and Converted.', 'App.showQuoteFunnelReport()')}
       ${(this.can('special_projects') || this.can('special_projects_approve')) ? this._reportButtonCard('Special Projects Margin Report', "Realized markup per Special Project, from each line's Cost vs. Price.", 'App.showSpecialProjectsMarginReport()') : ''}
@@ -13244,6 +13245,81 @@ const App = {
           </table>
         </div>
       </div>`}`;
+  },
+
+  // ─── Sales by Branch & Department ───────────────────────────────────────
+
+  showSalesByDepartmentReport() {
+    this._showReportModal('Sales by Branch &amp; Department', this._reportDateRangeFilters('sbd-start','sbd-end'), 'loadSalesByDepartmentReport');
+  },
+
+  async loadSalesByDepartmentReport() {
+    const start = document.getElementById('sbd-start')?.value || '';
+    const end = document.getElementById('sbd-end')?.value || '';
+    const content = document.getElementById('rpt-modal-content');
+    if (!content) return;
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let data;
+    try { data = await this.api('GET', `/reports/sales-by-department?start=${start}&end=${end}`); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    if (!document.getElementById('rpt-modal-content')) return;
+
+    const { departments, branches, totals } = data;
+    const labels = { retail: 'Retail', rental: 'Rental', work_order: 'Work Orders', special_project: 'Special Projects' };
+    const colors = { retail: 'blue', rental: 'orange', work_order: 'purple', special_project: 'green' };
+    const pct = (part, whole) => whole ? (part / whole * 100).toFixed(1) + '%' : '—';
+    content.innerHTML = `
+      <div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));margin-bottom:18px">
+        <div class="stat-card"><div class="stat-label">Total Sales</div><div class="stat-value" style="font-size:20px">${this.fmt(totals.total)}</div><div class="stat-sub">${totals.transaction_count} transactions</div></div>
+        ${departments.map(d => `<div class="stat-card ${colors[d]}"><div class="stat-label">${labels[d]}</div><div class="stat-value" style="font-size:20px">${this.fmt(totals.departments[d].total)}</div><div class="stat-sub">${pct(totals.departments[d].total, totals.total)} of total</div></div>`).join('')}
+      </div>
+      ${!branches.length ? '<div class="empty-state"><p>No completed sales in this range.</p></div>' : `
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">By Branch</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Branch</th>${departments.map(d => `<th>${labels[d]}</th>`).join('')}<th>Branch Total</th></tr></thead>
+            <tbody>${branches.map(b => `
+              <tr>
+                <td class="fw-600">${b.branch_name}</td>
+                ${departments.map(d => `<td>${this.fmt(b.departments[d].total)}</td>`).join('')}
+                <td class="fw-600">${this.fmt(b.total)}</td>
+              </tr>`).join('')}
+              <tr style="border-top:2px solid var(--border)">
+                <td class="fw-600">All Branches</td>
+                ${departments.map(d => `<td class="fw-600">${this.fmt(totals.departments[d].total)}</td>`).join('')}
+                <td class="fw-600">${this.fmt(totals.total)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      ${branches.map(b => `
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">${b.branch_name} — ${this.fmt(b.total)}</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Department</th><th>Transactions</th><th>Tax</th><th>Sales</th><th>% of Branch</th></tr></thead>
+            <tbody>${departments.map(d => `
+              <tr>
+                <td class="fw-600">${labels[d]}</td>
+                <td>${b.departments[d].transaction_count}</td>
+                <td>${this.fmt(b.departments[d].tax)}</td>
+                <td>${this.fmt(b.departments[d].total)}</td>
+                <td>${pct(b.departments[d].total, b.total)}</td>
+              </tr>`).join('')}
+              <tr style="border-top:2px solid var(--border)">
+                <td class="fw-600">Branch Total</td>
+                <td class="fw-600">${b.transaction_count}</td>
+                <td class="fw-600">${this.fmt(b.tax)}</td>
+                <td class="fw-600">${this.fmt(b.total)}</td>
+                <td></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>`).join('')}`}
+      <p style="font-size:11px;color:var(--text-muted)">Completed transactions, tax included. Rental figures exclude refundable security deposits; Work Order figures include assessment fees, deposits, and final payments as collected.</p>`;
   },
 
   // ─── Salesperson Leaderboard ────────────────────────────────────────────
