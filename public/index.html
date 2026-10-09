@@ -12975,6 +12975,7 @@ const App = {
       ${this._reportButtonCard('Credit Risk / Exposure', 'Customers near or over their credit limit, blocked accounts, and days remaining before an unpaid balance auto-blocks.', 'App.showCreditRiskReport()')}
       ${this._reportButtonCard('Tax Collected', 'Taxable sales and tax collected by day and branch, sized for filing.', 'App.showTaxCollectedReport()')}
       ${this.can('accounts_writeoff') ? this._reportButtonCard('Write-Off / Bad Debt', 'Every balance written off, by customer and branch, over a period.', 'App.showWriteoffReport()') : ''}
+      ${this._reportButtonCard('Rental Deposits', 'Deposits taken on rentals and where they went — used against fees/damage, refunded (by method), issued as credit notes, or still held.', 'App.showRentalDepositReport()')}
       ${this._reportButtonCard('Gross Margin (COGS)', 'Store-wide cost vs. price on completed sales, by category and branch — the sibling of the Special Projects margin report.', 'App.showGrossMarginReport()')}
       <p style="font-size:11px;color:var(--text-muted);margin-top:10px">AR Collections still lives on the general <a href="#" onclick="event.preventDefault();App.showSection('reports')">Reports &amp; Analytics</a> screen; Customer Balances / Aging / Payment History are on the <a href="#" onclick="event.preventDefault();App.showSection('accounts')">Accounts</a> screen.</p>`;
   },
@@ -13193,6 +13194,105 @@ const App = {
                 <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${this.escapeAttr(r.reason)}">${r.reason||'—'}</td>
                 <td>${r.employee_name||'—'}</td>
               </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`}`;
+  },
+
+  // ─── Rental Deposits ─────────────────────────────────────────────────────
+
+  showRentalDepositReport() {
+    const filters = `${this._reportDateRangeFilters('rdr-start','rdr-end')}
+      <select id="rdr-basis" style="width:auto" title="Which date the range applies to">
+        <option value="deposit">By deposit date</option>
+        <option value="settled">By return date</option>
+      </select>`;
+    this._showReportModal('Rental Deposits', filters, 'loadRentalDepositReport');
+  },
+
+  async loadRentalDepositReport() {
+    const start = document.getElementById('rdr-start')?.value || '';
+    const end = document.getElementById('rdr-end')?.value || '';
+    const basis = document.getElementById('rdr-basis')?.value || 'deposit';
+    const content = document.getElementById('rpt-modal-content');
+    if (!content) return;
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let data;
+    try { data = await this.api('GET', `/reports/rental-deposits?start=${start}&end=${end}&basis=${basis}`); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    if (!document.getElementById('rpt-modal-content')) return;
+
+    const { summary, counts, byBranch, records } = data;
+    const dispLabel = {
+      held: ['Held', 'badge-info'], used: ['Fully Used', 'badge-danger'],
+      refunded_cash: ['Refunded — Cash', 'badge-success'], refunded_bank_transfer: ['Refunded — Bank Transfer', 'badge-success'],
+      refunded_original_card: ['Refunded — Original Card', 'badge-success'], refund_pending: ['Refund Due', 'badge-warning'],
+      credit_note: ['Credit Note', 'badge-teal'], applied_to_account: ['Applied to Account', 'badge-info'],
+    };
+    const amt = v => v > 0 ? this.fmt(v) : '<span style="color:var(--text-muted)">—</span>';
+    const breakdown = [
+      ['Used (fees / damage)', 'used'],
+      ['Refunded — Cash', 'refunded_cash'],
+      ['Refunded — Bank Transfer', 'refunded_bank_transfer'],
+      ['Refunded — Original Card', 'refunded_original_card'],
+      ['Applied to Customer Credit Note', 'credit_note'],
+      ['Applied to Credit Account Balance', 'applied_to_account'],
+      ['Refund Due (method not recorded)', 'refund_pending'],
+      ['Still Held (open rentals)', 'held'],
+    ];
+    const pct = v => summary.collected > 0 ? (v / summary.collected * 100).toFixed(1) + '%' : '—';
+    content.innerHTML = `
+      <div class="stats-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:18px">
+        <div class="stat-card blue"><div class="stat-label">Deposits Collected</div><div class="stat-value">${this.fmt(summary.collected)}</div></div>
+        <div class="stat-card orange"><div class="stat-label">Used</div><div class="stat-value">${this.fmt(summary.used)}</div></div>
+        <div class="stat-card green"><div class="stat-label">Refunded</div><div class="stat-value">${this.fmt(summary.refunded)}</div></div>
+        <div class="stat-card purple"><div class="stat-label">Credit Notes</div><div class="stat-value">${this.fmt(summary.credit_note)}</div></div>
+      </div>
+      ${!records.length ? '<div class="empty-state"><p>No rental deposits in this range.</p></div>' : `
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">Breakdown (${summary.agreement_count} agreement${summary.agreement_count===1?'':'s'})</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Disposition</th><th>Agreements</th><th>Amount</th><th>% of Collected</th></tr></thead>
+            <tbody>${breakdown.map(([label, k]) => `<tr><td class="fw-600">${label}</td><td>${counts[k]}</td><td>${this.fmt(summary[k])}</td><td>${pct(summary[k])}</td></tr>`).join('')}
+              <tr style="border-top:2px solid var(--border)"><td class="fw-600">Total Collected</td><td>${summary.agreement_count}</td><td class="fw-600">${this.fmt(summary.collected)}</td><td>100%</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      ${summary.fee_refund > 0 ? `<p style="font-size:11px;color:var(--text-muted);margin:-8px 0 16px">Early returns also refunded ${this.fmt(summary.fee_refund)} of unused prepaid rental fees on top of these deposits — not included above, since it wasn't deposit money.</p>` : ''}
+      ${byBranch.length > 1 ? `
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">By Branch</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Branch</th><th>Collected</th><th>Used</th><th>Refunded</th><th>Credit Notes</th><th>To Account</th><th>Refund Due</th><th>Held</th></tr></thead>
+            <tbody>${byBranch.map(r => `<tr><td class="fw-600">${r.branch_name||'—'}</td><td>${this.fmt(r.collected)}</td><td>${this.fmt(r.used)}</td><td>${this.fmt(r.refunded)}</td><td>${this.fmt(r.credit_note)}</td><td>${this.fmt(r.applied_to_account)}</td><td>${this.fmt(r.refund_pending)}</td><td>${this.fmt(r.held)}</td></tr>`).join('')}</tbody>
+          </table>
+        </div>
+      </div>` : ''}
+      <div class="card">
+        <div class="card-header"><span class="card-title">Agreements</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Deposit Date</th><th>Agreement</th><th>Customer</th><th>Deposit</th><th>Used</th><th>Refunded</th><th>Credit Note</th><th>To Account</th><th>Outstanding</th><th>Status</th></tr></thead>
+            <tbody>${records.map(r => {
+              const [label, badge] = dispLabel[r.disposition] || [r.disposition, 'badge-secondary'];
+              const refunded = r.refunded_cash + r.refunded_bank_transfer + r.refunded_original_card;
+              return `<tr>
+                <td style="color:var(--text-muted)">${this.fmtDate(r.deposit_date)}</td>
+                <td class="fw-600">${r.agreement_number}</td>
+                <td>${r.customer_name||'—'}</td>
+                <td>${this.fmt(r.collected)}</td>
+                <td>${amt(r.used)}</td>
+                <td>${amt(refunded)}</td>
+                <td>${amt(r.credit_note)}</td>
+                <td>${amt(r.applied_to_account)}</td>
+                <td>${amt(r.held + r.refund_pending)}</td>
+                <td><span class="badge-pill ${badge}" style="font-size:10px">${label}</span></td>
+              </tr>`;
+            }).join('')}
             </tbody>
           </table>
         </div>

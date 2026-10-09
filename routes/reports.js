@@ -1005,6 +1005,108 @@ router.get('/gross-margin', requirePermission('reports'), async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Rental deposit breakdown — where every deposit taken in the period ended
+// up: still held on an open rental, used (consumed by rental fees / damage /
+// tax at return), refunded (cash / bank transfer / original card, or still
+// awaiting a recorded method), issued as a store-credit note, or netted
+// against a credit-account balance. Same bucketing as GET
+// /rentals/deposits/summary, but per-agreement and date-filtered. `basis`
+// picks the date the range applies to: 'deposit' (when the deposit was
+// taken, i.e. the checkout transaction) or 'settled' (when it was returned).
+// Cancelled agreements are left out — their deposit goes back with the
+// voided checkout transaction, not through this flow.
+router.get('/rental-deposits', requirePermission('reports'), async (req, res) => {
+  try {
+    const { start, end, branch_id } = req.query;
+    const basis = req.query.basis === 'settled' ? 'settled' : 'deposit';
+    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+    const e = end || new Date().toISOString().slice(0, 10);
+    const dateExpr = basis === 'settled' ? 'ra.returned_at' : 'COALESCE(co.created_at, ra.created_at)';
+    const bf = branch_id ? ' AND ra.branch_id = ?' : '';
+    const bp = branch_id ? [branch_id] : [];
+
+    const { rows } = await db.execute({
+      sql: `SELECT ra.id, ra.agreement_number, ra.status, ra.branch_id, b.name as branch_name,
+              c.first_name || ' ' || c.last_name as customer_name, c.customer_number,
+              ra.deposit_total, ra.credit_note_amount, ra.deposit_return_method, ra.deposit_return_reference,
+              ra.settlement_transaction_id, ra.returned_at, ra.damage_fee_total,
+              COALESCE(co.created_at, ra.created_at) as deposit_date,
+              co.payment_method as checkout_payment_method, se.total as settlement_total
+            FROM rental_agreements ra
+            LEFT JOIN transactions co ON ra.checkout_transaction_id = co.id
+            LEFT JOIN transactions se ON ra.settlement_transaction_id = se.id
+            LEFT JOIN customers c ON ra.customer_id = c.id
+            LEFT JOIN branches b ON ra.branch_id = b.id
+            WHERE ra.status IN ('awaiting_issue', 'active', 'returned') AND ra.deposit_total > 0
+              AND date(${dateExpr}) BETWEEN date(?) AND date(?)${bf}
+            ORDER BY ${dateExpr} DESC`,
+      args: [s, e, ...bp],
+    });
+
+    const r2 = n => parseFloat((n || 0).toFixed(2));
+    const BUCKETS = ['collected', 'held', 'used', 'refunded_cash', 'refunded_bank_transfer', 'refunded_original_card', 'refund_pending', 'credit_note', 'applied_to_account'];
+    const blank = () => Object.fromEntries(BUCKETS.map(k => [k, 0]));
+    const summary = { ...blank(), agreement_count: rows.length, fee_refund: 0 };
+    const counts = blank();
+    const byBranch = new Map();
+
+    const records = rows.map(a => {
+      const d = blank();
+      d.collected = a.deposit_total;
+      let disposition, feeRefund = 0;
+      if (a.status !== 'returned') {
+        d.held = a.deposit_total; disposition = 'held';
+      } else if (!a.settlement_transaction_id) {
+        // Returned but awaiting final payment — only happens when fees
+        // exceeded the deposit, so the whole deposit was consumed.
+        d.used = a.deposit_total; disposition = 'used';
+      } else {
+        // An early return can refund unused prepaid rental fee on top of the
+        // deposit, so the settlement refund may exceed the deposit. Only the
+        // deposit's share (refunded first) is bucketed here; the excess is
+        // reported separately as fee_refund so the buckets always sum to
+        // what was collected.
+        const refundDue = a.settlement_total < 0 ? r2(-a.settlement_total) : 0;
+        const depositBack = r2(Math.min(refundDue, a.deposit_total));
+        feeRefund = r2(refundDue - depositBack);
+        d.used = r2(a.deposit_total - depositBack);
+        if (depositBack <= 0) disposition = 'used';
+        else if (a.checkout_payment_method === 'credit') { d.applied_to_account = depositBack; disposition = 'applied_to_account'; }
+        else if (a.credit_note_amount > 0) {
+          d.credit_note = r2(Math.min(a.credit_note_amount, depositBack));
+          // A credit note can be issued for less than the full refund due;
+          // the rest hasn't been disbursed any other way yet.
+          d.refund_pending = r2(depositBack - d.credit_note);
+          disposition = 'credit_note';
+        } else if (['cash', 'bank_transfer', 'original_card'].includes(a.deposit_return_method)) {
+          d[`refunded_${a.deposit_return_method}`] = depositBack; disposition = `refunded_${a.deposit_return_method}`;
+        } else { d.refund_pending = depositBack; disposition = 'refund_pending'; }
+      }
+      summary.fee_refund = r2(summary.fee_refund + feeRefund);
+
+      const key = a.branch_id || 0;
+      if (!byBranch.has(key)) byBranch.set(key, { branch_id: a.branch_id, branch_name: a.branch_name, agreement_count: 0, ...blank() });
+      const br = byBranch.get(key);
+      br.agreement_count += 1;
+      for (const k of BUCKETS) {
+        summary[k] = r2(summary[k] + d[k]);
+        br[k] = r2(br[k] + d[k]);
+        if (d[k] > 0) counts[k] += 1;
+      }
+      return {
+        id: a.id, agreement_number: a.agreement_number, status: a.status, branch_name: a.branch_name,
+        customer_name: a.customer_name, customer_number: a.customer_number,
+        deposit_date: a.deposit_date, returned_at: a.returned_at, deposit_return_reference: a.deposit_return_reference,
+        disposition, ...d, fee_refund: feeRefund,
+      };
+    });
+
+    summary.refunded = r2(summary.refunded_cash + summary.refunded_bank_transfer + summary.refunded_original_card);
+    for (const br of byBranch.values()) br.refunded = r2(br.refunded_cash + br.refunded_bank_transfer + br.refunded_original_card);
+    res.json({ basis, summary, counts, byBranch: [...byBranch.values()].sort((x, y) => y.collected - x.collected), records });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Sales by branch & department. A transaction's department comes from the
 // same FK links the Transactions list uses (rental_agreements checkout /
 // settlement, work_orders assessment / deposit / final, a special_project
