@@ -253,7 +253,7 @@ router.get('/discount-eligibility/:productId', requirePermission('pos'), async (
     const { rows: [product] } = await db.execute({ sql: 'SELECT id, brand, category_id FROM products WHERE id = ?', args: [req.params.productId] });
     if (!product) return res.status(404).json({ error: 'Product not found' });
     const result = await checkDiscountEligibility(product);
-    const { rows: [setting] } = await db.execute({ sql: "SELECT value FROM settings WHERE key = 'pos_max_line_discount_percent'", args: [] });
+    const { rows: [setting] } = await db.execute({ sql: "SELECT value FROM settings WHERE key = 'max_discount_pct'", args: [] });
     res.json({ ...result, max_percent: parseFloat(setting?.value) || 0 });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

@@ -3827,6 +3827,18 @@ const App = {
     }
   },
 
+  // Percentage a manual line-item discount took off a sold line (the "%"
+  // button in the POS cart), for receipts — 0 when the line wasn't
+  // discounted. Prefers the stored discount_percent; falls back to deriving
+  // it from discount_amount for lines discounted some other way.
+  _lineDiscountPct(i) {
+    const pct = parseFloat(i.discount_percent) || 0;
+    if (pct > 0) return pct;
+    const gross = (parseFloat(i.unit_price) || 0) * (parseFloat(i.quantity) || 0);
+    const amt = parseFloat(i.discount_amount) || 0;
+    return amt > 0 && gross > 0 ? parseFloat((amt / gross * 100).toFixed(2)) : 0;
+  },
+
   showReceipt(tx, change = 0, cashResult = null, splitForeignCash = null) {
     const items = tx.items || [];
     const storeName = this.settings.store_name || 'My Store';
@@ -3859,7 +3871,7 @@ const App = {
             ${tx.created_by_name ? `<div class="receipt-row"><span>Created By:</span><span>${tx.created_by_name}</span></div>` : ''}
             ${tx.employee_name ? `<div class="receipt-row"><span>Cashier:</span><span>${tx.employee_name}</span></div>` : ''}
             <hr>
-            ${items.map(i => `<div class="receipt-row"><span>${i.product_name}</span><span>${this.fmt(i.total)}</span></div>${i.quantity > 1 ? `<div style="color:#666;font-size:11px;padding-left:4px">${i.quantity} x ${this.fmt(i.unit_price)}</div>` : ''}`).join('')}
+            ${items.map(i => { const pct = this._lineDiscountPct(i); return `<div class="receipt-row"><span>${i.product_name}</span><span>${this.fmt(i.total)}</span></div>${i.quantity > 1 || pct > 0 ? `<div style="color:#666;font-size:11px;padding-left:4px">${i.quantity} x ${this.fmt(i.unit_price)}${pct > 0 ? ` &nbsp;less ${pct}% (-${this.fmt(i.discount_amount)})` : ''}</div>` : ''}`; }).join('')}
             <hr>
             <div class="receipt-row"><span>Subtotal</span><span>${this.fmt(tx.subtotal)}</span></div>
             ${tx.tax_exempt ? `<div class="receipt-row" style="color:#2e7d32"><span>Tax Exempt${tx.tax_exemption_number ? ` — Ref: ${tx.tax_exemption_number}` : ''}</span><span>—</span></div>` : `<div class="receipt-row"><span>Tax</span><span>${this.fmt(tx.tax_amount)}</span></div>`}
@@ -3960,6 +3972,7 @@ const App = {
     const rentalRentedLabel = tx.rental_checkout_datetime ? this.fmtDateTime(tx.rental_checkout_datetime) : '—';
     const rentalReturnedLabel = tx.rental_returned_at ? this.fmtDateTime(tx.rental_returned_at) : 'Not yet returned';
     const rentalDurationCellLabel = this.rentalDurationLabel(tx.rental_checkout_datetime, tx.rental_due_date, tx.rental_returned_at);
+    const hasLineDiscount = items.some(i => this._lineDiscountPct(i) > 0);
     const itemRows = items.map(i => `<tr>
         <td style="padding:8px;border-bottom:1px solid #e8e8e8">${i.product_name}</td>
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:center">${i.quantity}</td>
@@ -3967,6 +3980,7 @@ const App = {
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:center">${rentalReturnedLabel}</td>
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:center">${rentalDurationCellLabel}</td>` : ''}
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:right">${this.fmt(i.unit_price)}</td>
+        ${hasLineDiscount ? `<td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:right">${this._lineDiscountPct(i) > 0 ? `${this._lineDiscountPct(i)}%` : '—'}</td>` : ''}
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:right;font-weight:600">${this.fmt(i.total)}</td>
       </tr>`).join('');
 
@@ -4063,7 +4077,7 @@ const App = {
       ${tx.rental_po_number ? `<div><label>Customer PO</label>${tx.rental_po_number}</div>` : ''}
     </div>
     <table>
-      <thead><tr><th>Item</th><th style="text-align:center">Qty</th>${isRental ? `<th style="text-align:center">Rented</th><th style="text-align:center">Returned</th><th style="text-align:center">Duration</th>` : ''}<th style="text-align:right">Unit Price</th><th style="text-align:right">Total</th></tr></thead>
+      <thead><tr><th>Item</th><th style="text-align:center">Qty</th>${isRental ? `<th style="text-align:center">Rented</th><th style="text-align:center">Returned</th><th style="text-align:center">Duration</th>` : ''}<th style="text-align:right">Unit Price</th>${hasLineDiscount ? '<th style="text-align:right">Discount</th>' : ''}<th style="text-align:right">Total</th></tr></thead>
       <tbody>${itemRows}</tbody>
     </table>
     <table class="totals">
@@ -14633,7 +14647,7 @@ const App = {
               <div class="form-group"><label>Loyalty Points per $1 Spent</label><input type="number" id="s-loyalty" value="${s.loyalty_rate||0.5}" min="0" step="0.1"></div>
               <div class="form-group"><label>Low Stock Threshold</label><input type="number" id="s-lowstock" value="${s.low_stock_threshold||5}" min="0"></div>
             </div>
-            <div class="form-group"><label>Maximum Discount (% of subtotal, 0 = unlimited)</label><input type="number" id="s-max-discount" value="${s.max_discount_pct||0}" min="0" max="100" step="0.1" placeholder="e.g. 20 for 20% max"></div>
+            <div class="form-group"><label>Maximum Discount (%, 0 = unlimited) — caps the ticket discount and each line-item discount</label><input type="number" id="s-max-discount" value="${s.max_discount_pct||0}" min="0" max="100" step="0.1" placeholder="e.g. 20 for 20% max"></div>
             <button class="btn btn-primary" onclick="App.saveSettings()">Save Settings</button>
           </div>
           <div class="card" style="margin-bottom:16px">
@@ -14654,11 +14668,7 @@ const App = {
           </div>
           <div class="card" style="margin-bottom:16px">
             <div class="card-header"><span class="card-title">POS Line-Item Discounts</span></div>
-            <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">Governs the per-line "Discount" action in the POS cart — separate from the whole-ticket Maximum Discount above. An item already covered by an active promotion, or whose brand is listed below, can't take a manual discount at all.</p>
-            <div class="form-group"><label>Maximum Line Item Discount (%, 0 = unlimited)</label><input type="number" id="s-max-line-discount" value="${s.pos_max_line_discount_percent||0}" min="0" max="100" step="0.1" placeholder="e.g. 15 for 15% max"></div>
-            <p style="font-size:11px;color:var(--text-muted);margin:0 0 8px">A discount above this needs a manager PIN with <span class="perm-pill">pos_discount_override</span> to authorize.</p>
-            <button class="btn btn-primary" onclick="App.saveSettings()">Save Settings</button>
-            <div style="border-top:1px solid var(--border);margin:14px 0 12px"></div>
+            <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">Governs the per-line "%" discount in the POS cart. It's capped at the Maximum Discount above (currently ${parseFloat(s.max_discount_pct) > 0 ? `${parseFloat(s.max_discount_pct)}%` : 'unlimited'}); a discount above that needs a manager PIN with <span class="perm-pill">pos_discount_override</span> to authorize. An item already covered by an active promotion, or whose brand is listed below, can't take a manual discount at all.</p>
             <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Brands Excluded From Manual Discounts</div>
             <div id="discount-excluded-brands-wrap">Loading…</div>
             <div class="input-row" style="margin-top:10px;align-items:flex-end">
@@ -15026,7 +15036,6 @@ const App = {
       layaway_deposit_percent: document.getElementById('s-layaway-deposit').value,
       layaway_cancellation_fee_type: document.getElementById('s-layaway-fee-type').value,
       layaway_cancellation_fee_value: document.getElementById('s-layaway-fee-value').value,
-      pos_max_line_discount_percent: document.getElementById('s-max-line-discount').value,
       email_smtp_host: document.getElementById('s-smtp-host').value,
       email_smtp_port: document.getElementById('s-smtp-port').value,
       email_smtp_user: document.getElementById('s-smtp-user').value,

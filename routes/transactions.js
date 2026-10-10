@@ -187,9 +187,9 @@ router.post('/', requirePermission('pos'), async (req, res) => {
     createdBy = createdBy || employee_id || 1;
 
     // Store-wide cap for a manual per-line discount (see the POS "Discount"
-    // action on a cart line) — 0/unset means no limit is configured, same
-    // convention as the existing whole-ticket max_discount_pct setting.
-    const { rows: [maxDiscSetting] } = await db.execute({ sql: "SELECT value FROM settings WHERE key = 'pos_max_line_discount_percent'", args: [] });
+    // action on a cart line) — the same Maximum Discount (max_discount_pct)
+    // setting that caps the whole-ticket discount; 0/unset means no limit.
+    const { rows: [maxDiscSetting] } = await db.execute({ sql: "SELECT value FROM settings WHERE key = 'max_discount_pct'", args: [] });
     const maxLineDiscountPercent = parseFloat(maxDiscSetting?.value) || 0;
 
     const isTaxExempt = tax_exempt ? 1 : 0;

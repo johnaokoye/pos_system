@@ -55,11 +55,18 @@ function buildReceiptHtml(tx, s) {
   const storePhone = tx.branch_phone || s.store_phone || '';
   const footer = s.receipt_footer || 'Thank you for your business!';
 
-  const rows = (tx.items || []).map(i => `
+  const rows = (tx.items || []).map(i => {
+    // Manual line-item discount (POS "%" button), shown between the unit
+    // price and the line total — e.g. "× 2 @ $10.00 less 5% (-$1.00)".
+    const gross = (parseFloat(i.unit_price) || 0) * (parseFloat(i.quantity) || 0);
+    const pct = parseFloat(i.discount_percent) || (parseFloat(i.discount_amount) > 0 && gross > 0 ? parseFloat((i.discount_amount / gross * 100).toFixed(2)) : 0);
+    const disc = pct > 0 ? ` <span style="color:${BRAND.green}">less ${pct}% (-${fmt(i.discount_amount)})</span>` : '';
+    return `
     <tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku}${i.quantity > 1 ? ` × ${i.quantity} @ ${fmt(i.unit_price)}` : ''}</span></td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku}${i.quantity > 1 || pct > 0 ? ` × ${i.quantity} @ ${fmt(i.unit_price)}` : ''}${disc}</span></td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(i.total)}</td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
 
   return `<!DOCTYPE html>
 <html>
