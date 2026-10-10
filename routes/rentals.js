@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { getOutstandingQty, getOutOfServiceQty } = require('../lib/rentalAvailability');
-const { getBranchStock, feeFor, blendedFeePerUnit, checkAvailability, parseDbTime, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, dueDateTime, requiredDepositReturnMethod, rentalDiscount, attachRateBasis, rentalWindow } = require('../lib/rentals');
+const { depositWaiver, isCreditCustomerType, getBranchStock, feeFor, blendedFeePerUnit, checkAvailability, parseDbTime, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, dueDateTime, requiredDepositReturnMethod, rentalDiscount, attachRateBasis, rentalWindow } = require('../lib/rentals');
 const { requirePermission, requireAnyPermission, requireAuth, can, canManageRentals, requireRentalsManage } = require('../lib/permissions');
 const { runCreditCheck } = require('./customers');
 const { nextNumber } = require('../lib/nextNumber');
@@ -185,7 +185,7 @@ router.get('/agreements/driver-queue', requireAuth, async (req, res) => {
 router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
   try {
     const { rows: [agreement] } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name,
-      c.phone as customer_phone, c.email as customer_email,
+      c.phone as customer_phone, c.email as customer_email, c.customer_type,
       c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
       b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone,
       e.first_name || ' ' || e.last_name as employee_name,
@@ -235,6 +235,7 @@ router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
     // same math here (checkout instant = now) purely for display, so the
     // Process Payment modal can show an estimated total — this is NOT
     // persisted and will be recomputed for real when checkout completes.
+    agreement.deposit_waived_reason = depositWaiver(agreement);
     if (agreement.status === 'pending' && items.length) {
       // Whole seconds, same as checkout below — see the note there.
       const estCheckoutDateTime = new Date(Math.floor(Date.now() / 1000) * 1000);
@@ -251,9 +252,9 @@ router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
         const estLineTax = parseFloat((estFee * (item.tax_rate || 0) / 100).toFixed(2));
         item.estimated_rental_fee = estFee;
         // Deposit mirrors fee + tax (the "Sales Total"), not the fee alone —
-        // matches what's actually charged at checkout below. Waived when an
-        // operator is required — see PATCH .../checkout.
-        item.estimated_deposit_amount = agreement.operator_required ? 0 : parseFloat((estFee + estLineTax).toFixed(2));
+        // matches what's actually charged at checkout below. Waived for an
+        // operator or a credit customer — see PATCH .../checkout.
+        item.estimated_deposit_amount = agreement.deposit_waived_reason ? 0 : parseFloat((estFee + estLineTax).toFixed(2));
         estRentalSubtotal += estFee;
         estTax += estLineTax;
       }
@@ -262,7 +263,7 @@ router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
       const operatorFee = agreement.operator_required ? parseFloat(agreement.operator_fee || 0) : 0;
       agreement.estimated_rental_subtotal = parseFloat(estRentalSubtotal.toFixed(2));
       agreement.estimated_tax = parseFloat(estTax.toFixed(2));
-      agreement.estimated_deposit_total = agreement.operator_required ? 0 : parseFloat((estRentalSubtotal + estTax).toFixed(2));
+      agreement.estimated_deposit_total = agreement.deposit_waived_reason ? 0 : parseFloat((estRentalSubtotal + estTax).toFixed(2));
       agreement.estimated_discount = rentalDiscount(agreement.discount_amount, agreement.estimated_rental_subtotal, agreement.estimated_tax, deliveryCost + pickupCost + operatorFee);
       agreement.estimated_total = parseFloat((estRentalSubtotal + estTax + agreement.estimated_deposit_total + deliveryCost + pickupCost + operatorFee - agreement.estimated_discount).toFixed(2));
     }
@@ -401,10 +402,14 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
     if (method === 'gift_card') return res.status(400).json({ error: 'Gift Card cannot be used to pay a rental deposit — choose another payment method' });
     const isCredit = method === 'credit';
     let creditCustomer = null;
+    const { rows: [rentalCustomer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [agreement.customer_id] });
+    // No deposit for an operator-run rental or a credit customer (whatever
+    // they pay with) — see lib/rentals.js's depositWaiver.
+    const depositWaived = !!depositWaiver({ operator_required: agreement.operator_required, customer_type: rentalCustomer?.customer_type });
     if (isCredit) {
-      const { rows: [cust] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [agreement.customer_id] });
+      const cust = rentalCustomer;
       if (!cust) return res.status(400).json({ error: 'Customer not found' });
-      if (cust.customer_type !== 'credit') return res.status(400).json({ error: 'Customer does not have a credit account' });
+      if (!isCreditCustomerType(cust.customer_type)) return res.status(400).json({ error: 'Customer does not have a credit account' });
       if (cust.account_blocked) return res.status(400).json({ error: 'Customer account is blocked due to overdue payment. Please settle the outstanding balance first.' });
       // A credit rental charges straight to the customer's account with no
       // cash/card in hand — the PO is what ties that charge back to the
@@ -434,8 +439,9 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
       // not the fee alone — so what's held as refundable equals what was
       // actually charged as the sale, tax included. Waived entirely when an
       // operator is required — our own staff runs the equipment, not the
-      // customer, so there's nothing a deposit needs to protect against.
-      item.depositAmount = agreement.operator_required ? 0 : parseFloat((item.rentalFee + item.lineTax).toFixed(2));
+      // customer, so there's nothing a deposit needs to protect against —
+      // and for a credit customer, whose account covers the rental.
+      item.depositAmount = depositWaived ? 0 : parseFloat((item.rentalFee + item.lineTax).toFixed(2));
       rentalSubtotal += item.rentalFee;
       taxAmount += item.lineTax;
     }
@@ -445,7 +451,7 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
     // each item's already-rounded depositAmount, so it exactly equals
     // Sub-Total + Sales Tax with no compounding-rounding drift between the
     // per-item figures and the printed "Sales Total"/"Rental Deposit" lines.
-    const depositTotal = agreement.operator_required ? 0 : parseFloat((rentalSubtotal + taxAmount).toFixed(2));
+    const depositTotal = depositWaived ? 0 : parseFloat((rentalSubtotal + taxAmount).toFixed(2));
 
     // Delivery/pickup/operator requirement + cost were decided up front when
     // the rental was created (not here) — charged now, alongside the rental

@@ -174,6 +174,13 @@ router.get('/', requireAuth, async (req, res) => {
 // ── CSV import/export ─────────────────────────────────────
 // Registered before GET /:id so "export"/"template" aren't swallowed as a
 // customer id (same ordering as routes/products.js's /export routes).
+// customer_type is compared as lowercase 'cash'/'credit' throughout, but the
+// CSV export writes 'Cash'/'Credit' — so a re-imported export (or any
+// caller) could store a capitalized value that those checks miss.
+function normalizeCustomerType(t) {
+  return String(t || '').trim().toLowerCase() === 'credit' ? 'credit' : 'cash';
+}
+
 const CSV_COLUMNS = ['first_name','last_name','email','phone','address','city','state','zip','customer_type','credit_terms_days','credit_limit','tax_exempt','tax_exemption_number','customer_category_name','notes'];
 
 // Text-only rental compliance fields (see lib/rentals.js RENTAL_REQUIREMENTS)
@@ -405,7 +412,7 @@ router.post('/', requirePermission('customers_add'), async (req, res) => {
     const cashBackCardError = await validateCashBackCard(cash_back_card_type_id, cash_back_card_number, null);
     if (cashBackCardError) return res.status(400).json({ error: cashBackCardError });
     const customer_number = await nextNumber(db, 'customers', 'customer_number', 'CUST-', 4);
-    const type = customer_type || 'cash';
+    const type = normalizeCustomerType(customer_type);
     const creditEnabled = type === 'credit' ? 1 : 0;
     const terms = parseInt(credit_terms_days) || 30;
     const limit = parseFloat(credit_limit) || 0;
@@ -467,7 +474,7 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
         if (clashes.length) return res.status(409).json(hardDuplicateError(clashes));
       }
     }
-    const type = customer_type || 'cash';
+    const type = normalizeCustomerType(customer_type);
     const creditEnabled = type === 'credit' ? 1 : 0;
     const terms = parseInt(credit_terms_days) || 30;
     const limit = parseFloat(credit_limit) || 0;
@@ -594,7 +601,7 @@ router.post('/import', requirePermission('customers_import'), async (req, res) =
           }
         }
         const category_id = customer_category_name ? (catMap[customer_category_name.toLowerCase()] ?? null) : null;
-        const type = customer_type || 'cash';
+        const type = normalizeCustomerType(customer_type);
         const customer_number = await nextNumber(db, 'customers', 'customer_number', 'CUST-', 4);
         // Rental fields only get stored when the row actually flags the
         // customer as a rental customer — same as POST / (single create).

@@ -674,7 +674,7 @@ function buildRentalQuoteHtml(q, s, { print = false } = {}) {
     q.pickup_required ? line('Pickup', fmt(sum.pickup)) : '',
     q.operator_required ? line('Operator', fmt(sum.operator)) : '',
     sum.deposit_waived
-      ? line('Refundable Deposit', 'Waived — operator provided')
+      ? line('Refundable Deposit', sum.deposit_waived_reason === 'credit' ? 'Not required — credit account' : 'Waived — operator provided')
       : line('Refundable Deposit', fmt(sum.deposit)),
     sum.discount > 0 ? line('Discount', `-${fmt(sum.discount)}`, `color:${BRAND.green}`) : '',
   ].join('');
@@ -1000,7 +1000,7 @@ router.post('/send-rental-invoice/:id', requireAuth, async (req, res) => {
 
 async function loadQuoteForDocument(id) {
   const { rows: [q] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name,
-    c.customer_number, c.email as customer_email, c.phone as customer_phone,
+    c.customer_number, c.customer_type, c.email as customer_email, c.phone as customer_phone,
     c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
     b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name
     FROM quotations q

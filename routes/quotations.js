@@ -20,12 +20,20 @@ const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 // approving needs special_projects_approve, viewing needs either).
 router.use(requireAnyPermission('quotations', 'special_projects'));
 
+// A rental quote's deposit depends on whether the customer is a credit
+// customer (see lib/rentals.js's depositWaiver).
+async function customerTypeOf(customerId) {
+  if (!customerId) return null;
+  const { rows: [c] } = await db.execute({ sql: 'SELECT customer_type FROM customers WHERE id = ?', args: [customerId] });
+  return c ? c.customer_type : null;
+}
+
 const canSeeSpecialProjects = req => can(req.employee && req.employee.permissions, 'special_projects') || can(req.employee && req.employee.permissions, 'special_projects_approve');
 
 router.get('/', async (req, res) => {
   try {
     const { status, customer_id, quote_number, quote_type, start, end, limit = 100 } = req.query;
-    let sql = `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, e.first_name || ' ' || e.last_name as employee_name, oe.first_name || ' ' || oe.last_name as original_employee_name, ae.first_name || ' ' || ae.last_name as approved_by_name, re.first_name || ' ' || re.last_name as rejected_by_name, b.name as branch_name, t.transaction_number as converted_tx_number, ra.agreement_number as converted_agreement_number, ra.status as converted_agreement_status FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN employees oe ON q.original_employee_id = oe.id LEFT JOIN employees ae ON q.approved_by = ae.id LEFT JOIN employees re ON q.rejected_by = re.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id LEFT JOIN rental_agreements ra ON q.converted_to_agreement_id = ra.id WHERE 1=1`;
+    let sql = `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.customer_type, e.first_name || ' ' || e.last_name as employee_name, oe.first_name || ' ' || oe.last_name as original_employee_name, ae.first_name || ' ' || ae.last_name as approved_by_name, re.first_name || ' ' || re.last_name as rejected_by_name, b.name as branch_name, t.transaction_number as converted_tx_number, ra.agreement_number as converted_agreement_number, ra.status as converted_agreement_status FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN employees oe ON q.original_employee_id = oe.id LEFT JOIN employees ae ON q.approved_by = ae.id LEFT JOIN employees re ON q.rejected_by = re.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id LEFT JOIN rental_agreements ra ON q.converted_to_agreement_id = ra.id WHERE 1=1`;
     const params = [];
     if (status) { sql += ' AND q.status = ?'; params.push(status); }
     if (quote_type) { sql += ' AND q.quote_type = ?'; params.push(quote_type); }
@@ -79,7 +87,7 @@ async function attachQuoteItemSources(items) {
 
 router.get('/:id', async (req, res) => {
   try {
-    const { rows: [quote] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, c.phone as customer_phone, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip, e.first_name || ' ' || e.last_name as employee_name, oe.first_name || ' ' || oe.last_name as original_employee_name, ae.first_name || ' ' || ae.last_name as approved_by_name, re.first_name || ' ' || re.last_name as rejected_by_name, b.name as branch_name, t.transaction_number as converted_tx_number, ra.agreement_number as converted_agreement_number, ra.status as converted_agreement_status FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN employees oe ON q.original_employee_id = oe.id LEFT JOIN employees ae ON q.approved_by = ae.id LEFT JOIN employees re ON q.rejected_by = re.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id LEFT JOIN rental_agreements ra ON q.converted_to_agreement_id = ra.id WHERE q.id = ?`, args: [req.params.id] });
+    const { rows: [quote] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.customer_type, c.email as customer_email, c.phone as customer_phone, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip, e.first_name || ' ' || e.last_name as employee_name, oe.first_name || ' ' || oe.last_name as original_employee_name, ae.first_name || ' ' || ae.last_name as approved_by_name, re.first_name || ' ' || re.last_name as rejected_by_name, b.name as branch_name, t.transaction_number as converted_tx_number, ra.agreement_number as converted_agreement_number, ra.status as converted_agreement_status FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN employees oe ON q.original_employee_id = oe.id LEFT JOIN employees ae ON q.approved_by = ae.id LEFT JOIN employees re ON q.rejected_by = re.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id LEFT JOIN rental_agreements ra ON q.converted_to_agreement_id = ra.id WHERE q.id = ?`, args: [req.params.id] });
     if (!quote) return res.status(404).json({ error: 'Not found' });
     if (quote.quote_type === 'special_project' && !canSeeSpecialProjects(req)) return res.status(403).json({ error: 'Missing permission: special_projects' });
     const { rows: items } = await db.execute({ sql: QUOTE_ITEMS_SELECT, args: [req.params.id] });
@@ -377,7 +385,7 @@ router.post('/', async (req, res) => {
     } catch(e) { return res.status(400).json({ error: e.message }); }
     const disc = parseFloat(discount_amount || 0);
     const total = isRental
-      ? rentalQuoteSummary({ subtotal, tax_amount, discount_amount: disc, delivery_required, delivery_cost, pickup_required, pickup_cost, operator_required, operator_fee }).total
+      ? rentalQuoteSummary({ subtotal, tax_amount, discount_amount: disc, delivery_required, delivery_cost, pickup_required, pickup_cost, operator_required, operator_fee, customer_type: await customerTypeOf(customer_id) }).total
       : parseFloat((subtotal + tax_amount - disc).toFixed(2));
 
     const tx = await db.transaction('write');
@@ -469,7 +477,7 @@ router.put('/:id', async (req, res) => {
     } catch(e) { return res.status(400).json({ error: e.message }); }
     const disc = parseFloat(discount_amount || 0);
     const total = isRental
-      ? rentalQuoteSummary({ subtotal, tax_amount, discount_amount: disc, delivery_required, delivery_cost, pickup_required, pickup_cost, operator_required, operator_fee }).total
+      ? rentalQuoteSummary({ subtotal, tax_amount, discount_amount: disc, delivery_required, delivery_cost, pickup_required, pickup_cost, operator_required, operator_fee, customer_type: await customerTypeOf(customer_id) }).total
       : parseFloat((subtotal + tax_amount - disc).toFixed(2));
 
     const tx = await db.transaction('write');
