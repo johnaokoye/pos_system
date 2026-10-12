@@ -305,6 +305,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .receipt-row { display: flex; justify-content: space-between; gap: 4px; }
 .receipt-row span:last-child { white-space: nowrap; }
 .receipt-total { font-weight: bold; font-size: 13px; }
+/* Name on its own line, then "qty x price ... total" beneath it, with a gap
+   between items so each one reads as a block on the narrow paper. */
+.receipt-item { margin-bottom: 5px; }
+.receipt-item > div:first-child { word-break: break-word; }
 
 /* Print */
 @media print {
@@ -760,13 +764,15 @@ const App = {
   // popup window (window.open('') + document.write()) with no base URL of
   // its own to resolve a relative /uploads/... path against. Left-aligned
   // by default (no centering) since none of these templates set text-align
-  // on their container, so it lands top-left without extra styling.
-  _printLogoTag(maxHeight = 40) {
+  // on their container, so it lands top-left without extra styling; pass
+  // center=true for the narrow thermal receipt, where it sits under the
+  // centered store name.
+  _printLogoTag(maxHeight = 40, center = false) {
     const url = this.settings?.company_logo_url;
     if (!url) return '';
     const src = /^https?:\/\//.test(url) ? url : `${location.origin}${url}`;
     const alt = (this.settings.store_name || 'Logo').replace(/"/g, '&quot;');
-    return `<img src="${src}" alt="${alt}" style="display:block;max-height:${maxHeight}px;max-width:220px;object-fit:contain;margin-bottom:8px">`;
+    return `<img src="${src}" alt="${alt}" style="display:block;max-height:${maxHeight}px;max-width:220px;object-fit:contain;margin:${center ? '0 auto 8px' : '0 0 8px'}">`;
   },
 
   updateClock() {
@@ -3860,7 +3866,7 @@ const App = {
         <div class="modal-body">
           <div class="receipt">
             <div class="receipt-store" style="text-align:center;font-weight:700;font-size:15px;margin-bottom:6px">${storeName}</div>
-            ${this._printLogoTag(36)}
+            ${this._printLogoTag(36, true)}
             ${tx.branch_name ? `<div class="receipt-title">${tx.branch_name}</div>` : ''}
             ${tx.branch_address ? `<div style="text-align:center;font-size:11px;color:#666">${tx.branch_address}${tx.branch_city ? ', ' + tx.branch_city : ''}${tx.branch_state ? ' ' + tx.branch_state : ''}${tx.branch_zip ? ' ' + tx.branch_zip : ''}</div>` : `<div style="text-align:center;font-size:11px;color:#666">${this.settings.store_address || ''}</div>`}
             <div style="text-align:center;font-size:11px;color:#666">${tx.branch_phone || this.settings.store_phone || ''}</div>
@@ -3871,7 +3877,11 @@ const App = {
             ${tx.created_by_name ? `<div class="receipt-row"><span>Created By:</span><span>${tx.created_by_name}</span></div>` : ''}
             ${tx.employee_name ? `<div class="receipt-row"><span>Cashier:</span><span>${tx.employee_name}</span></div>` : ''}
             <hr>
-            ${items.map(i => { const pct = this._lineDiscountPct(i); return `<div class="receipt-row"><span>${i.product_name}</span><span>${this.fmt(i.total)}</span></div>${i.quantity > 1 || pct > 0 ? `<div style="color:#666;font-size:11px;padding-left:4px">${i.quantity} x ${this.fmt(i.unit_price)}${pct > 0 ? ` &nbsp;less ${pct}% (-${this.fmt(i.discount_amount)})` : ''}</div>` : ''}`; }).join('')}
+            ${items.map(i => { const pct = this._lineDiscountPct(i); return `<div class="receipt-item">
+              <div>${i.product_name}</div>
+              <div class="receipt-row"><span style="padding-left:8px">${i.quantity} x ${this.fmt(i.unit_price)}</span><span>${this.fmt(i.total)}</span></div>
+              ${pct > 0 ? `<div style="color:#666;font-size:11px;padding-left:8px">less ${pct}% (-${this.fmt(i.discount_amount)})</div>` : ''}
+            </div>`; }).join('')}
             <hr>
             <div class="receipt-row"><span>Subtotal</span><span>${this.fmt(tx.subtotal)}</span></div>
             ${tx.tax_exempt ? `<div class="receipt-row" style="color:#2e7d32"><span>Tax Exempt${tx.tax_exemption_number ? ` — Ref: ${tx.tax_exemption_number}` : ''}</span><span>—</span></div>` : `<div class="receipt-row"><span>Tax</span><span>${this.fmt(tx.tax_amount)}</span></div>`}
@@ -15019,6 +15029,10 @@ const App = {
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || 'Upload failed');
       this.alert('Logo uploaded');
+      // Receipts and other printouts read the logo from this.settings
+      // (via _printLogoTag), and the server has already deleted the old
+      // file, so keep it in sync or they'd show a broken image until reload.
+      if (this.settings) this.settings.company_logo_url = json.logo_url;
       this.applyBranding(json.logo_url, this.settings?.store_name);
       this.renderSettings();
     } catch(e) { this.alert(e.message, 'error'); }
@@ -15029,6 +15043,7 @@ const App = {
     try {
       await this.api('DELETE', '/settings/logo');
       this.alert('Logo removed');
+      if (this.settings) delete this.settings.company_logo_url;
       this.applyBranding(null, this.settings?.store_name);
       this.renderSettings();
     } catch(e) { this.alert(e.message, 'error'); }
