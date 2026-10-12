@@ -82,7 +82,17 @@ function hardDuplicateError(matches) {
 // 0->1 stamps who/when; flipping 1->0 (or the customer no longer being a
 // rental customer at all) clears both, since a later re-approval should
 // carry a fresh timestamp, not the old one.
-function resolveRentalPreapproval(req, current, isRentalCust, requested) {
+//
+// Granting (0->1) is further limited to customers a CSV import created
+// (canGrant) — preapproval exists for migrated legacy records, so a customer
+// keyed in by hand must have the full rental paperwork before they can rent.
+// Revoking (1->0) is always allowed.
+async function createdByImport(customerId) {
+  const { rows } = await db.execute({ sql: "SELECT 1 FROM customer_import_batch_items WHERE customer_id = ? AND action = 'created' LIMIT 1", args: [customerId] });
+  return rows.length > 0;
+}
+
+function resolveRentalPreapproval(req, current, isRentalCust, requested, canGrant) {
   const currentVal = current?.rental_preapproved ? 1 : 0;
   const keepCurrent = () => ({
     rental_preapproved: currentVal,
@@ -92,7 +102,7 @@ function resolveRentalPreapproval(req, current, isRentalCust, requested) {
   if (!isRentalCust) return { rental_preapproved: 0, rental_preapproved_by: null, rental_preapproved_at: null };
   if (!can(req.employee?.permissions, 'customers_rental_preapprove')) return keepCurrent();
   const newVal = requested ? 1 : 0;
-  if (newVal === currentVal) return keepCurrent();
+  if (newVal === currentVal || (newVal && !canGrant)) return keepCurrent();
   return newVal
     ? { rental_preapproved: 1, rental_preapproved_by: req.employee?.id || null, rental_preapproved_at: new Date().toISOString() }
     : { rental_preapproved: 0, rental_preapproved_by: null, rental_preapproved_at: null };
@@ -322,7 +332,8 @@ const CUSTOMER_WITH_CARD_SELECT = `SELECT c.*, dct.name as discount_card_type_na
   cbct.name as cash_back_card_type_name, cbct.points_threshold as cash_back_points_threshold, cbct.reward_amount as cash_back_reward_amount,
   cbct.min_redeem_amount as cash_back_min_redeem_amount, cbct.min_redeem_days as cash_back_min_redeem_days, cbct.active as cash_back_card_type_active,
   cc.name as customer_category_name, cc.discount_percent as customer_category_discount_percent, cc.active as customer_category_active,
-  rpe.first_name || ' ' || rpe.last_name as rental_preapproved_by_name
+  rpe.first_name || ' ' || rpe.last_name as rental_preapproved_by_name,
+  EXISTS (SELECT 1 FROM customer_import_batch_items cibi WHERE cibi.customer_id = c.id AND cibi.action = 'created') as created_by_import
   FROM customers c LEFT JOIN discount_card_types dct ON c.discount_card_type_id = dct.id
   LEFT JOIN cash_back_card_types cbct ON c.cash_back_card_type_id = cbct.id
   LEFT JOIN customer_categories cc ON c.customer_category_id = cc.id
@@ -418,7 +429,8 @@ router.post('/', requirePermission('customers_add'), async (req, res) => {
     const limit = parseFloat(credit_limit) || 0;
     const taxExempt = tax_exempt ? 1 : 0;
     const isRentalCust = is_rental_customer ? 1 : 0;
-    const preapproval = resolveRentalPreapproval(req, null, isRentalCust, !!rental_preapproved);
+    // Never preapproved on manual create — see resolveRentalPreapproval.
+    const preapproval = resolveRentalPreapproval(req, null, isRentalCust, !!rental_preapproved, false);
     const result = await db.execute({ sql: `INSERT INTO customers
       (customer_number,first_name,last_name,email,phone,address,city,state,zip,notes,customer_type,credit_terms_days,credit_limit,credit_enabled,tax_exempt,tax_exemption_number,
        is_rental_customer,rental_id_type,rental_id_number,rental_address_proof_type,
@@ -480,7 +492,7 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
     const limit = parseFloat(credit_limit) || 0;
     const taxExempt = tax_exempt ? 1 : 0;
     const isRentalCust = is_rental_customer ? 1 : 0;
-    const preapproval = resolveRentalPreapproval(req, existing, isRentalCust, !!rental_preapproved);
+    const preapproval = resolveRentalPreapproval(req, existing, isRentalCust, !!rental_preapproved, await createdByImport(req.params.id));
     await db.execute({ sql: `UPDATE customers SET first_name=?,last_name=?,email=?,phone=?,address=?,city=?,state=?,zip=?,notes=?,active=?,customer_type=?,credit_terms_days=?,credit_limit=?,credit_enabled=?,tax_exempt=?,tax_exemption_number=?,
       is_rental_customer=?,rental_id_type=?,rental_id_number=?,rental_address_proof_type=?,
       rental_reference_name=?,rental_reference_phone=?,rental_reference_relationship=?,rental_reference_address=?,
@@ -523,29 +535,6 @@ router.delete('/:id', requirePermission('customers_delete'), async (req, res) =>
 // match skips the row instead of creating it — pass `duplicate_mode:
 // 'force'` to create rows whose only match is by name (phone/email
 // matches are always skipped).
-// TEMPORARY bulk utility (Customers screen button) — flags every active
-// customer as a rental customer and preapproves them, so rentals can be
-// created for anyone despite missing ID/reference info. Customers already
-// preapproved keep their original preapproved_by/at. { dry_run: true }
-// only returns how many rows would change. Remove once no longer needed.
-router.post('/bulk-rental-preapprove', requirePermission('customers_rental_preapprove'), async (req, res) => {
-  try {
-    const where = 'active = 1 AND (COALESCE(is_rental_customer, 0) = 0 OR COALESCE(rental_preapproved, 0) = 0)';
-    const { rows: [{ n }] } = await db.execute({ sql: `SELECT COUNT(*) AS n FROM customers WHERE ${where}`, args: [] });
-    if (req.body?.dry_run) return res.json({ count: Number(n) });
-    const result = await db.execute({
-      sql: `UPDATE customers SET
-              is_rental_customer = 1,
-              rental_preapproved_by = CASE WHEN COALESCE(rental_preapproved, 0) = 1 THEN rental_preapproved_by ELSE ? END,
-              rental_preapproved_at = CASE WHEN COALESCE(rental_preapproved, 0) = 1 THEN rental_preapproved_at ELSE ? END,
-              rental_preapproved = 1
-            WHERE ${where}`,
-      args: [req.employee?.id || null, new Date().toISOString()],
-    });
-    res.json({ updated: result.rowsAffected });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
 router.post('/import', requirePermission('customers_import'), async (req, res) => {
   try {
     const { rows, batch_id, duplicate_mode } = req.body;

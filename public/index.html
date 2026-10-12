@@ -228,6 +228,9 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .pay-btn:hover { filter: brightness(0.9); }
 .customer-bar { display: flex; align-items: center; gap: 8px; background: #f5f5f5; border-radius: 6px; padding: 8px 10px; font-size: 13px; }
 .customer-bar svg { color: var(--text-muted); width: 16px; height: 16px; flex-shrink: 0; }
+.cart-cust-name { font-size: 15px; font-weight: 700; line-height: 1.2; }
+.cart-cust-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 2px; font-size: 12px; color: var(--text-muted); }
+.cart-cust-meta .badge-pill { padding: 1px 8px; font-size: 10px; }
 
 /* POS register topbar (scan input, exit shortcut) — sidebar/topbar chrome stays visible */
 .pos-kiosk-topbar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; background: #eef2fb; border-bottom: 1px solid #c5d5f5; flex-shrink: 0; flex-wrap: wrap; }
@@ -2542,10 +2545,10 @@ const App = {
         <div class="pos-ticket-info">
           <div class="customer-bar" id="cart-customer-bar">
             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
-            <span style="color:var(--text-muted)">Customer #:</span>
-            <span id="cart-customer-name" style="flex:1">Walk-in Customer</span>
+            <span style="color:var(--text-muted)">Customer:</span>
+            <div id="cart-customer-name" style="flex:1">${this._cartCustomerHtml()}</div>
             <button class="btn btn-outline btn-sm" onclick="App.selectCustomer()">Select</button>
-            <button class="btn btn-secondary btn-sm" id="remove-customer-btn" style="display:none" onclick="App.removeCustomer()">✕</button>
+            <button class="btn btn-secondary btn-sm" id="remove-customer-btn" style="display:${this.cartCustomer ? 'inline-flex' : 'none'}" onclick="App.removeCustomer()">✕</button>
           </div>
           <span style="color:var(--text-muted)">Sales rep: <strong style="color:var(--text)">${cashierName}</strong></span>
           <div id="active-quote-bar" style="display:none;background:#e8f0fe;border:1px solid #b3c8f7;border-radius:6px;padding:6px 10px;font-size:12px;align-items:center;gap:8px">
@@ -3135,8 +3138,7 @@ const App = {
     this.renderCart();
     const aqBar = document.getElementById('active-quote-bar');
     if (aqBar) aqBar.style.display = 'none';
-    document.getElementById('cart-customer-name').textContent = 'Walk-in Customer';
-    document.getElementById('remove-customer-btn').style.display = 'none';
+    this._renderCartCustomer();
     const di = document.getElementById('discount-input');
     if (di) di.value = '';
     const dd = document.getElementById('discount-display');
@@ -3602,8 +3604,7 @@ const App = {
         const customer = await this.api('GET', `/customers/${held.customer_id}`);
         this.cartCustomer = customer;
         if (this.section !== 'pos') return;
-        document.getElementById('cart-customer-name').textContent = `${customer.first_name} ${customer.last_name}`;
-        document.getElementById('remove-customer-btn').style.display = 'inline-flex';
+        this._renderCartCustomer();
         const bar = document.getElementById('store-credit-bar');
         if (bar) bar.style.display = 'none';
         const cbBar = document.getElementById('cash-back-bar');
@@ -3611,8 +3612,7 @@ const App = {
       } else {
         this.cartCustomer = null;
         if (this.section !== 'pos') return;
-        document.getElementById('cart-customer-name').textContent = 'Walk-in Customer';
-        document.getElementById('remove-customer-btn').style.display = 'none';
+        this._renderCartCustomer();
       }
       const aqBar = document.getElementById('active-quote-bar');
       if (aqBar) {
@@ -3772,8 +3772,7 @@ const App = {
         const customer = await this.api('GET', `/customers/${quote.customer_id}`);
         this.cartCustomer = customer;
         if (this.section !== 'pos') return;
-        document.getElementById('cart-customer-name').textContent = `${customer.first_name} ${customer.last_name}`;
-        document.getElementById('remove-customer-btn').style.display = 'inline-flex';
+        this._renderCartCustomer();
         const bar = document.getElementById('store-credit-bar');
         if (bar) bar.style.display = 'none';
         const cbBar = document.getElementById('cash-back-bar');
@@ -4261,13 +4260,40 @@ const App = {
     return accrued;
   },
 
+  // The POS ticket's customer block — name on its own line, then phone,
+  // category, Cash/Credit type and a Rental badge, so the cashier can
+  // confirm at a glance they've attached the right customer (and which
+  // tenders/rentals apply) without opening the customer record.
+  _cartCustomerHtml() {
+    const c = this.cartCustomer;
+    if (!c) return 'Walk-in Customer';
+    const esc = v => this.escapeAttr(v);
+    const isCredit = String(c.customer_type || '').toLowerCase() === 'credit';
+    const meta = [
+      c.phone ? `<span>📞 ${esc(c.phone)}</span>` : '',
+      c.customer_category_name ? `<span class="badge-pill badge-teal" title="Customer category">${esc(c.customer_category_name)}</span>` : '',
+      `<span class="badge-pill ${isCredit ? 'badge-blue' : 'badge-success'}" title="Customer type">${isCredit ? 'Credit' : 'Cash'}</span>`,
+      c.is_rental_customer ? `<span class="badge-pill badge-purple" title="Rental customer">🔑 Rental</span>` : '',
+      c.account_blocked ? `<span class="badge-pill badge-danger" title="Account blocked for overdue payment">Blocked</span>` : '',
+    ].filter(Boolean).join('');
+    return `<div class="cart-cust-name">${esc(`${c.first_name || ''} ${c.last_name || ''}`.trim())}</div><div class="cart-cust-meta">${meta}</div>`;
+  },
+
+  // Repaints the customer block from this.cartCustomer; no-op off the POS
+  // screen (several callers set the customer before/without rendering POS).
+  _renderCartCustomer() {
+    const el = document.getElementById('cart-customer-name');
+    if (el) el.innerHTML = this._cartCustomerHtml();
+    const btn = document.getElementById('remove-customer-btn');
+    if (btn) btn.style.display = this.cartCustomer ? 'inline-flex' : 'none';
+  },
+
   setCartCustomer(id, name) {
     this.api('GET', `/customers/${id}`).then(async c => {
       this.cartCustomer = c;
       this._storeCreditApplied = 0;
       this._cashBackApplied = 0;
-      document.getElementById('cart-customer-name').textContent = name;
-      document.getElementById('remove-customer-btn').style.display = 'inline-flex';
+      this._renderCartCustomer();
       const bar = document.getElementById('store-credit-bar');
       const bal = parseFloat(c.account_balance || 0);
       // account_balance is a receivable (positive = customer owes the
@@ -4374,8 +4400,7 @@ const App = {
     this._storeCreditApplied = 0;
     this._cashBackApplied = 0;
     this.appliedDiscountCard = null;
-    document.getElementById('cart-customer-name').textContent = 'Walk-in Customer';
-    document.getElementById('remove-customer-btn').style.display = 'none';
+    this._renderCartCustomer();
     document.getElementById('store-credit-bar').style.display = 'none';
     document.getElementById('cash-back-bar').style.display = 'none';
     this._updateDiscountCardUI();
@@ -11427,7 +11452,6 @@ const App = {
           ${this.can('customers_import_history') ? `<button class="btn btn-secondary btn-sm" onclick="App.showCustomerImportHistory()" title="Review or reverse past CSV imports">Import History</button>` : ''}
           ${this.can('customers_export_balances') ? `<button class="btn btn-secondary btn-sm" onclick="App.showCustomerBalancesExport()" title="Export AR balance, credit note total, and status by customer type">Export Balances</button>` : ''}
           ${this.can('customers_missing_rental_info') ? `<button class="btn btn-secondary btn-sm" onclick="App.showRentalIncompleteReport()" title="Rental customers missing the ID/reference/document info required to create a rental">🔑 Missing Rental Info</button>` : ''}
-          ${this.can('customers_rental_preapprove') ? `<button class="btn btn-danger btn-sm" onclick="App.bulkRentalPreapproveAll()" title="Temporary utility: mark every active customer as a rental customer and preapprove them">⚠ Preapprove All for Rental (temp)</button>` : ''}
           ${this.can('customers_add') ? `<button class="btn btn-primary" onclick="App.showCustomerForm()">+ Add Customer</button>` : ''}
         </div>
       </div>
@@ -11473,18 +11497,6 @@ const App = {
         </td>
       </tr>`;}).join('')}</tbody>
     </table>`;
-  },
-
-  // TEMPORARY utility — see POST /customers/bulk-rental-preapprove.
-  async bulkRentalPreapproveAll() {
-    try {
-      const { count } = await this.api('POST', '/customers/bulk-rental-preapprove', { dry_run: true });
-      if (!count) return this.alert('Every active customer is already a preapproved rental customer');
-      if (!confirm(`Mark ${count} active customer(s) as Rental Customers and preapprove them?\n\nThey'll be able to rent without photo ID, proof of address, or references on file. This can't be undone in bulk.`)) return;
-      const { updated } = await this.api('POST', '/customers/bulk-rental-preapprove', {});
-      this.alert(`${updated} customer(s) preapproved for rental`);
-      this.renderCustomers();
-    } catch (e) { this.alert(e.message, 'error'); }
   },
 
   async showCustomerForm(id, opts = {}) {
@@ -11639,7 +11651,7 @@ const App = {
               <div class="form-group"><label>Relationship</label><input id="cf-ref3-relationship" value="${c.rental_reference3_relationship||''}" placeholder="e.g. Employer, Family, Friend"></div>
               <hr style="margin:12px 0">
               <strong style="font-size:12px;color:var(--text-muted);text-transform:uppercase">Preapproved (Legacy Migration)</strong>
-              ${this.can('customers_rental_preapprove') ? `
+              ${this.can('customers_rental_preapprove') && (c.created_by_import || c.rental_preapproved) ? `
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:normal;margin-top:6px">
                 <input type="checkbox" id="cf-rental-preapproved" ${c.rental_preapproved?'checked':''} style="margin:0">
                 Preapproved — allow rentals despite incomplete info above
@@ -11647,6 +11659,7 @@ const App = {
               <p style="font-size:11px;color:var(--text-muted);margin:4px 0 0">For rental customers migrated from a previous system whose old export didn't carry the ID/reference/document data above. Still shows on the Missing Rental Info report until those fields are actually filled in — this only stops the gap from blocking a new rental today.</p>
               ` : `
               <p style="font-size:12px;margin-top:6px;${c.rental_preapproved ? 'color:#2e7d32' : 'color:var(--text-muted)'}">${c.rental_preapproved ? '✓ Preapproved for rentals despite incomplete info' : 'Not preapproved'}</p>
+              ${!c.rental_preapproved ? `<p style="font-size:11px;color:var(--text-muted);margin:2px 0 0">Only customers created by a customer import can be preapproved — complete the ID, proof of address and references above before renting.</p>` : ''}
               `}
               ${c.rental_preapproved && c.rental_preapproved_at ? `<p style="font-size:11px;color:var(--text-muted);margin-top:2px">Approved ${new Date(c.rental_preapproved_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}${c.rental_preapproved_by_name ? ' by ' + c.rental_preapproved_by_name : ''}</p>` : ''}
             </div>
@@ -12839,10 +12852,7 @@ const App = {
         const dd = document.getElementById('discount-display');
         if (dd) dd.textContent = `-${this.fmt(ret.total)}`;
         if (tx?.customer_id && this.cartCustomer) {
-          const nameEl = document.getElementById('cart-customer-name');
-          if (nameEl) nameEl.textContent = `${this.cartCustomer.first_name} ${this.cartCustomer.last_name}`;
-          const removeBtn = document.getElementById('remove-customer-btn');
-          if (removeBtn) removeBtn.style.display = '';
+          this._renderCartCustomer();
         }
         this.renderCart();
       } else {
