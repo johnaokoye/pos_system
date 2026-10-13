@@ -2570,7 +2570,7 @@ const App = {
         <div class="pos-ticket-wrap">
           <div class="pos-ticket-table-wrap">
             <table class="pos-ticket-table">
-              <thead><tr><th>Item Number</th><th>Description</th><th style="text-align:center">Qty</th><th style="text-align:right">Price</th><th style="text-align:right">Line Total</th><th></th></tr></thead>
+              <thead><tr><th>Item Number</th><th>Description</th><th style="text-align:center">Qty</th><th style="text-align:right">Price</th><th style="text-align:right">Tax</th><th style="text-align:right">Line Total<div style="font-size:10px;font-weight:400;text-transform:none;letter-spacing:0">incl. tax</div></th><th></th></tr></thead>
               <tbody id="cart-items-list"></tbody>
             </table>
           </div>
@@ -2998,7 +2998,7 @@ const App = {
     const code = document.getElementById('promo-code-input')?.value?.trim();
     if (!code) return;
     const subtotal = this.cart.reduce((s, i) => s + i.price * i.quantity, 0);
-    const cartItems = this.cart.map(i => ({ product_id: i.product_id, category_id: i.category_id, price: i.price, quantity: i.quantity }));
+    const cartItems = this.cart.map(i => ({ product_id: i.product_id, category_id: i.category_id, price: i.price, quantity: i.quantity, discount_percent: i.discountPercent || 0 }));
     try {
       const result = await this.api('POST', '/promotions/validate-code', { code, subtotal, cart_items: cartItems });
       this.appliedPromoCode = result;
@@ -3067,7 +3067,7 @@ const App = {
       return;
     }
     const subtotal = this.cart.reduce((s, i) => s + i.price * i.quantity, 0);
-    const cartItems = this.cart.map(i => ({ product_id: i.product_id, category_id: i.category_id, price: i.price, quantity: i.quantity }));
+    const cartItems = this.cart.map(i => ({ product_id: i.product_id, category_id: i.category_id, price: i.price, quantity: i.quantity, discount_percent: i.discountPercent || 0 }));
     try {
       const promos = await this.api('POST', '/promotions/auto-apply', { cart_items: cartItems, subtotal });
       this._availablePromos = promos || [];
@@ -3159,16 +3159,20 @@ const App = {
 
     if (!this.cart.length) {
       // list is a <tbody> in the kiosk ticket table — a row, not a bare div.
-      list.innerHTML = '<tr><td colspan="6" class="empty-state" style="padding:24px;border:none">Cart is empty — scan or type an item number to begin.</td></tr>';
+      list.innerHTML = '<tr><td colspan="7" class="empty-state" style="padding:24px;border:none">Cart is empty — scan or type an item number to begin.</td></tr>';
       totals.innerHTML = '';
       this._selectedCartLine = null;
       return;
     }
 
+    const isExempt = this.isCartTaxExempt();
     list.innerHTML = this.cart.map((item, idx) => {
       const sku = item.sku || this.allProducts.find(p => p.id === item.product_id)?.sku || '—';
       const lineGross = item.price * item.quantity;
       const lineNet = this._cartLineNet(item);
+      // Same per-line tax the totals below add up (after any line discount;
+      // ticket-level discounts/promotions come off the total, not the tax).
+      const lineTax = isExempt ? 0 : parseFloat((lineNet * (item.tax_rate || 0) / 100).toFixed(2));
       return `
       <tr class="pos-ticket-row${this._selectedCartLine === idx ? ' selected' : ''}" onclick="App.selectCartLine(event,${idx})">
         <td style="font-family:monospace;font-size:12px">${sku}</td>
@@ -3181,7 +3185,8 @@ const App = {
           </div>
         </td>
         <td style="text-align:right">${this.fmt(item.price)}</td>
-        <td style="text-align:right;font-weight:600">${item.discountPercent > 0 ? `<span style="text-decoration:line-through;color:var(--text-muted);font-weight:400;font-size:11px">${this.fmt(lineGross)}</span> ${this.fmt(lineNet)}` : this.fmt(lineGross)}</td>
+        <td style="text-align:right;color:var(--text-muted)">${isExempt ? '—' : this.fmt(lineTax)}</td>
+        <td style="text-align:right;font-weight:600">${item.discountPercent > 0 ? `<span style="text-decoration:line-through;color:var(--text-muted);font-weight:400;font-size:11px" title="Before line discount">${this.fmt(lineGross + (isExempt ? 0 : parseFloat((lineGross * (item.tax_rate || 0) / 100).toFixed(2))))}</span> ` : ''}${this.fmt(lineNet + lineTax)}</td>
         <td style="white-space:nowrap">
           ${this.can('pos_discounts') ? `<button class="btn-secondary" style="padding:2px 8px;font-size:11px" title="Line Discount" onclick="event.stopPropagation();App.showLineDiscountModal(${idx})">%</button>` : ''}
           <button class="btn-remove" onclick="App.removeFromCart(${idx})">×</button>
@@ -3203,6 +3208,7 @@ const App = {
       <div class="pos-totals">
         <div class="pos-total-item"><label>Subtotal</label><span>${this.fmt(subtotal)}</span></div>
         <div class="pos-total-item"><label>${isTaxExempt ? 'Tax Exempt' : 'Tax'}</label><span>${isTaxExempt ? '—' : this.fmt(tax)}</span></div>
+        ${discount > 0 ? `<div class="pos-total-item"><label>Total incl. Tax</label><span>${this.fmt(subtotal + tax)}</span></div>` : ''}
         ${discount > 0 ? `<div class="pos-total-item"><label>${discountLabel}</label><span style="color:var(--success)">-${this.fmt(discount)}</span></div>` : ''}
         ${this._storeCreditApplied > 0 ? `<div class="pos-total-item"><label>💳 Available Credit</label><span style="color:var(--success)">-${this.fmt(this._storeCreditApplied)}</span></div>` : ''}
         ${this._cashBackApplied > 0 ? `<div class="pos-total-item"><label>🎁 Cash Back</label><span style="color:var(--success)">-${this.fmt(this._cashBackApplied)}</span></div>` : ''}
@@ -3304,7 +3310,7 @@ const App = {
         item.discountOverrideEmployeeId = result.id;
         item.discountOverrideName = result.name;
         this.closeModal();
-        this.renderCart();
+        this._checkAutoPromos();
         this.alert(`${pct}% discount applied — authorised by ${result.name}`, 'success');
       }).catch(e => {
         if (errEl) errEl.textContent = e.message;
@@ -3317,7 +3323,8 @@ const App = {
     item.discountOverrideEmployeeId = null;
     item.discountOverrideName = null;
     this.closeModal();
-    this.renderCart();
+    // Re-checks promotions too: a discounted line no longer counts toward a bundle.
+    this._checkAutoPromos();
   },
 
   clearLineDiscount(idx) {
@@ -3327,7 +3334,7 @@ const App = {
     item.discountOverrideEmployeeId = null;
     item.discountOverrideName = null;
     this.closeModal();
-    this.renderCart();
+    this._checkAutoPromos();
   },
 
   async processPayment(method) {
@@ -18041,6 +18048,7 @@ const App = {
               <div style="display:flex;gap:6px">
                 <button class="btn btn-sm btn-outline" onclick="App.addQuoteItem()">+ Add Item</button>
                 <button class="btn btn-sm btn-outline" onclick="App.addQuoteCustomItem()">+ Custom Item</button>
+                <button class="btn btn-sm btn-outline" id="qt-add-q-item-btn" style="display:none" onclick="App.addQuoteCustomItem(null,{qItem:true})" title="Something not in inventory that Purchasing should order — a Purchase Request is auto-created when the project is accepted">+ Q Item</button>
               </div>
             </div>
             <div id="qt-items"></div>
@@ -18104,7 +18112,7 @@ const App = {
           this.addRentalQuoteLine();
         }
       } else if (q.items.length) {
-        q.items.forEach(item => item.product_id ? this.addQuoteItem(item) : this.addQuoteCustomItem(item));
+        q.items.forEach(item => item.product_id ? this.addQuoteItem(item) : this.addQuoteCustomItem(item, { qItem: !!item.is_q_item }));
       } else {
         this.addQuoteItem();
       }
@@ -18151,6 +18159,10 @@ const App = {
     // addQuoteCustomItem) — so anything that isn't specifically rental shows
     // the retail items section and the Valid Until field.
     if (retailSection) retailSection.style.display = type!=='rental' ? '' : 'none';
+    // Retail's "+ Custom Item" is already a Q item; a Special Project's is a
+    // labour/fee line, so Q items get their own button there.
+    const qItemBtn = document.getElementById('qt-add-q-item-btn');
+    if (qItemBtn) qItemBtn.style.display = type==='special_project' ? '' : 'none';
     if (rentalSection) rentalSection.style.display = type==='rental' ? '' : 'none';
     if (validGroup) validGroup.style.display = type!=='rental' ? '' : 'none';
     if (dueGroup) dueGroup.style.display = type==='rental' ? '' : 'none';
@@ -18309,25 +18321,28 @@ const App = {
   // stays editable so this row can be swapped for a real product once the
   // item is received into stock. On a Special Project, this is also how
   // non-inventory lines like labour or equipment rental fees get added —
-  // those never carry the "Q" Purchasing badge below, since special
-  // projects skip the auto-Purchase-Request flow entirely (see
-  // processQuoteAcceptance in routes/quotations.js).
-  addQuoteCustomItem(prefill) {
+  // those don't carry the "Q" Purchasing badge. A Special Project line
+  // added via "+ Q Item" (opts.qItem) does, and is the only kind that goes
+  // to Purchasing when the project is accepted (see processQuoteAcceptance
+  // in routes/quotations.js).
+  addQuoteCustomItem(prefill, opts = {}) {
     this._quoteItems = this._quoteItems || [];
     const idx = this._quoteItems.length;
     this._quoteItems.push({ temp: true });
     const container = document.getElementById('qt-items');
     const isSP = this._quoteType === 'special_project';
+    const isQ = !isSP || !!opts.qItem;
+    const qBadge = `<span class="badge-pill badge-warning" style="flex-shrink:0" title="Flags this item for Purchasing to order — a Purchase Request is auto-created">Q</span>`;
     const div = document.createElement('div');
     div.className = 'po-receive-row';
     div.id = `qt-item-${idx}`;
     div.innerHTML = `
-      <input id="qti-desc-${idx}" style="flex:2" placeholder="${isSP ? 'e.g. Labour, Chainsaw rental, Equipment operator' : 'Custom item description'}" value="${prefill?this.escapeAttr(prefill.product_name):''}" data-pr-id="${prefill&&prefill.purchase_request_id||''}">
+      <input id="qti-desc-${idx}" style="flex:2" placeholder="${isSP && !isQ ? 'e.g. Labour, Chainsaw rental, Equipment operator' : 'Custom item description'}" value="${prefill?this.escapeAttr(prefill.product_name):''}" data-pr-id="${prefill&&prefill.purchase_request_id||''}" data-q-item="${isSP && isQ ? '1' : ''}">
       <input id="qti-qty-${idx}" type="number" min="1" value="${prefill?prefill.quantity:1}" style="width:70px" placeholder="Qty" oninput="App.calcQuoteTotal()">
       ${isSP ? `<input id="qti-cost-${idx}" type="number" step="0.01" value="${prefill&&prefill.unit_cost!=null?prefill.unit_cost:''}" style="width:90px" placeholder="Cost" title="Informational only — doesn't affect the total" oninput="App._updateQuoteItemMargin(${idx})">` : ''}
       <input id="qti-price-${idx}" type="number" step="0.01" value="${prefill?prefill.unit_price:''}" style="width:90px" placeholder="Amount" oninput="App.calcQuoteTotal();App._updateQuoteItemMargin(${idx})">
       <input id="qti-disc-${idx}" type="number" min="0" step="0.01" value="${prefill&&prefill.discount_amount||''}" style="width:80px" placeholder="Discount" title="Discount given on this line — recorded for reference, doesn't change the price above">
-      ${isSP ? `<span id="qti-margin-${idx}" style="font-size:11px;color:var(--text-muted);white-space:nowrap"></span>` : `<span class="badge-pill badge-warning" style="flex-shrink:0" title="Flags this item for Purchasing to order — a Purchase Request is auto-created">Q</span>`}
+      ${isSP ? `<span id="qti-margin-${idx}" style="font-size:11px;color:var(--text-muted);white-space:nowrap"></span>` : ''}${isQ ? qBadge : ''}
       <button class="btn btn-sm btn-danger" onclick="document.getElementById('qt-item-${idx}').remove();App.calcQuoteTotal()">✕</button>`;
     container.appendChild(div);
     this.calcQuoteTotal();
@@ -18723,7 +18738,8 @@ const App = {
       const description = descInp?.value.trim();
       if (!description) return;
       const purchase_request_id = descInp.dataset.prId || null;
-      items.push({ description, quantity, unit_price, unit_cost, discount, purchase_request_id });
+      const is_q_item = descInp.dataset.qItem === '1';
+      items.push({ description, quantity, unit_price, unit_cost, discount, purchase_request_id, is_q_item });
     });
     if (!items.length) { this.alert('Add at least one item', 'error'); return; }
     const isSpecialProject = this._quoteType === 'special_project';
@@ -18815,7 +18831,7 @@ const App = {
         <table>
           <thead><tr><th>Item</th><th>Qty</th><th>Cost</th><th>Price</th><th>Margin</th><th>Total</th></tr></thead>
           <tbody>
-            ${q.items.map(i => { const margin = (i.unit_cost != null && i.unit_price > 0) ? ((i.unit_price - i.unit_cost) / i.unit_price * 100) : null; return `<tr><td>${i.product_name}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on this line">-${this.fmt(i.discount_amount)}</span>` : ''}</td><td>${i.quantity}</td><td>${i.unit_cost != null ? this.fmt(i.unit_cost) : '<span style="color:var(--text-muted)">—</span>'}</td><td>${this.fmt(i.unit_price)}</td><td>${margin != null ? `<span style="color:${margin<0?'var(--danger)':'var(--text-muted)'}">${margin>=0?'+':''}${margin.toFixed(0)}%</span>` : '—'}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`; }).join('')}
+            ${q.items.map(i => { const margin = (i.unit_cost != null && i.unit_price > 0) ? ((i.unit_price - i.unit_cost) / i.unit_price * 100) : null; return `<tr><td>${i.product_name}${i.is_temp_item && i.is_q_item ? ` <span class="badge-pill badge-warning" style="font-size:10px" title="Flagged for Purchasing to order">Q</span>${i.purchase_request_number ? ` <a href="#" style="font-size:11px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${i.purchase_request_id})">${i.purchase_request_number}</a>` : ''}` : ''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on this line">-${this.fmt(i.discount_amount)}</span>` : ''}</td><td>${i.quantity}</td><td>${i.unit_cost != null ? this.fmt(i.unit_cost) : '<span style="color:var(--text-muted)">—</span>'}</td><td>${this.fmt(i.unit_price)}</td><td>${margin != null ? `<span style="color:${margin<0?'var(--danger)':'var(--text-muted)'}">${margin>=0?'+':''}${margin.toFixed(0)}%</span>` : '—'}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`; }).join('')}
           </tbody>
         </table>
       </div>` : `
@@ -18823,7 +18839,7 @@ const App = {
         <table>
           <thead><tr><th>Product</th><th>Qty</th><th>Price</th><th>Tax</th><th>Total</th></tr></thead>
           <tbody>
-            ${q.items.map(i => `<tr><td>${i.product_name}${i.is_temp_item ? ` <span class="badge-pill badge-warning" style="font-size:10px" title="Flagged for Purchasing to order">Q</span>${i.purchase_request_number ? ` <a href="#" style="font-size:11px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${i.purchase_request_id})">${i.purchase_request_number}</a>` : ''}` : ''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on this line">-${this.fmt(i.discount_amount)}</span>` : ''}${this.renderQuoteItemSources(i, q)}</td><td>${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td>${this.fmt(i.tax_amount)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}
+            ${q.items.map(i => `<tr><td>${i.product_name}${i.is_temp_item && (!isSpecialProject || i.is_q_item) ? ` <span class="badge-pill badge-warning" style="font-size:10px" title="Flagged for Purchasing to order">Q</span>${i.purchase_request_number ? ` <a href="#" style="font-size:11px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${i.purchase_request_id})">${i.purchase_request_number}</a>` : ''}` : ''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on this line">-${this.fmt(i.discount_amount)}</span>` : ''}${this.renderQuoteItemSources(i, q)}</td><td>${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td>${this.fmt(i.tax_amount)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}
           </tbody>
         </table>
       </div>`;
@@ -24407,9 +24423,9 @@ const App = {
             ${promos.length ? promos.map(p => `
               <tr>
                 <td class="fw-600">${p.name}</td>
-                <td>${p.type === 'percentage' ? 'Percentage' : 'Fixed'}</td>
-                <td>${p.type === 'percentage' ? p.value + '%' : this.fmt(p.value)}</td>
-                <td>${p.applies_to === 'all' ? 'All Items' : p.applies_to === 'categories' ? `<span class="badge-pill badge-purple">${p.item_count} categories</span>` : p.applies_to === 'items' ? `<span class="badge-pill badge-blue">${p.item_count} products</span>` : p.applies_to === 'brands' ? `<span class="badge-pill badge-purple">${p.brand_count} brands</span>` : `<span class="badge-pill badge-purple">${p.item_count} items/cats</span>`}${p.excluded_brand_count > 0 ? `<br><span class="badge-pill badge-danger" style="font-size:10px">${p.excluded_brand_count} brand${p.excluded_brand_count>1?'s':''} excluded</span>` : ''}</td>
+                <td>${p.type === 'bundle' ? '<span class="badge-pill badge-teal">Bundle</span>' : p.type === 'percentage' ? 'Percentage' : 'Fixed'}</td>
+                <td>${p.type === 'bundle' ? (p.bundle_pricing === 'price' ? `${this.fmt(p.bundle_price)} / bundle` : `${p.value}% off bundle`) : p.type === 'percentage' ? p.value + '%' : this.fmt(p.value)}</td>
+                <td>${p.type === 'bundle' ? `<span class="badge-pill badge-teal">${p.bundle_unit_count} items per bundle</span>` : p.applies_to === 'all' ? 'All Items' : p.applies_to === 'categories' ? `<span class="badge-pill badge-purple">${p.item_count} categories</span>` : p.applies_to === 'items' ? `<span class="badge-pill badge-blue">${p.item_count} products</span>` : p.applies_to === 'brands' ? `<span class="badge-pill badge-purple">${p.brand_count} brands</span>` : `<span class="badge-pill badge-purple">${p.item_count} items/cats</span>`}${p.excluded_brand_count > 0 ? `<br><span class="badge-pill badge-danger" style="font-size:10px">${p.excluded_brand_count} brand${p.excluded_brand_count>1?'s':''} excluded</span>` : ''}</td>
                 <td style="font-size:12px">${this._promoScheduleLabel(p)}</td>
                 <td><span class="badge-pill badge-blue">${p.code_count} codes</span></td>
                 <td>${statusBadge(p)}</td>
@@ -24417,7 +24433,7 @@ const App = {
                   <button class="btn btn-sm btn-secondary" onclick="App.showPromoForm(${p.id})">Edit</button>
                   <button class="btn btn-sm btn-outline" onclick="App.managePromoCodes(${p.id},'${p.name.replace(/'/g,"\\'")}')">Codes</button>
                   ${['categories','items','specific'].includes(p.applies_to) ? `<button class="btn btn-sm btn-outline" onclick="App.managePromoItems(${p.id},'${p.name.replace(/'/g,"\\'")}')">Items</button>` : ''}
-                  <button class="btn btn-sm btn-outline" onclick="App.managePromoBrands(${p.id},'${p.name.replace(/'/g,"\\'")}')">Brands</button>
+                  ${p.type !== 'bundle' ? `<button class="btn btn-sm btn-outline" onclick="App.managePromoBrands(${p.id},'${p.name.replace(/'/g,"\\'")}')">Brands</button>` : ''}
                   <button class="btn btn-sm btn-danger" onclick="App.deletePromotion(${p.id})">Del</button>
                 </td>
               </tr>`).join('') : '<tr><td colspan="8" class="empty-state">No promotions yet</td></tr>'}
@@ -24435,6 +24451,10 @@ const App = {
       this.api('GET', '/promotions/product-assignments'),
     ]);
     if (id) p = promoData;
+    // Bundle builder rows — see _renderPromoBundleRows.
+    this._pmBundleProducts = products.filter(pr => pr.active);
+    this._pmBundle = (p.bundle_items || []).map(b => ({ product_id: b.product_id, name: b.product_name, sku: b.sku, price: b.price, quantity: b.quantity }));
+    const isBundle = p.type === 'bundle';
 
     const assignedCatMap = new Map((p.items||[]).filter(i=>i.item_type==='category').map(i=>[i.item_id, i.id]));
     const assignedProdMap = new Map((p.items||[]).filter(i=>i.item_type==='product').map(i=>[i.item_id, i.id]));
@@ -24491,15 +24511,16 @@ const App = {
               <select id="pm-type" onchange="App._promoTypeToggle()">
                 <option value="percentage" ${p.type==='percentage'?'selected':''}>Percentage (%)</option>
                 <option value="fixed" ${p.type==='fixed'?'selected':''}>Fixed Amount ($)</option>
+                <option value="bundle" ${isBundle?'selected':''}>Bundle (items sold together)</option>
               </select>
             </div>
-            <div class="form-group"><label id="pm-value-label">${p.type==='percentage'?'Discount %':'Discount $'}</label>
+            <div class="form-group" id="pm-value-group" style="display:${isBundle?'none':''}"><label id="pm-value-label">${p.type==='percentage'?'Discount %':'Discount $'}</label>
               <input type="number" id="pm-value" value="${p.value||0}" min="0" step="0.01">
             </div>
           </div>
           <div class="input-row">
             <div class="form-group"><label>Min Purchase Amount</label><input type="number" id="pm-minpur" value="${p.min_purchase||0}" min="0" step="0.01"></div>
-            <div class="form-group"><label>Applies To</label>
+            <div class="form-group" id="pm-applies-group" style="display:${isBundle?'none':''}"><label>Applies To</label>
               <select id="pm-applies" onchange="App._promoAppliesToToggle()">
                 <option value="all" ${appliesToVal==='all'?'selected':''}>All Items</option>
                 <option value="categories" ${appliesToVal==='categories'?'selected':''}>Specific Categories</option>
@@ -24507,6 +24528,26 @@ const App = {
                 <option value="brands" ${appliesToVal==='brands'?'selected':''}>Specific Brands</option>
               </select>
             </div>
+          </div>
+          <div id="pm-bundle-section" style="display:${isBundle?'':'none'};margin-bottom:12px;border:1px solid var(--border);border-radius:6px;padding:10px">
+            <label style="font-weight:600;font-size:13px;display:block;margin-bottom:6px">Bundle Items</label>
+            <p style="font-size:11px;color:var(--text-muted);margin:0 0 8px">The products, and how many of each, that make up one bundle. Every complete set in the cart gets the bundle pricing.</p>
+            <div style="position:relative;margin-bottom:8px">
+              <input type="text" id="pm-bundle-search" placeholder="Search products to add…" autocomplete="off" style="width:100%" oninput="App._filterPromoBundleProducts(this.value)" onfocus="App._filterPromoBundleProducts(this.value)">
+              <div id="pm-bundle-dd" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
+            </div>
+            <div id="pm-bundle-rows"></div>
+            <div class="input-row" style="margin-top:10px">
+              <div class="form-group"><label>Bundle Pricing</label>
+                <select id="pm-bundle-pricing" onchange="App._renderPromoBundleSummary()">
+                  <option value="percent" ${p.bundle_pricing!=='price'?'selected':''}>Discount % off the bundle</option>
+                  <option value="price" ${p.bundle_pricing==='price'?'selected':''}>Set a bundle price</option>
+                </select>
+              </div>
+              <div class="form-group" id="pm-bundle-pct-group"><label>Discount %</label><input type="number" id="pm-bundle-pct" value="${isBundle && p.bundle_pricing!=='price' ? p.value : ''}" min="0" max="100" step="0.01" oninput="App._renderPromoBundleSummary()"></div>
+              <div class="form-group" id="pm-bundle-price-group"><label>Bundle Price</label><input type="number" id="pm-bundle-price" value="${p.bundle_price ?? ''}" min="0" step="0.01" oninput="App._renderPromoBundleSummary()"></div>
+            </div>
+            <div id="pm-bundle-summary" style="font-size:12px;color:var(--text-muted)"></div>
           </div>
           <div id="pm-cat-section" style="display:${appliesToVal==='categories'?'':'none'};margin-bottom:12px">
             <label style="font-weight:600;font-size:13px;display:block;margin-bottom:8px">Categories</label>
@@ -24555,12 +24596,96 @@ const App = {
           <button class="btn btn-primary" onclick="App.savePromotion(${id||''})">Save</button>
         </div>
       </div>`);
+    this._renderPromoBundleRows();
+    if (isBundle) this._promoTypeToggle();
+  },
+
+  // ─── Bundle promotion builder ─────────────────────────────────────────────
+  _filterPromoBundleProducts(q) {
+    const dd = document.getElementById('pm-bundle-dd');
+    if (!dd) return;
+    const term = (q || '').trim().toLowerCase();
+    const inBundle = new Set(this._pmBundle.map(b => String(b.product_id)));
+    const matches = (this._pmBundleProducts || [])
+      .filter(pr => !inBundle.has(String(pr.id)) && (!term || `${pr.name} ${pr.sku || ''}`.toLowerCase().includes(term)))
+      .slice(0, 40);
+    dd.innerHTML = matches.length ? matches.map(pr => `<div style="padding:7px 10px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--border)" onmousedown="event.preventDefault();App._addPromoBundleProduct(${pr.id})" onmouseover="this.style.background='var(--bg-secondary,#f5f5f5)'" onmouseout="this.style.background=''"><span class="fw-600">${this.escapeAttr(pr.name)}</span> <span style="color:var(--text-muted);font-size:11px">${this.escapeAttr(pr.sku || '')} · ${this.fmt(pr.price)}</span></div>`).join('')
+      : '<div style="padding:8px 10px;font-size:12px;color:var(--text-muted)">No matching products</div>';
+    dd.style.display = 'block';
+    const search = document.getElementById('pm-bundle-search');
+    if (search && !search._bundleBlurBound) { search.addEventListener('blur', () => { dd.style.display = 'none'; }); search._bundleBlurBound = true; }
+  },
+
+  _addPromoBundleProduct(productId) {
+    const pr = (this._pmBundleProducts || []).find(x => String(x.id) === String(productId));
+    if (!pr) return;
+    this._pmBundle.push({ product_id: pr.id, name: pr.name, sku: pr.sku, price: pr.price, quantity: 1 });
+    const search = document.getElementById('pm-bundle-search');
+    if (search) search.value = '';
+    document.getElementById('pm-bundle-dd').style.display = 'none';
+    this._renderPromoBundleRows();
+  },
+
+  _setPromoBundleQty(idx, val) {
+    if (this._pmBundle[idx]) this._pmBundle[idx].quantity = Math.max(1, parseInt(val) || 1);
+    this._renderPromoBundleSummary();
+  },
+
+  _removePromoBundleProduct(idx) {
+    this._pmBundle.splice(idx, 1);
+    this._renderPromoBundleRows();
+  },
+
+  _renderPromoBundleRows() {
+    const el = document.getElementById('pm-bundle-rows');
+    if (!el) return;
+    el.innerHTML = this._pmBundle.length ? this._pmBundle.map((b, idx) => `
+      <div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)">
+        <span style="flex:1;font-size:13px"><span class="fw-600">${this.escapeAttr(b.name)}</span> <span style="color:var(--text-muted);font-size:11px">${this.escapeAttr(b.sku || '')} · ${this.fmt(b.price)} each</span></span>
+        <label style="font-size:11px;color:var(--text-muted);margin:0">Qty</label>
+        <input type="number" min="1" step="1" value="${b.quantity}" style="width:64px" oninput="App._setPromoBundleQty(${idx},this.value)">
+        <button class="btn btn-sm btn-danger" onclick="App._removePromoBundleProduct(${idx})">✕</button>
+      </div>`).join('') : '<div style="font-size:12px;color:var(--text-muted);padding:4px 0">No items yet — search above to add products.</div>';
+    this._renderPromoBundleSummary();
+  },
+
+  // Live "regular price → customer pays → saves" readout for one bundle at
+  // current catalog prices (the POS uses the actual cart prices).
+  _renderPromoBundleSummary() {
+    const pricing = document.getElementById('pm-bundle-pricing')?.value || 'percent';
+    const pctGroup = document.getElementById('pm-bundle-pct-group');
+    const priceGroup = document.getElementById('pm-bundle-price-group');
+    if (pctGroup) pctGroup.style.display = pricing === 'percent' ? '' : 'none';
+    if (priceGroup) priceGroup.style.display = pricing === 'price' ? '' : 'none';
+    const el = document.getElementById('pm-bundle-summary');
+    if (!el) return;
+    const regular = this._pmBundle.reduce((s, b) => s + (parseFloat(b.price) || 0) * b.quantity, 0);
+    if (!this._pmBundle.length) { el.innerHTML = ''; return; }
+    let pays = null;
+    if (pricing === 'percent') {
+      const pct = parseFloat(document.getElementById('pm-bundle-pct')?.value);
+      if (isFinite(pct)) pays = regular * (1 - pct / 100);
+    } else {
+      const price = parseFloat(document.getElementById('pm-bundle-price')?.value);
+      if (isFinite(price)) pays = price;
+    }
+    const saves = pays != null ? regular - pays : null;
+    el.innerHTML = `Regular price of one bundle: <strong>${this.fmt(regular)}</strong>${pays != null ? ` · Customer pays: <strong>${this.fmt(pays)}</strong> · ${saves >= 0 ? `Saves <strong style="color:var(--success,#2e7d32)">${this.fmt(saves)}</strong>` : `<strong style="color:var(--danger)">Bundle price is higher than buying separately — no discount will apply</strong>`}` : ''}`;
   },
 
   _promoTypeToggle() {
     const t = document.getElementById('pm-type')?.value;
     const lbl = document.getElementById('pm-value-label');
     if (lbl) lbl.textContent = t === 'percentage' ? 'Discount %' : 'Discount $';
+    // A bundle prices itself (Bundle Items section), so the flat value and
+    // the Applies To scoping don't apply to it.
+    const isBundle = t === 'bundle';
+    const show = (id, on) => { const el = document.getElementById(id); if (el) el.style.display = on ? '' : 'none'; };
+    show('pm-value-group', !isBundle);
+    show('pm-applies-group', !isBundle);
+    show('pm-bundle-section', isBundle);
+    if (isBundle) { ['pm-cat-section', 'pm-items-section', 'pm-brands-section'].forEach(id => show(id, false)); }
+    else this._promoAppliesToToggle();
   },
 
   _promoAppliesToToggle() {
@@ -24639,6 +24764,13 @@ const App = {
       active: document.getElementById('pm-active').checked,
     };
     if (!data.name) return this.alert('Name required', 'error');
+    if (data.type === 'bundle') {
+      data.bundle_pricing = document.getElementById('pm-bundle-pricing').value;
+      data.value = parseFloat(document.getElementById('pm-bundle-pct').value) || 0;
+      data.bundle_price = document.getElementById('pm-bundle-price').value;
+      data.bundle_items = this._pmBundle.map(b => ({ product_id: b.product_id, quantity: b.quantity }));
+      data.applies_to = 'bundle';
+    }
 
     // Snapshot both checkbox lists before modal closes
     const catCbs = [...document.querySelectorAll('.pm-cat-cb')];

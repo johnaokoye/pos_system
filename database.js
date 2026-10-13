@@ -810,6 +810,16 @@ async function _init() {
       excluded INTEGER DEFAULT 0,
       UNIQUE(promotion_id, brand)
     )` },
+    // The products (and how many of each) that make up one set of a
+    // type='bundle' promotion — e.g. 1 drill + 2 batteries. See
+    // lib/promotions.js's computeBundleDiscount.
+    { sql: `CREATE TABLE IF NOT EXISTS promotion_bundle_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      promotion_id INTEGER NOT NULL REFERENCES promotions(id) ON DELETE CASCADE,
+      product_id INTEGER NOT NULL REFERENCES products(id),
+      quantity INTEGER NOT NULL DEFAULT 1,
+      UNIQUE(promotion_id, product_id)
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS promotion_codes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       promotion_id INTEGER NOT NULL REFERENCES promotions(id) ON DELETE CASCADE,
@@ -1780,6 +1790,16 @@ async function _init() {
     // Long-form product copy for the e-commerce site (retail and rental
     // items) — `description` stays the short one-liner used in the POS.
     'ALTER TABLE products ADD COLUMN long_description TEXT',
+    // A Special Project custom line the user added as a "Q" item (to be
+    // ordered by Purchasing), as opposed to a labour/fee line — only these
+    // go into the auto-created Purchase Request when the project is
+    // accepted. Retail quotes ignore it: every custom line there is a Q item.
+    'ALTER TABLE quotation_items ADD COLUMN is_q_item INTEGER NOT NULL DEFAULT 0',
+    // Bundle promotions (type='bundle'): 'percent' takes `value`% off the
+    // bundle's regular price; 'price' sells each complete set for
+    // bundle_price instead.
+    'ALTER TABLE promotions ADD COLUMN bundle_pricing TEXT',
+    'ALTER TABLE promotions ADD COLUMN bundle_price REAL',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

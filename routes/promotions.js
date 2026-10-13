@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { requirePermission } = require('../lib/permissions');
-const { promoTimingStatus, computeEligibleAmount, promoAppliesToProduct } = require('../lib/promotions');
+const { promoTimingStatus, computeEligibleAmount, promoAppliesToProduct, computeBundleDiscount } = require('../lib/promotions');
 
 // List all promotions with code count
 router.get('/', requirePermission('promotions'), async (req, res) => {
@@ -12,7 +12,8 @@ router.get('/', requirePermission('promotions'), async (req, res) => {
         (SELECT COUNT(*) FROM promotion_codes WHERE promotion_id = p.id) as code_count,
         (SELECT COUNT(*) FROM promotion_items WHERE promotion_id = p.id) as item_count,
         (SELECT COUNT(*) FROM promotion_brands WHERE promotion_id = p.id AND excluded = 0) as brand_count,
-        (SELECT COUNT(*) FROM promotion_brands WHERE promotion_id = p.id AND excluded = 1) as excluded_brand_count
+        (SELECT COUNT(*) FROM promotion_brands WHERE promotion_id = p.id AND excluded = 1) as excluded_brand_count,
+        (SELECT COALESCE(SUM(quantity), 0) FROM promotion_bundle_items WHERE promotion_id = p.id) as bundle_unit_count
       FROM promotions p ORDER BY p.created_at DESC
     `, args: [] });
     res.json(rows);
@@ -65,6 +66,9 @@ router.get('/:id', requirePermission('promotions'), async (req, res) => {
     const { rows: items } = await db.execute({ sql: 'SELECT * FROM promotion_items WHERE promotion_id = ?', args: [req.params.id] });
     const { rows: brands } = await db.execute({ sql: 'SELECT * FROM promotion_brands WHERE promotion_id = ?', args: [req.params.id] });
     const { rows: codes } = await db.execute({ sql: 'SELECT * FROM promotion_codes WHERE promotion_id = ? ORDER BY created_at DESC', args: [req.params.id] });
+    const { rows: bundleItems } = await db.execute({ sql: `SELECT pbi.product_id, pbi.quantity, pr.name as product_name, pr.sku, pr.price
+      FROM promotion_bundle_items pbi JOIN products pr ON pr.id = pbi.product_id WHERE pbi.promotion_id = ? ORDER BY pbi.id`, args: [req.params.id] });
+    promo.bundle_items = bundleItems;
     promo.items = items;
     promo.brands = brands;
     promo.codes = codes;
@@ -74,31 +78,89 @@ router.get('/:id', requirePermission('promotions'), async (req, res) => {
 
 const RECURRENCE_TYPES = ['none', 'daily', 'weekly', 'monthly', 'yearly'];
 
+// Validates a bundle promotion's pricing and products from a create/update
+// body. Throws a user-facing message; returns the cleaned values otherwise.
+// A "bundle" needs at least two units in total, so "3 for $10" of a single
+// product is as valid as "drill + battery".
+function parseBundle(body) {
+  const pricing = body.bundle_pricing === 'price' ? 'price' : 'percent';
+  const items = (Array.isArray(body.bundle_items) ? body.bundle_items : [])
+    .map(i => ({ product_id: parseInt(i.product_id), quantity: parseInt(i.quantity) || 0 }))
+    .filter(i => i.product_id && i.quantity > 0);
+  if (new Set(items.map(i => i.product_id)).size !== items.length) throw new Error('Each product can only be listed once in a bundle — set its quantity instead');
+  if (items.reduce((n, i) => n + i.quantity, 0) < 2) throw new Error('A bundle needs at least two items');
+  const value = parseFloat(body.value) || 0;
+  const bundle_price = body.bundle_price === '' || body.bundle_price == null ? null : parseFloat(body.bundle_price);
+  if (pricing === 'percent' && (value <= 0 || value > 100)) throw new Error('Bundle discount must be between 0 and 100%');
+  if (pricing === 'price' && (bundle_price == null || !(bundle_price >= 0))) throw new Error('Enter the bundle price');
+  return { pricing, items, value: pricing === 'percent' ? value : 0, bundle_price: pricing === 'price' ? bundle_price : null };
+}
+
+async function saveBundleItems(tx, promoId, items) {
+  await tx.execute({ sql: 'DELETE FROM promotion_bundle_items WHERE promotion_id = ?', args: [promoId] });
+  for (const i of items) {
+    await tx.execute({ sql: 'INSERT INTO promotion_bundle_items (promotion_id, product_id, quantity) VALUES (?, ?, ?)', args: [promoId, i.product_id, i.quantity] });
+  }
+}
+
+// promotion_id -> [{product_id, quantity}] for the given bundle promos.
+async function bundleItemsByPromo(promos) {
+  const ids = promos.filter(p => p.type === 'bundle').map(p => p.id);
+  const byPromo = {};
+  if (!ids.length) return byPromo;
+  const { rows } = await db.execute({ sql: `SELECT promotion_id, product_id, quantity FROM promotion_bundle_items WHERE promotion_id IN (${ids.map(() => '?').join(',')})`, args: ids });
+  for (const r of rows) (byPromo[r.promotion_id] = byPromo[r.promotion_id] || []).push(r);
+  return byPromo;
+}
+
 // Create promotion
 router.post('/', requirePermission('promotions'), async (req, res) => {
   try {
-    const { name, description, type, value, min_purchase, applies_to, start_date, end_date, start_time, end_time, is_recurring, recurrence_type, recurrence_days, active } = req.body;
+    const { name, description, type, min_purchase, start_date, end_date, start_time, end_time, is_recurring, recurrence_type, recurrence_days, active } = req.body;
+    let { value, applies_to } = req.body;
     if (!name) return res.status(400).json({ error: 'Name required' });
-    if (!['percentage', 'fixed'].includes(type)) return res.status(400).json({ error: 'Invalid type' });
+    if (!['percentage', 'fixed', 'bundle'].includes(type)) return res.status(400).json({ error: 'Invalid type' });
+    const bundle = type === 'bundle' ? parseBundle(req.body) : null;
+    if (bundle) { value = bundle.value; applies_to = 'bundle'; }
     const recurType = recurrence_type && RECURRENCE_TYPES.includes(recurrence_type) ? recurrence_type : (is_recurring ? 'daily' : 'none');
-    const result = await db.execute({ sql: `
-      INSERT INTO promotions (name, description, type, value, min_purchase, applies_to, start_date, end_date, start_time, end_time, is_recurring, recurrence_type, recurrence_days, active)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, args: [name, description || null, type, value || 0, min_purchase || 0, applies_to || 'all', start_date || null, end_date || null, start_time || null, end_time || null, recurType !== 'none' ? 1 : 0, recurType, recurType === 'weekly' && Array.isArray(recurrence_days) ? JSON.stringify(recurrence_days) : null, active !== false ? 1 : 0] });
-    res.json({ id: Number(result.lastInsertRowid) });
+    const tx = await db.transaction('write');
+    let id, committed = false;
+    try {
+      const result = await tx.execute({ sql: `
+        INSERT INTO promotions (name, description, type, value, min_purchase, applies_to, start_date, end_date, start_time, end_time, is_recurring, recurrence_type, recurrence_days, active, bundle_pricing, bundle_price)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, args: [name, description || null, type, value || 0, min_purchase || 0, applies_to || 'all', start_date || null, end_date || null, start_time || null, end_time || null, recurType !== 'none' ? 1 : 0, recurType, recurType === 'weekly' && Array.isArray(recurrence_days) ? JSON.stringify(recurrence_days) : null, active !== false ? 1 : 0, bundle ? bundle.pricing : null, bundle ? bundle.bundle_price : null] });
+      id = Number(result.lastInsertRowid);
+      if (bundle) await saveBundleItems(tx, id, bundle.items);
+      await tx.commit();
+      committed = true;
+    } catch(e) { if (!committed) await tx.rollback().catch(() => {}); throw e; }
+    res.json({ id });
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
 
 // Update promotion
 router.put('/:id', requirePermission('promotions'), async (req, res) => {
   try {
-    const { name, description, type, value, min_purchase, applies_to, start_date, end_date, start_time, end_time, is_recurring, recurrence_type, recurrence_days, active } = req.body;
+    const { name, description, type, min_purchase, start_date, end_date, start_time, end_time, is_recurring, recurrence_type, recurrence_days, active } = req.body;
+    let { value, applies_to } = req.body;
     if (!name) return res.status(400).json({ error: 'Name required' });
+    if (!['percentage', 'fixed', 'bundle'].includes(type)) return res.status(400).json({ error: 'Invalid type' });
+    const bundle = type === 'bundle' ? parseBundle(req.body) : null;
+    if (bundle) { value = bundle.value; applies_to = 'bundle'; }
     const recurType = recurrence_type && RECURRENCE_TYPES.includes(recurrence_type) ? recurrence_type : (is_recurring ? 'daily' : 'none');
-    await db.execute({ sql: `
-      UPDATE promotions SET name=?, description=?, type=?, value=?, min_purchase=?, applies_to=?, start_date=?, end_date=?, start_time=?, end_time=?, is_recurring=?, recurrence_type=?, recurrence_days=?, active=?
-      WHERE id=?
-    `, args: [name, description || null, type, value || 0, min_purchase || 0, applies_to || 'all', start_date || null, end_date || null, start_time || null, end_time || null, recurType !== 'none' ? 1 : 0, recurType, recurType === 'weekly' && Array.isArray(recurrence_days) ? JSON.stringify(recurrence_days) : null, active ? 1 : 0, req.params.id] });
+    const tx = await db.transaction('write');
+    let committed = false;
+    try {
+      await tx.execute({ sql: `
+        UPDATE promotions SET name=?, description=?, type=?, value=?, min_purchase=?, applies_to=?, start_date=?, end_date=?, start_time=?, end_time=?, is_recurring=?, recurrence_type=?, recurrence_days=?, active=?, bundle_pricing=?, bundle_price=?
+        WHERE id=?
+      `, args: [name, description || null, type, value || 0, min_purchase || 0, applies_to || 'all', start_date || null, end_date || null, start_time || null, end_time || null, recurType !== 'none' ? 1 : 0, recurType, recurType === 'weekly' && Array.isArray(recurrence_days) ? JSON.stringify(recurrence_days) : null, active ? 1 : 0, bundle ? bundle.pricing : null, bundle ? bundle.bundle_price : null, req.params.id] });
+      // Switching a bundle to another type drops its product list.
+      await saveBundleItems(tx, req.params.id, bundle ? bundle.items : []);
+      await tx.commit();
+      committed = true;
+    } catch(e) { if (!committed) await tx.rollback().catch(() => {}); throw e; }
     res.json({ success: true });
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
@@ -106,6 +168,7 @@ router.put('/:id', requirePermission('promotions'), async (req, res) => {
 // Delete promotion
 router.delete('/:id', requirePermission('promotions'), async (req, res) => {
   try {
+    await db.execute({ sql: 'DELETE FROM promotion_bundle_items WHERE promotion_id = ?', args: [req.params.id] });
     await db.execute({ sql: 'DELETE FROM promotions WHERE id = ?', args: [req.params.id] });
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -298,9 +361,15 @@ router.post('/auto-apply', requirePermission('pos'), async (req, res) => {
     }
 
     const results = [];
+    const bundleItems = await bundleItemsByPromo(promos);
 
     for (const promo of promos) {
       if (promo.min_purchase > 0 && subtotal < promo.min_purchase) continue;
+      if (promo.type === 'bundle') {
+        const { discount, sets } = computeBundleDiscount(promo, bundleItems[promo.id] || [], cart_items);
+        if (discount > 0) results.push({ ...promo, discount_amount: discount, bundle_sets: sets });
+        continue;
+      }
       const eligibleAmount = computeEligibleAmount(promo, cart_items, subtotal, { items: itemsByPromo[promo.id] || [], brands: brandsByPromo[promo.id] || [], brandByProduct });
       if (eligibleAmount === 0) continue;
       const discount = promo.type === 'percentage'
@@ -321,7 +390,7 @@ router.post('/validate-code', requirePermission('pos'), async (req, res) => {
     if (!code) return res.status(400).json({ error: 'Code required' });
 
     const { rows: [pc] } = await db.execute({ sql: `
-      SELECT pc.*, p.name as promo_name, p.type, p.value, p.min_purchase, p.applies_to,
+      SELECT pc.*, p.name as promo_name, p.type, p.value, p.min_purchase, p.applies_to, p.bundle_pricing, p.bundle_price,
              p.start_date, p.end_date, p.start_time, p.end_time, p.is_recurring, p.recurrence_type, p.recurrence_days, p.active as promo_active
       FROM promotion_codes pc
       JOIN promotions p ON p.id = pc.promotion_id
@@ -344,6 +413,14 @@ router.post('/validate-code', requirePermission('pos'), async (req, res) => {
     if (pc.usage_limit !== null && pc.times_used >= pc.usage_limit) return res.status(400).json({ error: 'This code has reached its usage limit' });
     if (pc.min_purchase > 0 && subtotal < pc.min_purchase) {
       return res.status(400).json({ error: `Minimum purchase of ${pc.min_purchase} required` });
+    }
+
+    if (pc.type === 'bundle') {
+      // pc.id is the code's own id — the bundle hangs off pc.promotion_id.
+      const bundleItems = await bundleItemsByPromo([{ type: 'bundle', id: pc.promotion_id }]);
+      const { discount } = computeBundleDiscount(pc, bundleItems[pc.promotion_id] || [], cart_items || []);
+      if (!discount) return res.status(400).json({ error: 'The cart doesn\'t contain a complete bundle for this promotion' });
+      return res.json({ code_id: pc.id, promotion_id: pc.promotion_id, promo_name: pc.promo_name, type: pc.type, value: pc.value, discount_amount: discount });
     }
 
     // Calculate eligible amount

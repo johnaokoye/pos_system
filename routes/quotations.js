@@ -157,6 +157,7 @@ async function processQuoteItems(items) {
       serial_number,
       sku: product ? product.sku : null,
       is_temp_item: product ? 0 : 1,
+      is_q_item: !product && item.is_q_item ? 1 : 0,
       purchase_request_id: product ? null : (item.purchase_request_id || null),
       sources,
       qty, unit_price, unit_cost, lineTotal, lineTax, lineDisc,
@@ -251,10 +252,14 @@ async function ensureQuotePR(quote) {
 // branch could cover (quotation_item_sources.branch_id IS NULL). Only runs
 // once the customer has accepted the quote — never at create/edit time,
 // since items are still in flux until then.
-async function flagItemsForPurchasing(quote) {
+//
+// `qItemsOnly` (Special Projects): only custom lines explicitly added as Q
+// items (is_q_item) are flagged — the project's other custom lines are
+// labour/fees, not things to buy — and branch shortfalls are left alone.
+async function flagItemsForPurchasing(quote, { qItemsOnly = false } = {}) {
   try {
-    const { rows: unflaggedQItems } = await db.execute({ sql: 'SELECT * FROM quotation_items WHERE quote_id = ? AND is_temp_item = 1 AND purchase_request_id IS NULL', args: [quote.id] });
-    const { rows: shortfalls } = await db.execute({
+    const { rows: unflaggedQItems } = await db.execute({ sql: `SELECT * FROM quotation_items WHERE quote_id = ? AND is_temp_item = 1 AND purchase_request_id IS NULL${qItemsOnly ? ' AND is_q_item = 1' : ''}`, args: [quote.id] });
+    const { rows: shortfalls } = qItemsOnly ? { rows: [] } : await db.execute({
       sql: `SELECT qis.id as source_id, qi.id as item_id, qi.product_id, qi.product_name, qi.unit_price, qi.discount_amount, qis.quantity
             FROM quotation_item_sources qis JOIN quotation_items qi ON qis.quotation_item_id = qi.id
             WHERE qi.quote_id = ? AND qis.branch_id IS NULL AND qis.purchase_request_item_id IS NULL`,
@@ -347,10 +352,10 @@ async function processQuoteTransfers(quote) {
 }
 
 async function processQuoteAcceptance(quote) {
-  // A Special Project's custom lines (labour, equipment rental fees, etc.)
-  // aren't catalog shortfalls to buy — they have no business spawning a
-  // Purchase Request or a branch transfer the way a retail "Q" item does.
-  if (quote.quote_type === 'special_project') return;
+  // A Special Project's ordinary custom lines (labour, equipment rental
+  // fees, etc.) aren't things to buy, and it never auto-creates branch
+  // transfers — only the lines added as Q items go to Purchasing.
+  if (quote.quote_type === 'special_project') return flagItemsForPurchasing(quote, { qItemsOnly: true });
   await processQuoteTransfers(quote);
   await flagItemsForPurchasing(quote);
 }
@@ -421,8 +426,8 @@ router.post('/', async (req, res) => {
         }
       } else {
         for (const item of processedItems) {
-          const { product_id, product_name, sku, is_temp_item, purchase_request_id, sources, qty, unit_price, unit_cost, lineTotal, lineTax, lineDisc, serial_number } = item;
-          const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,unit_cost,discount_amount,tax_amount,total,is_temp_item,purchase_request_id,serial_number) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [quoteId, product_id, product_name, sku, qty, unit_price, unit_cost, lineDisc, lineTax, lineTotal, is_temp_item, purchase_request_id, serial_number || null] });
+          const { product_id, product_name, sku, is_temp_item, is_q_item, purchase_request_id, sources, qty, unit_price, unit_cost, lineTotal, lineTax, lineDisc, serial_number } = item;
+          const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,unit_cost,discount_amount,tax_amount,total,is_temp_item,is_q_item,purchase_request_id,serial_number) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [quoteId, product_id, product_name, sku, qty, unit_price, unit_cost, lineDisc, lineTax, lineTotal, is_temp_item, is_q_item, purchase_request_id, serial_number || null] });
           item.id = Number(itemResult.lastInsertRowid);
           if (sources) {
             for (const src of sources) {
@@ -503,8 +508,8 @@ router.put('/:id', async (req, res) => {
         }
       } else {
         for (const item of processedItems) {
-          const { product_id, product_name, sku, is_temp_item, purchase_request_id, sources, qty, unit_price, unit_cost, lineTotal, lineTax, lineDisc, serial_number } = item;
-          const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,unit_cost,discount_amount,tax_amount,total,is_temp_item,purchase_request_id,serial_number) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [quote.id, product_id, product_name, sku, qty, unit_price, unit_cost, lineDisc, lineTax, lineTotal, is_temp_item, purchase_request_id, serial_number || null] });
+          const { product_id, product_name, sku, is_temp_item, is_q_item, purchase_request_id, sources, qty, unit_price, unit_cost, lineTotal, lineTax, lineDisc, serial_number } = item;
+          const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,unit_cost,discount_amount,tax_amount,total,is_temp_item,is_q_item,purchase_request_id,serial_number) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [quote.id, product_id, product_name, sku, qty, unit_price, unit_cost, lineDisc, lineTax, lineTotal, is_temp_item, is_q_item, purchase_request_id, serial_number || null] });
           item.id = Number(itemResult.lastInsertRowid);
           if (sources) {
             for (const src of sources) {
