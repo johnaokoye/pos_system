@@ -215,6 +215,16 @@ if (!process.env.VERCEL) {
       await rentalsRouter.checkMissedPickups();
     } catch (e) {}
   }, 5 * 60000);
+
+  // Scheduled rental stops/resumptions (operator / negotiated stops) — the
+  // pause records use the booked times regardless of when this notices them;
+  // running every minute just keeps the Paused status on screen current.
+  setInterval(async () => {
+    try {
+      await ensureReady();
+      await rentalsRouter.runScheduledPauses();
+    } catch (e) {}
+  }, 60000);
 }
 
 // Vercel serverless export

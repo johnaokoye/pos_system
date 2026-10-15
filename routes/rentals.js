@@ -12,6 +12,7 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const { cloudUpload } = require('../lib/cloudinary');
+const { loadClosedDaySettings, closedDayGrace, zonedTimeToUtc } = require('../lib/closedDays');
 
 const localPoAttachmentDir = path.join(__dirname, '../uploads/rental-po-attachments');
 
@@ -58,14 +59,30 @@ function attachDepositReturnPolicy(agreement) {
 
 // ─── Agreements list/detail ───────────────────────────────────────────────
 
+// Attaches `closed_day_grace` (see lib/closedDays.js) to an active rental due
+// on a closed day, and while it's still inside that grace window it isn't
+// shown as overdue.
+function attachClosedDayGrace(agreement, settings) {
+  if (agreement.status !== 'active') return agreement;
+  const grace = closedDayGrace(agreement, settings);
+  if (!grace) return agreement;
+  agreement.closed_day_grace = { ...grace, returnByAt: grace.returnByAt.toISOString() };
+  if (agreement.display_status === 'overdue' && Date.now() <= grace.returnByAt.getTime()) {
+    agreement.display_status = 'active';
+    agreement.closed_day_grace.in_grace_window = true;
+  }
+  return agreement;
+}
+
 router.get('/agreements', requireRentalsManage, async (req, res) => {
   try {
     const { customer_id, branch_id, view } = req.query;
+    await runScheduledPauses();
     let sql = `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name,
       c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
       b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip,
       e.first_name || ' ' || e.last_name as employee_name,
-      q.quote_number as source_quote_number,
+      q.quote_number as source_quote_number, spq.quote_number as special_project_number, b.closed_day_grace as branch_closed_day_grace,
       co.payment_method as checkout_payment_method, co.created_at as checkout_transaction_created_at,
       se.total as settlement_total,
       dd.first_name || ' ' || dd.last_name as delivery_driver_name,
@@ -77,6 +94,9 @@ router.get('/agreements', requireRentalsManage, async (req, res) => {
       (SELECT COUNT(*) FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_count,
       (SELECT GROUP_CONCAT(product_name || ' x' || quantity, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_summary,
       (SELECT started_at FROM rental_agreement_pauses WHERE agreement_id = ra.id AND ended_at IS NULL LIMIT 1) as current_pause_started_at,
+      (SELECT reason FROM rental_agreement_pauses WHERE agreement_id = ra.id AND ended_at IS NULL LIMIT 1) as current_pause_reason,
+      (SELECT scheduled_resume_at FROM rental_agreement_pauses WHERE agreement_id = ra.id AND ended_at IS NULL LIMIT 1) as current_pause_resume_at,
+      (SELECT starts_at FROM rental_scheduled_pauses WHERE agreement_id = ra.id AND status = 'scheduled' ORDER BY starts_at LIMIT 1) as next_scheduled_pause_at,
       CASE WHEN ra.status = 'awaiting_issue' AND ra.delivery_driver_confirmed_at IS NOT NULL THEN 'out_for_delivery' WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused' WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' WHEN ra.status = 'returned' AND ra.settlement_transaction_id IS NULL AND (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total) > 0 THEN 'returned_unpaid' ELSE ra.status END as display_status,
       (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total) as balance_due
       FROM rental_agreements ra
@@ -84,6 +104,7 @@ router.get('/agreements', requireRentalsManage, async (req, res) => {
       LEFT JOIN branches b ON ra.branch_id = b.id
       LEFT JOIN employees e ON ra.employee_id = e.id
       LEFT JOIN quotations q ON q.converted_to_agreement_id = ra.id
+      LEFT JOIN quotations spq ON ra.quotation_id = spq.id
       LEFT JOIN transactions co ON ra.checkout_transaction_id = co.id
       LEFT JOIN transactions se ON ra.settlement_transaction_id = se.id
       LEFT JOIN employees dd ON ra.delivery_driver_id = dd.id
@@ -107,7 +128,10 @@ router.get('/agreements', requireRentalsManage, async (req, res) => {
     else if (view === 'returned' || view === 'cancelled' || view === 'pending' || view === 'awaiting_issue') { sql += ' AND ra.status = ?'; params.push(view); }
     sql += ' ORDER BY ra.created_at DESC LIMIT 200';
     const { rows } = await db.execute({ sql, args: params });
-    res.json(rows.map(attachDepositReturnPolicy));
+    const closedDays = await loadClosedDaySettings(db);
+    let out = rows.map(attachDepositReturnPolicy).map(a => attachClosedDayGrace(a, closedDays));
+    if (view === 'overdue') out = out.filter(a => a.display_status === 'overdue');
+    res.json(out);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -166,6 +190,8 @@ router.get('/agreements/driver-queue', requireAuth, async (req, res) => {
     const { rows } = await db.execute({ sql: `SELECT ra.id, ra.agreement_number, ra.status, ra.due_date, ra.returned_at, ra.checkout_datetime, ra.created_at,
       ra.delivery_required, ra.delivery_driver_id, ra.delivery_driver_confirmed_at, ra.delivery_address,
       ra.pickup_required, ra.pickup_driver_id, ra.pickup_confirmed_at, ra.pickup_customer_name,
+      ra.delivery_scheduled_start, ra.delivery_scheduled_end, ra.delivery_schedule_notes,
+      ra.pickup_scheduled_start, ra.pickup_scheduled_end, ra.pickup_schedule_notes,
       ra.issue_security_employee_id, ra.issue_security_confirmed_at,
       ra.return_driver_employee_id,
       c.first_name || ' ' || c.last_name as customer_name, c.phone as customer_phone,
@@ -184,6 +210,7 @@ router.get('/agreements/driver-queue', requireAuth, async (req, res) => {
 
 router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
   try {
+    await runScheduledPauses(req.params.id);
     const { rows: [agreement] } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name,
       c.phone as customer_phone, c.email as customer_email, c.customer_type,
       c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
@@ -194,6 +221,7 @@ router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
       se.transaction_number as settlement_transaction_number, se.total as settlement_total,
       se.subtotal as settlement_subtotal, se.tax_amount as settlement_tax_amount, se.payment_method as settlement_payment_method, se.amount_tendered as settlement_amount_tendered, se.change_amount as settlement_change_amount, se.created_at as settlement_created_at,
       q.id as source_quote_id, q.quote_number as source_quote_number, qe.first_name || ' ' || qe.last_name as quote_created_by,
+      spq.quote_number as special_project_number, b.closed_day_grace as branch_closed_day_grace,
       dd.first_name || ' ' || dd.last_name as delivery_driver_name,
       pd.first_name || ' ' || pd.last_name as pickup_driver_name,
       op.first_name || ' ' || op.last_name as operator_name,
@@ -211,6 +239,7 @@ router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
       LEFT JOIN transactions co ON ra.checkout_transaction_id = co.id
       LEFT JOIN transactions se ON ra.settlement_transaction_id = se.id
       LEFT JOIN quotations q ON q.converted_to_agreement_id = ra.id
+      LEFT JOIN quotations spq ON ra.quotation_id = spq.id
       LEFT JOIN employees qe ON q.employee_id = qe.id
       LEFT JOIN employees dd ON ra.delivery_driver_id = dd.id
       LEFT JOIN employees pd ON ra.pickup_driver_id = pd.id
@@ -275,11 +304,18 @@ router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
       LEFT JOIN employees cb ON rp.confirmed_by = cb.id
       WHERE rp.agreement_id = ? ORDER BY rp.id`, args: [req.params.id] });
     agreement.pauses = pauses;
+    const { rows: scheduledPauses } = await db.execute({ sql: `SELECT sp.*, e.first_name || ' ' || e.last_name as created_by_name FROM rental_scheduled_pauses sp LEFT JOIN employees e ON sp.created_by = e.id WHERE sp.agreement_id = ? AND (sp.status = 'scheduled' OR (sp.status = 'cancelled' AND sp.series_id IS NULL)) ORDER BY sp.starts_at`, args: [req.params.id] });
+    agreement.scheduled_pauses = scheduledPauses;
+    const { rows: series } = await db.execute({ sql: `SELECT sr.*, (SELECT COUNT(*) FROM rental_scheduled_pauses WHERE series_id = sr.id AND status = 'started') as stops_taken FROM rental_pause_series sr WHERE sr.agreement_id = ? AND sr.status = 'active' ORDER BY sr.id`, args: [req.params.id] });
+    agreement.pause_series = series.map(sr => ({ ...sr, description: describeSeries(sr) }));
+    const { rows: maintenance } = await db.execute({ sql: `${MAINTENANCE_SELECT} WHERE rm.agreement_id = ? ORDER BY rm.id`, args: [req.params.id] });
+    agreement.maintenance = maintenance;
     const { rows: replacements } = await db.execute({ sql: `SELECT rr.*, e.first_name || ' ' || e.last_name as replaced_by_name
       FROM rental_item_replacements rr LEFT JOIN employees e ON rr.replaced_by = e.id
       WHERE rr.agreement_id = ? ORDER BY rr.id`, args: [req.params.id] });
     agreement.replacements = replacements;
     attachDepositReturnPolicy(agreement);
+    attachClosedDayGrace(agreement, await loadClosedDaySettings(db));
     res.json(agreement);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -379,6 +415,10 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
     const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
     if (!agreement) return res.status(404).json({ error: 'Not found' });
     if (agreement.status !== 'pending') return res.status(400).json({ error: `This agreement is ${agreement.status}, not awaiting checkout` });
+    if (agreement.quotation_id) {
+      const { rows: [sp] } = await db.execute({ sql: 'SELECT quote_number FROM quotations WHERE id = ?', args: [agreement.quotation_id] });
+      return res.status(400).json({ error: `This rental is billed on Special Project ${sp ? sp.quote_number : ''} — it's paid with the project invoice at the POS, not on its own.` });
+    }
 
     // A hold placed before the customer's other rental came back unpaid
     // still can't be finalized — same block as creating a new one.
@@ -772,6 +812,134 @@ router.patch('/agreements/:id/claim-delivery', requirePermission('rentals_confir
 // the financial settlement afterward — see the /return handler below, which
 // picks up pickup_driver_id and skips re-collecting a driver signature once
 // pickup_confirmed_at is already set.
+// ─── Dispatch schedule ───────────────────────────────────────────────────
+// Books when a rental's delivery or pickup happens (a time, or a window with
+// an end) and, optionally, which driver does it. A delivery can be booked
+// any time before the item goes out; a pickup any time before it's collected.
+// A driver already booked for an overlapping job is allowed but warned about.
+const DEFAULT_JOB_MS = 60 * 60000;
+
+function dispatchJobs(a) {
+  const jobs = [];
+  const now = Date.now();
+  if (a.delivery_required) {
+    const done = a.status === 'active' || a.status === 'returned';
+    const start = a.delivery_scheduled_start, end = a.delivery_scheduled_end;
+    jobs.push({ leg: 'delivery', start, end, driver_id: a.delivery_driver_id, driver_name: a.delivery_driver_name, notes: a.delivery_schedule_notes,
+      state: done ? 'done' : a.delivery_driver_confirmed_at ? 'out' : (start && new Date(end || start).getTime() < now ? 'late' : 'pending'),
+      open: !done && ['pending', 'awaiting_issue'].includes(a.status) });
+  }
+  if (a.pickup_required) {
+    const done = !!a.pickup_confirmed_at || a.status === 'returned';
+    const start = a.pickup_scheduled_start, end = a.pickup_scheduled_end;
+    jobs.push({ leg: 'pickup', start, end, driver_id: a.pickup_driver_id, driver_name: a.pickup_driver_name, notes: a.pickup_schedule_notes,
+      state: done ? 'done' : (start && new Date(end || start).getTime() < now ? 'late' : 'pending'),
+      open: !done && ['pending', 'awaiting_issue', 'active'].includes(a.status) });
+  }
+  return jobs;
+}
+
+const DISPATCH_SELECT = `SELECT ra.id, ra.agreement_number, ra.status, ra.is_paused, ra.due_date, ra.checkout_datetime, ra.branch_id,
+    ra.delivery_required, ra.delivery_address, ra.delivery_driver_id, ra.delivery_driver_confirmed_at, ra.delivery_scheduled_start, ra.delivery_scheduled_end, ra.delivery_schedule_notes,
+    ra.pickup_required, ra.pickup_driver_id, ra.pickup_confirmed_at, ra.pickup_scheduled_start, ra.pickup_scheduled_end, ra.pickup_schedule_notes, ra.customer_pickup,
+    c.first_name || ' ' || c.last_name as customer_name, c.phone as customer_phone,
+    c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
+    b.name as branch_name,
+    dd.first_name || ' ' || dd.last_name as delivery_driver_name, pd.first_name || ' ' || pd.last_name as pickup_driver_name,
+    (SELECT GROUP_CONCAT(product_name || ' x' || quantity, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_summary
+  FROM rental_agreements ra
+  LEFT JOIN customers c ON ra.customer_id = c.id
+  LEFT JOIN branches b ON ra.branch_id = b.id
+  LEFT JOIN employees dd ON ra.delivery_driver_id = dd.id
+  LEFT JOIN employees pd ON ra.pickup_driver_id = pd.id`;
+
+// Jobs (deliveries + pickups) booked between two store-local dates, plus the
+// open ones not booked yet.
+router.get('/dispatch-schedule', requireRentalsManage, async (req, res) => {
+  try {
+    const { from, to, driver_id, branch_id } = req.query;
+    const iso = /^\d{4}-\d{2}-\d{2}$/;
+    if (!iso.test(from || '') || !iso.test(to || '') || to < from) return res.status(400).json({ error: 'Choose a valid date range' });
+    const { timeZone } = await loadClosedDaySettings(db);
+    const rangeStart = zonedTimeToUtc(from, '00:00', timeZone);
+    const next = new Date(`${to}T00:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
+    const rangeEnd = zonedTimeToUtc(next.toISOString().slice(0, 10), '00:00', timeZone);
+    let sql = `${DISPATCH_SELECT} WHERE (ra.delivery_required = 1 OR ra.pickup_required = 1) AND ra.status IN ('pending','awaiting_issue','active','returned')
+      AND (ra.status != 'returned' OR ra.pickup_scheduled_start >= ? OR ra.delivery_scheduled_start >= ?)`;
+    const args = [rangeStart.toISOString(), rangeStart.toISOString()];
+    if (branch_id) { sql += ' AND ra.branch_id = ?'; args.push(branch_id); }
+    const { rows } = await db.execute({ sql: sql + ' LIMIT 1000', args });
+    const scheduled = [], unscheduled = [];
+    for (const a of rows) {
+      for (const job of dispatchJobs(a)) {
+        if (driver_id && String(job.driver_id) !== String(driver_id)) continue;
+        const row = { ...job, agreement: a };
+        if (job.start) {
+          const t = new Date(job.start);
+          if (t >= rangeStart && t < rangeEnd) scheduled.push(row);
+        } else if (job.open) unscheduled.push(row);
+      }
+    }
+    scheduled.sort((x, y) => new Date(x.start) - new Date(y.start));
+    unscheduled.sort((x, y) => String(x.agreement.due_date).localeCompare(String(y.agreement.due_date)));
+    res.json({ from, to, time_zone: timeZone, scheduled, unscheduled });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.patch('/agreements/:id/schedule-dispatch', requirePermission('rentals_issue'), async (req, res) => {
+  try {
+    const { leg, start, end, driver_id, notes, clear } = req.body;
+    if (!['delivery', 'pickup'].includes(leg)) return res.status(400).json({ error: 'Choose delivery or pickup' });
+    const { rows: [a] } = await db.execute({ sql: `${DISPATCH_SELECT} WHERE ra.id = ?`, args: [req.params.id] });
+    if (!a) return res.status(404).json({ error: 'Not found' });
+    if (leg === 'delivery') {
+      if (!a.delivery_required) return res.status(400).json({ error: 'This rental doesn\'t include delivery' });
+      if (!['pending', 'awaiting_issue'].includes(a.status)) return res.status(400).json({ error: 'This rental has already gone out — its delivery can\'t be rescheduled' });
+    } else {
+      if (!a.pickup_required) return res.status(400).json({ error: 'This rental doesn\'t include pickup' });
+      if (a.pickup_confirmed_at || !['pending', 'awaiting_issue', 'active'].includes(a.status)) return res.status(400).json({ error: 'This pickup has already been done' });
+    }
+    if (clear) {
+      await db.execute({ sql: `UPDATE rental_agreements SET ${leg}_scheduled_start = NULL, ${leg}_scheduled_end = NULL, ${leg}_schedule_notes = NULL WHERE id = ?`, args: [req.params.id] });
+      return res.json({ ok: true, warnings: [] });
+    }
+    const startAt = new Date(start), endAt = end ? new Date(end) : null;
+    if (!start || isNaN(startAt)) return res.status(400).json({ error: 'Choose the date and time' });
+    if (endAt && (isNaN(endAt) || endAt <= startAt)) return res.status(400).json({ error: 'The window must end after it starts' });
+
+    let driverId = driver_id ? parseInt(driver_id) : null;
+    if (driverId) {
+      const { rows: [driver] } = await db.execute({ sql: 'SELECT id FROM employees WHERE id = ? AND is_driver = 1 AND active = 1', args: [driverId] });
+      if (!driver) return res.status(400).json({ error: 'Selected employee is not flagged as a driver' });
+      if (leg === 'delivery' && a.delivery_driver_confirmed_at && a.delivery_driver_id !== driverId) return res.status(400).json({ error: 'A driver has already signed for this delivery — it can\'t be given to someone else' });
+    }
+
+    const warnings = [];
+    if (driverId) {
+      // Other open jobs booked for this driver that overlap this window.
+      const mineEnd = endAt || new Date(startAt.getTime() + DEFAULT_JOB_MS);
+      const { rows: others } = await db.execute({ sql: `${DISPATCH_SELECT} WHERE ra.id != ? AND ra.status IN ('pending','awaiting_issue','active') AND (ra.delivery_driver_id = ? OR ra.pickup_driver_id = ?)`, args: [req.params.id, driverId, driverId] });
+      for (const o of others) {
+        for (const j of dispatchJobs(o)) {
+          if (!j.start || !j.open || j.state === 'done' || String(j.driver_id) !== String(driverId)) continue;
+          const js = new Date(j.start), je = j.end ? new Date(j.end) : new Date(js.getTime() + DEFAULT_JOB_MS);
+          if (js < mineEnd && je > startAt) warnings.push({ type: 'driver_busy', leg: j.leg, agreement_number: o.agreement_number, at: js.toISOString() });
+        }
+      }
+    }
+    if (leg === 'pickup') {
+      const dueAt = dueDateTime(a);
+      if (dueAt ? startAt > dueAt : a.due_date && startAt.toISOString().slice(0, 10) > a.due_date) warnings.push({ type: 'after_due', due_date: a.due_date });
+    }
+
+    const driverSql = driverId ? (leg === 'pickup' ? ', pickup_driver_id = ?, pickup_driver_assigned_at = COALESCE(pickup_driver_assigned_at, ?)' : ', delivery_driver_id = ?') : '';
+    const driverArgs = driverId ? (leg === 'pickup' ? [driverId, new Date().toISOString()] : [driverId]) : [];
+    await db.execute({ sql: `UPDATE rental_agreements SET ${leg}_scheduled_start = ?, ${leg}_scheduled_end = ?, ${leg}_schedule_notes = ?${driverSql} WHERE id = ?`,
+      args: [startAt.toISOString(), endAt ? endAt.toISOString() : null, notes && String(notes).trim() ? String(notes).trim() : null, ...driverArgs, req.params.id] });
+    res.json({ ok: true, warnings });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.patch('/agreements/:id/assign-pickup-driver', requirePermission('rentals_issue'), async (req, res) => {
   try {
     const { driver_id } = req.body;
@@ -821,6 +989,18 @@ router.patch('/agreements/:id/confirm-pickup', requirePermission('rentals_confir
 // the frontend's "Void Line" override UX) — duplicated narrowly here rather
 // than calling that route, since routes in this app call each other via
 // exported functions, not internal HTTP, and no shared helper exists yet.
+const PAUSE_REASON_LABELS = {
+  replacement: 'Replacement', repair: 'Repair', servicing: 'Servicing', maintenance: 'Maintenance', relocation: 'Relocation',
+  operator: 'Operator stop', negotiated: 'Negotiated stop', missed_pickup: 'Missed pickup', other: 'Other',
+};
+const PAUSE_REASONS = ['replacement', 'repair', 'servicing', 'maintenance', 'relocation', 'operator', 'negotiated'];
+// Only these can be booked to start later (and stop/start on a schedule).
+const SCHEDULABLE_PAUSE_REASONS = ['operator', 'negotiated'];
+
+// Pause reasons that take items into the shop (and so open a maintenance
+// record per item — see /maintenance below).
+const MAINTENANCE_PAUSE_REASONS = ['repair', 'servicing', 'maintenance'];
+
 async function validateOverridePin(pin, permission) {
   const { rows: employees } = await db.execute({ sql: 'SELECT e.id, e.first_name, e.last_name, e.pin, sg.permissions FROM employees e LEFT JOIN security_groups sg ON e.security_group_id = sg.id WHERE e.active = 1', args: [] });
   // Uses the same bidirectional can() the rest of the app's permission checks
@@ -841,23 +1021,68 @@ async function validateOverridePin(pin, permission) {
 // permission on visibility.
 router.post('/agreements/:id/pause', requireRentalsManage, async (req, res) => {
   try {
-    const { reason, notes, override_pin, employee_id } = req.body;
-    if (!['maintenance', 'replacement', 'other'].includes(reason)) return res.status(400).json({ error: 'A valid reason (maintenance, replacement, or other) is required' });
+    const { reason, notes, override_pin, employee_id, maintenance_item_ids, starts_at, resume_at } = req.body;
+    // 'other' is no longer offered but older pauses may still carry it.
+    if (!PAUSE_REASONS.includes(reason)) return res.status(400).json({ error: 'Choose a valid reason for the pause' });
     if (!notes || !notes.trim()) return res.status(400).json({ error: 'Notes are required to pause a rental' });
     if (!override_pin) return res.status(400).json({ error: 'Manager override PIN is required' });
 
+    // Optional schedule: a start in the future books the pause for later
+    // (operator / negotiated stops only); a resume time ends it on its own.
+    const now = new Date();
+    const startAt = starts_at ? new Date(starts_at) : null;
+    const resumeAt = resume_at ? new Date(resume_at) : null;
+    if ((startAt && isNaN(startAt)) || (resumeAt && isNaN(resumeAt))) return res.status(400).json({ error: 'Invalid pause or resume date/time' });
+    const scheduledStart = startAt && startAt.getTime() > now.getTime() + 60000;
+    if (scheduledStart && !SCHEDULABLE_PAUSE_REASONS.includes(reason)) return res.status(400).json({ error: 'Only operator and negotiated stops can be scheduled ahead — other pauses start now' });
+    if (resumeAt && resumeAt <= (scheduledStart ? startAt : now)) return res.status(400).json({ error: 'The resume time must be after the pause starts' });
+
+    await runScheduledPauses(req.params.id);
     const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
     if (!agreement) return res.status(404).json({ error: 'Not found' });
     if (agreement.status !== 'active') return res.status(400).json({ error: `Cannot pause a ${agreement.status} agreement — only active (issued) rentals can be paused` });
-    if (agreement.is_paused) return res.status(400).json({ error: 'This rental is already paused' });
+    if (agreement.is_paused && !scheduledStart) return res.status(400).json({ error: 'This rental is already paused' });
+    if (scheduledStart) {
+      try { await assertNoPauseOverlap(agreement, startAt, resumeAt); } catch(e) { return res.status(400).json({ error: e.message }); }
+    } else {
+      // Starting now mustn't run into a stop already booked.
+      const { rows: [next] } = await db.execute({ sql: "SELECT starts_at FROM rental_scheduled_pauses WHERE agreement_id = ? AND status = 'scheduled' AND series_id IS NULL ORDER BY starts_at LIMIT 1", args: [req.params.id] });
+      if (next && (!resumeAt || resumeAt > new Date(next.starts_at))) return res.status(400).json({ error: `A stop is already scheduled from ${new Date(next.starts_at).toISOString().replace('T', ' ').slice(0, 16)} UTC — set this pause to resume before then, or cancel that one first` });
+    }
+
+    // Maintenance/repair/servicing takes specific items into the shop — each
+    // gets a maintenance record (rental_maintenance) with its own work log.
+    let maintenanceItems = [];
+    if (MAINTENANCE_PAUSE_REASONS.includes(reason)) {
+      const ids = (Array.isArray(maintenance_item_ids) ? maintenance_item_ids : []).map(Number);
+      const { rows: agItems } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ? AND quantity > quantity_returned', args: [req.params.id] });
+      maintenanceItems = agItems.filter(i => ids.includes(i.id));
+      if (!maintenanceItems.length) return res.status(400).json({ error: 'Choose the item(s) going in for ' + reason });
+    }
 
     const authorizer = await validateOverridePin(override_pin, 'rentals_pause');
     if (!authorizer) return res.status(403).json({ error: 'Invalid PIN or insufficient privilege' });
 
+    if (scheduledStart) {
+      await db.execute({ sql: 'INSERT INTO rental_scheduled_pauses (agreement_id, reason, notes, starts_at, ends_at, created_by, authorized_by) VALUES (?,?,?,?,?,?,?)',
+        args: [req.params.id, reason, notes.trim(), startAt.toISOString(), resumeAt ? resumeAt.toISOString() : null, employee_id || null, authorizer.id] });
+      try {
+        await logActivity({ customerId: agreement.customer_id, employeeId: employee_id, type: 'rental', subject: `Rental ${agreement.agreement_number} — ${PAUSE_REASON_LABELS[reason].toLowerCase()} scheduled`, description: notes.trim(), completed: true });
+      } catch(e) {}
+      const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+      return res.status(201).json({ ...updated, scheduled: true });
+    }
+
     const tx = await db.transaction('write');
     let committed = false;
     try {
-      await tx.execute({ sql: 'INSERT INTO rental_agreement_pauses (agreement_id, reason, notes, paused_by, authorized_by) VALUES (?,?,?,?,?)', args: [req.params.id, reason, notes.trim(), employee_id || null, authorizer.id] });
+      const pauseResult = await tx.execute({ sql: 'INSERT INTO rental_agreement_pauses (agreement_id, reason, notes, paused_by, authorized_by, scheduled_resume_at) VALUES (?,?,?,?,?,?)', args: [req.params.id, reason, notes.trim(), employee_id || null, authorizer.id, resumeAt ? resumeAt.toISOString() : null] });
+      const pauseId = Number(pauseResult.lastInsertRowid);
+      for (const item of maintenanceItems) {
+        const m = await tx.execute({ sql: 'INSERT INTO rental_maintenance (agreement_id, agreement_item_id, pause_id, product_id, branch_id, quantity, reason, opened_by) VALUES (?,?,?,?,?,?,?,?)',
+          args: [req.params.id, item.id, pauseId, item.product_id, agreement.branch_id, item.quantity - item.quantity_returned, reason, employee_id || null] });
+        await tx.execute({ sql: 'INSERT INTO rental_maintenance_log (maintenance_id, entry_type, notes, employee_id) VALUES (?,?,?,?)', args: [Number(m.lastInsertRowid), 'issue', notes.trim(), employee_id || null] });
+      }
       await tx.execute({ sql: 'UPDATE rental_agreements SET is_paused = 1 WHERE id = ?', args: [req.params.id] });
       await tx.commit();
       committed = true;
@@ -883,6 +1108,7 @@ router.post('/agreements/:id/pause', requireRentalsManage, async (req, res) => {
 router.patch('/agreements/:id/resume', requireRentalsManage, async (req, res) => {
   try {
     const { employee_id } = req.body;
+    await runScheduledPauses(req.params.id);
     const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
     if (!agreement) return res.status(404).json({ error: 'Not found' });
     if (!agreement.is_paused) return res.status(400).json({ error: 'This rental is not currently paused' });
@@ -890,34 +1116,280 @@ router.patch('/agreements/:id/resume', requireRentalsManage, async (req, res) =>
     const { rows: [openPause] } = await db.execute({ sql: 'SELECT * FROM rental_agreement_pauses WHERE agreement_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1', args: [req.params.id] });
     if (!openPause) return res.status(400).json({ error: 'No open pause found on this agreement' });
 
-    const now = new Date();
-    const pausedMs = Math.max(0, now - new Date(openPause.started_at));
-    const pausedDays = Math.ceil(pausedMs / 86400000);
-    const dueDateBefore = agreement.due_date;
-    const dueDateAfter = new Date(new Date(`${dueDateBefore}T00:00:00.000Z`).getTime() + pausedDays * 86400000).toISOString().slice(0, 10);
-
-    const tx = await db.transaction('write');
-    let committed = false;
-    try {
-      await tx.execute({ sql: 'UPDATE rental_agreement_pauses SET ended_at = ?, resumed_by = ?, due_date_before = ?, due_date_after = ? WHERE id = ?', args: [now.toISOString(), employee_id || null, dueDateBefore, dueDateAfter, openPause.id] });
-      await tx.execute({ sql: 'UPDATE rental_agreements SET is_paused = 0, due_date = ? WHERE id = ?', args: [dueDateAfter, req.params.id] });
-      await tx.commit();
-      committed = true;
-      try {
-        await logActivity({
-          customerId: agreement.customer_id, employeeId: employee_id,
-          type: 'rental', subject: `Rental ${agreement.agreement_number} resumed — due date extended to ${dueDateAfter}`,
-          description: `Paused ${pausedDays} day${pausedDays === 1 ? '' : 's'} for ${openPause.reason}`, completed: true,
-        });
-      } catch(e) {}
-      const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
-      res.json(updated);
-    } catch(e) {
-      if (!committed) await tx.rollback();
-      res.status(committed ? 500 : 400).json({ error: e.message });
-    }
+    try { await resumePause(agreement, openPause, new Date(), employee_id); }
+    catch(e) { return res.status(400).json({ error: e.message }); }
+    const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    res.json(updated);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
+
+// Repeating operator / negotiated stop — daily (start_time -> end_time, next
+// day if end is earlier) or weekly (start_day start_time -> end_day end_time;
+// days 0 = Sunday). Times are store-local (Settings → store time zone).
+router.post('/agreements/:id/pause-series', requireRentalsManage, async (req, res) => {
+  try {
+    const { reason, notes, frequency, start_day, start_time, end_day, end_time, from_date, until_date, override_pin, employee_id, days } = req.body;
+    if (!SCHEDULABLE_PAUSE_REASONS.includes(reason)) return res.status(400).json({ error: 'Only operator and negotiated stops can repeat' });
+    if (!notes || !String(notes).trim()) return res.status(400).json({ error: 'Notes are required to pause a rental' });
+    if (!['daily', 'weekly', 'weekdays'].includes(frequency)) return res.status(400).json({ error: 'Choose daily, weekly or specific days' });
+    const dayList = frequency === 'weekdays' ? [...new Set((Array.isArray(days) ? days : []).map(Number).filter(d => d >= 0 && d <= 6))].sort((a, b) => a - b) : null;
+    if (frequency === 'weekdays' && !dayList.length) return res.status(400).json({ error: 'Tick at least one day' });
+    const hhmm = /^([01]\d|2[0-3]):[0-5]\d$/;
+    if (!hhmm.test(start_time || '') || !hhmm.test(end_time || '')) return res.status(400).json({ error: 'Enter the stop and resume times' });
+    const sDay = parseInt(start_day), eDay = parseInt(end_day);
+    if (frequency === 'weekly' && (!(sDay >= 0 && sDay <= 6) || !(eDay >= 0 && eDay <= 6))) return res.status(400).json({ error: 'Choose the stop and resume days' });
+    if (frequency !== 'weekly' && start_time === end_time) return res.status(400).json({ error: 'The stop and resume times can\'t be the same' });
+    const iso = /^\d{4}-\d{2}-\d{2}$/;
+    if (!iso.test(from_date || '')) return res.status(400).json({ error: 'Choose the date the stops start from' });
+    if (until_date && (!iso.test(until_date) || until_date < from_date)) return res.status(400).json({ error: 'The end date must be on or after the start date' });
+    if (!override_pin) return res.status(400).json({ error: 'Manager override PIN is required' });
+
+    await runScheduledPauses(req.params.id);
+    const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    if (!agreement) return res.status(404).json({ error: 'Not found' });
+    if (agreement.status !== 'active') return res.status(400).json({ error: `Cannot schedule stops on a ${agreement.status} agreement — only active (issued) rentals` });
+    const authorizer = await validateOverridePin(override_pin, 'rentals_pause');
+    if (!authorizer) return res.status(403).json({ error: 'Invalid PIN or insufficient privilege' });
+
+    const r = await db.execute({ sql: 'INSERT INTO rental_pause_series (agreement_id, reason, notes, frequency, start_day, start_time, end_day, end_time, from_date, until_date, created_by, authorized_by, created_at, days) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      args: [req.params.id, reason, String(notes).trim(), frequency, frequency === 'weekly' ? sDay : null, start_time, frequency === 'weekly' ? eDay : null, end_time, from_date, until_date || null, employee_id || null, authorizer.id, new Date().toISOString(), dayList ? dayList.join(',') : null] });
+    const seriesId = Number(r.lastInsertRowid);
+    await runScheduledPauses(req.params.id);
+    const { rows: [sr] } = await db.execute({ sql: 'SELECT * FROM rental_pause_series WHERE id = ?', args: [seriesId] });
+    const { rows: occ } = await db.execute({ sql: 'SELECT starts_at, ends_at, status, cancel_reason FROM rental_scheduled_pauses WHERE series_id = ? ORDER BY starts_at', args: [seriesId] });
+    try {
+      await logActivity({ customerId: agreement.customer_id, employeeId: employee_id, type: 'rental', subject: `Rental ${agreement.agreement_number} — recurring ${PAUSE_REASON_LABELS[reason].toLowerCase()}`, description: `${describeSeries(sr)}. ${String(notes).trim()}`, completed: true });
+    } catch(e) {}
+    res.status(201).json({ ...sr, description: describeSeries(sr), occurrences: occ });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Stops the series: its booked stops that haven't started are cancelled; a
+// stop already under way carries on until it resumes.
+router.delete('/agreements/:id/pause-series/:sid', requireRentalsManage, async (req, res) => {
+  try {
+    const result = await db.execute({ sql: "UPDATE rental_pause_series SET status = 'cancelled' WHERE id = ? AND agreement_id = ? AND status = 'active'", args: [req.params.sid, req.params.id] });
+    if (!result.rowsAffected) return res.status(400).json({ error: 'Not found, or already ended' });
+    await db.execute({ sql: "UPDATE rental_scheduled_pauses SET status = 'cancelled', cancel_reason = 'Recurring stop cancelled' WHERE series_id = ? AND status = 'scheduled'", args: [req.params.sid] });
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Set (or clear, with resume_at null) when the current pause ends itself.
+router.patch('/agreements/:id/schedule-resume', requireRentalsManage, async (req, res) => {
+  try {
+    const { resume_at } = req.body;
+    await runScheduledPauses(req.params.id);
+    const { rows: [openPause] } = await db.execute({ sql: 'SELECT * FROM rental_agreement_pauses WHERE agreement_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1', args: [req.params.id] });
+    if (!openPause) return res.status(400).json({ error: 'This rental is not currently paused' });
+    let at = null;
+    if (resume_at) {
+      at = new Date(resume_at);
+      if (isNaN(at)) return res.status(400).json({ error: 'Invalid resume date/time' });
+      if (at <= new Date()) return res.status(400).json({ error: 'The resume time must be in the future — use Resume Rental to resume now' });
+      const { rows: [next] } = await db.execute({ sql: "SELECT starts_at FROM rental_scheduled_pauses WHERE agreement_id = ? AND status = 'scheduled' AND series_id IS NULL ORDER BY starts_at LIMIT 1", args: [req.params.id] });
+      if (next && at > new Date(next.starts_at)) return res.status(400).json({ error: 'That runs into a stop already scheduled — resume before it starts, or cancel it first' });
+    }
+    await db.execute({ sql: 'UPDATE rental_agreement_pauses SET scheduled_resume_at = ? WHERE id = ?', args: [at ? at.toISOString() : null, openPause.id] });
+    res.json({ ok: true, scheduled_resume_at: at ? at.toISOString() : null });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/agreements/:id/scheduled-pauses/:sid', requireRentalsManage, async (req, res) => {
+  try {
+    const result = await db.execute({ sql: "UPDATE rental_scheduled_pauses SET status = 'cancelled', cancel_reason = ? WHERE id = ? AND agreement_id = ? AND status = 'scheduled'", args: [req.body?.reason || 'Cancelled by staff', req.params.sid, req.params.id] });
+    if (!result.rowsAffected) return res.status(400).json({ error: 'Not found, or it has already started' });
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Ends a pause at `endedAt` (now for a manual resume, the booked time for a
+// scheduled one): pushes the due date out by the paused time, rounded up to
+// whole days in the customer's favour, and closes any maintenance still open.
+async function resumePause(agreement, openPause, endedAt, employeeId) {
+  const pausedMs = Math.max(0, endedAt - new Date(openPause.started_at));
+  let pausedDays = Math.ceil(pausedMs / 86400000);
+  // A repeating stop (e.g. every night) would gain a whole day each time if
+  // every occurrence rounded up on its own — so the series' stopped time is
+  // added up, and the due date only moves when that total crosses another day.
+  const { rows: [occ] } = await db.execute({ sql: 'SELECT series_id FROM rental_scheduled_pauses WHERE pause_id = ? AND series_id IS NOT NULL', args: [openPause.id] });
+  if (occ) {
+    const { rows: prior } = await db.execute({ sql: `SELECT p.started_at, p.ended_at, p.due_date_before, p.due_date_after FROM rental_agreement_pauses p
+      JOIN rental_scheduled_pauses sp ON sp.pause_id = p.id WHERE sp.series_id = ? AND p.ended_at IS NOT NULL AND p.id != ?`, args: [occ.series_id, openPause.id] });
+    const totalMs = pausedMs + prior.reduce((sum, p) => sum + Math.max(0, new Date(p.ended_at) - new Date(p.started_at)), 0);
+    const alreadyExtended = prior.reduce((sum, p) => sum + (p.due_date_before && p.due_date_after ? Math.round((new Date(`${p.due_date_after}T00:00:00Z`) - new Date(`${p.due_date_before}T00:00:00Z`)) / 86400000) : 0), 0);
+    pausedDays = Math.max(0, Math.ceil(totalMs / 86400000) - alreadyExtended);
+  }
+  const dueDateBefore = agreement.due_date;
+  const dueDateAfter = new Date(new Date(`${dueDateBefore}T00:00:00.000Z`).getTime() + pausedDays * 86400000).toISOString().slice(0, 10);
+
+  const tx = await db.transaction('write');
+  let committed = false;
+  try {
+    await tx.execute({ sql: 'UPDATE rental_agreement_pauses SET ended_at = ?, resumed_by = ?, due_date_before = ?, due_date_after = ? WHERE id = ?', args: [endedAt.toISOString(), employeeId || null, dueDateBefore, dueDateAfter, openPause.id] });
+    await tx.execute({ sql: 'UPDATE rental_agreements SET is_paused = 0, due_date = ? WHERE id = ?', args: [dueDateAfter, agreement.id] });
+    const { rows: openMaint } = await tx.execute({ sql: "SELECT id FROM rental_maintenance WHERE agreement_id = ? AND status = 'open'", args: [agreement.id] });
+    for (const m of openMaint) {
+      await tx.execute({ sql: 'INSERT INTO rental_maintenance_log (maintenance_id, entry_type, notes, employee_id) VALUES (?,?,?,?)', args: [m.id, 'completed', 'Rental resumed — item back in use', employeeId || null] });
+      await tx.execute({ sql: "UPDATE rental_maintenance SET status = 'completed', completed_at = ?, completed_by = ? WHERE id = ?", args: [endedAt.toISOString(), employeeId || null, m.id] });
+    }
+    await tx.commit();
+    committed = true;
+  } catch(e) {
+    if (!committed) { try { await tx.rollback(); } catch(_) {} }
+    throw e;
+  } finally {
+    // Runs unattended from the scheduler — never leave a transaction holding the database.
+    try { tx.close(); } catch(_) {}
+  }
+  try {
+    await logActivity({
+      customerId: agreement.customer_id, employeeId,
+      type: 'rental', subject: `Rental ${agreement.agreement_number} resumed${employeeId ? '' : ' (scheduled)'} — due date extended to ${dueDateAfter}`,
+      description: `Paused ${pausedDays} day${pausedDays === 1 ? '' : 's'} for ${PAUSE_REASON_LABELS[openPause.reason] || openPause.reason}`, completed: true,
+    });
+  } catch(e) {}
+  return { dueDateAfter, pausedDays };
+}
+
+// ─── Recurring stops ─────────────────────────────────────────────────────
+const SERIES_HORIZON_DAYS = 14;
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const addDaysStr = (dateStr, n) => { const d = new Date(`${dateStr}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+const storeToday = timeZone => new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+
+const seriesDays = sr => String(sr.days || '').split(',').filter(x => x !== '').map(Number).sort((a, b) => a - b);
+
+function describeSeries(sr) {
+  const t = v => { const [h, m] = v.split(':').map(Number); return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`; };
+  const overnight = sr.end_time <= sr.start_time ? ' next day' : '';
+  const days = seriesDays(sr);
+  const dayList = days.length === 5 && [1, 2, 3, 4, 5].every(d => days.includes(d)) ? 'Monday to Friday'
+    : days.length === 2 && days.includes(0) && days.includes(6) ? 'Saturday and Sunday'
+    : days.map(d => DAY_NAMES[d].slice(0, 3)).join(', ');
+  const when = sr.frequency === 'daily' ? `Every day ${t(sr.start_time)} to ${t(sr.end_time)}${overnight}`
+    : sr.frequency === 'weekdays' ? `${dayList}, ${t(sr.start_time)} to ${t(sr.end_time)}${overnight}`
+    : `Every ${DAY_NAMES[sr.start_day]} ${t(sr.start_time)} to ${DAY_NAMES[sr.end_day]} ${t(sr.end_time)}`;
+  return `${when}, from ${sr.from_date}${sr.until_date ? ` until ${sr.until_date}` : ' until the rental is returned'}`;
+}
+
+// The series' windows (store-local) starting on local dates [fromDate, toDate].
+function seriesWindows(sr, fromDate, toDate, timeZone) {
+  const out = [];
+  for (let d = fromDate; d <= toDate; d = addDaysStr(d, 1)) {
+    if (d < sr.from_date || (sr.until_date && d > sr.until_date)) continue;
+    let endDate;
+    if (sr.frequency === 'daily' || sr.frequency === 'weekdays') {
+      if (sr.frequency === 'weekdays' && !seriesDays(sr).includes(new Date(`${d}T00:00:00Z`).getUTCDay())) continue;
+      endDate = sr.end_time > sr.start_time ? d : addDaysStr(d, 1);
+    } else {
+      if (new Date(`${d}T00:00:00Z`).getUTCDay() !== sr.start_day) continue;
+      let delta = (sr.end_day - sr.start_day + 7) % 7;
+      if (delta === 0 && sr.end_time <= sr.start_time) delta = 7;
+      endDate = addDaysStr(d, delta);
+    }
+    out.push({ date: d, start: zonedTimeToUtc(d, sr.start_time, timeZone), end: zonedTimeToUtc(endDate, sr.end_time, timeZone) });
+  }
+  return out;
+}
+
+// Books each active series' stops over the next SERIES_HORIZON_DAYS as
+// rental_scheduled_pauses rows (once each — keyed by occurrence_date). A
+// window already under way when the series is created starts straight away.
+// A window that would overlap another booked stop is recorded as cancelled.
+async function materializePauseSeries(agreementId = null) {
+  const { rows: series } = await db.execute({ sql: `SELECT sr.*, ra.status as agreement_status FROM rental_pause_series sr JOIN rental_agreements ra ON ra.id = sr.agreement_id WHERE sr.status = 'active'${agreementId ? ' AND sr.agreement_id = ?' : ''}`, args: agreementId ? [agreementId] : [] });
+  if (!series.length) return;
+  const { timeZone } = await loadClosedDaySettings(db);
+  const now = new Date();
+  const today = storeToday(timeZone);
+  for (const sr of series) {
+    if (sr.agreement_status !== 'active' || (sr.until_date && sr.until_date < addDaysStr(today, -1))) {
+      await db.execute({ sql: "UPDATE rental_pause_series SET status = 'ended' WHERE id = ?", args: [sr.id] });
+      continue;
+    }
+    const createdAt = new Date(String(sr.created_at).replace(' ', 'T') + (/Z|[+-]\d\d:?\d\d$/.test(sr.created_at) ? '' : 'Z'));
+    const { rows: existing } = await db.execute({ sql: 'SELECT occurrence_date FROM rental_scheduled_pauses WHERE series_id = ?', args: [sr.id] });
+    const have = new Set(existing.map(r => r.occurrence_date));
+    for (const w of seriesWindows(sr, addDaysStr(today, -7), addDaysStr(today, SERIES_HORIZON_DAYS), timeZone)) {
+      if (have.has(w.date) || w.end <= createdAt || w.end <= now) continue;
+      const start = w.start < createdAt ? createdAt : w.start;
+      const { rows: clash } = await db.execute({ sql: `SELECT id FROM rental_scheduled_pauses WHERE agreement_id = ? AND status IN ('scheduled','started') AND (series_id IS NULL OR series_id != ?)
+        AND starts_at < ? AND (ends_at IS NULL OR ends_at > ?)`, args: [sr.agreement_id, sr.id, w.end.toISOString(), start.toISOString()] });
+      await db.execute({ sql: 'INSERT INTO rental_scheduled_pauses (agreement_id, reason, notes, starts_at, ends_at, status, cancel_reason, created_by, authorized_by, series_id, occurrence_date) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+        args: [sr.agreement_id, sr.reason, sr.notes, start.toISOString(), w.end.toISOString(), clash.length ? 'cancelled' : 'scheduled', clash.length ? 'Overlaps another scheduled stop' : null, sr.created_by, sr.authorized_by, sr.id, w.date] });
+    }
+  }
+}
+
+// A booked stop can't overlap another booked stop, or the current pause
+// unless that pause is set to resume before it starts.
+async function assertNoPauseOverlap(agreement, startAt, endAt) {
+  const { rows: booked } = await db.execute({ sql: "SELECT starts_at, ends_at FROM rental_scheduled_pauses WHERE agreement_id = ? AND status = 'scheduled' AND series_id IS NULL", args: [agreement.id] });
+  for (const b of booked) {
+    const bStart = new Date(b.starts_at), bEnd = b.ends_at ? new Date(b.ends_at) : null;
+    const overlaps = (!bEnd || startAt < bEnd) && (!endAt || endAt > bStart);
+    if (overlaps) throw new Error('This overlaps a stop that\'s already scheduled — cancel or change that one first');
+  }
+  if (agreement.is_paused) {
+    const { rows: [open] } = await db.execute({ sql: 'SELECT scheduled_resume_at FROM rental_agreement_pauses WHERE agreement_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1', args: [agreement.id] });
+    if (!open || !open.scheduled_resume_at || new Date(open.scheduled_resume_at) > startAt) throw new Error('This rental is paused now — set its resume time (before the new stop starts) first');
+  }
+}
+
+// Starts booked stops whose time has come and resumes pauses whose resume
+// time has passed — at their booked times, so billing and the due-date
+// extension come out the same however late this runs. Runs every minute
+// (server.js) and before any rental read/write that depends on it, which also
+// covers serverless deployments with no timer. Pass an agreement id to only
+// process that one.
+async function runScheduledPauses(agreementId = null) {
+  await materializePauseSeries(agreementId);
+  const now = new Date();
+  const scope = agreementId ? ' AND agreement_id = ?' : '';
+  const scopeArgs = agreementId ? [agreementId] : [];
+  // One event at a time, earliest first, so a backlog (e.g. several nightly
+  // stops missed while the server was down) plays out in the right order.
+  for (let step = 0; step < 500; step++) {
+    const { rows: [end] } = await db.execute({ sql: `SELECT * FROM rental_agreement_pauses WHERE ended_at IS NULL AND scheduled_resume_at IS NOT NULL AND scheduled_resume_at <= ?${scope} ORDER BY scheduled_resume_at LIMIT 1`, args: [now.toISOString(), ...scopeArgs] });
+    const { rows: [start] } = await db.execute({ sql: `SELECT * FROM rental_scheduled_pauses WHERE status = 'scheduled' AND starts_at <= ?${scope} ORDER BY starts_at LIMIT 1`, args: [now.toISOString(), ...scopeArgs] });
+    if (!end && !start) break;
+    if (end && (!start || new Date(end.scheduled_resume_at) <= new Date(start.starts_at))) {
+      const { rows: [ag] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [end.agreement_id] });
+      try {
+        if (!ag || !ag.is_paused) throw new Error('not paused');
+        await resumePause(ag, end, new Date(end.scheduled_resume_at), null);
+      } catch(e) {
+        // Don't retry a resume that can't happen.
+        await db.execute({ sql: 'UPDATE rental_agreement_pauses SET scheduled_resume_at = NULL WHERE id = ?', args: [end.id] });
+      }
+      continue;
+    }
+    const sp = start;
+    const { rows: [ag] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [sp.agreement_id] });
+    const skip = !ag || ag.status !== 'active' ? 'Rental was no longer out when the stop was due' : ag.is_paused ? 'Rental was already paused when the stop was due' : null;
+    if (skip) {
+      await db.execute({ sql: "UPDATE rental_scheduled_pauses SET status = 'cancelled', cancel_reason = ? WHERE id = ?", args: [skip, sp.id] });
+      continue;
+    }
+    const tx = await db.transaction('write');
+    try {
+      const r = await tx.execute({ sql: 'INSERT INTO rental_agreement_pauses (agreement_id, reason, notes, started_at, paused_by, authorized_by, scheduled_resume_at) VALUES (?,?,?,?,?,?,?)',
+        args: [sp.agreement_id, sp.reason, sp.notes, sp.starts_at, sp.created_by, sp.authorized_by, sp.ends_at] });
+      await tx.execute({ sql: 'UPDATE rental_agreements SET is_paused = 1 WHERE id = ?', args: [sp.agreement_id] });
+      await tx.execute({ sql: "UPDATE rental_scheduled_pauses SET status = 'started', pause_id = ? WHERE id = ?", args: [Number(r.lastInsertRowid), sp.id] });
+      await tx.commit();
+    } catch(e) {
+      try { await tx.rollback(); } catch(_) {}
+      try { tx.close(); } catch(_) {}
+      // A busy database is worth retrying on the next run; anything else isn't.
+      if (/BUSY|locked/i.test(e.message)) break;
+      await db.execute({ sql: "UPDATE rental_scheduled_pauses SET status = 'cancelled', cancel_reason = ? WHERE id = ?", args: ['Could not start: ' + e.message, sp.id] });
+      continue;
+    }
+    try { tx.close(); } catch(_) {}
+  }
+}
 
 // ─── Item replacement (while paused for replacement) ────────────────────────
 // Swaps some or all outstanding units on a line for another rental product
@@ -946,7 +1418,7 @@ router.post('/agreements/:id/replace-item', requireRentalsManage, async (req, re
     if (!agreement) return res.status(404).json({ error: 'Not found' });
     if (agreement.status !== 'active' || !agreement.is_paused) return res.status(400).json({ error: 'Items can only be replaced on an active rental that is paused for replacement' });
     const { rows: [openPause] } = await db.execute({ sql: 'SELECT * FROM rental_agreement_pauses WHERE agreement_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1', args: [req.params.id] });
-    if (!openPause || openPause.reason !== 'replacement') return res.status(400).json({ error: 'This rental is not paused for replacement — pause it with reason "Replacement of Item" first' });
+    if (!openPause || openPause.reason !== 'replacement') return res.status(400).json({ error: 'This rental is not paused for replacement — pause it with reason "Replacement" first' });
 
     const { rows: [item] } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE id = ? AND agreement_id = ?', args: [item_id, req.params.id] });
     if (!item) return res.status(404).json({ error: 'Item not found on this agreement' });
@@ -1022,6 +1494,77 @@ router.post('/agreements/:id/replace-item', requireRentalsManage, async (req, re
 
 // Units held out of service — currently held by default, or ?status=all for
 // the last 200 including ones already returned to service.
+// ─── Maintenance list + work log ─────────────────────────────────────────
+const MAINTENANCE_LOG_TYPES = ['issue', 'work', 'parts', 'note'];
+
+const MAINTENANCE_SELECT = `SELECT rm.*, p.name as product_name, p.sku, b.name as branch_name,
+    ra.agreement_number, ra.is_paused as agreement_is_paused, ra.status as agreement_status,
+    c.first_name || ' ' || c.last_name as customer_name,
+    ob.first_name || ' ' || ob.last_name as opened_by_name, cb.first_name || ' ' || cb.last_name as completed_by_name,
+    (SELECT COUNT(*) FROM rental_maintenance_log WHERE maintenance_id = rm.id) as log_count,
+    (SELECT COALESCE(SUM(cost), 0) FROM rental_maintenance_log WHERE maintenance_id = rm.id) as total_cost,
+    (SELECT notes FROM rental_maintenance_log WHERE maintenance_id = rm.id ORDER BY id DESC LIMIT 1) as last_log_notes,
+    (SELECT created_at FROM rental_maintenance_log WHERE maintenance_id = rm.id ORDER BY id DESC LIMIT 1) as last_log_at
+  FROM rental_maintenance rm
+  LEFT JOIN products p ON rm.product_id = p.id
+  LEFT JOIN branches b ON rm.branch_id = b.id
+  LEFT JOIN rental_agreements ra ON rm.agreement_id = ra.id
+  LEFT JOIN customers c ON ra.customer_id = c.id
+  LEFT JOIN employees ob ON rm.opened_by = ob.id
+  LEFT JOIN employees cb ON rm.completed_by = cb.id`;
+
+router.get('/maintenance', requireRentalsManage, async (req, res) => {
+  try {
+    const { status, branch_id, agreement_id } = req.query;
+    let sql = `${MAINTENANCE_SELECT} WHERE 1=1`;
+    const args = [];
+    if (status !== 'all') sql += " AND rm.status = 'open'";
+    if (branch_id) { sql += ' AND rm.branch_id = ?'; args.push(branch_id); }
+    if (agreement_id) { sql += ' AND rm.agreement_id = ?'; args.push(agreement_id); }
+    sql += ' ORDER BY (rm.status = \'open\') DESC, rm.opened_at DESC LIMIT 300';
+    const { rows } = await db.execute({ sql, args });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/maintenance/:id', requireRentalsManage, async (req, res) => {
+  try {
+    const { rows: [m] } = await db.execute({ sql: `${MAINTENANCE_SELECT} WHERE rm.id = ?`, args: [req.params.id] });
+    if (!m) return res.status(404).json({ error: 'Not found' });
+    const { rows: log } = await db.execute({ sql: `SELECT l.*, e.first_name || ' ' || e.last_name as employee_name FROM rental_maintenance_log l LEFT JOIN employees e ON l.employee_id = e.id WHERE l.maintenance_id = ? ORDER BY l.id`, args: [req.params.id] });
+    m.log = log;
+    res.json(m);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/maintenance/:id/log', requireRentalsManage, async (req, res) => {
+  try {
+    const { entry_type, notes, cost, employee_id } = req.body;
+    if (!MAINTENANCE_LOG_TYPES.includes(entry_type)) return res.status(400).json({ error: 'Choose what kind of entry this is' });
+    if (!notes || !String(notes).trim()) return res.status(400).json({ error: 'Describe the issue or work done' });
+    const costVal = cost === '' || cost == null ? null : parseFloat(cost);
+    if (costVal != null && (!isFinite(costVal) || costVal < 0)) return res.status(400).json({ error: 'Cost must be a positive amount' });
+    const { rows: [m] } = await db.execute({ sql: 'SELECT status FROM rental_maintenance WHERE id = ?', args: [req.params.id] });
+    if (!m) return res.status(404).json({ error: 'Not found' });
+    await db.execute({ sql: 'INSERT INTO rental_maintenance_log (maintenance_id, entry_type, notes, cost, employee_id) VALUES (?,?,?,?,?)', args: [req.params.id, entry_type, String(notes).trim(), costVal, employee_id || null] });
+    res.status(201).json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Work signed off — the item's ready, even if the rental itself stays paused
+// (e.g. waiting to be taken back out to the customer).
+router.patch('/maintenance/:id/complete', requireRentalsManage, async (req, res) => {
+  try {
+    const { notes, employee_id } = req.body;
+    const { rows: [m] } = await db.execute({ sql: 'SELECT status FROM rental_maintenance WHERE id = ?', args: [req.params.id] });
+    if (!m) return res.status(404).json({ error: 'Not found' });
+    if (m.status !== 'open') return res.status(400).json({ error: 'This maintenance is already completed' });
+    await db.execute({ sql: 'INSERT INTO rental_maintenance_log (maintenance_id, entry_type, notes, employee_id) VALUES (?,?,?,?)', args: [req.params.id, 'completed', (notes && String(notes).trim()) || 'Work completed', employee_id || null] });
+    await db.execute({ sql: "UPDATE rental_maintenance SET status = 'completed', completed_at = ?, completed_by = ? WHERE id = ?", args: [new Date().toISOString(), employee_id || null, req.params.id] });
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/out-of-service', requireRentalsManage, async (req, res) => {
   try {
     const { branch_id, status } = req.query;
@@ -1196,6 +1739,7 @@ router.patch('/agreements/:id/cancel', requirePermission('rentals_returns'), asy
       // retail hold sourced from a quote).
       await tx.execute({ sql: `UPDATE quotations SET status = 'accepted', converted_to_agreement_id = NULL WHERE converted_to_agreement_id = ?`, args: [req.params.id] });
       await tx.execute({ sql: "UPDATE rental_agreements SET status = 'cancelled', cancellation_reason = ?, cancelled_by = ?, cancelled_at = CURRENT_TIMESTAMP WHERE id = ?", args: [reason || null, employee_id || null, req.params.id] });
+      await tx.execute({ sql: "UPDATE rental_scheduled_pauses SET status = 'cancelled', cancel_reason = 'Rental cancelled' WHERE agreement_id = ? AND status = 'scheduled'", args: [req.params.id] });
       await tx.commit();
       if (reversedCreditCustomerId) { try { await runCreditCheck(reversedCreditCustomerId); } catch(e) {} }
       try {
@@ -1236,6 +1780,7 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
     const { items, duration_adjustment_override, payment_method, drawer_session_id, pickup_driver_id, returned_at, return_security_employee_id, return_driver_employee_id, security_signature, driver_signature } = req.body;
     if (!items || !items.length) return res.status(400).json({ error: 'At least one item is required' });
 
+    await runScheduledPauses(req.params.id);
     const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
     if (!agreement) return res.status(404).json({ error: 'Not found' });
     if (agreement.status !== 'active') return res.status(400).json({ error: `Cannot return items on a ${agreement.status} agreement` });
@@ -1310,7 +1855,21 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
     // still used everywhere else (return timestamp, damage fee, etc.).
     const { rows: closedPauses } = await db.execute({ sql: 'SELECT started_at, ended_at FROM rental_agreement_pauses WHERE agreement_id = ? AND ended_at IS NOT NULL', args: [req.params.id] });
     const totalPausedMs = closedPauses.reduce((sum, p) => sum + Math.max(0, new Date(p.ended_at) - new Date(p.started_at)), 0);
-    const effectiveNow = new Date(Math.max(new Date(checkoutDateTime).getTime(), now.getTime() - totalPausedMs));
+    let effectiveNow = new Date(Math.max(new Date(checkoutDateTime).getTime(), now.getTime() - totalPausedMs));
+
+    // Due on a day the branch is closed (Sunday / public holiday) and back by
+    // the return-by time on the next open day: the time past the due time
+    // isn't charged (lib/closedDays.js).
+    let closedDayGraceApplied = null;
+    {
+      const { rows: [br] } = await db.execute({ sql: 'SELECT closed_day_grace FROM branches WHERE id = ?', args: [agreement.branch_id] });
+      const grace = closedDayGrace({ ...agreement, branch_closed_day_grace: br && br.closed_day_grace }, await loadClosedDaySettings(db));
+      const dueAt = dueDateTime(agreement);
+      if (grace && dueAt && now > dueAt && now <= grace.returnByAt) {
+        effectiveNow = new Date(Math.max(new Date(checkoutDateTime).getTime(), effectiveNow.getTime() - (now - dueAt)));
+        closedDayGraceApplied = grace;
+      }
+    }
 
     const tx = await db.transaction('write');
     try {
@@ -1368,6 +1927,7 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
       const { rows: refreshedItems } = await tx.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
       const allReturned = refreshedItems.every(i => i.quantity_returned >= i.quantity);
       const newStatus = allReturned ? 'returned' : 'active';
+      if (allReturned) await tx.execute({ sql: "UPDATE rental_scheduled_pauses SET status = 'cancelled', cancel_reason = 'Rental returned' WHERE agreement_id = ? AND status = 'scheduled'", args: [req.params.id] });
 
       // Delivery/pickup/operator requirement + cost were already decided (and
       // charged for) when the rental was created — pickup_driver_id here just
@@ -1450,6 +2010,7 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
     const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
     const { rows: updatedItems } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
     updated.items = updatedItems;
+    if (closedDayGraceApplied) updated.closed_day_grace_applied = { closedReason: closedDayGraceApplied.closedReason, nextOpenDate: closedDayGraceApplied.nextOpenDate, returnBy: closedDayGraceApplied.returnBy };
 
     // Only fires once the agreement is fully closed (every item returned) —
     // a partial return correctly leaves this alone. Credit-financed rentals
@@ -1730,3 +2291,4 @@ async function checkMissedPickups() {
 
 module.exports = router;
 module.exports.checkMissedPickups = checkMissedPickups;
+module.exports.runScheduledPauses = runScheduledPauses;

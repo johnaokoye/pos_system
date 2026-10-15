@@ -62,6 +62,7 @@ New columns must be appended to the `migrations` array in `database.js:_init()` 
 - `purchase_orders` / `purchase_order_items` → `suppliers`, `branches`; PO attachments in `po_attachments` table
 - `products` images stored in `uploads/products/`, served at `/uploads/products/<filename>`
 - `quotations` can be converted to transactions (`converted_to_tx` FK)
+- Special Project rental lines (`quotation_items.is_rental_line`, with `rental_start`/`rental_end`): approving the project creates a pending `rental_agreements` row per line (`rental_agreements.quotation_id`, `quotation_items.rental_agreement_id`) that holds the item; it can't be checked out on its own — `POST /transactions` with that `quote_id` moves it to `awaiting_issue`, then it's issued/returned through Rentals as usual
 - `branch_inventory` tracks per-branch stock separately from `products.stock_qty`
 - CRM: `crm_leads` → `crm_opportunities` → `crm_activities`; opportunities can link to quotations
 - Commissions: `commission_plans` → `employee_commission_plans` (per-employee assignment) → `commission_records` (auto-created by `calcCommission` on sale/opportunity won)

@@ -153,6 +153,8 @@ router.get('/:id', requireAuth, async (req, res) => {
     tx.items = items;
     const { rows: payments } = await db.execute({ sql: 'SELECT * FROM transaction_payments WHERE transaction_id = ? ORDER BY id', args: [req.params.id] });
     tx.payments = payments;
+    const isSpRentalLine = await spRentalLineMatcher(req.params.id);
+    for (const item of items) if (isSpRentalLine(item)) item.is_sp_rental = 1;
     // Pause history is agreement-level, not tied to which transaction (checkout
     // vs settlement) this is — shown on either printed invoice for the same rental.
     if (tx.rental_agreement_id) {
@@ -386,6 +388,11 @@ router.post('/', requirePermission('pos'), async (req, res) => {
 
       if (quote_id) {
         await tx.execute({ sql: `UPDATE quotations SET status = 'converted', converted_to_tx = ? WHERE id = ? AND status NOT IN ('converted','declined','cancelled')`, args: [txId, quote_id] });
+        // A Special Project's held rental items are paid for by this sale —
+        // they're now ready to issue through the Rentals screen, exactly
+        // like a rental paid at its own checkout (see holdSpecialProjectRentals
+        // in routes/quotations.js). No deposit on these.
+        await tx.execute({ sql: `UPDATE rental_agreements SET status = 'awaiting_issue', checkout_transaction_id = ?, deposit_total = 0 WHERE quotation_id = ? AND status = 'pending'`, args: [txId, quote_id] });
       }
 
       await tx.commit();
@@ -494,6 +501,33 @@ router.patch('/:id/fulfillment', requirePermission('transactions'), async (req, 
   } catch(e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
+// A Special Project invoice paid at the POS can include rental lines — custom
+// (no-product) lines named after the project's rental lines (see POST
+// /quotations/:id/convert). They're checked back in from the Rentals screen,
+// never returned here. Returns a predicate for this sale's items.
+async function spRentalLineMatcher(txId) {
+  const { rows } = await db.execute({ sql: `SELECT qi.product_name FROM quotation_items qi
+    WHERE qi.is_rental_line = 1 AND qi.quote_id IN (SELECT quotation_id FROM rental_agreements WHERE checkout_transaction_id = ? AND quotation_id IS NOT NULL)`, args: [txId] });
+  const names = rows.map(r => r.product_name);
+  return txItem => !txItem.product_id && (txItem.sku === 'RENTAL' || names.some(n => String(txItem.product_name || '').startsWith(n)));
+}
+
+// Credit card refunds are only allowed this many days after the sale (the
+// card processor won't reverse an older charge). Past that, a return paid
+// even partly by credit card can still go out as a credit note or exchange.
+const CARD_REFUND_WINDOW_DAYS = 90;
+
+// The SQLite CURRENT_TIMESTAMP default is UTC without a zone marker.
+function daysSinceSale(createdAt) {
+  const t = Date.parse(String(createdAt).replace(' ', 'T') + (/[zZ]|[+-]\d\d:?\d\d$/.test(createdAt) ? '' : 'Z'));
+  return (Date.now() - t) / 86400000;
+}
+
+async function paidByCreditCard(tx) {
+  const { rows } = await db.execute({ sql: "SELECT 1 FROM transaction_payments WHERE transaction_id = ? AND payment_method = 'credit_card' LIMIT 1", args: [tx.id] });
+  return rows.length > 0 || tx.payment_method === 'credit_card';
+}
+
 // Process a return
 router.post('/:id/return', requirePermission('transactions_returns'), async (req, res) => {
   try {
@@ -509,15 +543,21 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
     if (!tx) return res.status(404).json({ error: 'Transaction not found' });
     if (tx.status !== 'completed') return res.status(400).json({ error: 'Only completed transactions can be returned' });
     if (resolution === 'credit_note' && !tx.customer_id) return res.status(400).json({ error: 'Credit note requires a customer on the original transaction' });
+    if (resolution === 'refund' && daysSinceSale(tx.created_at) > CARD_REFUND_WINDOW_DAYS && await paidByCreditCard(tx)) {
+      return res.status(400).json({ error: `This sale was paid by credit card more than ${CARD_REFUND_WINDOW_DAYS} days ago, so it can't be refunded. Issue a credit note or an exchange instead.` });
+    }
 
     // Same reasoning as the void guard below: a rental's checkout/settlement
     // transaction never decremented stock, so "returning" it here would
     // incorrectly inflate stock — use the Rentals screen's Process Return
     // instead, which correctly handles duration/damage/deposit accounting.
-    const { rows: [linkedAgreement] } = await db.execute({ sql: 'SELECT agreement_number FROM rental_agreements WHERE checkout_transaction_id = ? OR settlement_transaction_id = ?', args: [req.params.id, req.params.id] });
-    if (linkedAgreement) {
+    const { rows: [linkedAgreement] } = await db.execute({ sql: 'SELECT agreement_number, quotation_id FROM rental_agreements WHERE checkout_transaction_id = ? OR settlement_transaction_id = ?', args: [req.params.id, req.params.id] });
+    // A Special Project invoice can carry rental lines alongside ordinary
+    // ones — its other lines can still be returned here, just not the rental.
+    if (linkedAgreement && !linkedAgreement.quotation_id) {
       return res.status(400).json({ error: `This transaction belongs to rental agreement ${linkedAgreement.agreement_number} — process the return from the Rentals screen instead.` });
     }
+    const isSpRentalLine = await spRentalLineMatcher(req.params.id);
 
     // Same reasoning — an assessment fee/deposit/final-payment transaction
     // never decremented stock either, so it has nothing a return could
@@ -539,6 +579,7 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
     for (const item of items) {
       const txItem = txItems.find(i => i.id === item.transaction_item_id);
       if (!txItem) return res.status(400).json({ error: `Item ${item.transaction_item_id} not found in transaction` });
+      if (isSpRentalLine(txItem)) return res.status(400).json({ error: `"${txItem.product_name}" is a rental — it's checked back in from the Rentals screen, not returned here.` });
       const alreadyRet = returnedMap[item.transaction_item_id] || 0;
       const maxQty = txItem.quantity - alreadyRet;
       if (item.quantity <= 0 || item.quantity > maxQty) return res.status(400).json({ error: `Invalid quantity for "${txItem.product_name}". Max returnable: ${maxQty}` });

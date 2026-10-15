@@ -618,6 +618,45 @@ async function _init() {
       resumed_by INTEGER REFERENCES employees(id),
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // A pause booked ahead of time (operator stop, negotiated stop) — turned
+    // into a real rental_agreement_pauses row when starts_at arrives, and
+    // that pause is resumed at ends_at (routes/rentals.js runScheduledPauses).
+    // status: scheduled -> started, or cancelled.
+    { sql: `CREATE TABLE IF NOT EXISTS rental_scheduled_pauses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agreement_id INTEGER NOT NULL REFERENCES rental_agreements(id),
+      reason TEXT NOT NULL,
+      notes TEXT,
+      starts_at DATETIME NOT NULL,
+      ends_at DATETIME,
+      status TEXT NOT NULL DEFAULT 'scheduled',
+      pause_id INTEGER REFERENCES rental_agreement_pauses(id),
+      cancel_reason TEXT,
+      created_by INTEGER REFERENCES employees(id),
+      authorized_by INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    // A repeating stop (daily or weekly window, store-local times) — its
+    // occurrences are booked as rental_scheduled_pauses rows (series_id) a
+    // couple of weeks ahead on a rolling basis (routes/rentals.js
+    // materializePauseSeries). status: active -> cancelled / ended.
+    { sql: `CREATE TABLE IF NOT EXISTS rental_pause_series (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agreement_id INTEGER NOT NULL REFERENCES rental_agreements(id),
+      reason TEXT NOT NULL,
+      notes TEXT,
+      frequency TEXT NOT NULL,
+      start_day INTEGER,
+      start_time TEXT NOT NULL,
+      end_day INTEGER,
+      end_time TEXT NOT NULL,
+      from_date TEXT NOT NULL,
+      until_date TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_by INTEGER REFERENCES employees(id),
+      authorized_by INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     // Swapping a faulty rental unit for another while the agreement is
     // paused for replacement (POST /rentals/agreements/:id/replace-item). One
     // row per swap — the audit trail. item_id is the line now holding the
@@ -657,6 +696,35 @@ async function _init() {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       returned_to_service_at DATETIME,
       returned_to_service_by INTEGER REFERENCES employees(id)
+    )` },
+    // Rental items taken in for maintenance/repair/servicing while their
+    // rental is paused (POST /rentals/agreements/:id/pause) — one row per
+    // agreement line, with a running log of the issues found and work done.
+    // 'open' while it's in the shop; 'completed' when the work is signed off
+    // or the rental is resumed.
+    { sql: `CREATE TABLE IF NOT EXISTS rental_maintenance (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agreement_id INTEGER NOT NULL REFERENCES rental_agreements(id),
+      agreement_item_id INTEGER REFERENCES rental_agreement_items(id),
+      pause_id INTEGER REFERENCES rental_agreement_pauses(id),
+      product_id INTEGER REFERENCES products(id),
+      branch_id INTEGER REFERENCES branches(id),
+      quantity INTEGER NOT NULL DEFAULT 1,
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open',
+      opened_by INTEGER REFERENCES employees(id),
+      opened_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      completed_by INTEGER REFERENCES employees(id),
+      completed_at DATETIME
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS rental_maintenance_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      maintenance_id INTEGER NOT NULL REFERENCES rental_maintenance(id),
+      entry_type TEXT NOT NULL DEFAULT 'note',
+      notes TEXT NOT NULL,
+      cost REAL,
+      employee_id INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
     { sql: `CREATE TABLE IF NOT EXISTS product_accessories (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1511,6 +1579,22 @@ async function _init() {
     'ALTER TABLE rental_agreement_pauses ADD COLUMN customer_confirmation TEXT',
     'ALTER TABLE rental_agreement_pauses ADD COLUMN confirmed_by INTEGER REFERENCES employees(id)',
     'ALTER TABLE rental_agreement_pauses ADD COLUMN confirmed_at DATETIME',
+    // When set, the pause resumes itself at this time (scheduled resumption).
+    'ALTER TABLE rental_agreement_pauses ADD COLUMN scheduled_resume_at DATETIME',
+    'ALTER TABLE rental_scheduled_pauses ADD COLUMN series_id INTEGER REFERENCES rental_pause_series(id)',
+    'ALTER TABLE rental_scheduled_pauses ADD COLUMN occurrence_date TEXT',
+    // frequency='weekdays': the days (0 = Sunday) a stop starts on, e.g. '1,2,3,4,5'.
+    'ALTER TABLE rental_pause_series ADD COLUMN days TEXT',
+    // Dispatch schedule: when a rental's delivery / pickup is booked to
+    // happen (start, optional end of the window), set from Rental Dispatch →
+    // Schedule (PATCH /rentals/agreements/:id/schedule-dispatch). The driver
+    // goes in the existing delivery_driver_id / pickup_driver_id.
+    'ALTER TABLE rental_agreements ADD COLUMN delivery_scheduled_start DATETIME',
+    'ALTER TABLE rental_agreements ADD COLUMN delivery_scheduled_end DATETIME',
+    'ALTER TABLE rental_agreements ADD COLUMN delivery_schedule_notes TEXT',
+    'ALTER TABLE rental_agreements ADD COLUMN pickup_scheduled_start DATETIME',
+    'ALTER TABLE rental_agreements ADD COLUMN pickup_scheduled_end DATETIME',
+    'ALTER TABLE rental_agreements ADD COLUMN pickup_schedule_notes TEXT',
     // Pickup driver pre-assignment + field confirmation. pickup_driver_id
     // already existed (set only at return time, as whoever did the pickup);
     // pickup_driver_assigned_at marks that a dispatcher assigned it ahead of
@@ -1822,6 +1906,21 @@ async function _init() {
     // bundle_price instead.
     'ALTER TABLE promotions ADD COLUMN bundle_pricing TEXT',
     'ALTER TABLE promotions ADD COLUMN bundle_price REAL',
+    // Rental items on a Special Project: the line's rental period, billed as
+    // part of the project invoice. Approving the project holds the item by
+    // creating a pending rental agreement (rental_agreement_id, and
+    // rental_agreements.quotation_id back the other way) that is issued and
+    // returned through the normal Rentals screens once the invoice is paid.
+    'ALTER TABLE quotation_items ADD COLUMN is_rental_line INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE quotation_items ADD COLUMN rental_start TEXT',
+    'ALTER TABLE quotation_items ADD COLUMN rental_end TEXT',
+    'ALTER TABLE quotation_items ADD COLUMN rental_agreement_id INTEGER REFERENCES rental_agreements(id)',
+    'ALTER TABLE rental_agreements ADD COLUMN quotation_id INTEGER REFERENCES quotations(id)',
+    // Branch is closed on Sundays and the public holidays in Settings: a
+    // rental due back on one of those days may be returned by the return-by
+    // time (default 8:00 AM) on the next open day without a late charge
+    // (lib/closedDays.js).
+    'ALTER TABLE branches ADD COLUMN closed_day_grace INTEGER NOT NULL DEFAULT 0',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

@@ -33,12 +33,12 @@ router.get('/:id', requirePermission('branches'), async (req, res) => {
 });
 
 router.post('/', requirePermission('branches'), async (req, res) => {
-  const { name, address, city, state, zip, phone, email, manager, currency, price_tier_percent } = req.body;
+  const { name, address, city, state, zip, phone, email, manager, currency, price_tier_percent, closed_day_grace } = req.body;
   if (!name) return res.status(400).json({ error: 'Name required' });
   try {
     const { rows: [count] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM branches', args: [] });
     const branch_code = `BR-${String(Number(count.c) + 1).padStart(3, '0')}`;
-    const result = await db.execute({ sql: 'INSERT INTO branches (branch_code,name,address,city,state,zip,phone,email,manager,currency,price_tier_percent) VALUES (?,?,?,?,?,?,?,?,?,?,?)', args: [branch_code, name, address||null, city||null, state||null, zip||null, phone||null, email||null, manager||null, currency||null, parseFloat(price_tier_percent) || 0] });
+    const result = await db.execute({ sql: 'INSERT INTO branches (branch_code,name,address,city,state,zip,phone,email,manager,currency,price_tier_percent,closed_day_grace) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', args: [branch_code, name, address||null, city||null, state||null, zip||null, phone||null, email||null, manager||null, currency||null, parseFloat(price_tier_percent) || 0, closed_day_grace ? 1 : 0] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM branches WHERE id = ?', args: [Number(result.lastInsertRowid)] });
     res.status(201).json(row);
   } catch(e) {
@@ -47,11 +47,11 @@ router.post('/', requirePermission('branches'), async (req, res) => {
 });
 
 router.put('/:id', requirePermission('branches'), async (req, res) => {
-  const { name, address, city, state, zip, phone, email, manager, active, currency, is_warehouse, price_tier_percent } = req.body;
+  const { name, address, city, state, zip, phone, email, manager, active, currency, is_warehouse, price_tier_percent, closed_day_grace } = req.body;
   // The Branch Management form doesn't send is_warehouse (it's toggled from
   // Warehouse > Locations), so an omitted value keeps the current flag.
   try {
-    await db.execute({ sql: 'UPDATE branches SET name=?,address=?,city=?,state=?,zip=?,phone=?,email=?,manager=?,active=?,currency=?,is_warehouse=COALESCE(?, is_warehouse),price_tier_percent=? WHERE id=?', args: [name, address||null, city||null, state||null, zip||null, phone||null, email||null, manager||null, active??1, currency||null, is_warehouse === undefined ? null : (is_warehouse?1:0), parseFloat(price_tier_percent) || 0, req.params.id] });
+    await db.execute({ sql: 'UPDATE branches SET name=?,address=?,city=?,state=?,zip=?,phone=?,email=?,manager=?,active=?,currency=?,is_warehouse=COALESCE(?, is_warehouse),price_tier_percent=?,closed_day_grace=COALESCE(?, closed_day_grace) WHERE id=?', args: [name, address||null, city||null, state||null, zip||null, phone||null, email||null, manager||null, active??1, currency||null, is_warehouse === undefined ? null : (is_warehouse?1:0), parseFloat(price_tier_percent) || 0, closed_day_grace === undefined ? null : (closed_day_grace ? 1 : 0), req.params.id] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM branches WHERE id = ?', args: [req.params.id] });
     res.json(row);
   } catch(e) {

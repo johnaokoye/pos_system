@@ -2056,7 +2056,15 @@ const App = {
     // assign-pickup-driver) and not yet confirmed in the field — not the
     // shared pending pool above still is.
     const pickups = agreements.filter(a => a.pickup_required && a.status === 'active' && a.pickup_driver_id === myId && !a.pickup_confirmed_at)
-      .sort((a,b) => (a.due_date||'').localeCompare(b.due_date||''));
+      .sort((a,b) => (a.pickup_scheduled_start || a.due_date || '').localeCompare(b.pickup_scheduled_start || b.due_date || ''));
+    readyToClaim.sort((a,b) => (a.delivery_scheduled_start || '9').localeCompare(b.delivery_scheduled_start || '9'));
+    // When dispatch has booked the job: "🗓 Fri 9:00 AM – 11:00 AM" + notes.
+    const booked = (a, leg) => {
+      const s = a[`${leg}_scheduled_start`]; if (!s) return '';
+      const e = a[`${leg}_scheduled_end`];
+      const t = d => new Date(d).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+      return `<div style="font-size:12px;font-weight:600;color:var(--primary)">🗓 ${t(s)}${e ? ` – ${new Date(e).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}` : ''}</div>${a[`${leg}_schedule_notes`] ? `<div style="font-size:11px;color:var(--text-muted)">${this.escapeAttr(a[`${leg}_schedule_notes`])}</div>` : ''}`;
+    };
 
     const history = agreements
       .filter(a => (a.delivery_driver_id === myId && a.delivery_driver_confirmed_at) || (a.pickup_driver_id === myId && (a.pickup_confirmed_at || a.status === 'returned')) || a.return_driver_employee_id === myId)
@@ -2067,9 +2075,9 @@ const App = {
 
     document.getElementById('content').innerHTML = `
       <div class="section-header"><h2>My Deliveries</h2></div>
-      ${this._rentalDashSection('Deliveries Ready to Claim', readyToClaim.map(a => this._rentalDashRow(a, '', this.can('rentals_confirm_delivery') ? `<button class="btn btn-sm btn-primary" onclick="App.showClaimDeliveryModal(${a.id})">Accept &amp; Sign for Delivery</button>` : '', this._rentalDeliveryContactHtml(a))), 'No deliveries waiting to go out.')}
-      ${this._rentalDashSection('Out for Delivery — Awaiting Customer Signature', outForDelivery.map(a => this._rentalDashRow(a, '', this.can('rentals_confirm_delivery') ? `<button class="btn btn-sm btn-primary" onclick="App.showDeliveryCustomerSignatureModal(${a.id})">Get Customer Signature</button>` : '', this._rentalDeliveryContactHtml(a))), 'Nothing out for delivery right now.')}
-      ${this._rentalDashSection('Pickups Needed', pickups.map(a => this._rentalDashRow(a, '', this.can('rentals_confirm_pickup') ? `<button class="btn btn-sm btn-primary" onclick="App.showConfirmPickupModal(${a.id})">Confirm Pickup</button>` : '', `<div style="font-size:12px;color:var(--text-muted)">📍 ${this._rentalPickupAddress(a) || 'No address on file'}</div>`)), 'No pickups assigned to you right now.')}
+      ${this._rentalDashSection('Deliveries Ready to Claim', readyToClaim.map(a => this._rentalDashRow(a, booked(a, 'delivery'), this.can('rentals_confirm_delivery') ? `<button class="btn btn-sm btn-primary" onclick="App.showClaimDeliveryModal(${a.id})">Accept &amp; Sign for Delivery</button>` : '', this._rentalDeliveryContactHtml(a))), 'No deliveries waiting to go out.')}
+      ${this._rentalDashSection('Out for Delivery — Awaiting Customer Signature', outForDelivery.map(a => this._rentalDashRow(a, booked(a, 'delivery'), this.can('rentals_confirm_delivery') ? `<button class="btn btn-sm btn-primary" onclick="App.showDeliveryCustomerSignatureModal(${a.id})">Get Customer Signature</button>` : '', this._rentalDeliveryContactHtml(a))), 'Nothing out for delivery right now.')}
+      ${this._rentalDashSection('Pickups Needed', pickups.map(a => this._rentalDashRow(a, booked(a, 'pickup'), this.can('rentals_confirm_pickup') ? `<button class="btn btn-sm btn-primary" onclick="App.showConfirmPickupModal(${a.id})">Confirm Pickup</button>` : '', `<div style="font-size:12px;color:var(--text-muted)">📍 ${this._rentalPickupAddress(a) || 'No address on file'}</div>`)), 'No pickups assigned to you right now.')}
       ${this._rentalDashSection('My Recent Activity', history.map(a => this._rentalDashRow(a, `<div style="font-size:11px;color:var(--text-muted)">${a.display_status}</div>`, '', `<div style="font-size:12px;color:var(--text-muted)">📍 ${this._rentalPickupAddress(a) || 'No address on file'}</div>`, false)), 'No completed deliveries or pickups yet.')}
     `;
   },
@@ -3553,7 +3561,7 @@ const App = {
         this.can('rentals') ? this.api('GET', rentalsUrl).catch(() => []) : Promise.resolve([]),
         this.can('rentals') ? this.api('GET', rentalBalanceUrl).catch(() => []) : Promise.resolve([]),
         this.can('work_orders') ? this.api('GET', woUrl).catch(() => []) : Promise.resolve([]),
-      ]);
+      ]).then(([h, pr, ...rest]) => [h, pr.filter(r => !r.quotation_id), ...rest]);
       if (!held.length && !pendingRentals.length && !pendingRentalBalances.length && !pendingWOs.length) {
         this.alert(customerId ? `No held orders for ${this.cartCustomer.first_name} ${this.cartCustomer.last_name}` : 'No held orders', 'info');
         return;
@@ -3713,7 +3721,7 @@ const App = {
         this.can('rentals') ? this.api('GET', '/rentals/agreements?view=pending').catch(() => []) : Promise.resolve([]),
         this.can('rentals') ? this.api('GET', '/rentals/agreements?view=awaiting_payment&limit=50').catch(() => []) : Promise.resolve([]),
         this.can('work_orders') ? this.api('GET', '/work-orders?view=awaiting_payment&limit=50').catch(() => []) : Promise.resolve([]),
-      ]);
+      ]).then(([h, pr, ...rest]) => [h, pr.filter(r => !r.quotation_id), ...rest]);
       const count = held.length + pendingRentals.length + pendingRentalBalances.length + pendingWOs.length;
       const badge = document.getElementById('hold-count-badge');
       if (!badge) return;
@@ -5723,6 +5731,7 @@ const App = {
     { key: 'all',            label: 'All Agreements' },
     { key: 'returned',       label: 'Returned' },
     { key: 'cancelled',      label: 'Cancelled' },
+    { key: 'maintenance',    label: 'In Maintenance' },
     { key: 'out_of_service', label: 'Out of Service' },
   ],
 
@@ -5764,6 +5773,7 @@ const App = {
     const hdr = document.getElementById('rental-header-actions');
     if (hdr) hdr.innerHTML = `${this.can('quotations') ? `<button class="btn btn-secondary btn-sm" style="margin-right:8px" onclick="App.showQuoteForm(null,'rental')">Rental Quote</button>` : ''}${this.can('rentals_issue') ? `<button class="btn btn-secondary btn-sm" style="margin-right:8px" onclick="App.showSection('rental-dispatch')">Rental Dispatch</button>` : ''}${this.can('rentals_checkout') ? `<button class="btn btn-primary btn-sm" onclick="App.showRentalCheckoutModal()">+ New Rental</button>` : ''}`;
     if (this.rentalTab === 'out_of_service') await this.loadRentalOutOfService();
+    else if (this.rentalTab === 'maintenance') await this.loadRentalMaintenance();
     else await this.loadRentalAgreements();
   },
 
@@ -5795,6 +5805,98 @@ const App = {
       </div>`);
   },
 
+  // Items taken in for maintenance/repair/servicing on a paused rental (see
+  // showPauseRentalModal), each with its work log.
+  _maintLogLabels: { issue: 'Issue found', work: 'Work done', parts: 'Parts', note: 'Note', completed: 'Completed' },
+
+  async loadRentalMaintenance() {
+    const el = document.getElementById('rental-content');
+    if (!el) return;
+    const showAll = !!this._maintShowAll;
+    const rows = await this.api('GET', `/rentals/maintenance${showAll ? '?status=all' : ''}`);
+    if (!document.getElementById('rental-content') || this.rentalTab !== 'maintenance') return;
+    const toggle = `<label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:10px"><input type="checkbox" ${showAll ? 'checked' : ''} onchange="App._maintShowAll=this.checked;App.loadRentalMaintenance()" style="width:auto;margin:0"> Include completed maintenance</label>`;
+    const days = r => Math.max(0, Math.floor(((r.completed_at ? new Date(r.completed_at) : new Date()) - new Date(String(r.opened_at).replace(' ', 'T') + (/Z|[+-]\d\d:?\d\d$/.test(r.opened_at) ? '' : 'Z'))) / 86400000));
+    el.innerHTML = toggle + (!rows.length ? `<div class="empty-state"><p>${showAll ? 'No maintenance recorded yet.' : 'No rental items are in maintenance.'}</p></div>` : `
+      <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>Item</th><th>Qty</th><th>Reason</th><th>Agreement</th><th>Customer</th><th>Branch</th><th>In Since</th><th>Latest Entry</th><th>Cost</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rows.map(r => `<tr>
+          <td class="fw-600">${r.product_name || '—'}${r.sku ? `<div style="font-size:11px;color:var(--text-muted);font-family:monospace">${r.sku}</div>` : ''}</td>
+          <td>${r.quantity}</td>
+          <td style="text-transform:capitalize">${r.reason}</td>
+          <td><a href="#" onclick="event.preventDefault();App.viewRentalAgreement(${r.agreement_id})">${r.agreement_number}</a></td>
+          <td>${r.customer_name || '—'}</td>
+          <td>${r.branch_name || '—'}</td>
+          <td style="font-size:12px">${this.fmtDateTime(r.opened_at)}<div style="color:var(--text-muted)">${days(r)} day${days(r) === 1 ? '' : 's'}${r.opened_by_name ? ` · ${r.opened_by_name}` : ''}</div></td>
+          <td style="font-size:12px;max-width:280px">${r.last_log_notes ? this.escapeAttr(r.last_log_notes) : '—'}<div style="color:var(--text-muted)">${r.log_count} entr${r.log_count === 1 ? 'y' : 'ies'}</div></td>
+          <td>${r.total_cost > 0 ? this.fmt(r.total_cost) : '—'}</td>
+          <td>${r.status === 'open' ? '<span class="badge-pill badge-warning">In maintenance</span>' : `<span class="badge-pill badge-success">Completed ${this.fmtDate(r.completed_at)}</span>`}</td>
+          <td style="white-space:nowrap"><button class="btn btn-sm btn-outline" onclick="App.showRentalMaintenance(${r.id})">${r.status === 'open' ? 'Log / Update' : 'View Log'}</button></td>
+        </tr>`).join('')}</tbody>
+      </table>
+      </div>`);
+  },
+
+  async showRentalMaintenance(id) {
+    const m = await this.api('GET', `/rentals/maintenance/${id}`);
+    const open = m.status === 'open';
+    this.showModal(`
+      <div class="modal" style="max-width:640px">
+        <div class="modal-header"><span class="modal-title">${m.product_name} — ${m.reason.charAt(0).toUpperCase() + m.reason.slice(1)}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body" style="max-height:72vh;overflow-y:auto">
+          <div style="font-size:13px;margin-bottom:12px;line-height:1.6">
+            <strong>Agreement:</strong> <a href="#" onclick="event.preventDefault();App.closeModal();App.viewRentalAgreement(${m.agreement_id})">${m.agreement_number}</a> · ${m.customer_name || '—'} · ${m.branch_name || '—'}<br>
+            <strong>Qty:</strong> ${m.quantity}${m.sku ? ` · <span style="font-family:monospace">${m.sku}</span>` : ''} · <strong>In since</strong> ${this.fmtDateTime(m.opened_at)}${m.opened_by_name ? ` by ${m.opened_by_name}` : ''}<br>
+            <strong>Status:</strong> ${open ? '<span class="badge-pill badge-warning">In maintenance</span>' : `<span class="badge-pill badge-success">Completed</span> ${this.fmtDateTime(m.completed_at)}${m.completed_by_name ? ` by ${m.completed_by_name}` : ''}`}
+            ${m.total_cost > 0 ? ` · <strong>Cost so far:</strong> ${this.fmt(m.total_cost)}` : ''}
+          </div>
+          <div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;margin-bottom:6px">Work Log</div>
+          <div style="border:1px solid var(--border);border-radius:6px;margin-bottom:14px">
+            ${m.log.map((l, i) => `<div style="padding:8px 12px;${i ? 'border-top:1px solid var(--border);' : ''}font-size:13px">
+              <div style="display:flex;justify-content:space-between;gap:8px"><strong>${this._maintLogLabels[l.entry_type] || l.entry_type}${l.cost != null ? ` · ${this.fmt(l.cost)}` : ''}</strong><span style="font-size:11px;color:var(--text-muted);white-space:nowrap">${this.fmtDateTime(l.created_at)}${l.employee_name ? ` · ${l.employee_name}` : ''}</span></div>
+              <div style="white-space:pre-wrap;overflow-wrap:anywhere">${this.escapeAttr(l.notes)}</div>
+            </div>`).join('')}
+          </div>
+          ${open ? `<div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;margin-bottom:6px">Add to Log</div>
+          <div class="input-row">
+            <div class="form-group"><label>Type</label><select id="ml-type">
+              ${['issue', 'work', 'parts', 'note'].map(t => `<option value="${t}" ${t === 'work' ? 'selected' : ''}>${this._maintLogLabels[t]}</option>`).join('')}
+            </select></div>
+            <div class="form-group"><label>Cost (optional)</label><input id="ml-cost" type="number" min="0" step="0.01" placeholder="0.00"></div>
+          </div>
+          <div class="form-group"><label>Details</label><textarea id="ml-notes" rows="3" style="width:100%;resize:vertical" placeholder="What was found, what was done, parts used…"></textarea></div>` : ''}
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+          ${open ? `<button class="btn btn-outline" onclick="App.completeRentalMaintenance(${m.id})">Mark Complete</button>
+          <button class="btn btn-primary" onclick="App.addRentalMaintenanceLog(${m.id})">Add Entry</button>` : ''}
+        </div>
+      </div>`);
+  },
+
+  async addRentalMaintenanceLog(id) {
+    const notes = document.getElementById('ml-notes').value.trim();
+    if (!notes) { this.alert('Describe the issue or work done', 'error'); return; }
+    try {
+      await this.api('POST', `/rentals/maintenance/${id}/log`, { entry_type: document.getElementById('ml-type').value, notes, cost: document.getElementById('ml-cost').value, employee_id: this.currentUser.id });
+      this.alert('Entry added');
+      await this.showRentalMaintenance(id);
+      if (this.rentalTab === 'maintenance') this.loadRentalMaintenance();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async completeRentalMaintenance(id) {
+    const notes = document.getElementById('ml-notes')?.value.trim();
+    if (!confirm('Mark this maintenance complete? The item is ready to go back out. (Resume the rental to restart its billing clock.)')) return;
+    try {
+      await this.api('PATCH', `/rentals/maintenance/${id}/complete`, { notes, employee_id: this.currentUser.id });
+      this.alert('Maintenance completed');
+      await this.showRentalMaintenance(id);
+      if (this.rentalTab === 'maintenance') this.loadRentalMaintenance();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
   async returnRentalUnitToService(id) {
     if (!confirm('Return this unit to service? It will show as available to rent again.')) return;
     try {
@@ -5811,6 +5913,7 @@ const App = {
   // GET /rentals/agreements?view= endpoint the Rentals screen itself uses.
 
   _dispatchTabs: [
+    { key: 'schedule',          label: 'Schedule' },
     { key: 'awaiting_issue',    label: 'Awaiting Issue' },
     { key: 'active',            label: 'Issued' },
     { key: 'deliveries',        label: 'Deliveries' },
@@ -5818,7 +5921,7 @@ const App = {
   ],
 
   async renderRentalDispatch() {
-    this.dispatchTab = this.dispatchTab || 'awaiting_issue';
+    this.dispatchTab = this.dispatchTab || 'schedule';
     document.getElementById('content').innerHTML = `
       <div class="section-header">
         <h2>Rental Dispatch</h2>
@@ -5839,6 +5942,7 @@ const App = {
   },
 
   async loadDispatchTab() {
+    if (this.dispatchTab === 'schedule') return this.loadDispatchScheduleTab();
     if (this.dispatchTab === 'deliveries') return this.loadDeliveriesTab();
     if (this.dispatchTab === 'pickup_reminders') return this.loadPickupRemindersTab();
     const el = document.getElementById('dispatch-content');
@@ -5879,6 +5983,164 @@ const App = {
   // agreement's checkout_date (when the item goes/went out); Pickup Date
   // mirrors due_date (when it's scheduled to be collected back) — same
   // fields the rental agreement itself is billed against.
+  // ─── Dispatch schedule ─────────────────────────────────────────────────
+  // Deliveries and pickups booked for a date range, by day, with the open
+  // jobs nobody has booked yet at the top (GET /rentals/dispatch-schedule).
+  _localDate(d) { const p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`; },
+
+  _dispatchRange() {
+    const today = new Date();
+    const add = n => { const d = new Date(today); d.setDate(d.getDate() + n); return this._localDate(d); };
+    const preset = this._dispatchPreset || 'week';
+    if (preset === 'today') return { from: add(0), to: add(0) };
+    if (preset === 'tomorrow') return { from: add(1), to: add(1) };
+    if (preset === 'custom') return { from: this._dispatchFrom || add(0), to: this._dispatchTo || add(6) };
+    return { from: add(0), to: add(6) };
+  },
+
+  async loadDispatchScheduleTab() {
+    const el = document.getElementById('dispatch-content');
+    if (!el) return;
+    if (!this._dispatchDrivers) {
+      try { this._dispatchDrivers = (await this.api('GET', '/employees')).filter(e => e.is_driver && e.active !== 0); } catch(e) { this._dispatchDrivers = []; }
+    }
+    const { from, to } = this._dispatchRange();
+    const driver = this._dispatchDriver || '';
+    let data;
+    try { data = await this.api('GET', `/rentals/dispatch-schedule?from=${from}&to=${to}${driver ? `&driver_id=${driver}` : ''}`); }
+    catch(e) { el.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    if (this.dispatchTab !== 'schedule' || !document.getElementById('dispatch-content')) return;
+    const canSchedule = this.can('rentals_issue');
+    const legBadge = leg => leg === 'delivery' ? '<span class="badge-pill badge-info" style="font-size:10px">DELIVERY</span>' : '<span class="badge-pill badge-warning" style="font-size:10px">PICKUP</span>';
+    const stateBadge = { done: '<span class="badge-pill badge-success">Done</span>', out: '<span class="badge-pill badge-teal">Out for delivery</span>', late: '<span class="badge-pill badge-danger">Late</span>', pending: '<span class="badge-pill badge-secondary">Booked</span>' };
+    const time = d => new Date(d).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    const addr = j => j.leg === 'delivery' ? (j.agreement.delivery_address || this._rentalPickupAddress(j.agreement) || '—') : (this._rentalPickupAddress(j.agreement) || '—');
+    const row = (j, withTime) => `<tr>
+      ${withTime ? `<td style="white-space:nowrap" class="fw-600">${time(j.start)}${j.end ? ` – ${time(j.end)}` : ''}</td>` : `<td style="white-space:nowrap;font-size:12px">Due ${this.fmtDate(j.agreement.due_date)}</td>`}
+      <td>${legBadge(j.leg)}</td>
+      <td class="fw-600"><a href="#" onclick="event.preventDefault();App.viewRentalAgreement(${j.agreement.id})">${j.agreement.agreement_number}</a></td>
+      <td>${j.agreement.customer_name || '—'}${j.agreement.customer_phone ? `<div style="font-size:11px"><a href="tel:${j.agreement.customer_phone}">${j.agreement.customer_phone}</a></div>` : ''}</td>
+      <td style="font-size:12px;max-width:220px">${addr(j)}</td>
+      <td style="font-size:12px;max-width:180px">${j.agreement.item_summary || '—'}</td>
+      <td>${j.driver_name || '<span style="color:var(--text-muted)">Unassigned</span>'}</td>
+      <td>${withTime ? (stateBadge[j.state] || '') : ''}${j.notes ? `<div style="font-size:11px;color:var(--text-muted);max-width:180px">${this.escapeAttr(j.notes)}</div>` : ''}</td>
+      <td style="text-align:right;white-space:nowrap">${canSchedule && j.state !== 'done' && j.open ? `<button class="btn btn-sm ${withTime ? 'btn-outline' : 'btn-primary'}" onclick="App.showScheduleDispatchModal(${j.agreement.id},'${j.leg}')">${withTime ? 'Reschedule' : 'Schedule'}</button>` : ''}</td>
+    </tr>`;
+    const head = first => `<thead><tr><th>${first}</th><th>Job</th><th>Agreement</th><th>Customer</th><th>Address</th><th>Items</th><th>Driver</th><th>Status</th><th></th></tr></thead>`;
+    const byDay = {};
+    for (const j of data.scheduled) { const k = this._localDate(new Date(j.start)); (byDay[k] = byDay[k] || []).push(j); }
+    const days = Object.keys(byDay).sort();
+    el.innerHTML = `
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px">
+        <select id="ds-preset" onchange="App._dispatchPreset=this.value;App.loadDispatchScheduleTab()" style="width:150px">
+          ${[['today','Today'],['tomorrow','Tomorrow'],['week','Next 7 days'],['custom','Choose dates…']].map(([v,l]) => `<option value="${v}" ${(this._dispatchPreset||'week')===v?'selected':''}>${l}</option>`).join('')}
+        </select>
+        ${(this._dispatchPreset||'week') === 'custom' ? `<input type="date" value="${from}" onchange="App._dispatchFrom=this.value;App.loadDispatchScheduleTab()" style="width:150px"> to <input type="date" value="${to}" onchange="App._dispatchTo=this.value;App.loadDispatchScheduleTab()" style="width:150px">` : `<span style="font-size:13px;color:var(--text-muted)">${this.fmtDate(from + 'T12:00:00')}${from !== to ? ` – ${this.fmtDate(to + 'T12:00:00')}` : ''}</span>`}
+        <select onchange="App._dispatchDriver=this.value;App.loadDispatchScheduleTab()" style="width:180px">
+          <option value="">All drivers</option>
+          ${this._dispatchDrivers.map(d => `<option value="${d.id}" ${String(driver)===String(d.id)?'selected':''}>${d.first_name} ${d.last_name}</option>`).join('')}
+        </select>
+      </div>
+      ${data.unscheduled.length ? `<div class="card" style="margin-bottom:16px;border-left:3px solid var(--warning,#d97706)">
+        <div class="card-header"><span class="card-title">Needs Scheduling (${data.unscheduled.length})</span></div>
+        <div class="table-wrap"><table class="table">${head('Due')}<tbody>${data.unscheduled.map(j => row(j, false)).join('')}</tbody></table></div>
+      </div>` : ''}
+      ${days.length ? days.map(d => `<div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">${new Date(d + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}</span><span style="font-size:12px;color:var(--text-muted)">${byDay[d].length} job${byDay[d].length === 1 ? '' : 's'}</span></div>
+        <div class="table-wrap"><table class="table">${head('Time')}<tbody>${byDay[d].map(j => row(j, true)).join('')}</tbody></table></div>
+      </div>`).join('') : `<div class="empty-state"><p>No deliveries or pickups booked for these dates${driver ? ' for this driver' : ''}.</p></div>`}`;
+  },
+
+  async showScheduleDispatchModal(id, leg) {
+    const a = await this.api('GET', `/rentals/agreements/${id}`);
+    if (!this._dispatchDrivers) {
+      try { this._dispatchDrivers = (await this.api('GET', '/employees')).filter(e => e.is_driver && e.active !== 0); } catch(e) { this._dispatchDrivers = []; }
+    }
+    const isDelivery = leg === 'delivery';
+    const start = a[`${leg}_scheduled_start`] ? new Date(a[`${leg}_scheduled_start`]) : null;
+    const end = a[`${leg}_scheduled_end`] ? new Date(a[`${leg}_scheduled_end`]) : null;
+    const hhmm = d => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    const defDate = start ? this._localDate(start) : isDelivery ? this._localDate(new Date()) : String(a.due_date).slice(0, 10);
+    const driverId = isDelivery ? a.delivery_driver_id : a.pickup_driver_id;
+    const lockedDriver = isDelivery && a.delivery_driver_confirmed_at;
+    this.showModal(`
+      <div class="modal" style="max-width:460px">
+        <div class="modal-header"><span class="modal-title">Schedule ${isDelivery ? 'Delivery' : 'Pickup'} — ${a.agreement_number}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;line-height:1.6">
+            ${a.customer_name || '—'} · ${a.items.filter(i => !i.parent_item_id).map(i => `${i.product_name} ×${i.quantity}`).join(', ')}<br>
+            📍 ${(isDelivery ? a.delivery_address : '') || this._rentalPickupAddress(a) || 'No address on file'}<br>
+            Due back ${this.fmtDate(a.due_date)}
+          </div>
+          <div class="form-group"><label>Date</label><input type="date" id="sd-date" value="${defDate}"></div>
+          <div class="input-row">
+            <div class="form-group"><label>From</label><input type="time" id="sd-start" value="${start ? hhmm(start) : '09:00'}"></div>
+            <div class="form-group"><label>To <span style="color:var(--text-muted);font-weight:400;font-size:11px">(optional)</span></label><input type="time" id="sd-end" value="${end ? hhmm(end) : ''}"></div>
+          </div>
+          <div class="form-group"><label>Driver</label>
+            <select id="sd-driver" ${lockedDriver ? 'disabled' : ''}>
+              <option value="">— Assign later —</option>
+              ${this._dispatchDrivers.map(d => `<option value="${d.id}" ${String(driverId) === String(d.id) ? 'selected' : ''}>${d.first_name} ${d.last_name}</option>`).join('')}
+            </select>
+            ${lockedDriver ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">The driver has already signed for this delivery.</div>` : !this._dispatchDrivers.length ? `<div style="font-size:11px;color:var(--danger);margin-top:2px">No employees are flagged as a driver yet (Employees → edit → Driver checkbox).</div>` : ''}
+          </div>
+          <div class="form-group"><label>Notes for the driver</label><textarea id="sd-notes" rows="2" style="width:100%;resize:vertical" placeholder="Gate code, contact on site, access…">${this.escapeAttr(a[`${leg}_schedule_notes`] || '')}</textarea></div>
+        </div>
+        <div class="modal-footer">
+          ${start ? `<button class="btn btn-outline" onclick="App.saveScheduleDispatch(${id},'${leg}',true)">Unschedule</button>` : ''}
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.saveScheduleDispatch(${id},'${leg}')">Save</button>
+        </div>
+      </div>`);
+  },
+
+  async saveScheduleDispatch(id, leg, clear = false) {
+    const body = { leg, clear };
+    if (!clear) {
+      const date = document.getElementById('sd-date').value;
+      const st = document.getElementById('sd-start').value;
+      const en = document.getElementById('sd-end').value;
+      if (!date || !st) { this.alert('Choose the date and start time', 'error'); return; }
+      body.start = new Date(`${date}T${st}`).toISOString();
+      body.end = en ? new Date(`${date}T${en}`).toISOString() : null;
+      const drv = document.getElementById('sd-driver');
+      if (drv && !drv.disabled && drv.value) body.driver_id = parseInt(drv.value);
+      body.notes = document.getElementById('sd-notes').value;
+    }
+    try {
+      const r = await this.api('PATCH', `/rentals/agreements/${id}/schedule-dispatch`, body);
+      this.closeModal();
+      this.alert(clear ? `${leg === 'delivery' ? 'Delivery' : 'Pickup'} unscheduled` : `${leg === 'delivery' ? 'Delivery' : 'Pickup'} scheduled`);
+      for (const w of r.warnings || []) {
+        this.alert(w.type === 'driver_busy'
+          ? `Heads up: this driver also has the ${w.leg} for ${w.agreement_number} at ${this.fmtDateTime(w.at)}`
+          : `Heads up: this pickup is after the rental is due back (${this.fmtDate(w.due_date + 'T12:00:00')}) — time past the due date is billed as late unless the rental is paused`, 'warning');
+      }
+      if (this.section === 'rental-dispatch') this.loadDispatchTab();
+      else if (this.section === 'rentals') this.renderRentals();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // Agreement view: when its delivery / pickup is booked, with Schedule buttons.
+  _dispatchScheduleHtml(a) {
+    if (!a.delivery_required && !a.pickup_required) return '';
+    const canSchedule = this.can('rentals_issue');
+    const time = (s, e) => `${this.fmtDateTime(s)}${e ? ` – ${new Date(e).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}` : ''}`;
+    const line = (leg, label, open, doneText) => {
+      const s = a[`${leg}_scheduled_start`], e = a[`${leg}_scheduled_end`];
+      const driver = leg === 'delivery' ? a.delivery_driver_name : a.pickup_driver_name;
+      return `<div style="margin-top:4px;display:flex;justify-content:space-between;gap:8px;align-items:center">
+        <span><strong>${label}:</strong> ${doneText || (s ? `${time(s, e)}${driver ? ` · ${driver}` : ' · driver not assigned'}${a[`${leg}_schedule_notes`] ? ` <span style="color:var(--text-muted)">· ${this.escapeAttr(a[`${leg}_schedule_notes`])}</span>` : ''}` : '<span style="color:var(--warning,#d97706)">not scheduled</span>')}</span>
+        ${canSchedule && open && !doneText ? `<button class="btn btn-sm btn-outline" style="padding:1px 8px;font-size:11px" onclick="App.closeModal();App.showScheduleDispatchModal(${a.id},'${leg}')">${s ? 'Reschedule' : 'Schedule'}</button>` : ''}
+      </div>`;
+    };
+    return `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:12px">
+      <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Dispatch</strong>
+      ${a.delivery_required ? line('delivery', 'Delivery', ['pending', 'awaiting_issue'].includes(a.status), ['active', 'returned'].includes(a.status) ? `delivered ${a.checkout_datetime ? this.fmtDateTime(a.checkout_datetime) : ''}` : '') : ''}
+      ${a.pickup_required ? line('pickup', 'Pickup', ['pending', 'awaiting_issue', 'active'].includes(a.status), a.pickup_confirmed_at ? `collected ${this.fmtDateTime(a.pickup_confirmed_at)}` : a.status === 'returned' ? 'returned' : '') : ''}
+    </div>`;
+  },
+
   async loadDeliveriesTab() {
     const el = document.getElementById('dispatch-content');
     if (!el) return;
@@ -5903,9 +6165,9 @@ const App = {
           <td style="max-width:200px">${a.item_summary||'—'}</td>
           <td style="max-width:220px">${a.delivery_required ? `${fromAddr(a)||'—'} → ${toAddr(a)}` : '—'}</td>
           <td>${a.delivery_required ? (a.delivery_driver_name || notAssigned) : none}</td>
-          <td>${a.delivery_required ? (a.checkout_date && a.status==='active' ? this.fmtDate(a.checkout_date) : '<span style="color:var(--text-muted)">Pending</span>') : none}</td>
+          <td>${a.delivery_required ? (a.checkout_date && a.status==='active' ? this.fmtDate(a.checkout_date) : a.delivery_scheduled_start ? `<span title="Scheduled">🗓 ${this.fmtDateTime(a.delivery_scheduled_start)}</span>` : '<span style="color:var(--text-muted)">Not scheduled</span>') : none}</td>
           <td>${this._pickupDriverCell(a)}</td>
-          <td>${a.pickup_required ? this.fmtDate(a.due_date) : none}</td>
+          <td>${a.pickup_required ? (a.pickup_scheduled_start ? `<span title="Scheduled">🗓 ${this.fmtDateTime(a.pickup_scheduled_start)}</span>` : `Due ${this.fmtDate(a.due_date)}`) : none}</td>
           <td>${a.operator_required ? (a.operator_name || notAssigned) : none}</td>
           <td><span class="badge-pill ${sc[a.display_status]||'badge-secondary'}">${a.display_status}</span></td>
           <td style="text-align:right;white-space:nowrap">
@@ -6414,11 +6676,11 @@ const App = {
       <table class="table">
         <thead><tr><th>Agreement #</th><th>Customer</th><th>Branch</th><th>Checkout</th><th>Due</th><th>Duration</th><th>Items</th><th>Delivery</th><th>Pickup</th><th>Operator</th><th>Verification</th><th>Status</th><th></th></tr></thead>
         <tbody>${agreements.map(a => `<tr>
-          <td class="fw-600">${a.agreement_number}</td>
+          <td class="fw-600">${a.agreement_number}${a.special_project_number ? `<div><span class="badge-pill badge-danger" style="font-size:10px" title="Rental billed on a Special Project">SP ${a.special_project_number}</span></div>` : ''}</td>
           <td>${a.customer_name||'—'}</td>
           <td>${a.branch_name||'—'}</td>
           <td>${(a.status==='pending'||a.status==='awaiting_issue') ? '—' : this.fmtDate(a.checkout_date)}</td>
-          <td>${this.fmtDate(a.due_date)}${a.current_pause_started_at ? `<div style="font-size:11px;color:var(--warning)">Paused since ${this.fmtDateTime(a.current_pause_started_at)}</div>` : ''}</td>
+          <td>${this.fmtDate(a.due_date)}${a.current_pause_started_at ? `<div style="font-size:11px;color:var(--warning)">${this._pauseReasonLabel(a.current_pause_reason)} since ${this.fmtDateTime(a.current_pause_started_at)}${a.current_pause_resume_at ? ` · resumes ${this.fmtDateTime(a.current_pause_resume_at)}` : ''}</div>` : ''}${a.next_scheduled_pause_at ? `<div style="font-size:11px;color:#3b82f6">Stop scheduled ${this.fmtDateTime(a.next_scheduled_pause_at)}</div>` : ''}${a.closed_day_grace ? `<div style="font-size:11px;color:var(--primary)" title="${this.escapeAttr(this._closedDayGraceNote(a))}">Closed day — back by ${this._closedDayReturnBy(a.closed_day_grace, { long: false })}</div>` : ''}</td>
           <td>${(a.status==='pending'||a.status==='awaiting_issue') ? '—' : this.rentalDurationLabel(a.checkout_date, a.due_date, a.returned_at)}</td>
           <td style="max-width:220px;font-size:13px">${a.item_summary||'—'}</td>
           <td>${a.delivery_required ? (a.delivery_driver_name || notAssigned) : (a.customer_pickup ? customerPickupTag : none)}</td>
@@ -6454,6 +6716,18 @@ const App = {
         <h2>Rental Deposits & Credit Notes</h2>
       </div>
       <div id="rental-deposits-summary" style="margin-bottom:16px"></div>
+      <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;align-items:center">
+        <input type="text" id="rd-search" placeholder="Agreement # or customer…" style="width:220px" oninput="App.filterRentalDeposits()">
+        <select id="rd-deposit-status" onchange="App.filterRentalDeposits()" style="width:180px">
+          <option value="">All deposit statuses</option>
+          ${Object.entries(this._depositStateLabels).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}
+        </select>
+        <select id="rd-refund-status" onchange="App.filterRentalDeposits()" style="width:200px">
+          <option value="">All refunds / credits</option>
+          ${Object.entries(this._depositRefundLabels).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}
+        </select>
+        <span id="rd-count" style="font-size:12px;color:var(--text-muted)"></span>
+      </div>
       <div id="rental-deposits-content"></div>`;
     await this.loadRentalDeposits();
   },
@@ -6478,7 +6752,12 @@ const App = {
       this.api('GET', '/rentals/agreements?view=returned'),
       this.api('GET', '/rentals/deposits/summary').catch(() => null),
     ]);
-    const agreements = [...awaitingIssue, ...active, ...returned].sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
+    // Held first, then partially applied, fully applied, fully refunded
+    // (no-deposit rentals last); newest first within each.
+    const order = Object.keys(this._depositStateLabels);
+    const agreements = [...awaitingIssue, ...active, ...returned].sort((a, b) =>
+      (order.indexOf(this._depositState(a)) - order.indexOf(this._depositState(b))) || (new Date(b.created_at) - new Date(a.created_at)));
+    this._rentalDepositsAll = agreements;
     if (!document.getElementById('rental-deposits-content')) return;
 
     const summaryEl = document.getElementById('rental-deposits-summary');
@@ -6496,33 +6775,67 @@ const App = {
       summaryEl.innerHTML = '';
     }
 
-    document.getElementById('rental-deposits-content').innerHTML = !agreements.length ? '<div class="empty-state"><p>No rental deposits to show.</p></div>' : `
+    this.filterRentalDeposits();
+  },
+
+  filterRentalDeposits() {
+    const el = document.getElementById('rental-deposits-content');
+    if (!el) return;
+    const all = this._rentalDepositsAll || [];
+    const q = (document.getElementById('rd-search')?.value || '').trim().toLowerCase();
+    const depositState = document.getElementById('rd-deposit-status')?.value || '';
+    const refundState = document.getElementById('rd-refund-status')?.value || '';
+    const rows = all.filter(a =>
+      (!q || `${a.agreement_number} ${a.customer_name || ''}`.toLowerCase().includes(q))
+      && (!depositState || this._depositState(a) === depositState)
+      && (!refundState || this._depositRefundState(a) === refundState));
+    const count = document.getElementById('rd-count');
+    if (count) count.textContent = rows.length === all.length ? `${all.length} agreement${all.length === 1 ? '' : 's'}` : `${rows.length} of ${all.length}`;
+    el.innerHTML = !rows.length ? `<div class="empty-state"><p>${all.length ? 'No deposits match these filters.' : 'No rental deposits to show.'}</p></div>` : `
       <table class="table">
         <thead><tr><th>Agreement #</th><th>Customer</th><th>Status</th><th>Deposit</th><th>Deposit Status</th><th>Refund / Credit</th><th></th></tr></thead>
-        <tbody>${agreements.map(a => this.renderRentalDepositRow(a)).join('')}</tbody>
+        <tbody>${rows.map(a => this.renderRentalDepositRow(a)).join('')}</tbody>
       </table>`;
+  },
+
+  // Deposit status, in the order the list is sorted by.
+  _depositStateLabels: { held: 'Held', partial: 'Partially Applied', applied: 'Fully Applied', refunded: 'Fully Refunded', none: 'No Deposit' },
+
+  // deposit_total/deposit_refunded are set once, at return time, by
+  // PATCH /rentals/agreements/:id/return — "applied" is whatever portion of
+  // the deposit the return's actual fee + damage consumed.
+  _depositState(a) {
+    if (!a.deposit_total) return 'none';
+    if (a.status !== 'returned') return 'held';
+    const applied = Math.max(0, a.deposit_total - (a.deposit_refunded || 0));
+    if (applied < 0.01) return 'refunded';
+    if (applied >= a.deposit_total - 0.01) return 'applied';
+    return 'partial';
+  },
+
+  _depositRefundLabels: { due: 'Refund Due', refunded: 'Refunded', credit_note: 'Credit Note Issued', account: 'Applied to Account', none: 'Nothing Due' },
+
+  // Same branches as the Refund / Credit cell in renderRentalDepositRow.
+  _depositRefundState(a) {
+    const refundDue = a.settlement_total < 0 ? -a.settlement_total : 0;
+    if (a.credit_note_amount > 0) return 'credit_note';
+    if (a.checkout_payment_method === 'credit' && refundDue > 0) return 'account';
+    if (['cash', 'bank_transfer', 'original_card'].includes(a.deposit_return_method)) return 'refunded';
+    if (refundDue > 0) return 'due';
+    return 'none';
   },
 
   renderRentalDepositRow(a) {
     const sc = { out_for_delivery:'badge-teal', awaiting_issue:'badge-warning', active:'badge-info', overdue:'badge-danger', returned:'badge-success' };
-    let depositCell;
-    if (!a.deposit_total) {
-      depositCell = '<span style="color:var(--text-muted)">No deposit</span>';
-    } else if (a.status !== 'returned') {
-      depositCell = `<span class="badge-pill badge-info">Held</span> ${this.fmt(a.deposit_total)}`;
-    } else {
-      // deposit_total/deposit_refunded are set once, at return time, by
-      // PATCH /rentals/agreements/:id/return — "applied" is whatever
-      // portion of the deposit the return's actual fee + damage consumed.
-      const applied = Math.max(0, a.deposit_total - (a.deposit_refunded||0));
-      if (applied < 0.01) {
-        depositCell = `<span class="badge-pill badge-success">Fully Refunded</span> ${this.fmt(a.deposit_total)}`;
-      } else if (applied >= a.deposit_total - 0.01) {
-        depositCell = `<span class="badge-pill badge-danger">Fully Applied</span> ${this.fmt(applied)} of ${this.fmt(a.deposit_total)}`;
-      } else {
-        depositCell = `<span class="badge-pill badge-warning">Partially Applied</span> ${this.fmt(applied)} of ${this.fmt(a.deposit_total)}`;
-      }
-    }
+    const state = this._depositState(a);
+    const applied = Math.max(0, (a.deposit_total || 0) - (a.deposit_refunded || 0));
+    const depositCell = {
+      none: '<span style="color:var(--text-muted)">No deposit</span>',
+      held: `<span class="badge-pill badge-info">Held</span> ${this.fmt(a.deposit_total)}`,
+      refunded: `<span class="badge-pill badge-success">Fully Refunded</span> ${this.fmt(a.deposit_total)}`,
+      applied: `<span class="badge-pill badge-danger">Fully Applied</span> ${this.fmt(applied)} of ${this.fmt(a.deposit_total)}`,
+      partial: `<span class="badge-pill badge-warning">Partially Applied</span> ${this.fmt(applied)} of ${this.fmt(a.deposit_total)}`,
+    }[state];
 
     // A negative settlement total means the deposit exceeded actual fees
     // (early return, or just low usage/no damage) — a refund is due. Credit
@@ -6851,6 +7164,7 @@ const App = {
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
             <span class="badge-pill ${sc[a.display_status]||'badge-secondary'}" style="font-size:13px">${a.display_status.toUpperCase()}</span>
             ${a.checkout_payment_method === 'credit' ? `<span class="badge-pill badge-info" style="font-size:13px">Billed to Account</span>` : ''}
+            ${a.special_project_number ? `<span class="badge-pill badge-danger" style="font-size:13px" title="Paid with the Special Project invoice">Special Project <a href="#" style="color:inherit" onclick="event.preventDefault();App.closeModal();App.viewQuote(${a.quotation_id})">${a.special_project_number}</a></span>` : ''}
             ${a.credit_note_amount > 0 ? `<span class="badge-pill badge-teal" style="font-size:13px">Credit Note: ${this.fmt(a.credit_note_amount)}</span>` : ''}
             ${a.checkout_transaction_number?`<span style="font-size:13px">Checkout: ${a.checkout_transaction_number}</span>`:''}
             ${a.settlement_transaction_number?`<span style="font-size:13px">Settlement: ${a.settlement_transaction_number}</span>`:''}
@@ -6859,7 +7173,7 @@ const App = {
             <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Customer</label><div>${a.customer_name||'—'}</div></div>
             <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Branch</label><div>${a.branch_name||'—'}</div></div>
             <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Checkout Date</label><div>${notYetIssued ? `<span style="color:var(--text-muted)">${a.status==='pending'?'Awaiting checkout':'Awaiting issue'}</span>` : this.fmtDate(a.checkout_date)}</div></div>
-            <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Due Date</label><div>${this.fmtDate(a.due_date)}</div></div>
+            <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Due Date</label><div>${this.fmtDate(a.due_date)}${a.closed_day_grace ? `<div style="font-size:11px;color:var(--primary)">${this._closedDayGraceNote(a)}</div>` : ''}</div></div>
             <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Duration</label><div>${notYetIssued ? `<span style="color:var(--text-muted)">${a.status==='pending'?'TBD at checkout':'Clock starts on issue'}</span>` : this.rentalDurationLabel(a.checkout_date, a.due_date, a.returned_at)}</div></div>
           </div>
           ${a.status==='pending' ? `<div style="padding:8px 12px;background:rgba(245,158,11,0.08);border-left:3px solid #d97706;border-radius:4px;font-size:12px;color:#d97706;margin-bottom:12px">Held — no payment collected yet. Fees and deposit are calculated when a cashier processes payment, based on the rental period starting at that moment.</div>` : ''}
@@ -6887,14 +7201,37 @@ const App = {
                   <button class="btn btn-sm btn-secondary" onclick="App.showMissedPickupContactModal(${a.id},'phone')">📞 Log Call</button>
                   <button class="btn btn-sm btn-primary" onclick="App.showMissedPickupConfirmModal(${a.id})">Record Customer Decision</button>
                 </div>
-              </div>` : `<div style="padding:8px 12px;background:rgba(217,119,6,0.1);border-left:3px solid #d97706;border-radius:4px;font-size:12px;color:#d97706;margin-bottom:12px">Paused — this rental is currently out for ${a.pauses?.find(p=>!p.ended_at)?.reason || 'maintenance'}.${openReplacementPause ? ' Use Replace Item to swap the faulty unit, then resume.' : ''} Resume it before processing a return.</div>`) : ''}
+              </div>` : `<div style="padding:8px 12px;background:rgba(217,119,6,0.1);border-left:3px solid #d97706;border-radius:4px;font-size:12px;color:#d97706;margin-bottom:12px">${(() => { const op = a.pauses?.find(p=>!p.ended_at); return `Paused — ${this._pauseReasonLabel(op?.reason).toLowerCase()} since ${op ? this.fmtDateTime(op.started_at) : '—'}.${op?.scheduled_resume_at ? ` <strong>Resumes automatically ${this.fmtDateTime(op.scheduled_resume_at)}.</strong>` : ''}`; })()}${openReplacementPause ? ' Use Replace Item to swap the faulty unit, then resume.' : ''} Resume it before processing a return.
+                <button class="btn btn-sm btn-outline" style="margin-left:6px;padding:1px 8px;font-size:11px" onclick="App.closeModal();App.showScheduleResumeModal(${a.id})">${a.pauses?.find(p=>!p.ended_at)?.scheduled_resume_at ? 'Change Resume Time' : 'Set Resume Time'}</button></div>`) : ''}
+          ${a.pause_series?.length ? `<div style="padding:8px 12px;background:rgba(59,130,246,0.08);border-left:3px solid #3b82f6;border-radius:4px;font-size:12px;margin-bottom:12px">
+            <strong>Recurring stops</strong>
+            ${a.pause_series.map(sr => { const next = (a.scheduled_pauses || []).find(sp => sp.series_id === sr.id && sp.status === 'scheduled'); return `<div style="margin-top:4px;display:flex;justify-content:space-between;gap:8px;align-items:center">
+              <span><strong>${this._pauseReasonLabel(sr.reason)}</strong> — ${sr.description}${next ? ` · next ${this.fmtDateTime(next.starts_at)}` : ''} · ${sr.stops_taken} taken so far${sr.notes ? ` <span style="color:var(--text-muted)">· ${this.escapeAttr(sr.notes)}</span>` : ''}</span>
+              <button class="btn btn-sm btn-outline" style="padding:1px 8px;font-size:11px" onclick="App.cancelPauseSeries(${a.id},${sr.id})">Stop Repeating</button>
+            </div>`; }).join('')}
+          </div>` : ''}
+          ${a.scheduled_pauses?.some(sp => sp.status === 'scheduled' && !sp.series_id) ? `<div style="padding:8px 12px;background:rgba(59,130,246,0.08);border-left:3px solid #3b82f6;border-radius:4px;font-size:12px;margin-bottom:12px">
+            <strong>Scheduled stops</strong>
+            ${a.scheduled_pauses.filter(sp => sp.status === 'scheduled' && !sp.series_id).map(sp => `<div style="margin-top:4px;display:flex;justify-content:space-between;gap:8px;align-items:center">
+              <span><strong>${this._pauseReasonLabel(sp.reason)}</strong> — ${this.fmtDateTime(sp.starts_at)} → ${sp.ends_at ? this.fmtDateTime(sp.ends_at) : 'until resumed'}${sp.notes ? ` <span style="color:var(--text-muted)">· ${this.escapeAttr(sp.notes)}</span>` : ''}</span>
+              <button class="btn btn-sm btn-outline" style="padding:1px 8px;font-size:11px" onclick="App.cancelScheduledPause(${a.id},${sp.id})">Cancel</button>
+            </div>`).join('')}
+          </div>` : ''}
           ${a.pauses?.length ? `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:12px">
             <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Pause History</strong>
             ${a.pauses.map(p => `<div style="margin-top:4px">
-              <strong style="text-transform:capitalize">${p.reason.replace('_',' ')}</strong> — ${this.fmtDateTime(p.started_at)} → ${p.ended_at ? this.fmtDateTime(p.ended_at) : '<span style="color:var(--warning)">Ongoing</span>'}
+              <strong>${this._pauseReasonLabel(p.reason)}</strong> — ${this.fmtDateTime(p.started_at)} → ${p.ended_at ? this.fmtDateTime(p.ended_at) : `<span style="color:var(--warning)">Ongoing${p.scheduled_resume_at ? ` (resumes ${this.fmtDateTime(p.scheduled_resume_at)})` : ''}</span>`}
               ${p.notes ? `<div style="color:var(--text-muted)">${p.notes}</div>` : ''}
               ${p.customer_confirmation ? `<div style="color:var(--text-muted)">Customer confirmed: <strong style="text-transform:capitalize">${p.customer_confirmation}</strong>${p.confirmed_by_name ? ` (logged by ${p.confirmed_by_name})` : ''}</div>` : ''}
-              <div style="color:var(--text-muted);font-size:11px">Paused by ${p.paused_by_name || (p.reason==='missed_pickup' ? 'System (auto-pause)' : '—')}, authorized by ${p.authorized_by_name||'—'}${p.ended_at ? `, resumed by ${p.resumed_by_name||'—'}` : ''}${p.due_date_after ? ` — due date extended to ${this.fmtDate(p.due_date_after)}` : ''}</div>
+              <div style="color:var(--text-muted);font-size:11px">Paused by ${p.paused_by_name || (p.reason==='missed_pickup' ? 'System (auto-pause)' : '—')}, authorized by ${p.authorized_by_name||'—'}${p.ended_at ? `, resumed by ${p.resumed_by_name || (p.scheduled_resume_at ? 'schedule' : '—')}` : ''}${p.due_date_after ? ` — due date extended to ${this.fmtDate(p.due_date_after)}` : ''}</div>
+            </div>`).join('')}
+          </div>` : ''}
+          ${this._dispatchScheduleHtml(a)}
+          ${a.maintenance?.length ? `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:12px">
+            <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Maintenance</strong>
+            ${a.maintenance.map(m => `<div style="margin-top:4px;display:flex;justify-content:space-between;gap:8px;align-items:center">
+              <span><strong>${m.product_name}</strong> × ${m.quantity} — <span style="text-transform:capitalize">${m.reason}</span> since ${this.fmtDateTime(m.opened_at)} · ${m.status === 'open' ? '<span class="badge-pill badge-warning" style="font-size:10px">In maintenance</span>' : `<span class="badge-pill badge-success" style="font-size:10px">Completed</span>`} · ${m.log_count} log entr${m.log_count === 1 ? 'y' : 'ies'}${m.total_cost > 0 ? ` · ${this.fmt(m.total_cost)}` : ''}</span>
+              <button class="btn btn-sm btn-outline" onclick="App.closeModal();App.showRentalMaintenance(${m.id})">Log</button>
             </div>`).join('')}
           </div>` : ''}
           ${a.replacements?.length ? `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:12px">
@@ -6942,13 +7279,14 @@ const App = {
           </div>
         </div>
         <div class="modal-footer footer-wrap">
-          ${a.status==='pending' && this.can('pos') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showFinalizeRentalModal(${a.id})">Process Payment</button>` : ''}
+          ${a.status==='pending' && this.can('pos') && !a.quotation_id ? `<button class="btn btn-primary" onclick="App.closeModal();App.showFinalizeRentalModal(${a.id})">Process Payment</button>` : ''}
           ${a.status==='awaiting_issue' && this.can('rentals_issue') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showIssueRentalModal(${a.id})">Issue Rental</button>` : ''}
           ${a.checkout_transaction_id ? `<button class="btn btn-secondary" onclick="App.printRentalInvoice(${a.id})">🖨️ Tax Invoice</button>
           <button class="btn btn-secondary" onclick="App.emailRentalInvoice(${a.id},'${(a.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email Invoice</button>
           <button class="btn btn-secondary" onclick="App.closeModal();App.launchRentalSummary(${a.id})">📋 Full Summary</button>` : ''}
           ${a.status==='active' ? `<button class="btn btn-secondary" onclick="App.printRentalDeliveryNote(${a.id})">🖨️ Delivery Note</button>` : ''}
-          ${a.status==='active' && !a.is_paused ? `<button class="btn btn-secondary" onclick="App.closeModal();App.showPauseRentalModal(${a.id})">⏸ Pause Rental</button>` : ''}
+          ${a.status==='active' && !a.is_paused ? `<button class="btn btn-secondary" onclick="App.closeModal();App.showPauseRentalModal(${a.id})">⏸ Pause / Schedule Stop</button>` : ''}
+          ${a.status==='active' && a.is_paused ? `<button class="btn btn-secondary" onclick="App.closeModal();App.showPauseRentalModal(${a.id}, { scheduleOnly: true })">🗓 Schedule Stop</button>` : ''}
           ${openReplacementPause && a.status==='active' ? `<button class="btn btn-secondary" onclick="App.closeModal();App.showReplaceRentalItemModal(${a.id})">🔁 Replace Item</button>` : ''}
           ${a.status==='active' && a.is_paused && !openMissedPickupPause ? `<button class="btn btn-primary" onclick="App.resumeRentalAgreement(${a.id})">▶ Resume Rental</button>` : ''}
           ${a.status==='active' && !a.is_paused && this.can('rentals_returns') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showRentalReturnModal(${a.id})">Process Return</button>` : ''}
@@ -6961,9 +7299,53 @@ const App = {
   // Pausing is the exceptional, billing-affecting action — it requires a
   // manager PIN entered on the spot — visible to anyone who can see
   // the agreement, the PIN is what actually gates it.
-  showPauseRentalModal(id) {
+  _pauseReasonLabels: {
+    replacement: 'Replacement', repair: 'Repair', servicing: 'Servicing', maintenance: 'Maintenance', relocation: 'Relocation',
+    operator: 'Operator stop', negotiated: 'Negotiated stop', missed_pickup: 'Missed pickup', other: 'Other',
+  },
+  _pauseReasonLabel(r) { return this._pauseReasonLabels[r] || (r ? r.replace(/_/g, ' ') : 'Pause'); },
+
+  // datetime-local value (store/browser local time) for a Date
+  _dtLocal(d) { const p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; },
+
+  // Operator and negotiated stops can be booked ahead (start later) and/or
+  // set to resume on their own; any pause can be given a resume time.
+  _onPauseReasonChange() {
+    const reason = document.getElementById('pr-reason').value;
+    document.getElementById('pr-maint-items').style.display = ['repair','servicing','maintenance'].includes(reason) ? '' : 'none';
+    const schedulable = ['operator', 'negotiated'].includes(reason);
+    const startWrap = document.getElementById('pr-start-wrap');
+    if (startWrap) startWrap.style.display = schedulable ? '' : 'none';
+    const repeatWrap = document.getElementById('pr-repeat-wrap');
+    if (repeatWrap) repeatWrap.style.display = schedulable ? '' : 'none';
+    if (!schedulable) { const now = document.getElementById('pr-start-now'); if (now) now.checked = true; const rp = document.getElementById('pr-repeat'); if (rp) rp.value = ''; }
+    this._onPauseTimingChange();
+  },
+
+  _onPauseTimingChange() {
+    const repeat = document.getElementById('pr-repeat')?.value || '';
+    const series = document.getElementById('pr-series');
+    if (series) series.style.display = repeat ? '' : 'none';
+    const single = document.getElementById('pr-single-timing');
+    if (single) single.style.display = repeat ? 'none' : '';
+    document.querySelectorAll('#pr-s-day, #pr-e-day').forEach(el => { el.style.display = repeat === 'weekly' ? '' : 'none'; });
+    const daysWrap = document.getElementById('pr-days-wrap');
+    if (daysWrap) daysWrap.style.display = repeat === 'weekdays' ? '' : 'none';
+    const submit = document.getElementById('pr-submit');
+    if (submit) submit.textContent = repeat ? 'Set Recurring Stop' : document.getElementById('pr-start-later')?.checked && document.getElementById('pr-start-wrap')?.style.display !== 'none' ? 'Schedule Stop' : 'Pause Rental';
+    const startAt = document.getElementById('pr-start-at');
+    if (startAt) startAt.style.display = document.getElementById('pr-start-later')?.checked ? '' : 'none';
+    const resumeAt = document.getElementById('pr-resume-at');
+    if (resumeAt) resumeAt.style.display = document.getElementById('pr-resume-later')?.checked ? '' : 'none';
+  },
+
+  async showPauseRentalModal(id, { scheduleOnly = false } = {}) {
+    const a = await this.api('GET', `/rentals/agreements/${id}`);
+    const outstanding = (a.items || []).filter(i => i.quantity > i.quantity_returned);
+    const soon = new Date(Date.now() + 86400000); soon.setMinutes(0, 0, 0);
+    const later = new Date(soon.getTime() + 86400000);
     this.showModal(`
-      <div class="modal" style="max-width:420px">
+      <div class="modal" style="max-width:580px">
         <div class="modal-header">
           <span class="modal-title">Pause Rental — Manager Override</span>
           <button class="modal-close">✕</button>
@@ -6971,11 +7353,55 @@ const App = {
         <div class="modal-body">
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px">Pausing stops the billing clock and pushes the due date out by however long it lasts — the customer isn't charged for downtime that isn't their fault.</p>
           <div class="form-group"><label>Reason</label>
-            <select id="pr-reason">
-              <option value="maintenance">Maintenance</option>
-              <option value="replacement">Replacement of Item</option>
-              <option value="other">Other</option>
+            <select id="pr-reason" onchange="App._onPauseReasonChange()">
+              ${(scheduleOnly ? ['operator', 'negotiated'] : ['replacement', 'repair', 'servicing', 'maintenance', 'relocation', 'operator', 'negotiated']).map(r => `<option value="${r}">${this._pauseReasonLabel(r)}</option>`).join('')}
             </select>
+          </div>
+          <div class="form-group" id="pr-repeat-wrap" style="${scheduleOnly ? '' : 'display:none'}"><label>Repeat</label>
+            <select id="pr-repeat" onchange="App._onPauseTimingChange()">
+              <option value="">Doesn't repeat</option>
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="weekdays">Specific days</option>
+            </select>
+          </div>
+          <div id="pr-series" style="display:none">
+            <div class="form-group" id="pr-days-wrap" style="display:none"><label>Stops start on</label>
+              <div style="display:flex;gap:10px;flex-wrap:wrap">
+                ${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map((d, i) => `<label style="display:flex;align-items:center;gap:4px;font-weight:normal;text-transform:none;font-size:13px;cursor:pointer"><input type="checkbox" class="pr-day" value="${i}" ${i >= 1 && i <= 5 ? 'checked' : ''} style="width:15px;height:15px;margin:0"> ${d}</label>`).join('')}
+              </div>
+            </div>
+            <div class="input-row">
+              <div class="form-group" style="min-width:0"><label>Stop</label><div style="display:flex;gap:6px">
+                <select id="pr-s-day" style="width:112px;flex-shrink:0">${['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'].map((d, i) => `<option value="${i}" ${i === 6 ? 'selected' : ''}>${d}</option>`).join('')}</select>
+                <input type="time" id="pr-s-time" value="17:00" style="flex:1;min-width:0"></div></div>
+              <div class="form-group" style="min-width:0"><label>Resume</label><div style="display:flex;gap:6px">
+                <select id="pr-e-day" style="width:112px;flex-shrink:0">${['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'].map((d, i) => `<option value="${i}" ${i === 1 ? 'selected' : ''}>${d}</option>`).join('')}</select>
+                <input type="time" id="pr-e-time" value="07:00" style="flex:1;min-width:0"></div></div>
+            </div>
+            <div class="input-row">
+              <div class="form-group"><label>Starting</label><input type="date" id="pr-from" value="${new Date().toISOString().slice(0, 10)}"></div>
+              <div class="form-group"><label>Until <span style="color:var(--text-muted);font-weight:400;font-size:11px">(blank = until returned)</span></label><input type="date" id="pr-until"></div>
+            </div>
+            <div id="pr-series-hint" style="font-size:11px;color:var(--text-muted);margin:-4px 0 10px">Times are store time. If the resume time is earlier than the stop time, it resumes the next day.</div>
+          </div>
+          <div class="input-row" id="pr-single-timing" style="align-items:flex-start">
+            <div class="form-group" id="pr-start-wrap" style="${scheduleOnly ? '' : 'display:none'}"><label>Stop</label>
+              ${scheduleOnly ? '' : `<label style="display:flex;align-items:center;gap:6px;font-weight:normal;text-transform:none;font-size:13px;margin:2px 0"><input type="radio" name="pr-start" id="pr-start-now" checked onchange="App._onPauseTimingChange()" style="width:auto;margin:0"> Now</label>`}
+              <label style="display:flex;align-items:center;gap:6px;font-weight:normal;text-transform:none;font-size:13px;margin:2px 0"><input type="radio" name="pr-start" id="pr-start-later" ${scheduleOnly ? 'checked' : ''} onchange="App._onPauseTimingChange()" style="width:auto;margin:0"> At</label>
+              <input type="datetime-local" id="pr-start-at" value="${this._dtLocal(soon)}" style="${scheduleOnly ? '' : 'display:none'}">
+            </div>
+            <div class="form-group"><label>Resume</label>
+              <label style="display:flex;align-items:center;gap:6px;font-weight:normal;text-transform:none;font-size:13px;margin:2px 0"><input type="radio" name="pr-resume" id="pr-resume-manual" ${scheduleOnly ? '' : 'checked'} onchange="App._onPauseTimingChange()" style="width:auto;margin:0"> Manually</label>
+              <label style="display:flex;align-items:center;gap:6px;font-weight:normal;text-transform:none;font-size:13px;margin:2px 0"><input type="radio" name="pr-resume" id="pr-resume-later" ${scheduleOnly ? 'checked' : ''} onchange="App._onPauseTimingChange()" style="width:auto;margin:0"> Automatically at</label>
+              <input type="datetime-local" id="pr-resume-at" value="${this._dtLocal(later)}" style="${scheduleOnly ? '' : 'display:none'}">
+            </div>
+          </div>
+          <div class="form-group" id="pr-maint-items" style="display:none"><label>Item(s) going in</label>
+            ${outstanding.map(i => `<label style="display:flex;align-items:center;gap:8px;font-weight:normal;text-transform:none;font-size:13px;margin:4px 0;cursor:pointer">
+              <input type="checkbox" class="pr-maint-item" value="${i.id}" ${outstanding.length === 1 || !i.parent_item_id ? 'checked' : ''} style="width:16px;height:16px;margin:0">
+              ${i.parent_item_id ? '↳ ' : ''}${i.product_name} × ${i.quantity - i.quantity_returned}</label>`).join('')}
+            <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Each gets a record in Rentals → In Maintenance, where the work is logged. The notes below are its first entry.</div>
           </div>
           <div class="form-group"><label>Notes</label><textarea id="pr-notes" rows="3" placeholder="What's happening and why"></textarea></div>
           <div class="form-group"><label>Override PIN</label>
@@ -6985,7 +7411,7 @@ const App = {
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-          <button class="btn btn-primary" onclick="App.submitPauseRental(${id})">Pause Rental</button>
+          <button class="btn btn-primary" id="pr-submit" onclick="App.submitPauseRental(${id})">${scheduleOnly ? 'Schedule Stop' : 'Pause Rental'}</button>
         </div>
       </div>`);
     setTimeout(() => document.getElementById('pr-notes')?.focus(), 50);
@@ -6999,15 +7425,86 @@ const App = {
     if (!notes) { if (errEl) errEl.textContent = 'Notes are required.'; return; }
     if (!pin) { if (errEl) errEl.textContent = 'PIN is required.'; return; }
     try {
-      await this.api('POST', `/rentals/agreements/${id}/pause`, { reason, notes, override_pin: pin, employee_id: this.currentUser.id });
+      const maintenance_item_ids = Array.from(document.querySelectorAll('.pr-maint-item:checked')).map(cb => parseInt(cb.value));
+      if (['repair', 'servicing', 'maintenance'].includes(reason) && !maintenance_item_ids.length) { if (errEl) errEl.textContent = 'Choose the item(s) going in.'; return; }
+      const repeat = ['operator', 'negotiated'].includes(reason) ? (document.getElementById('pr-repeat')?.value || '') : '';
+      if (repeat) {
+        const series = await this.api('POST', `/rentals/agreements/${id}/pause-series`, {
+          reason, notes, override_pin: pin, employee_id: this.currentUser.id, frequency: repeat,
+          start_day: document.getElementById('pr-s-day').value, start_time: document.getElementById('pr-s-time').value,
+          end_day: document.getElementById('pr-e-day').value, end_time: document.getElementById('pr-e-time').value,
+          from_date: document.getElementById('pr-from').value, until_date: document.getElementById('pr-until').value || null,
+          days: Array.from(document.querySelectorAll('.pr-day:checked')).map(cb => parseInt(cb.value)),
+        });
+        this.closeModal();
+        const booked = (series.occurrences || []).filter(o => o.status !== 'cancelled').length;
+        this.alert(`Recurring ${this._pauseReasonLabel(reason).toLowerCase()} set — ${series.description}. ${booked} stop${booked === 1 ? '' : 's'} booked for the next two weeks.`);
+        this.renderRentals();
+        return;
+      }
+      const startLater = document.getElementById('pr-start-later')?.checked && ['operator', 'negotiated'].includes(reason);
+      const resumeLater = document.getElementById('pr-resume-later')?.checked;
+      const starts_at = startLater ? new Date(document.getElementById('pr-start-at').value).toISOString() : null;
+      const resume_at = resumeLater ? new Date(document.getElementById('pr-resume-at').value).toISOString() : null;
+      const result = await this.api('POST', `/rentals/agreements/${id}/pause`, { reason, notes, override_pin: pin, employee_id: this.currentUser.id, maintenance_item_ids, starts_at, resume_at });
       this.closeModal();
-      this.alert('Rental paused');
+      this.alert(result.scheduled ? `${this._pauseReasonLabel(reason)} scheduled` : `Rental paused${resume_at ? ' — it will resume automatically' : ''}`);
       this.renderRentals();
     } catch(e) {
       if (errEl) errEl.textContent = e.message;
       document.getElementById('pr-pin').value = '';
       document.getElementById('pr-pin').focus();
     }
+  },
+
+  async showScheduleResumeModal(id) {
+    const a = await this.api('GET', `/rentals/agreements/${id}`);
+    const op = a.pauses?.find(p => !p.ended_at);
+    if (!op) { this.alert('This rental is not paused', 'warning'); return; }
+    const def = op.scheduled_resume_at ? new Date(op.scheduled_resume_at) : (() => { const d = new Date(Date.now() + 86400000); d.setMinutes(0, 0, 0); return d; })();
+    this.showModal(`
+      <div class="modal" style="max-width:400px">
+        <div class="modal-header"><span class="modal-title">Resume Time — ${a.agreement_number}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted)">Paused for ${this._pauseReasonLabel(op.reason).toLowerCase()} since ${this.fmtDateTime(op.started_at)}. The rental resumes itself at this time — the due date is extended by the time it was paused, as with a manual resume.</p>
+          <div class="form-group"><label>Resume at</label><input type="datetime-local" id="sr-at" value="${this._dtLocal(def)}"></div>
+        </div>
+        <div class="modal-footer">
+          ${op.scheduled_resume_at ? `<button class="btn btn-outline" onclick="App.saveScheduledResume(${id}, true)">Clear (resume manually)</button>` : ''}
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.saveScheduledResume(${id})">Save</button>
+        </div>
+      </div>`);
+  },
+
+  async saveScheduledResume(id, clear = false) {
+    try {
+      const v = document.getElementById('sr-at')?.value;
+      await this.api('PATCH', `/rentals/agreements/${id}/schedule-resume`, { resume_at: clear || !v ? null : new Date(v).toISOString() });
+      this.closeModal();
+      this.alert(clear ? 'Resume time cleared' : 'Resume time set');
+      this.viewRentalAgreement(id);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async cancelPauseSeries(agreementId, seriesId) {
+    if (!confirm('Stop this recurring stop? Booked stops that haven\'t started are cancelled; one already under way carries on until it resumes.')) return;
+    try {
+      await this.api('DELETE', `/rentals/agreements/${agreementId}/pause-series/${seriesId}`);
+      this.alert('Recurring stop ended');
+      this.closeModal();
+      this.viewRentalAgreement(agreementId);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async cancelScheduledPause(agreementId, scheduledId) {
+    if (!confirm('Cancel this scheduled stop?')) return;
+    try {
+      await this.api('DELETE', `/rentals/agreements/${agreementId}/scheduled-pauses/${scheduledId}`);
+      this.alert('Scheduled stop cancelled');
+      this.closeModal();
+      this.viewRentalAgreement(agreementId);
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   // No PIN — ending downtime isn't the exceptional action, starting it was.
@@ -8467,6 +8964,24 @@ const App = {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
+  // "Due Sun Oct 18 (closed) — may come back by 8:00 AM Tue Oct 20 at no
+  // extra charge" — set by GET /rentals/agreements(/:id) for an active rental
+  // due on a closed day at a branch with closed_day_grace (lib/closedDays.js).
+  // Shown in store time (the date and time as set), whatever the viewer's
+  // own clock is set to.
+  _closedDayReturnBy(g, { long = true } = {}) {
+    const [h, m] = String(g.returnBy || '08:00').split(':').map(Number);
+    const time = `${h % 12 || 12}:${String(m || 0).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`;
+    const day = new Date(`${g.nextOpenDate}T00:00:00Z`).toLocaleDateString('en-US', long ? { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' } : { weekday: 'short', timeZone: 'UTC' });
+    return `${time} ${day}`;
+  },
+
+  _closedDayGraceNote(a) {
+    const g = a.closed_day_grace;
+    if (!g) return '';
+    return `Due on a closed day (${g.closedReason}) — may be returned by ${this._closedDayReturnBy(g)} with no late charge`;
+  },
+
   async showRentalReturnModal(id) {
     const [a, employees] = await Promise.all([
       this.api('GET', `/rentals/agreements/${id}`),
@@ -8491,6 +9006,7 @@ const App = {
             <input type="datetime-local" id="rr-returned-at" value="${defaultReturnedAt}" max="${defaultReturnedAt}">
             <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Defaults to now — back-date this to when the item actually came back if it sat before being processed. Fees are calculated against this time.</div>
           </div>
+          ${a.closed_day_grace ? `<div style="padding:8px 12px;background:rgba(0,126,55,0.08);border-left:3px solid var(--primary);border-radius:4px;font-size:12px;margin-bottom:12px">${this._closedDayGraceNote(a)}.</div>` : ''}
           ${a.checkout_payment_method === 'credit' ? `<div style="padding:8px 12px;background:rgba(59,130,246,0.08);border-left:3px solid #3b82f6;border-radius:4px;font-size:12px;color:#3b82f6;margin-bottom:12px">This rental was charged to the customer's account. The settlement (duration adjustment, damage fees, and deposit) will be applied directly to their account balance — no cash/card is collected here.</div>` : ''}
           ${outstanding.map(i => {
             const remaining = i.quantity - i.quantity_returned;
@@ -8577,6 +9093,7 @@ const App = {
         driver_signature: hasDriverSigPad ? this._sigPadDataUrl('rr-driver-sig') : null,
       });
       this.closeModal();
+      if (updated.closed_day_grace_applied) this.alert(`Returned within the closed-day grace period (${updated.closed_day_grace_applied.closedReason}) — no late charge for the time after it was due.`, 'success');
       if (updated.settlement_transaction_id) {
         const tx = await this.api('GET', `/transactions/${updated.settlement_transaction_id}`);
         this.showReceipt(tx, tx.change_amount || 0);
@@ -13029,11 +13546,18 @@ const App = {
     const canRefund = this.can('transactions_refund');
     const canIssueCreditNote = this.can('transactions_credit_note');
     const canCreditNote = hasCustomer && canIssueCreditNote;
-    const firstResolution = canRefund ? 'refund' : (canCreditNote ? 'credit_note' : 'replacement');
+    // Credit card sales can only be refunded within 90 days (enforced again
+    // in POST /transactions/:id/return) — after that, credit note or exchange.
+    const paidByCard = tx.payment_method === 'credit_card' || (tx.payments || []).some(p => p.payment_method === 'credit_card');
+    const saleAgeDays = (Date.now() - new Date(String(tx.created_at).replace(' ', 'T') + (/[zZ]|[+-]\d\d:?\d\d$/.test(tx.created_at) ? '' : 'Z')).getTime()) / 86400000;
+    const cardRefundExpired = paidByCard && saleAgeDays > 90;
+    const refundAllowed = canRefund && !cardRefundExpired;
+    const firstResolution = refundAllowed ? 'refund' : (canCreditNote ? 'credit_note' : 'replacement');
 
     const itemRows = tx.items.map(item => {
       const alreadyRet = returnedQtyMap[item.id] || 0;
       const maxQty = item.quantity - alreadyRet;
+      if (item.is_sp_rental) return `<tr style="opacity:0.5"><td><input type="checkbox" disabled></td><td>${item.product_name}</td><td style="font-family:monospace;font-size:12px">${item.sku||''}</td><td style="text-align:center">${item.quantity}</td><td colspan="3" style="font-size:12px;color:var(--text-muted)">Rental — check it back in from the Rentals screen</td></tr>`;
       if (maxQty <= 0) return `<tr style="opacity:0.4"><td><input type="checkbox" disabled></td><td>${item.product_name}</td><td style="font-family:monospace;font-size:12px">${item.sku}</td><td style="text-align:center">${item.quantity}</td><td style="text-align:center;color:var(--danger)">All returned</td><td>${this.fmt(item.unit_price)}</td><td>—</td></tr>`;
       return `<tr>
         <td><input type="checkbox" class="ret-chk" data-item-id="${item.id}" data-max="${maxQty}" data-price="${item.unit_price}" data-tax-rate="${item.tax_amount > 0 ? (item.tax_amount / item.total * 100) : 0}" data-total="${item.total}" data-tax="${item.tax_amount}" onchange="App._retCalcTotal()"></td>
@@ -13070,9 +13594,9 @@ const App = {
           <div style="margin-bottom:14px">
             <p style="font-size:13px;font-weight:600;margin-bottom:8px">Resolution:</p>
             <div style="display:flex;flex-direction:column;gap:8px">
-              ${canRefund ? `<label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px">
-                <input type="radio" name="ret-resolution" value="refund" ${firstResolution==='refund'?'checked':''} style="margin-top:2px">
-                <span><strong>Refund</strong> — return cash or reverse the original payment method</span>
+              ${canRefund ? `<label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px${cardRefundExpired?';opacity:0.45':''}">
+                <input type="radio" name="ret-resolution" value="refund" ${cardRefundExpired?'disabled':(firstResolution==='refund'?'checked':'')} style="margin-top:2px">
+                <span><strong>Refund</strong> — return cash or reverse the original payment method${cardRefundExpired?' <em style="color:var(--danger)">(not available — paid by credit card more than 90 days ago)</em>':''}</span>
               </label>` : ''}
               ${canIssueCreditNote ? `<label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px${hasCustomer?'':';opacity:0.45'}">
                 <input type="radio" name="ret-resolution" value="credit_note" ${hasCustomer?(firstResolution==='credit_note'?'checked':''):'disabled'} style="margin-top:2px">
@@ -13086,7 +13610,7 @@ const App = {
           </div>
           <div class="form-group" style="margin-bottom:0">
             <label style="font-size:13px">Notes (optional)</label>
-            <input type="text" id="ret-notes" placeholder="Reason for return..." style="font-size:13px">
+            <textarea id="ret-notes" rows="4" placeholder="Reason for return..." style="font-size:13px;width:100%;resize:vertical;white-space:pre-wrap;overflow-wrap:anywhere"></textarea>
           </div>
         </div>
         <div class="modal-footer" style="justify-content:space-between;align-items:center">
@@ -13205,7 +13729,7 @@ const App = {
             ${ret.customer_name ? `<div class="receipt-row"><span>Customer:</span><span>${ret.customer_name}</span></div>` : ''}
             <div class="receipt-row"><span>Resolution:</span><span>${resolutionLabel}</span></div>
             ${ret.employee_name ? `<div class="receipt-row"><span>Processed By:</span><span>${ret.employee_name}</span></div>` : ''}
-            ${ret.notes ? `<div class="receipt-row"><span>Reason:</span><span>${ret.notes}</span></div>` : ''}
+            ${ret.notes ? `<div class="receipt-row"><span style="flex-shrink:0">Reason:</span><span style="text-align:right;white-space:pre-wrap;overflow-wrap:anywhere">${ret.notes}</span></div>` : ''}
             <hr>
             ${items.map(i => `<div class="receipt-row"><span>${i.product_name}</span><span>${this.fmt(i.total)}</span></div>${i.quantity > 1 ? `<div style="color:#666;font-size:11px;padding-left:4px">${i.quantity} x ${this.fmt(i.unit_price)}</div>` : ''}`).join('')}
             <hr>
@@ -14963,6 +15487,18 @@ const App = {
             <button class="btn btn-primary" onclick="App.saveSettings()">Save Settings</button>
           </div>
           <div class="card" style="margin-bottom:16px">
+            <div class="card-header"><span class="card-title">Rental Returns — Closed Days</span></div>
+            <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">At branches marked <strong>Closed on Sundays &amp; public holidays</strong> (Branch Management), a rental due back on a Sunday or one of the holidays below can be returned by the return-by time on the next open day with no late charge.</p>
+            <div class="input-row">
+              <div class="form-group"><label>Return By (next open day)</label><input type="time" id="s-closed-return-by" value="${this.escapeAttr(s.closed_day_return_by || '08:00')}"></div>
+              <div class="form-group"><label>Store Time Zone</label><input id="s-store-tz" list="s-store-tz-list" value="${this.escapeAttr(s.store_timezone || 'America/Jamaica')}" placeholder="America/Jamaica">
+                <datalist id="s-store-tz-list">${(Intl.supportedValuesOf ? Intl.supportedValuesOf('timeZone') : []).map(z => `<option value="${z}">`).join('')}</datalist></div>
+            </div>
+            <div class="form-group"><label>Public Holidays <span style="color:var(--text-muted);font-weight:400;font-size:11px">(one per line: date, then name — e.g. 2026-12-25 Christmas Day)</span></label>
+              <textarea id="s-public-holidays" rows="5" placeholder="2026-12-25 Christmas Day&#10;2026-12-26 Boxing Day">${this.escapeAttr(s.public_holidays || '')}</textarea></div>
+            <button class="btn btn-primary" onclick="App.saveSettings()">Save Settings</button>
+          </div>
+          <div class="card" style="margin-bottom:16px">
             <div class="card-header"><span class="card-title">POS Line-Item Discounts</span></div>
             <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">Governs the per-line "%" discount in the POS cart. It's capped at the Maximum Discount above (currently ${parseFloat(s.max_discount_pct) > 0 ? `${parseFloat(s.max_discount_pct)}%` : 'unlimited'}); a discount above that needs a manager PIN with <span class="perm-pill">pos_discount_override</span> to authorize. An item already covered by an active promotion, or whose brand is listed below, can't take a manual discount at all.</p>
             <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Brands Excluded From Manual Discounts</div>
@@ -15336,6 +15872,10 @@ const App = {
       max_discount_pct: document.getElementById('s-max-discount').value,
       layaway_deposit_percent: document.getElementById('s-layaway-deposit').value,
       layaway_markup_percent: document.getElementById('s-layaway-markup').value,
+      closed_day_return_by: document.getElementById('s-closed-return-by').value || '08:00',
+      store_timezone: document.getElementById('s-store-tz').value.trim(),
+      public_holidays: document.getElementById('s-public-holidays').value
+        .split('\n').map(l => l.trim()).filter(Boolean).join('\n'),
       layaway_cancellation_fee_type: document.getElementById('s-layaway-fee-type').value,
       layaway_cancellation_fee_value: document.getElementById('s-layaway-fee-value').value,
       email_smtp_host: document.getElementById('s-smtp-host').value,
@@ -15346,6 +15886,8 @@ const App = {
       email_smtp_secure: document.getElementById('s-smtp-secure').checked ? 'true' : 'false',
       alt_currencies: JSON.stringify(this.altCurrencies || []),
     };
+    const badHoliday = data.public_holidays.split('\n').find(l => !/^\d{4}-\d{2}-\d{2}\b/.test(l));
+    if (badHoliday) { this.alert(`Public holiday line "${badHoliday}" needs to start with a date like 2026-12-25`, 'error'); return; }
     try {
       await this.api('PUT', '/settings', data);
       await this.loadSettings();
@@ -18401,6 +18943,7 @@ const App = {
     this._editingQuoteId = editId || null;
     this._rentalQuoteProducts = [];
     this._rentalQuoteLineIdx = 0;
+    this._spRentalProducts = null;
     const q = editId ? await this.api('GET', `/quotations/${editId}`) : null;
     const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0,10);
     this.showModal(`
@@ -18449,6 +18992,7 @@ const App = {
                 <button class="btn btn-sm btn-outline" onclick="App.addQuoteItem()">+ Add Item</button>
                 <button class="btn btn-sm btn-outline" onclick="App.addQuoteCustomItem()">+ Custom Item</button>
                 <button class="btn btn-sm btn-outline" id="qt-add-q-item-btn" style="display:none" onclick="App.addQuoteCustomItem(null,{qItem:true})" title="Something not in inventory that Purchasing should order — a Purchase Request is auto-created when the project is accepted">+ Q Item</button>
+                <button class="btn btn-sm btn-outline" id="qt-add-rental-item-btn" style="display:none" onclick="App.addQuoteRentalItem()" title="A rental item for a set period — held when the project is approved, issued and checked back in through Rentals">+ Rental Item</button>
               </div>
             </div>
             <div id="qt-items"></div>
@@ -18512,7 +19056,11 @@ const App = {
           this.addRentalQuoteLine();
         }
       } else if (q.items.length) {
-        q.items.forEach(item => item.product_id ? this.addQuoteItem(item) : this.addQuoteCustomItem(item, { qItem: !!item.is_q_item }));
+        q.items.forEach(item => {
+          // A rental line's mandatory accessories are re-added by the server on save.
+          if (item.is_rental_line) { if (!item.parent_item_id) this.addQuoteRentalItem(item); return; }
+          item.product_id ? this.addQuoteItem(item) : this.addQuoteCustomItem(item, { qItem: !!item.is_q_item });
+        });
       } else {
         this.addQuoteItem();
       }
@@ -18537,6 +19085,9 @@ const App = {
       }
       if (!e.target.closest('.rql-prod-search-wrap')) {
         document.querySelectorAll('[id^="rql-prod-dd-"]').forEach(dd => { dd.style.display = 'none'; });
+      }
+      if (!e.target.closest('.qti-rprod-search-wrap')) {
+        document.querySelectorAll('[id^="qti-rprod-dd-"]').forEach(dd => { dd.style.display = 'none'; });
       }
     });
   },
@@ -18563,6 +19114,8 @@ const App = {
     // labour/fee line, so Q items get their own button there.
     const qItemBtn = document.getElementById('qt-add-q-item-btn');
     if (qItemBtn) qItemBtn.style.display = type==='special_project' ? '' : 'none';
+    const rentalItemBtn = document.getElementById('qt-add-rental-item-btn');
+    if (rentalItemBtn) rentalItemBtn.style.display = type==='special_project' ? '' : 'none';
     if (rentalSection) rentalSection.style.display = type==='rental' ? '' : 'none';
     if (validGroup) validGroup.style.display = type!=='rental' ? '' : 'none';
     if (dueGroup) dueGroup.style.display = type==='rental' ? '' : 'none';
@@ -18612,6 +19165,7 @@ const App = {
   onQuoteBranchTypeChange() {
     if (this._quoteType === 'rental') this._refreshRentalQuoteBranch();
     else this.onQuoteBranchChange();
+    document.querySelectorAll('#qt-items > [data-rental="1"]').forEach(row => this._quoteRentalEstimate(row.id.split('-').pop()));
   },
 
   _toggleQuoteService(which) {
@@ -18715,6 +19269,105 @@ const App = {
       if (costInput && !costInput.value) costInput.value = p.cost || 0;
       this._updateQuoteItemMargin(idx);
     }
+  },
+
+  // Special Project rental line: a rental item for a set period, charged on
+  // the project invoice. Price is per unit for the whole period — filled
+  // from the catalog rate (POST /quotations/rental-line-estimate) until the
+  // user types their own. Approving the project holds the item (see
+  // holdSpecialProjectRentals in routes/quotations.js).
+  addQuoteRentalItem(prefill) {
+    this._quoteItems = this._quoteItems || [];
+    const idx = this._quoteItems.length;
+    this._quoteItems.push({ rental: true });
+    const container = document.getElementById('qt-items');
+    const today = new Date().toISOString().slice(0, 10);
+    const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+    const name = prefill ? String(prefill.product_name || '').split(' — Rental ')[0] : '';
+    const div = document.createElement('div');
+    div.className = 'po-receive-row';
+    div.id = `qt-item-${idx}`;
+    div.dataset.rental = '1';
+    div.style.flexWrap = 'wrap';
+    div.innerHTML = `
+      <span class="badge-pill badge-warning" style="flex-shrink:0" title="Rental item — held when the project is approved">RENTAL</span>
+      <span class="qti-rprod-search-wrap" style="flex:2;min-width:180px;position:relative">
+        <input type="text" id="qti-rprod-search-${idx}" placeholder="Search rental items…" autocomplete="off" style="width:100%" value="${this.escapeAttr(name)}"
+          oninput="App._filterQuoteRentalOptions(${idx},this.value)" onfocus="App._filterQuoteRentalOptions(${idx},this.value)">
+        <input type="hidden" id="qti-rprod-${idx}" value="${prefill&&prefill.product_id||''}">
+        <div id="qti-rprod-dd-${idx}" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
+      </span>
+      <input id="qti-qty-${idx}" type="number" min="1" value="${prefill?prefill.quantity:1}" style="width:60px" placeholder="Qty" oninput="App._quoteRentalEstimate(${idx})">
+      <input id="qti-rstart-${idx}" type="date" value="${prefill&&prefill.rental_start||today}" style="width:140px" title="Rental start" onchange="App._quoteRentalEstimate(${idx})">
+      <span style="font-size:12px;color:var(--text-muted)">to</span>
+      <input id="qti-rend-${idx}" type="date" value="${prefill&&prefill.rental_end||tomorrow}" style="width:140px" title="Rental end (due back)" onchange="App._quoteRentalEstimate(${idx})">
+      <input id="qti-cost-${idx}" type="number" step="0.01" value="${prefill&&prefill.unit_cost!=null?prefill.unit_cost:''}" style="width:80px" placeholder="Cost" title="Informational only — doesn't affect the total" oninput="App._updateQuoteItemMargin(${idx})">
+      <input id="qti-price-${idx}" type="number" step="0.01" value="${prefill?prefill.unit_price:''}" data-auto="${prefill?'0':'1'}" style="width:90px" placeholder="Price" title="Price per unit for the whole rental period" oninput="this.dataset.auto='0';App.calcQuoteTotal();App._updateQuoteItemMargin(${idx})">
+      <input id="qti-disc-${idx}" type="number" min="0" step="0.01" value="${prefill&&prefill.discount_amount||''}" style="width:75px" placeholder="Discount" title="Discount given on this line — recorded for reference, doesn't change the price">
+      <span id="qti-margin-${idx}" style="font-size:11px;color:var(--text-muted);white-space:nowrap"></span>
+      <button class="btn btn-sm btn-danger" onclick="document.getElementById('qt-item-${idx}').remove();App.calcQuoteTotal()">✕</button>
+      <div id="qti-rinfo-${idx}" style="flex-basis:100%;font-size:11px;color:var(--text-muted);padding-left:4px"></div>`;
+    container.appendChild(div);
+    this.calcQuoteTotal();
+    this._updateQuoteItemMargin(idx);
+    if (prefill && prefill.product_id) this._quoteRentalEstimate(idx);
+  },
+
+  async _filterQuoteRentalOptions(idx, query) {
+    const dd = document.getElementById(`qti-rprod-dd-${idx}`);
+    if (!dd) return;
+    if (!this._spRentalProducts) {
+      try { this._spRentalProducts = await this.api('GET', '/products?is_rental=1&active=1'); } catch(e) { this._spRentalProducts = []; }
+    }
+    const q = (query || '').toLowerCase().trim();
+    const matches = this._spRentalProducts.filter(p => !q || `${p.name} ${p.sku || ''}`.toLowerCase().includes(q));
+    dd.innerHTML = matches.length ? matches.slice(0, 50).map(p => `
+      <div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text)" onclick="App._selectQuoteRentalOption(${idx},${p.id})">
+        <strong>${p.name}</strong>
+        <div style="font-size:11px;color:var(--text-muted)">${this.fmt(p.rental_rate || 0)}/day${p.sku ? ' · ' + p.sku : ''}</div>
+      </div>`).join('') : `<div style="padding:10px;color:var(--text-muted);font-size:13px">No rental items found</div>`;
+    dd.style.display = '';
+  },
+
+  _selectQuoteRentalOption(idx, productId) {
+    const p = (this._spRentalProducts || []).find(x => x.id === productId);
+    if (!p) return;
+    document.getElementById(`qti-rprod-${idx}`).value = productId;
+    document.getElementById(`qti-rprod-search-${idx}`).value = p.name;
+    document.getElementById(`qti-rprod-dd-${idx}`).style.display = 'none';
+    const price = document.getElementById(`qti-price-${idx}`);
+    if (price) price.dataset.auto = '1';
+    const cost = document.getElementById(`qti-cost-${idx}`);
+    if (cost) cost.value = '';
+    this._quoteRentalEstimate(idx);
+  },
+
+  // Fills the catalog price for the period (unless the user typed their own)
+  // and shows the length and how many are free to hold at the branch.
+  async _quoteRentalEstimate(idx) {
+    const info = document.getElementById(`qti-rinfo-${idx}`);
+    const product_id = document.getElementById(`qti-rprod-${idx}`)?.value;
+    if (!info || !product_id) return;
+    const quantity = parseInt(document.getElementById(`qti-qty-${idx}`)?.value) || 1;
+    const branch_id = document.getElementById('qt-branch')?.value || null;
+    let est;
+    try {
+      est = await this.api('POST', '/quotations/rental-line-estimate', {
+        product_id, quantity, branch_id,
+        rental_start: document.getElementById(`qti-rstart-${idx}`)?.value,
+        rental_end: document.getElementById(`qti-rend-${idx}`)?.value,
+      });
+    } catch(e) { info.innerHTML = `<span style="color:var(--danger)">${e.message}</span>`; return; }
+    const price = document.getElementById(`qti-price-${idx}`);
+    if (price && (price.dataset.auto === '1' || price.value === '')) { price.value = est.unit_price; price.dataset.auto = '1'; }
+    const cost = document.getElementById(`qti-cost-${idx}`);
+    if (cost && cost.value === '' && est.cost != null) cost.value = est.cost;
+    const availText = est.available == null ? 'choose a branch to check availability'
+      : est.available >= quantity ? `${est.available} available at this branch now`
+      : `<span style="color:var(--danger)">only ${est.available} available at this branch now</span>`;
+    info.innerHTML = `${est.days} day${est.days === 1 ? '' : 's'} · catalog rate ${this.fmt(est.fee)} for ${quantity} · ${availText}`;
+    this.calcQuoteTotal();
+    this._updateQuoteItemMargin(idx);
   },
 
   // Temporary line item: no product_id, just a free-text description and a
@@ -19122,6 +19775,22 @@ const App = {
     const items = [];
     document.querySelectorAll('#qt-items > [id^="qt-item-"]').forEach(row => {
       const idx = row.id.split('-').pop();
+      if (row.dataset.rental === '1') {
+        const product_id = document.getElementById(`qti-rprod-${idx}`)?.value;
+        if (!product_id) return;
+        const priceVal = document.getElementById(`qti-price-${idx}`).value;
+        const costVal = document.getElementById(`qti-cost-${idx}`)?.value;
+        items.push({
+          is_rental_line: 1, product_id,
+          quantity: parseInt(document.getElementById(`qti-qty-${idx}`).value) || 1,
+          rental_start: document.getElementById(`qti-rstart-${idx}`).value,
+          rental_end: document.getElementById(`qti-rend-${idx}`).value,
+          unit_price: priceVal === '' ? null : parseFloat(priceVal),
+          unit_cost: costVal === '' || costVal == null ? undefined : parseFloat(costVal),
+          discount: parseFloat(document.getElementById(`qti-disc-${idx}`)?.value) || 0,
+        });
+        return;
+      }
       const quantity = parseInt(document.getElementById(`qti-qty-${idx}`).value) || 1;
       const unit_price = parseFloat(document.getElementById(`qti-price-${idx}`).value) || 0;
       const discount = parseFloat(document.getElementById(`qti-disc-${idx}`)?.value) || 0;
@@ -19185,6 +19854,41 @@ const App = {
       this.closeModal();
       if (isSpecialProject) this.renderSpecialProjects(); else this.renderQuotations();
     } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // Under a Special Project rental line on viewQuote: its hold (rental
+  // agreement), check-out and check-in, condition, and any charges raised at
+  // check-in (late/early return, damage) — those are settled on the rental
+  // itself (Returned – Not Paid → Collect), not on the project invoice.
+  _spRentalDetailsHtml(i, q) {
+    if (!i.is_rental_line || i.parent_item_id) return '';
+    const d = v => v ? new Date(`${String(v).slice(0, 10)}T00:00:00Z`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }) : '—';
+    const cell = html => `<tr><td colspan="6" style="padding-top:0;border-top:none"><div style="font-size:12px;background:var(--bg-secondary);border-radius:6px;padding:8px 10px;line-height:1.6">${html}</div></td></tr>`;
+    const r = i.rental;
+    if (!r) {
+      const note = ['draft', 'pending_approval'].includes(q.status) ? 'The item is held for this project when it\'s approved.' : 'Not held — send the project back to Draft and approve it again to hold the item.';
+      return cell(`<strong>Rental period:</strong> ${d(i.rental_start)} to ${d(i.rental_end)} · <span style="color:var(--text-muted)">${note}</span>`);
+    }
+    const labels = { pending: ['Held — awaiting project payment', 'badge-warning'], awaiting_issue: ['Paid — ready to check out', 'badge-info'], out_for_delivery: ['Out for delivery', 'badge-teal'], active: ['Checked out', 'badge-info'], paused: ['Checked out (paused)', 'badge-warning'], overdue: ['Overdue', 'badge-danger'], returned: ['Checked in', 'badge-success'], returned_unpaid: ['Checked in — balance due', 'badge-danger'], cancelled: ['Hold cancelled', 'badge-secondary'] };
+    const [label, badge] = labels[r.display_status] || [r.display_status, 'badge-secondary'];
+    const parts = [`<strong>Rental:</strong> <a href="#" style="color:var(--primary);font-weight:600;text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewRentalAgreement(${r.id})">${r.agreement_number}</a> <span class="badge-pill ${badge}" style="font-size:10px">${label}</span> · Period ${d(i.rental_start)} to ${d(i.rental_end)} · Due back ${d(r.due_date)}`];
+    parts.push(`<strong>Check-out:</strong> ${r.checkout_datetime ? `${this.fmtDateTime(r.checkout_datetime)}${r.issued_by_name ? ` · signed out by ${r.issued_by_name}` : ''}` : '<span style="color:var(--text-muted)">not yet</span>'}`
+      + ` &nbsp; <strong>Check-in:</strong> ${r.returned_at ? `${this.fmtDateTime(r.returned_at)}${r.returned_by_name ? ` · signed in by ${r.returned_by_name}` : ''}` : '<span style="color:var(--text-muted)">not yet</span>'}`);
+    const conds = (r.items || []).filter(it => it.condition_out || it.condition_in || it.damage_notes)
+      .map(it => `${r.items.length > 1 ? `${it.product_name}: ` : ''}${it.condition_out || '—'} → ${it.condition_in || '—'}${it.damage_notes ? ` <span style="color:var(--danger)">(${it.damage_notes})</span>` : ''}`);
+    if (conds.length) parts.push(`<strong>Condition:</strong> ${conds.join('; ')}`);
+    if (r.status === 'returned') {
+      const adj = (r.duration_adjustment_total || 0) + (r.tax_adjustment_total || 0);
+      const charges = [];
+      if (Math.abs(adj) >= 0.005) charges.push(`${adj > 0 ? 'Late return' : 'Early return credit'} ${this.fmt(adj)} (incl. tax)`);
+      if (r.damage_fee_total > 0) charges.push(`Damage ${this.fmt(r.damage_fee_total)}`);
+      const bal = r.balance_due || 0;
+      const settled = r.settlement_transaction_number ? ` · settled on <a href="#" style="color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewTransaction(${r.settlement_transaction_id})">${r.settlement_transaction_number}</a>` : '';
+      const balText = bal > 0.005 ? (r.settlement_transaction_id ? `Balance ${this.fmt(bal)}${settled}` : `<span style="color:var(--danger);font-weight:600">Balance due ${this.fmt(bal)}</span> — collect from Rentals → Returned – Not Paid`)
+        : bal < -0.005 ? `Refund due ${this.fmt(-bal)} — see Rental Deposits` : 'No extra charges';
+      parts.push(`<strong>Charges at check-in:</strong> ${charges.length ? charges.join(' · ') + ' · ' : ''}${balText}`);
+    }
+    return cell(parts.join('<br>'));
   },
 
   // Per-item branch-sourcing breakdown for viewQuote — how much of the line
@@ -19258,7 +19962,7 @@ const App = {
         <table>
           <thead><tr><th>Item</th><th>Qty</th><th>Cost</th><th>Price</th><th>Margin</th><th>Total</th></tr></thead>
           <tbody>
-            ${q.items.map(i => { const margin = (i.unit_cost != null && i.unit_price > 0) ? ((i.unit_price - i.unit_cost) / i.unit_price * 100) : null; return `<tr><td>${i.product_name}${i.is_temp_item && i.is_q_item ? ` <span class="badge-pill badge-warning" style="font-size:10px" title="Flagged for Purchasing to order">Q</span>${i.purchase_request_number ? ` <a href="#" style="font-size:11px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${i.purchase_request_id})">${i.purchase_request_number}</a>` : ''}` : ''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on this line">-${this.fmt(i.discount_amount)}</span>` : ''}</td><td>${i.quantity}</td><td>${i.unit_cost != null ? this.fmt(i.unit_cost) : '<span style="color:var(--text-muted)">—</span>'}</td><td>${this.fmt(i.unit_price)}</td><td>${margin != null ? `<span style="color:${margin<0?'var(--danger)':'var(--text-muted)'}">${margin>=0?'+':''}${margin.toFixed(0)}%</span>` : '—'}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`; }).join('')}
+            ${q.items.map(i => { const margin = (i.unit_cost != null && i.unit_price > 0) ? ((i.unit_price - i.unit_cost) / i.unit_price * 100) : null; return `<tr><td>${i.parent_item_id ? '↳ ' : ''}${i.is_rental_line && !i.parent_item_id ? '<span class="badge-pill badge-warning" style="font-size:10px">RENTAL</span> ' : ''}${i.product_name}${i.is_temp_item && i.is_q_item ? ` <span class="badge-pill badge-warning" style="font-size:10px" title="Flagged for Purchasing to order">Q</span>${i.purchase_request_number ? ` <a href="#" style="font-size:11px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${i.purchase_request_id})">${i.purchase_request_number}</a>` : ''}` : ''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on this line">-${this.fmt(i.discount_amount)}</span>` : ''}</td><td>${i.quantity}</td><td>${i.unit_cost != null ? this.fmt(i.unit_cost) : '<span style="color:var(--text-muted)">—</span>'}</td><td>${this.fmt(i.unit_price)}</td><td>${margin != null ? `<span style="color:${margin<0?'var(--danger)':'var(--text-muted)'}">${margin>=0?'+':''}${margin.toFixed(0)}%</span>` : '—'}</td><td class="fw-600">${i.is_mandatory ? 'Included' : this.fmt(i.total)}</td></tr>${this._spRentalDetailsHtml(i, q)}`; }).join('')}
           </tbody>
         </table>
       </div>` : `
@@ -20653,6 +21357,10 @@ const App = {
               <input id="bf-price-tier" type="number" step="0.01" value="${b.price_tier_percent || 0}">
             </div>
           </div>
+          <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-weight:normal;font-size:13px;text-transform:none;margin:4px 0 12px">
+            <input type="checkbox" id="bf-closed-grace" ${b.closed_day_grace ? 'checked' : ''} style="width:16px;height:16px;margin-top:2px;flex-shrink:0">
+            <span><strong>Closed on Sundays &amp; public holidays</strong><br><span style="color:var(--text-muted);font-size:12px">A rental due back on a closed day can be returned by ${this.escapeAttr((this.settings && this.settings.closed_day_return_by) || '08:00')} the next open day with no late charge. Holidays are listed in Settings → Rental Returns.</span></span>
+          </label>
           <div class="input-row">
             ${id ? `<div class="form-group"><label>Status</label><select id="bf-active"><option value="1" ${b.active?'selected':''}>Active</option><option value="0" ${!b.active?'selected':''}>Inactive</option></select></div>` : '<div class="form-group"></div>'}
             <div class="form-group"></div>
@@ -20677,6 +21385,7 @@ const App = {
       email: document.getElementById('bf-email').value.trim(),
       currency: document.getElementById('bf-currency').value || null,
       price_tier_percent: parseFloat(document.getElementById('bf-price-tier').value) || 0,
+      closed_day_grace: document.getElementById('bf-closed-grace').checked ? 1 : 0,
     };
     if (id) data.active = parseInt(document.getElementById('bf-active').value);
     if (!data.name) { this.alert('Branch name required', 'error'); return; }
