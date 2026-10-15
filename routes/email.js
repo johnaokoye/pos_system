@@ -5,6 +5,7 @@ const { db } = require('../database');
 const { requireAuth, requirePermission, can } = require('../lib/permissions');
 const { inlineProtectedImages } = require('../lib/protectedUploads');
 const { rentalQuoteSummary, attachRentalRates, attachRateBasis, rentalWindow, rateBasisLabel } = require('../lib/rentals');
+const { renderDocumentPdf } = require('../lib/documentPdf');
 
 // Brand palette for every email sent out (receipts, quotes, invoices,
 // statements, notices): green header with a yellow accent stripe, black
@@ -47,6 +48,13 @@ function logoImgTag(s, origin, maxHeight = 40) {
   return `<img src="${src}" alt="${alt}" style="display:block;max-height:${maxHeight}px;max-width:200px;object-fit:contain;margin-bottom:8px">`;
 }
 
+// A sale that came from a quotation converted to an invoice (sent to a
+// cashier and cashed out) goes out as a tax invoice, not a receipt — same
+// rule as App._txDocTitle() in public/index.html for the printed copy.
+function receiptDocTitle(tx) {
+  return tx.source_quote_id ? 'Retail Tax Invoice' : 'Receipt';
+}
+
 function buildReceiptHtml(tx, s) {
   const storeName = s.store_name || 'My Store';
   const storeAddr = tx.branch_address
@@ -70,7 +78,7 @@ function buildReceiptHtml(tx, s) {
 
   return `<!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"><title>Receipt ${tx.transaction_number}</title></head>
+<head><meta charset="utf-8"><title>${receiptDocTitle(tx)} ${tx.transaction_number}</title></head>
 <body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
 <tr><td align="center">
@@ -82,7 +90,7 @@ function buildReceiptHtml(tx, s) {
       ${storePhone ? `<div style="color:#ffffff;font-size:12px">${storePhone}</div>` : ''}
     </td></tr>
     <tr><td style="padding:20px 24px">
-      <div style="font-size:18px;font-weight:700;color:${BRAND.black};margin-bottom:4px">Receipt</div>
+      <div style="font-size:18px;font-weight:700;color:${BRAND.black};margin-bottom:4px">${receiptDocTitle(tx)}</div>
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-bottom:16px">
         <tr><td style="padding:2px 0"><strong>Transaction #:</strong> ${tx.transaction_number}</td><td style="text-align:right;padding:2px 0"><strong>Date:</strong> ${new Date(tx.created_at).toLocaleString()}</td></tr>
         ${tx.customer_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Customer:</strong> ${tx.customer_name}</td></tr>` : ''}
@@ -404,14 +412,12 @@ function buildRentalInvoiceHtml(agreement, tx, s, origin) {
 // the emailed copy matches what printing it produces; replaces what used to
 // be three separate narrower documents (tax invoice extras aside, the
 // deposit-only credit-note/refund receipts) with one.
-function buildRentalSummaryHtml(agreement, s) {
-  const storeName = s.store_name || 'My Store';
-  const storeAddr = agreement.branch_address
-    ? `${agreement.branch_address}${agreement.branch_city ? ', ' + agreement.branch_city : ''}${agreement.branch_state ? ' ' + agreement.branch_state : ''}${agreement.branch_zip ? ' ' + agreement.branch_zip : ''}`
-    : s.store_address || '';
+// Everything the Rental Agreement Summary shows, computed once — shared by
+// the HTML email (buildRentalSummaryHtml) and its PDF (rentalSummaryPdfModel)
+// so the two can't drift apart.
+function rentalSummaryFigures(agreement) {
   const isReturned = agreement.status === 'returned';
-
-  const itemRows = (agreement.items || []).map(i => {
+  const items = (agreement.items || []).map(i => {
     const tag = i.parent_item_id ? (i.is_mandatory ? ' (included)' : ' (accessory)') : '';
     const rateParts = i.is_mandatory ? [] : [`${fmt(i.daily_rate)}/day`];
     if (!i.is_mandatory) {
@@ -420,15 +426,14 @@ function buildRentalSummaryHtml(agreement, s) {
     }
     // The blocks the fee is actually billed in over the rental period, when known.
     if (i.rate_basis && i.rate_basis.length) rateParts.splice(0, rateParts.length, rateBasisLabel(i.rate_basis, fmt));
-    return `<tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}${tag}</td>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${i.quantity}</td>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center;font-size:11px;color:#666">${i.is_mandatory ? 'No charge' : rateParts.join(' · ')}</td>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${fmt(i.rental_fee)}</td>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${i.quantity_returned > 0 ? fmt(i.final_rental_fee) : '—'}</td>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${i.damage_fee > 0 ? fmt(i.damage_fee) : '—'}</td>
-    </tr>`;
-  }).join('');
+    return {
+      name: `${i.product_name}${tag}`, child: !!i.parent_item_id, quantity: i.quantity,
+      rate: i.is_mandatory ? 'No charge' : rateParts.join(' · '),
+      originalFee: fmt(i.rental_fee),
+      finalFee: i.quantity_returned > 0 ? fmt(i.final_rental_fee) : '—',
+      damageFee: i.damage_fee > 0 ? fmt(i.damage_fee) : '—',
+    };
+  });
 
   const serviceFeesTotal = (agreement.delivery_required ? agreement.delivery_cost||0 : 0) + (agreement.pickup_required ? agreement.pickup_cost||0 : 0) + (agreement.operator_required ? agreement.operator_fee||0 : 0);
   const rentalFeeSubtotal = parseFloat(((agreement.checkout_subtotal||0) - agreement.deposit_total - serviceFeesTotal).toFixed(2));
@@ -470,11 +475,31 @@ function buildRentalSummaryHtml(agreement, s) {
     }
   }
 
-  const issueSignatures = [];
-  if (agreement.issue_customer_signature) issueSignatures.push(['Customer', agreement.customer_name, agreement.issue_customer_signature, agreement.issued_at]);
-  if (agreement.issue_security_signature) issueSignatures.push(['Security (Issue)', agreement.issue_security_employee_name, agreement.issue_security_signature, agreement.issue_security_confirmed_at]);
-  if (agreement.return_security_signature) issueSignatures.push(['Security (Return)', agreement.return_security_employee_name, agreement.return_security_signature, agreement.return_security_confirmed_at]);
-  if (agreement.return_driver_signature) issueSignatures.push(['Driver (Return)', agreement.return_driver_employee_name, agreement.return_driver_signature, agreement.return_driver_confirmed_at]);
+  const signatures = [];
+  if (agreement.issue_customer_signature) signatures.push(['Customer', agreement.customer_name, agreement.issue_customer_signature, agreement.issued_at]);
+  if (agreement.issue_security_signature) signatures.push(['Security (Issue)', agreement.issue_security_employee_name, agreement.issue_security_signature, agreement.issue_security_confirmed_at]);
+  if (agreement.return_security_signature) signatures.push(['Security (Return)', agreement.return_security_employee_name, agreement.return_security_signature, agreement.return_security_confirmed_at]);
+  if (agreement.return_driver_signature) signatures.push(['Driver (Return)', agreement.return_driver_employee_name, agreement.return_driver_signature, agreement.return_driver_confirmed_at]);
+
+  return { items, checkoutRows, settlementRows, balanceLabel, balanceDisplay, dispositionLine, signatures };
+}
+
+function buildRentalSummaryHtml(agreement, s) {
+  const storeName = s.store_name || 'My Store';
+  const storeAddr = agreement.branch_address
+    ? `${agreement.branch_address}${agreement.branch_city ? ', ' + agreement.branch_city : ''}${agreement.branch_state ? ' ' + agreement.branch_state : ''}${agreement.branch_zip ? ' ' + agreement.branch_zip : ''}`
+    : s.store_address || '';
+
+  const { items, checkoutRows, settlementRows, balanceLabel, balanceDisplay, dispositionLine, signatures: issueSignatures } = rentalSummaryFigures(agreement);
+  const itemRows = items.map(i => `<tr>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.name}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${i.quantity}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center;font-size:11px;color:#666">${i.rate}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${i.originalFee}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${i.finalFee}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${i.damageFee}</td>
+    </tr>`).join('');
+
   const sigRow = !issueSignatures.length ? '' : `<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:12px"><tr>
     ${issueSignatures.map(([label, name, src, signedAt]) => `<td style="text-align:center;padding:4px 8px">
       <img src="${src}" style="max-height:44px;max-width:110px;border-bottom:1px solid #333;padding-bottom:4px" />
@@ -753,12 +778,14 @@ router.post('/send-receipt/:id', requireAuth, async (req, res) => {
     const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name,
       e.first_name || ' ' || e.last_name as employee_name, cbe.first_name || ' ' || cbe.last_name as created_by_name,
       b.name as branch_name, b.address as branch_address, b.city as branch_city,
-      b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone
+      b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone,
+      q.id as source_quote_id, q.quote_number as source_quote_number
       FROM transactions t
       LEFT JOIN customers c ON t.customer_id = c.id
       LEFT JOIN employees e ON t.employee_id = e.id
       LEFT JOIN employees cbe ON cbe.id = COALESCE(t.created_by, t.employee_id)
       LEFT JOIN branches b ON t.branch_id = b.id
+      LEFT JOIN quotations q ON q.converted_to_tx = t.id
       WHERE t.id = ?`, args: [req.params.id] });
     if (!tx) return res.status(404).json({ error: 'Transaction not found' });
     const { rows: items } = await db.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [req.params.id] });
@@ -772,10 +799,10 @@ router.post('/send-receipt/:id', requireAuth, async (req, res) => {
       await transporter.sendMail({
         from: `"${fromName}" <${fromAddr}>`,
         to,
-        subject: `Receipt - ${tx.transaction_number} from ${s.store_name || 'Our Store'}`,
-        html: buildReceiptHtml(tx, s),
+        subject: `${receiptDocTitle(tx)} - ${tx.transaction_number} from ${s.store_name || 'Our Store'}`,
+        ...(await documentEmailContent(req.body.as_pdf, s, receiptPdfModel(tx, s), buildReceiptHtml(tx, s))),
       });
-      res.json({ success: true, message: `Receipt sent to ${to}` });
+      res.json({ success: true, message: `${receiptDocTitle(tx)} sent to ${to}` });
     } catch (e) {
       res.status(500).json({ error: `Failed to send email: ${e.message}` });
     }
@@ -936,8 +963,9 @@ router.post('/send-rental-summary/:id', requireAuth, async (req, res) => {
         from: `"${fromName}" <${fromAddr}>`,
         to,
         subject: `Rental Agreement Summary - ${agreement.agreement_number} from ${s.store_name || 'Our Store'}`,
-        // Signatures are login-only on this server — embed them in the email.
-        ...inlineProtectedImages(buildRentalSummaryHtml(agreement, s)),
+        // Signatures are login-only on this server — embed them in the email
+        // (or, as a PDF, read straight from disk by lib/documentPdf.js).
+        ...(await documentEmailContent(req.body.as_pdf, s, rentalSummaryPdfModel(agreement, s), inlineProtectedImages(buildRentalSummaryHtml(agreement, s)))),
       });
       res.json({ success: true, message: `Rental agreement summary sent to ${to}` });
     } catch (e) {
@@ -988,8 +1016,9 @@ router.post('/send-rental-invoice/:id', requireAuth, async (req, res) => {
         from: `"${fromName}" <${fromAddr}>`,
         to,
         subject: `Rental Tax Invoice - ${agreement.agreement_number} from ${s.store_name || 'Our Store'}`,
-        // Signatures are login-only on this server — embed them in the email.
-        ...inlineProtectedImages(buildRentalInvoiceHtml(agreement, tx, s, origin)),
+        // Signatures are login-only on this server — embed them in the email
+        // (or, as a PDF, read straight from disk by lib/documentPdf.js).
+        ...(await documentEmailContent(req.body.as_pdf, s, rentalInvoicePdfModel(agreement, tx, s), inlineProtectedImages(buildRentalInvoiceHtml(agreement, tx, s, origin)))),
       });
       res.json({ success: true, message: `Rental tax invoice sent to ${to}` });
     } catch (e) {
@@ -1057,7 +1086,7 @@ router.post('/send-quote/:id', requireAuth, async (req, res) => {
         from: `"${fromName}" <${fromAddr}>`,
         to,
         subject: `${isRental ? 'Rental Quotation' : 'Quotation'} ${q.quote_number} from ${s.store_name || 'Our Store'}`,
-        html: isRental ? buildRentalQuoteHtml(q, s) : buildQuoteHtml(q, s),
+        ...(await documentEmailContent(req.body.as_pdf, s, isRental ? rentalQuotePdfModel(q, s) : quotePdfModel(q, s), isRental ? buildRentalQuoteHtml(q, s) : buildQuoteHtml(q, s))),
       });
 
       // Auto-mark as sent if still in draft
@@ -1680,7 +1709,7 @@ router.post('/send-work-order-invoice/:id', requireAuth, async (req, res) => {
         from: `"${fromName}" <${fromAddr}>`,
         to,
         subject: `Work Order Tax Invoice ${wo.wo_number} from ${s.store_name || 'Our Store'}`,
-        html: buildWorkOrderInvoiceHtml(wo, s),
+        ...(await documentEmailContent(req.body.as_pdf, s, workOrderInvoicePdfModel(wo, s), buildWorkOrderInvoiceHtml(wo, s))),
       });
       res.json({ success: true, message: `Work order invoice sent to ${to}` });
     } catch (e) {
@@ -1802,5 +1831,236 @@ router.post('/send-missed-pickup-confirmation/:id', requireAuth, async (req, res
     }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
+
+// ─── "Attach as PDF" ─────────────────────────────────────────────────────────
+// Quotations and invoices can go out as a PDF attachment instead of an HTML
+// email (the email dialog's "Attach as PDF" option — `as_pdf` in the request
+// body). Each *PdfModel below maps the same data its HTML builder above uses
+// onto lib/documentPdf.js's generic layout, so the PDF carries the same
+// content; the email body becomes a short cover note.
+
+const pdfDate = d => d ? new Date(String(d).length === 10 ? `${d}T00:00:00` : d).toLocaleDateString() : '';
+const pdfDateTime = d => d ? new Date(d).toLocaleString() : '';
+
+function pdfStore(s, src = {}) {
+  const addr = src.branch_address
+    ? `${src.branch_address}${src.branch_city ? ', ' + src.branch_city : ''}${src.branch_state ? ' ' + src.branch_state : ''}${src.branch_zip ? ' ' + src.branch_zip : ''}`
+    : s.store_address || '';
+  return { name: s.store_name || 'My Store', branch: src.branch_name || '', address: addr, phone: src.branch_phone || s.store_phone || '', logo: s.company_logo_url || null };
+}
+
+const ITEM_COLUMNS = [{ label: 'Item', width: 4 }, { label: 'Qty', width: 0.8, align: 'center' }, { label: 'Unit Price', width: 1.4, align: 'right' }, { label: 'Total', width: 1.4, align: 'right' }];
+
+function quotePdfModel(q, s) {
+  return {
+    store: pdfStore(s),
+    title: 'QUOTATION', number: q.quote_number,
+    meta: [['Date', pdfDate(q.created_at)], ['Valid Until', q.valid_until ? pdfDate(String(q.valid_until).slice(0, 10)) : ''], ['Branch', q.branch_name]],
+    party: { label: 'Bill To', lines: [q.customer_name, q.customer_phone, q.customer_email] },
+    tables: [{ columns: ITEM_COLUMNS, rows: (q.items || []).map(i => ({
+      cells: [i.product_name, i.quantity, fmt(i.unit_price), fmt(i.total)],
+      sub: [i.sku, parseFloat(i.discount_amount) > 0 ? `Price includes ${fmt(i.discount_amount)} discount` : ''].filter(Boolean).join(' · '),
+    })) }],
+    totals: [
+      { label: 'Subtotal', value: fmt(q.subtotal) },
+      { label: 'Tax', value: fmt(q.tax_amount) },
+      parseFloat(q.discount_amount) > 0 ? { label: 'Discount', value: `-${fmt(q.discount_amount)}`, style: 'green' } : null,
+      { label: 'TOTAL', value: fmt(q.total), style: 'grand' },
+    ],
+    notes: [q.notes ? `Notes: ${q.notes}` : ''],
+    footer: s.receipt_footer || 'Thank you for your business!',
+  };
+}
+
+function rentalQuotePdfModel(q, s) {
+  const sum = rentalQuoteSummary(q);
+  const period = q.due_date ? rentalQuotePeriod(q) : null;
+  const utc = d => d.toLocaleDateString(undefined, { timeZone: 'UTC' });
+  const customerAddr = [q.customer_address, q.customer_city, q.customer_state, q.customer_zip].filter(Boolean).join(', ');
+  const services = [
+    q.delivery_required ? { cells: ['Delivery', fmt(sum.delivery)], sub: q.delivery_address || (customerAddr ? `To: ${customerAddr}` : 'To the customer’s address on file') } : null,
+    q.pickup_required ? { cells: ['Pickup', fmt(sum.pickup)], sub: 'Collection of the equipment from the customer at the end of the rental' } : null,
+    q.operator_required ? { cells: ['Operator', fmt(sum.operator)], sub: 'Trained operator provided to run the equipment' } : null,
+  ].filter(Boolean);
+  return {
+    store: pdfStore(s),
+    title: 'RENTAL QUOTATION', number: q.quote_number,
+    meta: [['Date', pdfDate(q.created_at)], ['Branch', q.branch_name], ['Prepared By', q.employee_name]],
+    party: { label: 'Customer', lines: [q.customer_name ? `${q.customer_name}${q.customer_number ? ` (${q.customer_number})` : ''}` : '', customerAddr, q.customer_phone, q.customer_email] },
+    info: period ? [['Rental Period', `${utc(period.start)} - ${utc(period.due)} (${period.days} day${period.days === 1 ? '' : 's'})`], ['Return Due', utc(period.due)]] : [],
+    tables: [
+      { heading: 'Rental Items', columns: [{ label: 'Item', width: 5 }, { label: 'Qty', width: 0.8, align: 'center' }, { label: 'Est. Rental Fee', width: 1.8, align: 'right' }],
+        rows: (q.items || []).map(i => {
+          const tag = i.parent_item_id ? (i.is_mandatory ? 'Included accessory' : 'Optional accessory') : '';
+          return { indent: !!i.parent_item_id, cells: [i.product_name, i.quantity, i.is_mandatory ? 'Included' : fmt(i.total)],
+            sub: [tag, i.sku, rentalRateCard(i), i.condition_out ? `Condition out: ${i.condition_out}` : ''].filter(Boolean).join(' · ') };
+        }) },
+      { heading: 'Additional Services', columns: [{ label: 'Service', width: 6 }, { label: 'Amount', width: 1.8, align: 'right' }], rows: services },
+    ],
+    totals: [
+      { label: 'Rental Fees (estimated)', value: fmt(sum.rental_fees) },
+      { label: 'Sales Tax', value: fmt(sum.tax) },
+      q.delivery_required ? { label: 'Delivery', value: fmt(sum.delivery) } : null,
+      q.pickup_required ? { label: 'Pickup', value: fmt(sum.pickup) } : null,
+      q.operator_required ? { label: 'Operator', value: fmt(sum.operator) } : null,
+      { label: 'Refundable Deposit', value: sum.deposit_waived ? (sum.deposit_waived_reason === 'credit' ? 'Not required (credit)' : 'Waived (operator)') : fmt(sum.deposit) },
+      sum.discount > 0 ? { label: 'Discount', value: `-${fmt(sum.discount)}`, style: 'green' } : null,
+      { label: 'TOTAL DUE AT CHECKOUT', value: fmt(sum.total), style: 'grand' },
+    ],
+    notes: [
+      sum.deposit_waived ? '' : `The refundable deposit (${fmt(sum.deposit)}) is returned when the equipment comes back on time and in the condition it went out; late return or damage charges are deducted from it.`,
+      'Rental fees are estimated for the period shown and are finalized at checkout based on the actual checkout time and return due date.',
+      q.notes ? `Notes: ${q.notes}` : '',
+    ],
+    footer: s.receipt_footer || 'Thank you for your business!',
+  };
+}
+
+function receiptPdfModel(tx, s) {
+  return {
+    store: pdfStore(s, tx),
+    title: receiptDocTitle(tx).toUpperCase(), number: tx.transaction_number,
+    meta: [['Date', pdfDateTime(tx.created_at)], ['Quotation', tx.source_quote_number]],
+    party: { label: 'Customer', lines: [tx.customer_name] },
+    info: [['Created By', tx.created_by_name], ['Cashier', tx.employee_name], ['Payment', (tx.payment_method || '').replace('_', ' ').toUpperCase()]],
+    tables: [{ columns: ITEM_COLUMNS, rows: (tx.items || []).map(i => {
+      const gross = (parseFloat(i.unit_price) || 0) * (parseFloat(i.quantity) || 0);
+      const pct = parseFloat(i.discount_percent) || (parseFloat(i.discount_amount) > 0 && gross > 0 ? parseFloat((i.discount_amount / gross * 100).toFixed(2)) : 0);
+      return { cells: [i.product_name, i.quantity, fmt(i.unit_price), fmt(i.total)], sub: [i.sku, pct > 0 ? `less ${pct}% (-${fmt(i.discount_amount)})` : ''].filter(Boolean).join(' · ') };
+    }) }],
+    totals: [
+      { label: 'Subtotal', value: fmt(tx.subtotal) },
+      tx.tax_exempt ? { label: `Tax Exempt${tx.tax_exemption_number ? ` (Ref: ${tx.tax_exemption_number})` : ''}`, value: '-' } : { label: 'Tax', value: fmt(tx.tax_amount) },
+      parseFloat(tx.discount_amount) > 0 ? { label: 'Discount', value: `-${fmt(tx.discount_amount)}`, style: 'green' } : null,
+      { label: 'TOTAL', value: fmt(tx.total), style: 'grand' },
+      parseFloat(tx.change_amount) > 0 ? { label: 'Change', value: fmt(tx.change_amount), style: 'muted' } : null,
+    ],
+    footer: s.receipt_footer || 'Thank you for your business!',
+  };
+}
+
+function rentalInvoicePdfModel(agreement, tx, s) {
+  const depositLine = (tx.items || []).find(i => i.sku === 'DEPOSIT' && i.total > 0);
+  let breakdown = null;
+  if (depositLine) {
+    const serviceTotal = (tx.items || []).filter(i => ['DELIVERY', 'PICKUP', 'OPERATOR'].includes(i.sku)).reduce((sum, i) => sum + i.total, 0);
+    const subTotalAmount = parseFloat((tx.subtotal - depositLine.total - serviceTotal).toFixed(2));
+    breakdown = { subTotalAmount, salesTotal: parseFloat((subTotalAmount + tx.tax_amount).toFixed(2)), depositAmt: depositLine.total };
+  }
+  const sig = (label, name, image, at) => image ? { label, name, image, signedAt: pdfDateTime(at) } : null;
+  return {
+    store: pdfStore(s, { ...tx, branch_name: agreement.branch_name }),
+    title: 'RENTAL TAX INVOICE', number: tx.transaction_number,
+    meta: [['Date', pdfDateTime(tx.created_at)], ['Agreement', agreement.agreement_number]],
+    party: { label: 'Customer', lines: [agreement.customer_name] },
+    info: [
+      ['Created By', tx.created_by_name || tx.employee_name], ['Cashier', tx.employee_name],
+      ['Item(s) Rented', (agreement.items || []).filter(i => !i.parent_item_id).map(i => `${i.product_name} x${i.quantity}`).join(', ') || '-'],
+      ['Rented', agreement.checkout_datetime ? pdfDateTime(agreement.checkout_datetime) : '-'],
+      ['Returned', agreement.returned_at ? pdfDateTime(agreement.returned_at) : 'Not yet returned'],
+      ['Duration', rentalDurationText(agreement.checkout_datetime, agreement.due_date, agreement.returned_at)],
+    ],
+    tables: [{ columns: [{ label: 'Item', width: 6 }, { label: 'Amount', width: 1.8, align: 'right' }], rows: (tx.items || []).map(i => ({
+      cells: [i.product_name, fmt(i.total)], sub: `${i.sku || ''}${i.quantity > 1 ? ` x ${i.quantity} @ ${fmt(i.unit_price)}` : ''}`,
+    })) }],
+    totals: breakdown ? [
+      { label: 'Sub-Total Amount', value: fmt(breakdown.subTotalAmount) },
+      { label: 'Sales Tax', value: fmt(tx.tax_amount) },
+      { label: 'Sales Total', value: fmt(breakdown.salesTotal) },
+      { label: 'Rental Deposit', value: fmt(breakdown.depositAmt) },
+      parseFloat(tx.discount_amount) > 0 ? { label: 'Discount', value: `-${fmt(tx.discount_amount)}`, style: 'green' } : null,
+      { label: 'GRAND TOTAL', value: fmt(tx.total), style: 'grand' },
+      { label: 'Payment', value: (tx.payment_method || '').replace('_', ' ').toUpperCase(), style: 'muted' },
+    ] : [
+      { label: 'Subtotal', value: fmt(tx.subtotal) },
+      { label: 'Tax', value: fmt(tx.tax_amount) },
+      { label: 'TOTAL', value: fmt(tx.total), style: 'grand' },
+      { label: 'Payment', value: (tx.payment_method || '').replace('_', ' ').toUpperCase(), style: 'muted' },
+    ],
+    signatures: [
+      sig('Issued - Customer', agreement.customer_name, agreement.issue_customer_signature, agreement.issued_at),
+      sig('Issued - Security', agreement.issue_security_employee_name, agreement.issue_security_signature, agreement.issue_security_confirmed_at),
+      sig('Returned - Security', agreement.return_security_employee_name, agreement.return_security_signature, agreement.return_security_confirmed_at),
+      sig('Returned - Driver', agreement.return_driver_employee_name, agreement.return_driver_signature, agreement.return_driver_confirmed_at),
+    ].filter(Boolean),
+    footer: s.receipt_footer || 'Thank you for your business!',
+  };
+}
+
+function workOrderInvoicePdfModel(wo, s) {
+  // Same balance-due math as buildWorkOrderInvoiceHtml above.
+  const estimateTotal = (parseFloat(wo.estimate_labor) || 0) + (parseFloat(wo.estimate_consumables) || 0);
+  const estimateTax = parseFloat((estimateTotal * (parseFloat(wo.estimate_tax_rate) || 0) / 100).toFixed(2));
+  const partsTotal = (wo.items || []).reduce((sum, i) => sum + (parseFloat(i.total) || 0), 0);
+  const partsTax = (wo.items || []).reduce((sum, i) => sum + (parseFloat(i.total) || 0) * (parseFloat(i.tax_rate) || 0) / 100, 0);
+  const assessmentTax = parseFloat(((parseFloat(wo.assessment_fee) || 0) * (parseFloat(wo.assessment_fee_tax_rate) || 0) / 100).toFixed(2));
+  const balanceDue = Math.max(0, estimateTotal + partsTotal + estimateTax + partsTax - (parseFloat(wo.deposit_amount) || 0));
+  return {
+    store: pdfStore(s, { branch_name: wo.branch_name }),
+    title: 'WORK ORDER TAX INVOICE', number: wo.wo_number,
+    meta: [['Status', `${WO_STATUS_LABELS[wo.status] || wo.status}${wo.is_express ? ' (Express)' : ''}`], ['Opened', pdfDate(wo.created_at)], ['Pickup Due', wo.pickup_due_date ? pdfDate(wo.pickup_due_date) : '']],
+    party: { label: 'Customer', lines: [wo.customer_name, wo.customer_phone, wo.customer_email] },
+    info: [['Description', wo.description], ['Item', wo.item_label]],
+    tables: [{ heading: 'Parts', columns: [{ label: 'Part', width: 4 }, ...ITEM_COLUMNS.slice(1)], rows: (wo.items || []).map(i => ({ cells: [i.product_name, i.quantity, fmt(i.unit_price), fmt(i.total)], sub: i.sku || '' })) }],
+    totals: [
+      { label: `Assessment Fee${wo.assessment_transaction_id ? ' (paid)' : ''}`, value: fmt(wo.assessment_fee) },
+      assessmentTax > 0 ? { label: 'Tax on Assessment Fee', value: fmt(assessmentTax), style: 'muted' } : null,
+      wo.status !== 'intake' ? { label: `Estimate (labor + consumables)${wo.is_express ? ' - express +25%' : ''}`, value: fmt(estimateTotal) } : null,
+      partsTotal > 0 ? { label: 'Parts', value: fmt(partsTotal) } : null,
+      (estimateTax + partsTax) > 0 ? { label: 'Tax (estimate + parts)', value: fmt(estimateTax + partsTax), style: 'muted' } : null,
+      parseFloat(wo.deposit_amount) > 0 ? { label: `Deposit Paid${wo.deposit_transaction_id ? ' (paid)' : ''}`, value: `-${fmt(wo.deposit_amount)}` } : null,
+      { label: `BALANCE DUE${wo.final_transaction_id ? ' (paid)' : ''}`, value: fmt(balanceDue), style: 'grand' },
+    ],
+    notes: [wo.estimate_notes ? `Estimate Notes: ${wo.estimate_notes}` : ''],
+    footer: s.receipt_footer || 'Thank you for your business!',
+  };
+}
+
+function rentalSummaryPdfModel(agreement, s) {
+  const f = rentalSummaryFigures(agreement);
+  return {
+    store: pdfStore(s, agreement),
+    title: 'RENTAL AGREEMENT SUMMARY', number: agreement.agreement_number,
+    meta: [['Checked Out', agreement.checkout_datetime ? pdfDateTime(agreement.checkout_datetime) : '-'], ['Due Date', pdfDate(agreement.due_date)], ['Returned', agreement.returned_at ? pdfDateTime(agreement.returned_at) : 'Not yet returned']],
+    party: { label: 'Customer', lines: [agreement.customer_name] },
+    tables: [{ heading: 'Items Rented',
+      columns: [{ label: 'Item', width: 3 }, { label: 'Qty', width: 0.6, align: 'center' }, { label: 'Rate', width: 2, align: 'center' }, { label: 'Original Fee', width: 1.2, align: 'right' }, { label: 'Final Fee', width: 1.2, align: 'right' }, { label: 'Damage Fee', width: 1.2, align: 'right' }],
+      rows: f.items.map(i => ({ indent: i.child, cells: [i.name, i.quantity, i.rate, i.originalFee, i.finalFee, i.damageFee] })) }],
+    totals: [
+      ...(f.checkoutRows.length ? [{ label: 'Checkout Charges', style: 'heading' }, ...f.checkoutRows.map(([label, value]) => ({ label, value }))] : []),
+      ...(f.settlementRows.length ? [{ label: 'Return Settlement', style: 'heading' }, ...f.settlementRows.map(([label, value]) => ({ label, value })), { label: f.balanceLabel, value: f.balanceDisplay, style: 'grand' }] : []),
+    ],
+    notes: [f.dispositionLine],
+    signatures: f.signatures.map(([label, name, image, at]) => ({ label, name, image, signedAt: at ? pdfDateTime(at) : '' })),
+    footer: s.receipt_footer || 'Thank you for your business!',
+  };
+}
+
+function buildPdfCoverHtml(model, s) {
+  const docName = model.title.toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>${docName} ${model.number}</title></head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0"><tr><td align="center">
+  <table width="480" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+    <tr><td style="${BRAND_HEADER_STYLE}"><div style="color:#fff;font-size:22px;font-weight:700">${s.store_name || 'My Store'}</div></td></tr>
+    <tr><td style="padding:20px 24px;font-size:14px;color:#333;line-height:1.5">
+      <p style="margin:0 0 12px">Please find your <strong>${docName} ${model.number}</strong> attached as a PDF.</p>
+      <p style="margin:0;color:#666">${s.receipt_footer || 'Thank you for your business!'}</p>
+    </td></tr>
+  </table>
+</td></tr></table>
+</body></html>`;
+}
+
+// Mail content for one document: the PDF + cover note when `asPdf`, else
+// the regular HTML email (`htmlContent` — a string, or the {html,
+// attachments} object inlineProtectedImages returns).
+async function documentEmailContent(asPdf, s, model, htmlContent) {
+  if (!asPdf) return typeof htmlContent === 'string' ? { html: htmlContent } : htmlContent;
+  const pdf = await renderDocumentPdf(model);
+  const filename = `${model.title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${model.number}.pdf`;
+  return { html: buildPdfCoverHtml(model, s), attachments: [{ filename, content: pdf, contentType: 'application/pdf' }] };
+}
 
 module.exports = router;

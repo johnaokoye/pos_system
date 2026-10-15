@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { getOutstandingQty, getOutOfServiceQty } = require('../lib/rentalAvailability');
-const { depositWaiver, isCreditCustomerType, getBranchStock, feeFor, blendedFeePerUnit, checkAvailability, parseDbTime, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, dueDateTime, requiredDepositReturnMethod, rentalDiscount, attachRateBasis, rentalWindow } = require('../lib/rentals');
+const { depositWaiver, isCreditCustomerType, getBranchStock, feeFor, blendedFeePerUnit, checkAvailability, parseDbTime, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, assertNoUnpaidRentalReturns, dueDateTime, requiredDepositReturnMethod, rentalDiscount, attachRateBasis, rentalWindow } = require('../lib/rentals');
 const { requirePermission, requireAnyPermission, requireAuth, can, canManageRentals, requireRentalsManage } = require('../lib/permissions');
 const { runCreditCheck } = require('./customers');
 const { nextNumber } = require('../lib/nextNumber');
@@ -77,7 +77,7 @@ router.get('/agreements', requireRentalsManage, async (req, res) => {
       (SELECT COUNT(*) FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_count,
       (SELECT GROUP_CONCAT(product_name || ' x' || quantity, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_summary,
       (SELECT started_at FROM rental_agreement_pauses WHERE agreement_id = ra.id AND ended_at IS NULL LIMIT 1) as current_pause_started_at,
-      CASE WHEN ra.status = 'awaiting_issue' AND ra.delivery_driver_confirmed_at IS NOT NULL THEN 'out_for_delivery' WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused' WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' ELSE ra.status END as display_status,
+      CASE WHEN ra.status = 'awaiting_issue' AND ra.delivery_driver_confirmed_at IS NOT NULL THEN 'out_for_delivery' WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused' WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' WHEN ra.status = 'returned' AND ra.settlement_transaction_id IS NULL AND (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total) > 0 THEN 'returned_unpaid' ELSE ra.status END as display_status,
       (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total) as balance_due
       FROM rental_agreements ra
       LEFT JOIN customers c ON ra.customer_id = c.id
@@ -202,7 +202,7 @@ router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
       rde.first_name || ' ' || rde.last_name as return_driver_employee_name,
       cne.first_name || ' ' || cne.last_name as credit_note_issued_by_name,
       dre.first_name || ' ' || dre.last_name as deposit_return_recorded_by_name,
-      CASE WHEN ra.status = 'awaiting_issue' AND ra.delivery_driver_confirmed_at IS NOT NULL THEN 'out_for_delivery' WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused' WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' ELSE ra.status END as display_status,
+      CASE WHEN ra.status = 'awaiting_issue' AND ra.delivery_driver_confirmed_at IS NOT NULL THEN 'out_for_delivery' WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused' WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' WHEN ra.status = 'returned' AND ra.settlement_transaction_id IS NULL AND (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total) > 0 THEN 'returned_unpaid' ELSE ra.status END as display_status,
       (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total) as balance_due
       FROM rental_agreements ra
       LEFT JOIN customers c ON ra.customer_id = c.id
@@ -323,6 +323,7 @@ router.post('/agreements', requirePermission('rentals_checkout'), async (req, re
     try {
       const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [customer_id] });
       assertRentalCustomerEligible(customer);
+      await assertNoUnpaidRentalReturns(db, customer);
     } catch(e) { return res.status(400).json({ error: e.message }); }
 
     let lines;
@@ -378,6 +379,13 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
     const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
     if (!agreement) return res.status(404).json({ error: 'Not found' });
     if (agreement.status !== 'pending') return res.status(400).json({ error: `This agreement is ${agreement.status}, not awaiting checkout` });
+
+    // A hold placed before the customer's other rental came back unpaid
+    // still can't be finalized — same block as creating a new one.
+    try {
+      const { rows: [customer] } = await db.execute({ sql: 'SELECT id, first_name, last_name FROM customers WHERE id = ?', args: [agreement.customer_id] });
+      if (customer) await assertNoUnpaidRentalReturns(db, customer);
+    } catch(e) { return res.status(400).json({ error: e.message }); }
 
     // Split tender: same {method, amount, approval_code} legs as POST
     // /transactions. Charge Account is excluded for the same reason as there

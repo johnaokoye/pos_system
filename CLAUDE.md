@@ -77,7 +77,7 @@ The `security_groups.permissions` JSON blob uses these keys (all boolean). Modul
 **Module keys:** `dashboard`, `pos`, `drawers`, `inventory`, `customers`, `transactions`, `reports`, `employees`, `suppliers`, `services`, `purchase_requests`, `purchasing`, `transfers`, `quotations`, `accounts`, `payables`, `crm`, `commissions`, `warehouse`, `shipping`, `cycle-counts`, `branches`, `security`, `user-sessions`, `assessment`, `promotions`, `settings`
 
 **Sub-permission keys** (stored and checked via `App.can()` exactly as shown):
-- `pos` → `pos_discounts`, `pos_discount_override`, `pos_refunds`, `pos_void_items`, `pos_hold`, `pos_customer_lookup`, `pos_item_lookup`, `pos_tax_exempt`, `pos_reprint_ticket`, `pos_pay_on_account`, `pos_change_quantity`, `pos_cancel_ticket`, `pos_payment`
+- `pos` → `pos_discounts`, `pos_discount_override`, `pos_refunds`, `pos_hold`, `pos_customer_lookup`, `pos_item_lookup`, `pos_tax_exempt`, `pos_reprint_ticket`, `pos_pay_on_account`, `pos_change_quantity`, `pos_cancel_ticket`, `pos_payment`
 - `drawers` → `drawers_manage`, `drawers_open`, `drawers_close`, `void_transactions`
 - `inventory` → `inventory_add`, `inventory_edit`, `inventory_delete`, `inventory_adjust`, `inventory_print_labels`, `inventory_merge`, `inventory_export`, `inventory_missing_data`, `inventory_template`, `inventory_import`, `inventory_import_history`, `inventory_scan_images`, `inventory_categories`, `inventory_brands`
 - `customers` → `customers_add`, `customers_edit`, `customers_delete`, `customers_credit`, `customers_import`, `customers_import_history`, `customers_export`, `customers_export_balances`, `customers_missing_rental_info`, `customers_print_history`, `customers_rental_preapprove`
@@ -102,7 +102,7 @@ The `security_groups.permissions` JSON blob uses these keys (all boolean). Modul
 - `promotions` → `promotions_create`, `promotions_codes`
 - `settings` → `settings_company`, `settings_tax`, `settings_payment`, `settings_integrations`
 
-`multi_branch_access` is stored directly in the permissions blob and checked standalone; it has no sub-permissions and does not appear in `_permissionTree`.
+`multi_branch_access` and `pos_view_margin` (per-line margin on the POS cart) are stored directly in the permissions blob and checked standalone; they have no sub-permissions and do not appear in `_permissionTree` — each is its own checkbox in the Security Group editor. `pos_view_margin` is deliberately not a `pos` sub-key, since subs are inherited from a full `pos` grant and cashiers shouldn't see cost by default.
 
 **Shipping note:** The `shipping` permission and `renderShipping()` section are backed by `shipments` / `shipment_items` in `database.js` and a set of `/shipments*` routes inside `routes/warehouse.js` (mounted at `/api/warehouse`, not a standalone `/api/shipping`). Draft shipments can be created directly or from an online order (`POST /warehouse/shipments/from-order/:txId`); `PATCH /:id/ship` deducts inventory, `/deliver` marks it complete, `/cancel` restores stock if it had already shipped.
 

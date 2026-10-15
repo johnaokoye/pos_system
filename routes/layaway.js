@@ -71,6 +71,12 @@ router.post('/plans', requirePermission('layaway_create'), async (req, res) => {
     if (!items || !items.length) return res.status(400).json({ error: 'At least one item is required' });
     const frequency = ['weekly', 'biweekly', 'monthly'].includes(payment_frequency) ? payment_frequency : 'monthly';
 
+    // Layaway-eligible items sell at their shelf price plus this store-wide
+    // markup when put on layaway (Settings → Layaway). Applied per unit and
+    // rounded, same as _layawayUnitPrice() on the frontend, so the totals
+    // shown in New Layaway match what's charged here.
+    const markupPercent = Math.max(0, parseFloat(await getSetting('layaway_markup_percent', 0)) || 0);
+
     const lines = [];
     let subtotal = 0, taxAmount = 0;
     for (const item of items) {
@@ -82,11 +88,12 @@ router.post('/plans', requirePermission('layaway_create'), async (req, res) => {
       const { rows: [bi] } = await db.execute({ sql: 'SELECT stock_qty FROM branch_inventory WHERE product_id = ? AND branch_id = ?', args: [product.id, branch_id] });
       const availableQty = bi ? bi.stock_qty : product.stock_qty;
       if (availableQty < qty) return res.status(400).json({ error: `Not enough stock for ${product.name} — ${availableQty} available` });
-      const lineTotal = parseFloat((product.price * qty).toFixed(2));
+      const unitPrice = parseFloat((product.price * (1 + markupPercent / 100)).toFixed(2));
+      const lineTotal = parseFloat((unitPrice * qty).toFixed(2));
       const lineTax = parseFloat((lineTotal * (product.tax_rate || 0) / 100).toFixed(2));
       subtotal += lineTotal;
       taxAmount += lineTax;
-      lines.push({ product, quantity: qty, unit_price: product.price, tax_rate: product.tax_rate || 0, lineTotal });
+      lines.push({ product, quantity: qty, unit_price: unitPrice, base_unit_price: product.price, tax_rate: product.tax_rate || 0, lineTotal });
     }
     subtotal = parseFloat(subtotal.toFixed(2));
     taxAmount = parseFloat(taxAmount.toFixed(2));
@@ -110,11 +117,11 @@ router.post('/plans', requirePermission('layaway_create'), async (req, res) => {
       const depositTxId = Number(txResult.lastInsertRowid);
       await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?,?)`, args: [depositTxId, null, `Layaway Deposit — ${lines.length} item(s)`, 'LAYAWAY-DEPOSIT', 1, tendered, 0, tendered] });
 
-      const planResult = await tx.execute({ sql: `INSERT INTO layaway_plans (plan_number,customer_id,employee_id,branch_id,status,subtotal,tax_amount,total,deposit_required,deposit_percent,amount_paid,payment_frequency,next_due_date,deposit_transaction_id,notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [plan_number, customer_id, employee_id || null, branch_id, 'active', subtotal, taxAmount, total, depositRequired, depositPercent, tendered, frequency, nextDue, depositTxId, notes || null] });
+      const planResult = await tx.execute({ sql: `INSERT INTO layaway_plans (plan_number,customer_id,employee_id,branch_id,status,subtotal,tax_amount,total,deposit_required,deposit_percent,amount_paid,payment_frequency,next_due_date,deposit_transaction_id,notes,markup_percent) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [plan_number, customer_id, employee_id || null, branch_id, 'active', subtotal, taxAmount, total, depositRequired, depositPercent, tendered, frequency, nextDue, depositTxId, notes || null, markupPercent] });
       const planId = Number(planResult.lastInsertRowid);
 
       for (const line of lines) {
-        await tx.execute({ sql: `INSERT INTO layaway_plan_items (plan_id,product_id,product_name,sku,quantity,unit_price,tax_rate,line_total) VALUES (?,?,?,?,?,?,?,?)`, args: [planId, line.product.id, line.product.name, line.product.sku, line.quantity, line.unit_price, line.tax_rate, line.lineTotal] });
+        await tx.execute({ sql: `INSERT INTO layaway_plan_items (plan_id,product_id,product_name,sku,quantity,unit_price,tax_rate,line_total,base_unit_price) VALUES (?,?,?,?,?,?,?,?,?)`, args: [planId, line.product.id, line.product.name, line.product.sku, line.quantity, line.unit_price, line.tax_rate, line.lineTotal, line.base_unit_price] });
 
         await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty - ? WHERE id = ?', args: [line.quantity, line.product.id] });
         await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = MAX(0, stock_qty - ?), updated_at = CURRENT_TIMESTAMP`, args: [line.product.id, branch_id, Math.max(0, line.product.stock_qty - line.quantity), line.product.min_stock, line.quantity] });

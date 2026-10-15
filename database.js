@@ -810,6 +810,22 @@ async function _init() {
       excluded INTEGER DEFAULT 0,
       UNIQUE(promotion_id, brand)
     )` },
+    // Saved product catalogues (Inventory > Catalogues): a named selection of
+    // products by category and/or brand, rendered to PDF on demand by
+    // routes/catalogues.js with current prices. category_ids/brands/
+    // excluded_product_ids are JSON arrays.
+    { sql: `CREATE TABLE IF NOT EXISTS product_catalogues (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      description TEXT,
+      category_ids TEXT,
+      brands TEXT,
+      excluded_product_ids TEXT,
+      show_prices INTEGER NOT NULL DEFAULT 1,
+      created_by INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     // The products (and how many of each) that make up one set of a
     // type='bundle' promotion — e.g. 1 drill + 2 batteries. See
     // lib/promotions.js's computeBundleDiscount.
@@ -1315,6 +1331,12 @@ async function _init() {
     'ALTER TABLE rental_agreements ADD COLUMN credit_note_issued_at DATETIME',
     'ALTER TABLE rental_agreements ADD COLUMN credit_note_issued_by INTEGER REFERENCES employees(id)',
     'ALTER TABLE products ADD COLUMN is_layaway_eligible INTEGER DEFAULT 0',
+    // Settings → Layaway "Markup (%)" in effect when the plan was created —
+    // snapshotted so a later settings change can't reprice an open plan.
+    // layaway_plan_items.unit_price already includes it; base_unit_price is
+    // the regular shelf price it was marked up from.
+    'ALTER TABLE layaway_plans ADD COLUMN markup_percent REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE layaway_plan_items ADD COLUMN base_unit_price REAL',
     // Rental issue/dispatch phase — an agreement now sits at 'awaiting_issue'
     // between payment (checkout) and the rental clock actually starting;
     // checkout_datetime/checkout_date are left unset until PATCH .../issue
@@ -2282,6 +2304,13 @@ async function _init() {
         perms.payables = (can(perms, 'security') && can(perms, 'settings')) || /payable/i.test(g.name || '');
         changed = true;
       }
+      // Per-line margin on the POS screen briefly followed `reports_financial`
+      // before getting its own standalone key — seeded from that so nobody's
+      // view changes on upgrade. Standalone (not a `pos` sub) on purpose: a
+      // sub would be inherited by every group with full `pos`, cashiers
+      // included, and cost shouldn't show on a customer-facing screen by
+      // default.
+      if (!('pos_view_margin' in perms)) { perms.pos_view_margin = can(perms, 'reports_financial'); changed = true; }
       if (changed) await db.execute({ sql: 'UPDATE security_groups SET permissions = ? WHERE id = ?', args: [JSON.stringify(perms), g.id] });
     }
   } catch(e) {}

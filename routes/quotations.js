@@ -5,7 +5,7 @@ const { requirePermission, requireAnyPermission, can } = require('../lib/permiss
 const { nextNumber } = require('../lib/nextNumber');
 const { isSerialNumberProduct, serialNumberLabel, serialNumberOf } = require('../lib/serialNumber');
 const { createTransfer } = require('../lib/transfers');
-const { feeFor, buildRentalLines, revalidateQuoteLines, insertPendingAgreement, assertRentalCustomerEligible, rentalQuoteSummary, attachRentalRates, attachRateBasis, rentalWindow } = require('../lib/rentals');
+const { feeFor, buildRentalLines, revalidateQuoteLines, insertPendingAgreement, assertRentalCustomerEligible, assertNoUnpaidRentalReturns, rentalQuoteSummary, attachRentalRates, attachRateBasis, rentalWindow } = require('../lib/rentals');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -28,12 +28,21 @@ async function customerTypeOf(customerId) {
   return c ? c.customer_type : null;
 }
 
+// A "Special Order" is a retail quote or Special Project with at least one
+// Q item — something not in the catalog that Purchasing has to order (see
+// flagItemsForPurchasing below for the same rule: on a retail quote every
+// custom line is one, on a Special Project only lines added as Q items are;
+// rental quotes never are).
+const IS_SPECIAL_ORDER_SQL = `EXISTS (SELECT 1 FROM quotation_items sqi WHERE sqi.quote_id = q.id AND (
+    (q.quote_type = 'special_project' AND sqi.is_q_item = 1)
+    OR (COALESCE(q.quote_type, 'retail') = 'retail' AND sqi.is_temp_item = 1)))`;
+
 const canSeeSpecialProjects = req => can(req.employee && req.employee.permissions, 'special_projects') || can(req.employee && req.employee.permissions, 'special_projects_approve');
 
 router.get('/', async (req, res) => {
   try {
-    const { status, customer_id, quote_number, quote_type, start, end, limit = 100 } = req.query;
-    let sql = `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.customer_type, e.first_name || ' ' || e.last_name as employee_name, oe.first_name || ' ' || oe.last_name as original_employee_name, ae.first_name || ' ' || ae.last_name as approved_by_name, re.first_name || ' ' || re.last_name as rejected_by_name, b.name as branch_name, t.transaction_number as converted_tx_number, ra.agreement_number as converted_agreement_number, ra.status as converted_agreement_status FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN employees oe ON q.original_employee_id = oe.id LEFT JOIN employees ae ON q.approved_by = ae.id LEFT JOIN employees re ON q.rejected_by = re.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id LEFT JOIN rental_agreements ra ON q.converted_to_agreement_id = ra.id WHERE 1=1`;
+    const { status, customer_id, quote_number, quote_type, start, end, special_order, limit = 100 } = req.query;
+    let sql = `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.customer_type, e.first_name || ' ' || e.last_name as employee_name, oe.first_name || ' ' || oe.last_name as original_employee_name, ae.first_name || ' ' || ae.last_name as approved_by_name, re.first_name || ' ' || re.last_name as rejected_by_name, b.name as branch_name, t.transaction_number as converted_tx_number, ra.agreement_number as converted_agreement_number, ra.status as converted_agreement_status, ${IS_SPECIAL_ORDER_SQL} as is_special_order FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN employees oe ON q.original_employee_id = oe.id LEFT JOIN employees ae ON q.approved_by = ae.id LEFT JOIN employees re ON q.rejected_by = re.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id LEFT JOIN rental_agreements ra ON q.converted_to_agreement_id = ra.id WHERE 1=1`;
     const params = [];
     if (status) { sql += ' AND q.status = ?'; params.push(status); }
     if (quote_type) { sql += ' AND q.quote_type = ?'; params.push(quote_type); }
@@ -41,6 +50,7 @@ router.get('/', async (req, res) => {
     if (quote_number) { sql += ' AND q.quote_number LIKE ?'; params.push(`%${quote_number}%`); }
     if (start) { sql += ' AND date(q.created_at) >= ?'; params.push(start); }
     if (end) { sql += ' AND date(q.created_at) <= ?'; params.push(end); }
+    if (special_order === '1') { sql += ` AND ${IS_SPECIAL_ORDER_SQL}`; }
     // Special Projects stay invisible to anyone without special_projects/
     // special_projects_approve, even in the unfiltered list — "only a few
     // people" means they don't show up at all, not just that they can't be
@@ -87,7 +97,7 @@ async function attachQuoteItemSources(items) {
 
 router.get('/:id', async (req, res) => {
   try {
-    const { rows: [quote] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.customer_type, c.email as customer_email, c.phone as customer_phone, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip, e.first_name || ' ' || e.last_name as employee_name, oe.first_name || ' ' || oe.last_name as original_employee_name, ae.first_name || ' ' || ae.last_name as approved_by_name, re.first_name || ' ' || re.last_name as rejected_by_name, b.name as branch_name, t.transaction_number as converted_tx_number, ra.agreement_number as converted_agreement_number, ra.status as converted_agreement_status FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN employees oe ON q.original_employee_id = oe.id LEFT JOIN employees ae ON q.approved_by = ae.id LEFT JOIN employees re ON q.rejected_by = re.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id LEFT JOIN rental_agreements ra ON q.converted_to_agreement_id = ra.id WHERE q.id = ?`, args: [req.params.id] });
+    const { rows: [quote] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.customer_type, c.email as customer_email, c.phone as customer_phone, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip, e.first_name || ' ' || e.last_name as employee_name, oe.first_name || ' ' || oe.last_name as original_employee_name, ae.first_name || ' ' || ae.last_name as approved_by_name, re.first_name || ' ' || re.last_name as rejected_by_name, b.name as branch_name, t.transaction_number as converted_tx_number, ra.agreement_number as converted_agreement_number, ra.status as converted_agreement_status, ${IS_SPECIAL_ORDER_SQL} as is_special_order FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN employees oe ON q.original_employee_id = oe.id LEFT JOIN employees ae ON q.approved_by = ae.id LEFT JOIN employees re ON q.rejected_by = re.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id LEFT JOIN rental_agreements ra ON q.converted_to_agreement_id = ra.id WHERE q.id = ?`, args: [req.params.id] });
     if (!quote) return res.status(404).json({ error: 'Not found' });
     if (quote.quote_type === 'special_project' && !canSeeSpecialProjects(req)) return res.status(403).json({ error: 'Missing permission: special_projects' });
     const { rows: items } = await db.execute({ sql: QUOTE_ITEMS_SELECT, args: [req.params.id] });
@@ -689,6 +699,7 @@ router.post('/:id/convert', async (req, res) => {
       try {
         const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [quote.customer_id] });
         assertRentalCustomerEligible(customer);
+        await assertNoUnpaidRentalReturns(db, customer);
       } catch(e) { return res.status(400).json({ error: e.message }); }
 
       // Stock may have shifted since the quote was drafted — re-check now.
