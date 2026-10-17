@@ -24,6 +24,39 @@ const parseNum = v => {
   return cleaned === '' || cleaned === '-' ? NaN : parseFloat(cleaned);
 };
 
+// Rental accessories can be stocked at several branches at once; regular
+// rental items live at exactly one (see PUT /:id's single-branch move).
+// branch_inventory holds each location's count and products.stock_qty is
+// kept as their sum. A location's count can't go below the units still out
+// on rental or held out of service there — those still belong to its stock.
+// Throws a user-facing Error naming the branch.
+async function setAccessoryBranchQty(executor, productId, branchId, qty, minStock) {
+  const held = (await getOutstandingQty(executor, productId, branchId)) + (await getOutOfServiceQty(executor, productId, branchId));
+  if (qty < held) {
+    const { rows: [b] } = await executor.execute({ sql: 'SELECT name FROM branches WHERE id = ?', args: [branchId] });
+    throw new Error(`${b ? b.name : 'That location'} has ${held} unit(s) out on rental or held out of service — its count can't be set below ${held}`);
+  }
+  if (qty > 0) {
+    await executor.execute({
+      sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock) VALUES (?, ?, ?, ?)
+            ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = ?, updated_at = CURRENT_TIMESTAMP`,
+      args: [productId, branchId, qty, minStock, qty],
+    });
+  } else {
+    await executor.execute({ sql: 'DELETE FROM branch_inventory WHERE product_id = ? AND branch_id = ?', args: [productId, branchId] });
+  }
+}
+
+async function syncAccessoryTotal(executor, productId) {
+  await executor.execute({ sql: 'UPDATE products SET stock_qty = COALESCE((SELECT SUM(stock_qty) FROM branch_inventory WHERE product_id = ?), 0) WHERE id = ?', args: [productId, productId] });
+}
+
+// [{ branch_id, branch_name, stock_qty }] for one accessory, by branch name.
+async function accessoryBranchStock(executor, productId) {
+  const { rows } = await executor.execute({ sql: 'SELECT bi.branch_id, b.name AS branch_name, bi.stock_qty FROM branch_inventory bi JOIN branches b ON b.id = bi.branch_id WHERE bi.product_id = ? ORDER BY b.name', args: [productId] });
+  return rows.map(r => ({ branch_id: r.branch_id, branch_name: r.branch_name, stock_qty: r.stock_qty }));
+}
+
 // Product images are named after the SKU (both the upload route below and the
 // folder-scan endpoint), but a SKU can contain characters that aren't safe in
 // a filename or a Cloudinary public_id (seen in real data: "/", spaces) — so
@@ -176,6 +209,8 @@ router.get('/', requireAuth, async (req, res) => {
       sql = `SELECT p.*, c.name as category_name, (SELECT COUNT(*) FROM product_variations WHERE product_id = p.id AND active = 1) as has_variations, ${rentalOutstandingExpr(false)},
         (SELECT bi.branch_id FROM branch_inventory bi WHERE bi.product_id = p.id LIMIT 1) as assigned_branch_id,
         (SELECT b.name FROM branch_inventory bi JOIN branches b ON bi.branch_id = b.id WHERE bi.product_id = p.id LIMIT 1) as assigned_branch_name,
+        CASE WHEN p.is_rental = 1 AND p.is_accessory = 1 THEN (SELECT json_group_array(json_object('branch_id', bi.branch_id, 'branch_name', b.name, 'stock_qty', bi.stock_qty))
+          FROM branch_inventory bi JOIN branches b ON bi.branch_id = b.id WHERE bi.product_id = p.id) END as branch_stock,
         (SELECT sku FROM products mp WHERE mp.id = p.merged_into_product_id) as merged_into_sku
         FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE 1=1`;
     }
@@ -209,6 +244,7 @@ router.get('/', requireAuth, async (req, res) => {
     sql += ` ORDER BY p.name`;
 
     const { rows } = await db.execute({ sql, args: params });
+    for (const r of rows) if (typeof r.branch_stock === 'string') r.branch_stock = JSON.parse(r.branch_stock).sort((a, b) => a.branch_name.localeCompare(b.branch_name));
     res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -604,7 +640,7 @@ router.post('/bulk-tax-rate-rentals', requirePermission('rentals_manage_items'),
 // columns (rates, classification, replacement value) instead of cost/supplier.
 router.get('/export/rentals', requirePermission('rentals_manage_items'), async (req, res) => {
   try {
-    const { rows: rentals } = await db.execute({ sql: `SELECT p.sku, p.name, p.description, p.long_description, p.model_number, p.size, c.name as category_name,
+    const { rows: rentals } = await db.execute({ sql: `SELECT p.id, p.sku, p.name, p.description, p.long_description, p.model_number, p.size, c.name as category_name,
       (SELECT b.name FROM branch_inventory bi JOIN branches b ON bi.branch_id = b.id WHERE bi.product_id = p.id LIMIT 1) as branch_name,
       p.stock_qty, p.min_stock, p.tax_rate, p.taxable, p.rental_classification,
       p.rental_rate as daily_rate, p.rental_weekly_rate as weekly_rate, p.rental_monthly_rate as monthly_rate, p.rental_hourly_rate as hourly_rate,
@@ -618,9 +654,20 @@ router.get('/export/rentals', requirePermission('rentals_manage_items'), async (
       return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
     };
 
+    // An accessory stocked at several locations gets one row per location
+    // (with that location's count), so the file re-imports cleanly.
+    const { rows: accStock } = await db.execute({ sql: `SELECT bi.product_id, b.name AS branch_name, bi.stock_qty FROM branch_inventory bi
+      JOIN branches b ON b.id = bi.branch_id JOIN products p ON p.id = bi.product_id WHERE p.is_rental = 1 AND p.is_accessory = 1 ORDER BY b.name`, args: [] });
+    const accStockById = new Map();
+    for (const r of accStock) (accStockById.get(r.product_id) || accStockById.set(r.product_id, []).get(r.product_id)).push(r);
+
     const headers = ['sku','name','description','long_description','model_number','size','category_name','branch_name','stock_qty','min_stock','tax_rate','taxable','rental_classification','daily_rate','weekly_rate','monthly_rate','hourly_rate','replacement_value','is_accessory','active'];
     const csvRows = [headers.join(',')];
-    for (const p of rentals) csvRows.push(headers.map(h => escape(p[h])).join(','));
+    for (const p of rentals) {
+      const locations = p.is_accessory ? accStockById.get(p.id) : null;
+      if (!locations) { csvRows.push(headers.map(h => escape(p[h])).join(',')); continue; }
+      for (const l of locations) csvRows.push(headers.map(h => escape({ ...p, branch_name: l.branch_name, stock_qty: l.stock_qty }[h])).join(','));
+    }
 
     const timestamp = new Date().toISOString().slice(0, 10);
     res.setHeader('Content-Type', 'application/octet-stream');
@@ -699,6 +746,15 @@ router.post('/import/rentals', requirePermission('rentals_manage_items'), async 
           created++;
         }
 
+        if (parseNum(is_accessory)) {
+          // Accessories can be at several branches: a row sets that one
+          // branch's count (the export writes one row per location), and a
+          // row without a branch leaves the locations alone.
+          if (branch_id) await setAccessoryBranchQty(db, productId, branch_id, qty, minStk);
+          const { rows: [{ n }] } = await db.execute({ sql: 'SELECT COUNT(*) AS n FROM branch_inventory WHERE product_id = ?', args: [productId] });
+          if (n > 0) await syncAccessoryTotal(db, productId);
+          continue;
+        }
         // Single-branch move model — same as PUT /:id's branch_id handling.
         await db.execute({ sql: 'DELETE FROM branch_inventory WHERE product_id = ? AND branch_id != ?', args: [productId, branch_id || 0] });
         if (branch_id) {
@@ -712,6 +768,95 @@ router.post('/import/rentals', requirePermission('rentals_manage_items'), async 
     }
 
     res.json({ created, updated, errors, total: rows.length });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST import rental accessories from the previous system's accessories
+// export, which only has a name and an active flag — no SKU, rates or stock.
+// Each becomes a rental item with is_accessory=1, a generated ACC-#### SKU,
+// 0 stock and no branch (counts are assigned per location afterwards).
+// Matched by name against existing rental accessories, so re-importing the
+// same file only updates Active instead of creating duplicates.
+const ACCESSORY_ACTIVE = { '1': 1, yes: 1, y: 1, true: 1, active: 1, '0': 0, no: 0, n: 0, false: 0, inactive: 0 };
+
+router.post('/import/rental-accessories', requirePermission('rentals_manage_items'), async (req, res) => {
+  try {
+    const { rows } = req.body;
+    if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ error: 'No rows provided' });
+
+    const defaultTaxRate = parseFloat(await getSetting('tax_rate', 8.5)) || 8.5;
+    const { rows: existingRows } = await db.execute({ sql: 'SELECT id, name FROM products WHERE is_rental = 1 AND is_accessory = 1', args: [] });
+    const byName = new Map(existingRows.map(p => [p.name.trim().toLowerCase(), p.id]));
+    const { rows: [{ n: maxSkuNum }] } = await db.execute({ sql: "SELECT COALESCE(MAX(CAST(SUBSTR(sku, 5) AS INTEGER)), 0) AS n FROM products WHERE sku GLOB 'ACC-[0-9]*'", args: [] });
+    let nextSkuNum = Number(maxSkuNum) || 0;
+
+    let created = 0, updated = 0;
+    const errors = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const rowNum = i + 2;
+      const name = String(rows[i].name || '').trim();
+      const activeRaw = String(rows[i].active ?? '').trim().toLowerCase();
+      if (!name) { errors.push(`Row ${rowNum}: accessory name is required`); continue; }
+      const active = activeRaw === '' ? 1 : ACCESSORY_ACTIVE[activeRaw];
+      if (active === undefined) { errors.push(`Row ${rowNum} (${name}): Active must be Yes/No, True/False or 1/0 — got "${rows[i].active}"`); continue; }
+
+      try {
+        const existingId = byName.get(name.toLowerCase());
+        if (existingId) {
+          await db.execute({ sql: 'UPDATE products SET active = ? WHERE id = ?', args: [active, existingId] });
+          updated++;
+          continue;
+        }
+        const sku = `ACC-${String(++nextSkuNum).padStart(4, '0')}`;
+        const result = await db.execute({ sql: `INSERT INTO products (sku,name,tax_rate,taxable,stock_qty,min_stock,rental_classification,
+          rental_rate,rental_weekly_rate,rental_monthly_rate,rental_hourly_rate,replacement_value,is_accessory,active,is_rental,price)
+          VALUES (?,?,?,1,0,0,'tool',0,0,0,0,0,1,?,1,0)`, args: [sku, name, defaultTaxRate, active] });
+        byName.set(name.toLowerCase(), Number(result.lastInsertRowid));
+        created++;
+      } catch (e) { errors.push(`Row ${rowNum} (${name}): ${e.message}`); }
+    }
+
+    res.json({ created, updated, errors, total: rows.length });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST per-location accessory counts: rows of { accessory (SKU or name),
+// branch_name, stock_qty }. Each row SETS that accessory's count at that
+// branch (0 removes the location); the accessory's total follows. Matched by
+// SKU first, then by name, against rental accessories only.
+router.post('/import/rental-accessory-stock', requirePermission('rentals_manage_items'), async (req, res) => {
+  try {
+    const { rows } = req.body;
+    if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ error: 'No rows provided' });
+
+    const { rows: accRows } = await db.execute({ sql: 'SELECT id, sku, name, min_stock FROM products WHERE is_rental = 1 AND is_accessory = 1', args: [] });
+    const bySku = new Map(accRows.map(a => [String(a.sku).trim().toLowerCase(), a]));
+    const byName = new Map(accRows.map(a => [String(a.name).trim().toLowerCase(), a]));
+    const { rows: branchRows } = await db.execute({ sql: 'SELECT id, name FROM branches', args: [] });
+    const branchMap = new Map(branchRows.map(b => [b.name.trim().toLowerCase(), b.id]));
+
+    let updated = 0;
+    const errors = [];
+    for (let i = 0; i < rows.length; i++) {
+      const rowNum = i + 2;
+      const key = String(rows[i].accessory || '').trim();
+      const branchName = String(rows[i].branch_name || '').trim();
+      const qtyRaw = String(rows[i].stock_qty ?? '').trim().replace(/,/g, '');
+      if (!key) { errors.push(`Row ${rowNum}: accessory SKU or name is required`); continue; }
+      const acc = bySku.get(key.toLowerCase()) || byName.get(key.toLowerCase());
+      if (!acc) { errors.push(`Row ${rowNum}: no rental accessory with SKU or name "${key}"`); continue; }
+      const branchId = branchMap.get(branchName.toLowerCase());
+      if (!branchId) { errors.push(`Row ${rowNum} (${acc.name}): ${branchName ? `branch "${branchName}" not found` : 'branch is required'}`); continue; }
+      const qty = Number(qtyRaw);
+      if (qtyRaw === '' || !Number.isInteger(qty) || qty < 0) { errors.push(`Row ${rowNum} (${acc.name}): quantity must be a whole number of 0 or more — got "${rows[i].stock_qty ?? ''}"`); continue; }
+      try {
+        await setAccessoryBranchQty(db, acc.id, branchId, qty, acc.min_stock || 0);
+        await syncAccessoryTotal(db, acc.id);
+        updated++;
+      } catch (e) { errors.push(`Row ${rowNum} (${acc.name}): ${e.message}`); }
+    }
+    res.json({ updated, errors, total: rows.length });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -878,6 +1023,7 @@ router.get('/:id', requireAuth, async (req, res) => {
       product.branch_stock_qty = bi ? bi.stock_qty : 0;
       product.branch_min_stock = bi ? bi.min_stock : product.min_stock;
     }
+    if (product.is_rental && product.is_accessory) product.branch_stock = await accessoryBranchStock(db, product.id);
     res.json(product);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -904,7 +1050,13 @@ router.post('/', (req, res, next) => requireProductPermission(!!req.body.is_rent
     const taxRateFinal = tax_rate ?? (parseFloat(await getSetting('tax_rate', 8.5)) || 8.5);
     const result = await db.execute({ sql: `INSERT INTO products (sku,barcode,name,description,long_description,category_id,price,cost,tax_rate,stock_qty,min_stock,active,supplier_id,is_service,unit,online_available,web_allotment,is_rental,rental_rate_type,rental_rate,rental_deposit,rental_late_fee_rate,replacement_value,rental_classification,rental_weekly_rate,rental_monthly_rate,rental_hourly_rate,rental_allow_sale,is_accessory,is_layaway_eligible,model_number,size,brand,taxable) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [sku, barcode||null, name, description||null, req.body.long_description||null, category_id||null, price||0, cost||0, taxRateFinal, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null, rnt, rental_rate_type||'daily', rental_rate||0, rental_deposit||0, rental_late_fee_rate||0, replacement_value||0, rental_classification||'tool', rental_weekly_rate||0, rental_monthly_rate||0, rental_hourly_rate||0, allowSale, acc, lay, model_number||null, size||null, brand||null, tax] });
     const productId = Number(result.lastInsertRowid);
-    if (!svc && branch_id && (parseInt(stock_qty) || 0) > 0) {
+    if (rnt && acc && Array.isArray(req.body.branch_stock)) {
+      for (const bs of req.body.branch_stock) {
+        const qty = parseInt(bs.stock_qty) || 0;
+        if (bs.branch_id && qty > 0) await setAccessoryBranchQty(db, productId, bs.branch_id, qty, parseInt(min_stock) || 0);
+      }
+      await syncAccessoryTotal(db, productId);
+    } else if (!svc && branch_id && (parseInt(stock_qty) || 0) > 0) {
       await db.execute({ sql: 'INSERT OR IGNORE INTO branch_inventory (product_id, branch_id, stock_qty, min_stock) VALUES (?, ?, ?, ?)', args: [productId, branch_id, parseInt(stock_qty) || 0, parseInt(min_stock) || 5] });
     }
     const { rows: [prod] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [productId] });
@@ -945,7 +1097,30 @@ router.put('/:id', async (req, res, next) => {
     // here, before any write, so a rejected move doesn't leave the rest of
     // the edit (rates, name, etc.) half-saved. Use Branch Transfers instead
     // once there's outstanding stock to move deliberately.
-    if (rnt && branch_id !== undefined) {
+    // Accessories send their per-location counts as branch_stock instead —
+    // every location the item is at now, plus any newly given a count. A
+    // location left out is treated as 0. Checked up front for the same
+    // no-half-saved-edit reason as the move check below.
+    const accBranchStock = rnt && acc && Array.isArray(req.body.branch_stock) ? new Map() : null;
+    if (accBranchStock) {
+      const { rows: current } = await db.execute({ sql: 'SELECT branch_id FROM branch_inventory WHERE product_id = ?', args: [req.params.id] });
+      for (const r of current) accBranchStock.set(String(r.branch_id), 0);
+      for (const bs of req.body.branch_stock) {
+        const qty = parseInt(bs.stock_qty);
+        if (!bs.branch_id || !(qty >= 0)) return res.status(400).json({ error: 'Each location needs a count of 0 or more' });
+        accBranchStock.set(String(bs.branch_id), qty);
+      }
+      for (const [bid, qty] of accBranchStock) {
+        const held = (await getOutstandingQty(db, req.params.id, bid)) + (await getOutOfServiceQty(db, req.params.id, bid));
+        if (qty < held) {
+          const { rows: [b] } = await db.execute({ sql: 'SELECT name FROM branches WHERE id = ?', args: [bid] });
+          return res.status(400).json({ error: `${b ? b.name : 'A location'} has ${held} unit(s) out on rental or held out of service — its count can't be set below ${held}` });
+        }
+      }
+    }
+    if (rnt && !acc && branch_id !== undefined) {
+      const { rows: [{ n }] } = await db.execute({ sql: 'SELECT COUNT(*) AS n FROM branch_inventory WHERE product_id = ?', args: [req.params.id] });
+      if (n > 1) return res.status(400).json({ error: `This item is stocked at ${n} locations — only accessories can be. Set every location but one to 0 (as an accessory) before unticking "This is an accessory".` });
       const { rows: [currentBI] } = await db.execute({ sql: 'SELECT branch_id FROM branch_inventory WHERE product_id = ?', args: [req.params.id] });
       const oldBranchId = currentBI?.branch_id || null;
       if (oldBranchId && String(oldBranchId) !== String(branch_id || '')) {
@@ -966,7 +1141,15 @@ router.put('/:id', async (req, res, next) => {
     if ('long_description' in req.body) {
       await db.execute({ sql: 'UPDATE products SET long_description = ? WHERE id = ?', args: [req.body.long_description || null, req.params.id] });
     }
-    if (rnt && branch_id !== undefined) {
+    if (accBranchStock) {
+      for (const [bid, qty] of accBranchStock) await setAccessoryBranchQty(db, req.params.id, bid, qty, min_stock || 0);
+      await syncAccessoryTotal(db, req.params.id);
+    } else if (rnt && acc) {
+      // An accessory saved without per-location counts (an API caller, or an
+      // older client) keeps its locations; the total still follows them.
+      const { rows: [{ n }] } = await db.execute({ sql: 'SELECT COUNT(*) AS n FROM branch_inventory WHERE product_id = ?', args: [req.params.id] });
+      if (n > 0) await syncAccessoryTotal(db, req.params.id);
+    } else if (rnt && branch_id !== undefined) {
       await db.execute({ sql: 'DELETE FROM branch_inventory WHERE product_id = ? AND branch_id != ?', args: [req.params.id, branch_id || 0] });
       if (branch_id) {
         await db.execute({

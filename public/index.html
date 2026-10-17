@@ -5134,7 +5134,7 @@ const App = {
       if (p.is_rental) accessories = await this.api('GET', `/products/${id}/accessories`).catch(() => []);
       // Same as showRentalItemForm: once assigned to a branch, branch_inventory
       // is the real stock figure, not the (possibly stale) global column.
-      if (p.is_rental && p.assigned_branch_id) {
+      if (p.is_rental && p.assigned_branch_id && !p.is_accessory) {
         const scoped = await this.api('GET', `/products/${id}?branch_id=${p.assigned_branch_id}`);
         p.stock_qty = scoped.branch_stock_qty;
       }
@@ -5179,6 +5179,7 @@ const App = {
               ${isRental && p.rental_deposit > 0 ? row('Deposit', this.fmt(p.rental_deposit)) : ''}
               ${isRental && p.replacement_value > 0 ? row('Replacement Value', this.fmt(p.replacement_value)) : ''}
               ${p.is_service ? '' : row('Stock', `${p.stock_qty}${p.unit ? ' ' + esc(p.unit) : ''}`)}
+              ${p.branch_stock?.length ? row('By Location', p.branch_stock.map(s => `${esc(s.branch_name)}: ${s.stock_qty}`).join('<br>')) : ''}
               ${row('Tax', p.taxable === 0 ? 'Not taxable' : `${p.tax_rate}%`)}
             </div>
           </div>
@@ -6290,10 +6291,17 @@ const App = {
             <option value="unassigned">Unassigned</option>
             ${branches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
           </select>
+          <select id="ri-type-filter" onchange="App._filterRentalItemsTable()" style="padding:7px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--card);color:var(--text)">
+            <option value="">All Types</option>
+            <option value="accessory">Accessories Only</option>
+            <option value="item">Exclude Accessories</option>
+          </select>
           <button class="btn btn-secondary btn-sm" onclick="App.exportRentalItemsCsv()" title="Export rental items to CSV">&#8659; Export CSV</button>
           ${this.can('rentals_manage_items') ? `
           <a class="btn btn-secondary btn-sm" href="/api/products/export/rentals/template" download title="Download import template">&#8659; Template</a>
           <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import rental items from CSV or Excel">&#8657; Import<input type="file" accept=".csv,.tsv,.txt,.xls,.xlsx" style="display:none" onchange="App.importRentalItemsCsv(this)"></label>
+          <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import accessories from the previous system's accessories export (Name + Active). Stock starts at 0.">&#8657; Import Accessories<input type="file" accept=".csv,.tsv,.txt,.xls,.xlsx" style="display:none" onchange="App.importRentalAccessoriesFile(this)"></label>
+          <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Set accessory counts per location from a file with Accessory (SKU or name), Branch and Quantity columns">&#8657; Import Accessory Counts<input type="file" accept=".csv,.tsv,.txt,.xls,.xlsx" style="display:none" onchange="App.importRentalAccessoryCountsFile(this)"></label>
           <button class="btn btn-secondary btn-sm" onclick="App.showBulkRentalTaxRateModal()" title="Set the tax rate on rental items — all branches or just one">Bulk Tax Rate Change</button>
           <button class="btn btn-primary btn-sm" onclick="App.showRentalItemForm()">+ Add Rental Item</button>` : ''}
         </div>
@@ -6330,6 +6338,60 @@ const App = {
     });
   },
 
+  // The previous system's accessories export: just a name and an active flag.
+  // Creates rental accessories with generated ACC-#### SKUs and 0 stock;
+  // names that already exist as accessories only have Active updated.
+  async importRentalAccessoriesFile(inputEl) {
+    const file = inputEl.files[0];
+    inputEl.value = '';
+    if (!file) return;
+    let parsed;
+    try { parsed = await this._readImportFile(file); } catch (e) { this.alert(e.message, 'error'); return; }
+    const { headers, rows: rawRows } = parsed;
+    if (!rawRows.length) { this.alert('No data rows found in the file', 'error'); return; }
+
+    const mapping = await this._showFieldMappingModal({ title: 'Map Accessory Columns', headers, fields: this._rentalAccessoryImportFields });
+    if (!mapping) return;
+    const rows = this._remapCsvRows(rawRows, mapping);
+
+    await this._runBatchedCsvImport({
+      rows, endpoint: '/products/import/rental-accessories', title: 'Importing Rental Accessories',
+      summarize: t => `${t.created||0} accessories created, ${t.updated||0} already existed (Active updated)`,
+      onFinish: () => this.renderRentalItems(),
+    });
+  },
+
+  // Per-location counts for rental accessories: each row sets one
+  // accessory's count at one branch (POST /products/import/rental-accessory-stock).
+  async importRentalAccessoryCountsFile(inputEl) {
+    const file = inputEl.files[0];
+    inputEl.value = '';
+    if (!file) return;
+    let parsed;
+    try { parsed = await this._readImportFile(file); } catch (e) { this.alert(e.message, 'error'); return; }
+    const { headers, rows: rawRows } = parsed;
+    if (!rawRows.length) { this.alert('No data rows found in the file', 'error'); return; }
+
+    const mapping = await this._showFieldMappingModal({ title: 'Map Accessory Count Columns', headers, fields: this._rentalAccessoryCountFields });
+    if (!mapping) return;
+    const rows = this._remapCsvRows(rawRows, mapping);
+
+    await this._runBatchedCsvImport({
+      rows, endpoint: '/products/import/rental-accessory-stock', title: 'Importing Accessory Counts',
+      summarize: t => `${t.updated||0} location count(s) set`,
+      onFinish: () => this.renderRentalItems(),
+    });
+  },
+
+  // Rental item form: an accessory gets a count per location instead of the
+  // single Branch + Stock Qty pair.
+  _toggleRentalAccessoryStock() {
+    const isAcc = document.getElementById('rf-is-accessory').checked;
+    document.getElementById('rf-branch-wrap').style.display = isAcc ? 'none' : '';
+    document.getElementById('rf-stock-wrap').style.display = isAcc ? 'none' : '';
+    document.getElementById('rf-acc-stock').style.display = isAcc ? '' : 'none';
+  },
+
   async loadRentalItems() {
     const el = document.getElementById('rental-content');
     if (!el) return;
@@ -6346,9 +6408,14 @@ const App = {
     if (!el || !this._rentalItemsAll) return;
     const branchFilter = document.getElementById('ri-branch-filter')?.value || '';
     const search = (document.getElementById('ri-search')?.value || '').trim().toLowerCase();
+    // Accessories can be at several branches (p.branch_stock); everything
+    // else is at one (p.assigned_branch_id).
+    const atBranch = p => p.branch_stock ? p.branch_stock.some(s => String(s.branch_id) === branchFilter) : String(p.assigned_branch_id) === branchFilter;
     let filtered = !branchFilter ? this._rentalItemsAll
       : branchFilter === 'unassigned' ? this._rentalItemsAll.filter(p => !p.assigned_branch_id)
-      : this._rentalItemsAll.filter(p => String(p.assigned_branch_id) === branchFilter);
+      : this._rentalItemsAll.filter(atBranch);
+    const typeFilter = document.getElementById('ri-type-filter')?.value || '';
+    if (typeFilter) filtered = filtered.filter(p => typeFilter === 'accessory' ? p.is_accessory : !p.is_accessory);
     if (search) filtered = filtered.filter(p => p.name.toLowerCase().includes(search) || p.sku.toLowerCase().includes(search));
     document.getElementById('rental-content').innerHTML = !filtered.length ? '<div class="empty-state"><p>No rental items match this filter.</p></div>' : `
       <div class="card">
@@ -6359,7 +6426,7 @@ const App = {
               <td style="width:52px">${p.image_path ? `<img src="${p.image_path}" class="prod-img-thumb" alt="">` : `<div class="prod-img-placeholder" onclick="App.showRentalItemForm(${p.id})">📷</div>`}</td>
               <td class="fw-600">${p.sku}${p.is_accessory?' <span class="badge-pill badge-secondary" style="font-size:10px">accessory</span>':''}</td>
               <td>${p.name}${p.rental_allow_sale ? ` <span class="badge-pill badge-teal" style="font-size:10px" title="Also sellable/quotable outright at ${this.fmt(p.price)}">For Sale · ${this.fmt(p.price)}</span>` : ''}${p.online_available ? ` <span class="badge-pill badge-info" style="font-size:10px" title="Visible on the website's Rentals catalog">Online</span>` : ''}</td>
-              <td>${p.assigned_branch_name || '—'}</td>
+              <td>${p.branch_stock?.length ? p.branch_stock.map(s => `<div style="white-space:nowrap">${s.branch_name}: <span class="fw-600">${s.stock_qty}</span></div>`).join('') : (p.assigned_branch_name || '—')}</td>
               <td><span class="badge-pill ${p.rental_classification==='equipment'?'badge-info':'badge-secondary'}">${p.rental_classification==='equipment'?'Equipment':'Tool'}</span></td>
               <td>${this.fmt(p.rental_rate)}</td>
               <td>${p.rental_classification==='equipment' ? this.fmt(p.rental_weekly_rate) : this.fmt(this._toolTierDayRates(p.rental_rate).weekTierDayRate)+'/day'}</td>
@@ -6372,7 +6439,7 @@ const App = {
                 <button class="btn btn-sm btn-outline" onclick="App.showProductCard(${p.id})">View</button>
                 ${this.can('rentals_manage_items') ? `<button class="btn btn-sm btn-secondary" onclick="App.showRentalItemForm(${p.id})">Edit</button>
                 <button class="btn btn-sm btn-outline" onclick="App.showRentalAccessoriesModal(${p.id}, '${p.name.replace(/'/g,"\\'")}')">Accessories</button>` : ''}
-                ${this.can('transfers') && p.assigned_branch_id ? `<button class="btn btn-sm btn-outline" onclick="App.showTransferForm({fromBranchId:${p.assigned_branch_id},productId:${p.id}})">Transfer</button>` : ''}
+                ${this.can('transfers') && p.assigned_branch_id ? `<button class="btn btn-sm btn-outline" onclick="App.showTransferForm({fromBranchId:${p.branch_stock && branchFilter && p.branch_stock.some(s => String(s.branch_id) === branchFilter) ? branchFilter : p.assigned_branch_id},productId:${p.id}})">Transfer</button>` : ''}
               </td>
             </tr>`).join('')}</tbody>
           </table>
@@ -6400,6 +6467,11 @@ const App = {
     const classification = p.rental_classification || 'tool';
     const mandatoryIds = currentAccessories.filter(a => a.is_mandatory).map(a => a.accessory_product_id);
     const accessoryOptions = allAccessories.filter(a => a.id !== id);
+    // Per-location counts for the accessory panel — an item being turned into
+    // an accessory starts with its one branch's stock there.
+    const accQtyByBranch = {};
+    if (p.branch_stock) p.branch_stock.forEach(s => { accQtyByBranch[s.branch_id] = s.stock_qty; });
+    else if (p.assigned_branch_id) accQtyByBranch[p.assigned_branch_id] = p.stock_qty || 0;
     this._rentalFormAccessorySource = currentAccessories; // so save can diff against the assignment ids, not just product ids
     this.showModal(`
       <div class="modal">
@@ -6422,7 +6494,7 @@ const App = {
             <div class="form-group"><label>Model Number</label><input id="rf-model" value="${p.model_number||''}"></div>
             <div class="form-group"><label>Size</label><input id="rf-size" value="${p.size||''}"></div>
           </div>
-          <div class="form-group"><label>Branch / Location</label>
+          <div class="form-group" id="rf-branch-wrap" style="${p.is_accessory ? 'display:none' : ''}"><label>Branch / Location</label>
             <select id="rf-branch">
               <option value="">— Unassigned (global stock only) —</option>
               ${branches.map(b => `<option value="${b.id}" ${p.assigned_branch_id===b.id?'selected':''}>${b.name}</option>`).join('')}
@@ -6455,9 +6527,16 @@ const App = {
         </div>
       </div>` : ''}
           <div class="input-row-3">
-            <div class="form-group"><label>Stock Qty *</label><input type="number" id="rf-stock" value="${p.stock_qty??0}" min="0"></div>
+            <div class="form-group" id="rf-stock-wrap" style="${p.is_accessory ? 'display:none' : ''}"><label>Stock Qty *</label><input type="number" id="rf-stock" value="${p.stock_qty??0}" min="0"></div>
             <div class="form-group"><label>Min Stock</label><input type="number" id="rf-minstock" value="${p.min_stock??1}" min="0"></div>
             <div class="form-group"><label>Tax Rate %</label><input type="number" id="rf-tax" value="${defaultTax}" min="0" step="0.1"></div>
+          </div>
+          <div class="form-group" id="rf-acc-stock" style="border:1px solid var(--border);border-radius:6px;padding:12px;${p.is_accessory ? '' : 'display:none'}">
+            <label style="margin-bottom:6px">Stock by Location</label>
+            <p style="font-size:11px;color:var(--text-muted);margin:0 0 8px">Accessories can be stocked at several locations — enter the count at each. A checkout only draws from its own location's count. Leave a location at 0 if it doesn't carry this accessory.</p>
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:6px 12px">
+              ${branches.map(b => `<label style="display:flex;align-items:center;gap:8px;font-weight:normal;font-size:13px;margin:0"><span style="flex:1">${b.name}</span><input type="number" class="rf-acc-branch-qty" data-branch="${b.id}" value="${accQtyByBranch[b.id] || 0}" min="0" step="1" style="width:80px"></label>`).join('')}
+            </div>
           </div>
           <div class="form-group"><label>Classification *</label>
             <select id="rf-classification" onchange="App._toggleRentalRateFields()">
@@ -6491,7 +6570,7 @@ const App = {
               <select id="rf-active"><option value="1" ${p.active!==0?'selected':''}>Active</option><option value="0" ${p.active===0?'selected':''}>Inactive</option></select>
             </div>
             <div class="form-group"><label style="display:flex;align-items:center;gap:6px;margin-top:22px">
-              <input type="checkbox" id="rf-is-accessory" ${p.is_accessory?'checked':''} style="width:auto"> This is an accessory (can be attached to other rental items)
+              <input type="checkbox" id="rf-is-accessory" ${p.is_accessory?'checked':''} onchange="App._toggleRentalAccessoryStock()" style="width:auto"> This is an accessory (can be attached to other rental items)
             </label></div>
           </div>
           <div class="form-group"><label style="display:flex;align-items:center;gap:6px">
@@ -6609,7 +6688,13 @@ const App = {
       price: allowSale ? salePrice : 0,
       online_available: document.getElementById('rf-online').checked ? 1 : 0,
     };
-    data.branch_id = document.getElementById('rf-branch')?.value || null;
+    if (data.is_accessory) {
+      data.branch_stock = Array.from(document.querySelectorAll('.rf-acc-branch-qty')).map(el => ({ branch_id: parseInt(el.dataset.branch), stock_qty: parseInt(el.value) || 0 }));
+      if (data.branch_stock.some(b => b.stock_qty < 0)) { this.alert('Location counts can\'t be negative', 'error'); return; }
+      data.stock_qty = data.branch_stock.reduce((t, b) => t + b.stock_qty, 0);
+    } else {
+      data.branch_id = document.getElementById('rf-branch')?.value || null;
+    }
     const selectedMandatoryIds = Array.from(document.querySelectorAll('.rf-mandatory-acc:checked')).map(cb => parseInt(cb.value));
     try {
       let productId = id;
@@ -11984,6 +12069,15 @@ const App = {
     { key: 'replacement_value',      label: 'Replacement Value' },
     { key: 'is_accessory',           label: 'Is Accessory (1/0)' },
     { key: 'active',                 label: 'Active (1/0)' },
+  ],
+  _rentalAccessoryCountFields: [
+    { key: 'accessory',   label: 'Accessory SKU or Name', required: true, aliases: ['SKU', 'Accessory', 'Accessory Name', 'Name', 'Item'] },
+    { key: 'branch_name', label: 'Branch / Location', required: true, aliases: ['Branch', 'Location', 'Property', 'Store'] },
+    { key: 'stock_qty',   label: 'Quantity', required: true, aliases: ['Qty', 'Count', 'Stock', 'Stock Qty', 'Quantity On Hand'] },
+  ],
+  _rentalAccessoryImportFields: [
+    { key: 'name',   label: 'Accessory Name', required: true, aliases: ['Accessory', 'Name', 'Description'] },
+    { key: 'active', label: 'Active (Yes/No, True/False, 1/0)', aliases: ['Is Active', 'Status'] },
   ],
   _customerImportFields: [
     { key: 'first_name',            label: 'First Name', required: true },
