@@ -808,6 +808,31 @@ async function _init() {
       counted_qty INTEGER,
       variance INTEGER DEFAULT 0
     )` },
+    // Each scanner/device file imported into a count session. An item's
+    // counted_qty is replayed from its active (not undone) upload lines in id
+    // order: 'replace' sets the count, 'add' adds to it — so several scanners
+    // counting the same SKU in different spots sum, and undoing one upload is
+    // just marking it undone and replaying the items it touched.
+    { sql: `CREATE TABLE IF NOT EXISTS cycle_count_uploads (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id INTEGER NOT NULL REFERENCES cycle_count_sessions(id),
+      device_label TEXT,
+      file_name TEXT,
+      mode TEXT NOT NULL DEFAULT 'add',
+      content_hash TEXT,
+      line_count INTEGER NOT NULL DEFAULT 0,
+      total_qty INTEGER NOT NULL DEFAULT 0,
+      employee_id INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      undone_at DATETIME,
+      undone_by INTEGER REFERENCES employees(id)
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS cycle_count_upload_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      upload_id INTEGER NOT NULL REFERENCES cycle_count_uploads(id),
+      item_id INTEGER NOT NULL REFERENCES cycle_count_items(id),
+      qty INTEGER NOT NULL
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS cash_drawers (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       branch_id INTEGER REFERENCES branches(id),
@@ -2714,6 +2739,10 @@ async function _init() {
     'CREATE INDEX IF NOT EXISTS idx_session_activity_session_id ON session_activity(session_id)',
     'CREATE INDEX IF NOT EXISTS idx_session_activity_employee_id ON session_activity(employee_id)',
     'CREATE INDEX IF NOT EXISTS idx_session_activity_created_at ON session_activity(created_at)',
+    'CREATE INDEX IF NOT EXISTS idx_cycle_count_items_session_id ON cycle_count_items(session_id)',
+    'CREATE INDEX IF NOT EXISTS idx_cycle_count_uploads_session_id ON cycle_count_uploads(session_id)',
+    'CREATE INDEX IF NOT EXISTS idx_cycle_count_upload_lines_upload_id ON cycle_count_upload_lines(upload_id)',
+    'CREATE INDEX IF NOT EXISTS idx_cycle_count_upload_lines_item_id ON cycle_count_upload_lines(item_id)',
   ];
   for (const sql of indexes) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

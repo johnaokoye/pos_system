@@ -25394,7 +25394,7 @@ const App = {
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-          <button class="btn btn-primary" onclick="App.saveCycleCount()">Create Session</button>
+          <button class="btn btn-primary" id="cc-create-btn" onclick="App.saveCycleCount()">Create Session</button>
         </div>
       </div>`);
   },
@@ -25420,12 +25420,18 @@ const App = {
       scope_id,
       notes: document.getElementById('cc-notes').value.trim()||null,
     };
+    const btn = document.getElementById('cc-create-btn');
+    if (btn?.disabled) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
     try {
       const session = await this.api('POST','/warehouse/cycle-counts',data);
       this.alert('Session created');
       this.closeModal();
       this.viewCycleCount(session.id);
-    } catch(e) { this.alert(e.message,'error'); }
+    } catch(e) {
+      this.alert(e.message,'error');
+      if (btn) { btn.disabled = false; btn.textContent = 'Create Session'; }
+    }
   },
 
   async viewCycleCount(id) {
@@ -25435,7 +25441,12 @@ const App = {
     const sc = { open:'badge-secondary', review:'badge-info', committed:'badge-success' };
     const counted   = session.items.filter(i=>i.counted_qty!==null).length;
     const variances = session.items.filter(i=>i.counted_qty!==null&&i.variance!==0).length;
-    const canCommit = session.status!=='committed' && variances>0;
+    const uncounted = session.items.length - counted;
+    // Uncounted lines can be committed as 0 (see commitCycleCount), so a
+    // session with nothing counted-and-different may still have work to commit.
+    const canCommit = session.status!=='committed' && (variances>0 || uncounted>0);
+    this._ccSession = session;
+    const uploads = session.uploads || [];
 
     el.innerHTML = `
       <div style="display:flex;gap:10px;align-items:center;margin-bottom:16px;flex-wrap:wrap">
@@ -25445,8 +25456,8 @@ const App = {
         <span style="color:var(--text-muted);font-size:13px">${session.branch_name||'All Branches'} &bull; ${session.scope_type}</span>
         <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
           <a class="btn btn-sm btn-outline" href="/api/warehouse/cycle-counts/${session.id}/export" download>⬇ Export CSV</a>
-          ${session.status!=='committed'?`<label class="btn btn-sm btn-primary" style="cursor:pointer;margin:0">⬆ Import CSV<input type="file" accept=".csv" style="display:none" onchange="App.importCycleCountCsv(${session.id},this)"></label>`:''}
-          ${canCommit?`<button class="btn btn-sm btn-success" onclick="App.commitCycleCount(${session.id})">✓ Commit ${variances} Adjustment${variances!==1?'s':''}</button>`:''}
+          ${session.status!=='committed'?`<label class="btn btn-sm btn-primary" style="cursor:pointer;margin:0" title="Import a scanner file (CSV or Excel). Each scanner's file can be imported separately — counts for the same item are added together.">⬆ Import Counts<input type="file" accept=".csv,.tsv,.txt,.xls,.xlsx" style="display:none" onchange="App.importCycleCountFile(${session.id},this)"></label>`:''}
+          ${canCommit?`<button class="btn btn-sm btn-success" onclick="App.commitCycleCount(${session.id})">✓ Commit Adjustments</button>`:''}
         </div>
       </div>
       <div class="stats-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:16px">
@@ -25455,6 +25466,24 @@ const App = {
         <div class="stat-card ${variances>0?'orange':'green'}"><div class="stat-label">Variances</div><div class="stat-value">${variances}</div></div>
         <div class="stat-card ${session.status==='committed'?'green':'purple'}"><div class="stat-label">Status</div><div class="stat-value" style="font-size:14px">${session.status}</div></div>
       </div>
+      ${uploads.length?`
+      <div class="card" style="margin-bottom:16px;padding:12px">
+        <div style="font-weight:600;margin-bottom:8px">Imports (${uploads.filter(u=>!u.undone_at).length} active)</div>
+        <table class="table" style="font-size:12px;margin:0">
+          <thead><tr><th>#</th><th>Scanner / Counter</th><th>File</th><th>Mode</th><th style="text-align:right">Lines</th><th style="text-align:right">Total Qty</th><th>By</th><th>When</th><th></th></tr></thead>
+          <tbody>${uploads.map(u=>`<tr style="${u.undone_at?'opacity:.5;text-decoration:line-through':''}">
+            <td>${u.id}</td>
+            <td>${this.escapeAttr(u.device_label||'—')}</td>
+            <td>${this.escapeAttr(u.file_name||'—')}</td>
+            <td>${u.mode==='add'?'Added':'Replaced'}</td>
+            <td style="text-align:right">${u.line_count}</td>
+            <td style="text-align:right">${u.total_qty}</td>
+            <td>${this.escapeAttr(u.employee_name||'—')}</td>
+            <td>${this.fmtDateTime(u.created_at)}</td>
+            <td style="text-decoration:none">${u.undone_at?'Undone':session.status!=='committed'?`<button class="btn btn-sm btn-outline" onclick="App.undoCycleCountUpload(${session.id},${u.id})">Undo</button>`:''}</td>
+          </tr>`).join('')}</tbody>
+        </table>
+      </div>`:''}
       <table class="table" style="font-size:13px">
         <thead><tr>
           <th>SKU</th><th>Product</th><th>Category</th><th>Bin</th>
@@ -25472,7 +25501,7 @@ const App = {
             <td>${i.bin_code||'—'}</td>
             <td style="text-align:right">${i.expected_qty}</td>
             <td style="text-align:right">${editable
-              ?`<input type="number" min="0" value="${i.counted_qty!==null?i.counted_qty:''}" data-item-id="${i.id}"
+              ?`<input type="number" min="0" value="${i.counted_qty!==null?i.counted_qty:''}" data-item-id="${i.id}" data-orig="${i.counted_qty!==null?i.counted_qty:''}"
                   style="width:70px;padding:3px 6px;border:1px solid var(--border);border-radius:4px;font-size:13px;text-align:right"
                   placeholder="—">`
               :i.counted_qty!==null?i.counted_qty:'—'}</td>
@@ -25488,50 +25517,138 @@ const App = {
   },
 
   async saveCycleCountEdits(sessionId) {
-    const inputs = document.querySelectorAll('[data-item-id]');
+    // Only lines whose box was changed — re-sending every count would pin
+    // them all as manual entries, so undoing a scanner import later would
+    // no longer take its counts back out.
     const items = [];
-    inputs.forEach(inp => {
+    document.querySelectorAll('[data-item-id]').forEach(inp => {
       const val = inp.value.trim();
-      if (val!=='') items.push({ item_id: parseInt(inp.dataset.itemId), counted_qty: val });
+      if (val!=='' && val!==inp.dataset.orig) items.push({ item_id: parseInt(inp.dataset.itemId), counted_qty: val });
     });
-    if (!items.length) return this.alert('No counts entered','error');
+    if (!items.length) return this.alert('No changed counts to save','error');
     try {
-      await this.api('POST',`/warehouse/cycle-counts/${sessionId}/import`,{ items });
-      this.alert('Counts saved');
+      await this.api('POST',`/warehouse/cycle-counts/${sessionId}/import`,{ items, mode: 'replace', device_label: 'Entered on screen' });
+      this.alert(`Saved ${items.length} count${items.length!==1?'s':''}`);
       this.viewCycleCount(sessionId);
     } catch(e) { this.alert(e.message,'error'); }
   },
 
-  async importCycleCountCsv(sessionId, inputEl) {
+  // Reads a scanner file (CSV, or Excel via _readImportFile — which also
+  // handles quoted commas in product names) and shows what it matched before
+  // anything is saved. Columns are found by header name, so the session's own
+  // export (Item ID … Counted Qty) and a plain SKU/barcode + qty file both work.
+  async importCycleCountFile(sessionId, inputEl) {
     const file = inputEl.files[0];
+    inputEl.value = '';
     if (!file) return;
-    const text = await file.text();
-    const lines = text.trim().split(/\r?\n/);
-    if (lines.length < 2) return this.alert('CSV appears empty','error');
-    const header = lines[0].split(',').map(h=>h.replace(/^"|"$/g,'').trim().toLowerCase());
-    const itemIdCol  = header.findIndex(h=>h==='item id');
-    const countedCol = header.findIndex(h=>h==='counted qty');
-    if (itemIdCol===-1||countedCol===-1) return this.alert('CSV must have "Item ID" and "Counted Qty" columns','error');
-    const items = [];
-    for (let i=1;i<lines.length;i++) {
-      const cols = lines[i].split(',').map(c=>c.replace(/^"|"$/g,'').trim());
-      const item_id    = parseInt(cols[itemIdCol]);
-      const counted_qty = cols[countedCol];
-      if (!isNaN(item_id)&&counted_qty!=='') items.push({ item_id, counted_qty: parseInt(counted_qty) });
-    }
-    if (!items.length) return this.alert('No valid rows found in CSV','error');
-    try {
-      await this.api('POST',`/warehouse/cycle-counts/${sessionId}/import`,{ items });
-      this.alert(`Imported ${items.length} counts`);
-      this.viewCycleCount(sessionId);
-    } catch(e) { this.alert(e.message,'error'); }
-    inputEl.value='';
+    let parsed;
+    try { parsed = await this._readImportFile(file); }
+    catch(e) { return this.alert(e.message,'error'); }
+    const norm = h => String(h).toLowerCase().replace(/[^a-z0-9]/g,'');
+    const find = names => parsed.headers.find(h => names.includes(norm(h)));
+    const col = {
+      item_id:     find(['itemid']),
+      sku:         find(['sku','itemcode','productcode','itemnumber','partnumber']),
+      barcode:     find(['barcode','upc','ean']),
+      bin_code:    find(['bincode','bin','binlocation']),
+      counted_qty: find(['countedqty','counted','count','qty','quantity','countqty']),
+    };
+    if (!col.counted_qty) return this.alert('The file needs a "Counted Qty" (or "Qty") column','error');
+    if (!col.item_id && !col.sku && !col.barcode) return this.alert('The file needs an "Item ID", "SKU" or "Barcode" column','error');
+    const rows = parsed.rows.map((r,i) => {
+      const row = { line: i+2 };
+      for (const k of Object.keys(col)) if (col[k]) row[k] = r[col[k]];
+      return row;
+    });
+    if (!rows.length) return this.alert('No rows found in the file','error');
+    let summary;
+    try { summary = await this.api('POST',`/warehouse/cycle-counts/${sessionId}/import`,{ rows, dry_run: true }); }
+    catch(e) { return this.alert(e.message,'error'); }
+    this._ccImport = { sessionId, fileName: file.name, rows };
+
+    let lastDevice = '';
+    try { lastDevice = localStorage.getItem('pos_cc_device') || ''; } catch(e) {}
+    const um = summary.unmatched || [];
+    this.showModal(`
+      <div class="modal" style="max-width:620px">
+        <div class="modal-header"><span class="modal-title">Import Counts — ${this.escapeAttr(file.name)}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="margin:0 0 10px"><strong>${summary.matched_rows}</strong> row${summary.matched_rows!==1?'s':''} matched to <strong>${summary.matched_items}</strong> count line${summary.matched_items!==1?'s':''}, total quantity <strong>${summary.total_qty}</strong>.${summary.skipped_blank?` <span style="color:var(--text-muted)">${summary.skipped_blank} row${summary.skipped_blank!==1?'s':''} with a blank Counted Qty skipped.</span>`:''}</p>
+          ${um.length?`<div style="border:1px solid #f44336;border-radius:6px;padding:8px 10px;margin-bottom:10px;font-size:12px;max-height:180px;overflow:auto">
+            <strong style="color:#f44336">${um.length} row${um.length!==1?'s':''} won't be imported:</strong>
+            <ul style="margin:6px 0 0;padding-left:18px">${um.slice(0,100).map(u=>`<li>Row ${u.line} — ${this.escapeAttr(u.ref)}: ${this.escapeAttr(u.reason)}</li>`).join('')}${um.length>100?`<li>…and ${um.length-100} more</li>`:''}</ul>
+          </div>`:''}
+          ${summary.duplicate_of?`<div style="border:1px solid #d97706;border-radius:6px;padding:8px 10px;margin-bottom:10px;font-size:12px;color:#d97706"><strong>Already imported?</strong> These counts are identical to import #${summary.duplicate_of.id}${summary.duplicate_of.device_label?` (${this.escapeAttr(summary.duplicate_of.device_label)})`:''}. Adding them again would double them.</div>`:''}
+          <div class="form-group"><label>Scanner / Counter</label><input id="cc-imp-device" value="${this.escapeAttr(lastDevice)}" placeholder="e.g. Scanner 2 — Aisles 5-8"></div>
+          <div class="form-group" style="margin-bottom:0">
+            <label style="display:flex;gap:8px;align-items:flex-start;font-weight:400;text-transform:none;margin-bottom:6px"><input type="radio" name="cc-imp-mode" value="add" checked style="margin-top:3px;width:auto;flex:0 0 auto"> <span style="text-align:left"><strong>Add to existing counts</strong> — use for each scanner's file. If an item was counted in several places, the quantities are added together.</span></label>
+            <label style="display:flex;gap:8px;align-items:flex-start;font-weight:400;text-transform:none"><input type="radio" name="cc-imp-mode" value="replace" style="margin-top:3px;width:auto;flex:0 0 auto"> <span style="text-align:left"><strong>Replace counts</strong> for the items in this file — use for a recount.</span></label>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" ${summary.matched_items?'':'disabled'} onclick="App._confirmCycleCountImport()">Import ${summary.matched_items} Count${summary.matched_items!==1?'s':''}</button>
+        </div>
+      </div>`);
   },
 
-  async commitCycleCount(sessionId) {
-    if (!confirm('Commit all variances to inventory? This cannot be undone.')) return;
+  async _confirmCycleCountImport(allowDuplicate) {
+    const imp = this._ccImport;
+    if (!imp) return;
+    const device_label = document.getElementById('cc-imp-device')?.value.trim() || '';
+    const mode = document.querySelector('input[name="cc-imp-mode"]:checked')?.value || 'add';
+    try { localStorage.setItem('pos_cc_device', device_label); } catch(e) {}
     try {
-      await this.api('PATCH',`/warehouse/cycle-counts/${sessionId}/commit`,{});
+      const r = await this.api('POST',`/warehouse/cycle-counts/${imp.sessionId}/import`,{ rows: imp.rows, mode, device_label, file_name: imp.fileName, allow_duplicate: !!allowDuplicate });
+      this.closeModal();
+      this._ccImport = null;
+      this.alert(`Imported ${r.matched_items} count${r.matched_items!==1?'s':''} (total qty ${r.total_qty})${r.unmatched.length?` — ${r.unmatched.length} row${r.unmatched.length!==1?'s':''} skipped`:''}`, r.unmatched.length?'warning':'success');
+      this.viewCycleCount(imp.sessionId);
+    } catch(e) {
+      if (/adding them again would double/.test(e.message) && confirm(`${e.message}.\n\nImport it anyway?`)) return this._confirmCycleCountImport(true);
+      this.alert(e.message,'error');
+    }
+  },
+
+  async undoCycleCountUpload(sessionId, uploadId) {
+    if (!confirm(`Undo import #${uploadId}? Its counts are taken back out; other imports are kept.`)) return;
+    try {
+      await this.api('POST',`/warehouse/cycle-counts/${sessionId}/uploads/${uploadId}/undo`,{});
+      this.alert(`Import #${uploadId} undone`);
+      this.viewCycleCount(sessionId);
+    } catch(e) { this.alert(e.message,'error'); }
+  },
+
+  commitCycleCount(sessionId) {
+    const s = this._ccSession;
+    if (!s || s.id!==sessionId) return;
+    const counted = s.items.filter(i=>i.counted_qty!==null);
+    const variances = counted.filter(i=>i.variance!==0).length;
+    const uncounted = s.items.length - counted.length;
+    const uncountedWithStock = s.items.filter(i=>i.counted_qty===null && i.expected_qty!==0).length;
+    this.showModal(`
+      <div class="modal" style="max-width:520px">
+        <div class="modal-header"><span class="modal-title">Commit ${s.session_number}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="margin:0 0 10px">${variances} counted line${variances!==1?'s':''} differ${variances===1?'s':''} from expected and will be adjusted.</p>
+          ${uncounted?`<label style="display:flex;gap:8px;align-items:flex-start;font-weight:400;text-transform:none;border:1px solid var(--border);border-radius:6px;padding:8px 10px">
+            <input type="checkbox" id="cc-zero-uncounted" style="margin-top:3px;width:auto;flex:0 0 auto" onchange="document.getElementById('cc-commit-total').textContent=${variances}+(this.checked?${uncountedWithStock}:0)">
+            <span style="text-align:left"><strong>Count the ${uncounted} uncounted line${uncounted!==1?'s':''} as 0</strong> — tick for a full or initial count, where anything not scanned wasn't found. ${uncountedWithStock} of them currently expect stock. Leave unticked to leave them unchanged.</span>
+          </label>`:''}
+          <p style="margin:12px 0 0"><strong>Adjustments to apply: <span id="cc-commit-total">${variances}</span></strong>. This can't be undone.</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-success" onclick="App._confirmCommitCycleCount(${sessionId})">Commit</button>
+        </div>
+      </div>`);
+  },
+
+  async _confirmCommitCycleCount(sessionId) {
+    const zero_uncounted = !!document.getElementById('cc-zero-uncounted')?.checked;
+    try {
+      await this.api('PATCH',`/warehouse/cycle-counts/${sessionId}/commit`,{ zero_uncounted });
+      this.closeModal();
       this.alert('Adjustments committed to inventory');
       this.viewCycleCount(sessionId);
     } catch(e) { this.alert(e.message,'error'); }
