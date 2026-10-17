@@ -11,6 +11,7 @@ const { nextNumber } = require('../lib/nextNumber');
 const { autoBills, createBill, dueDateFor, today } = require('../lib/payables');
 const { uploadSignature } = require('../lib/signatures');
 const { getSetting } = require('../lib/settings');
+const { localTaxRate, defaultTaxOption, priceLine, poTotals, receivedValue } = require('../lib/poLines');
 
 // Items joined with the quotation/work order they trace back to (a PR's "Q"
 // line converted into this PO) — lets the PO detail view click straight
@@ -86,27 +87,31 @@ router.post('/', async (req, res) => {
     const { supplier_id, branch_id, employee_id, items, notes, expected_date, vendor_order_number } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in PO' });
 
-    const po_number = await nextNumber(db, 'purchase_orders', 'po_number', 'PO-', 6);
-
-    let subtotal = 0;
+    const { rows: [supplier] } = supplier_id ? await db.execute({ sql: 'SELECT is_local FROM suppliers WHERE id = ?', args: [supplier_id] }) : { rows: [] };
+    const taxRate = await localTaxRate();
     const processedItems = [];
-    for (const item of items) {
-      const product = item.product_id ? (await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] })).rows[0] : null;
-      const unit_cost = parseFloat(item.unit_cost || (product ? product.cost : 0));
-      const qty = parseInt(item.quantity_ordered || item.quantity || 1);
-      const total = parseFloat((unit_cost * qty).toFixed(2));
-      subtotal += total;
-      processedItems.push({ product_id: item.product_id || null, product_name: item.product_name || (product ? product.name : 'Unknown'), sku: item.sku || (product ? product.sku : ''), quantity_ordered: qty, unit_cost, total });
-    }
-    subtotal = parseFloat(subtotal.toFixed(2));
+    try {
+      for (const item of items) {
+        const product = item.product_id ? (await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] })).rows[0] : null;
+        const product_name = item.product_name || (product ? product.name : 'Unknown');
+        const priced = priceLine({
+          name: product_name, quantity: item.quantity_ordered || item.quantity || 1,
+          unit_cost: item.unit_cost || (product ? product.cost : 0),
+          vendor_discount: item.vendor_discount, vendor_discount_percent: item.vendor_discount_percent, tax_option: item.tax_option || defaultTaxOption(supplier),
+        }, taxRate);
+        processedItems.push({ product_id: item.product_id || null, product_name, sku: item.sku || (product ? product.sku : ''), ...priced });
+      }
+    } catch(e) { return res.status(400).json({ error: e.message }); }
+    const { subtotal, tax_amount, total } = poTotals(processedItems);
+    const po_number = await nextNumber(db, 'purchase_orders', 'po_number', 'PO-', 6);
 
     const tx = await db.transaction('write');
     let committed = false;
     try {
-      const result = await tx.execute({ sql: 'INSERT INTO purchase_orders (po_number,supplier_id,branch_id,employee_id,subtotal,total,notes,expected_date,vendor_order_number) VALUES (?,?,?,?,?,?,?,?,?)', args: [po_number, supplier_id||null, branch_id||null, employee_id||null, subtotal, subtotal, notes||null, expected_date||null, vendor_order_number||null] });
+      const result = await tx.execute({ sql: 'INSERT INTO purchase_orders (po_number,supplier_id,branch_id,employee_id,subtotal,tax_amount,total,notes,expected_date,vendor_order_number) VALUES (?,?,?,?,?,?,?,?,?,?)', args: [po_number, supplier_id||null, branch_id||null, employee_id||null, subtotal, tax_amount, total, notes||null, expected_date||null, vendor_order_number||null] });
       const poId = Number(result.lastInsertRowid);
       for (const item of processedItems) {
-        await tx.execute({ sql: 'INSERT INTO purchase_order_items (po_id,product_id,product_name,sku,quantity_ordered,unit_cost,total) VALUES (?,?,?,?,?,?,?)', args: [poId, item.product_id, item.product_name, item.sku, item.quantity_ordered, item.unit_cost, item.total] });
+        await tx.execute({ sql: 'INSERT INTO purchase_order_items (po_id,product_id,product_name,sku,quantity_ordered,unit_cost,total,vendor_discount,vendor_discount_percent,tax_option,tax_rate,tax_amount) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', args: [poId, item.product_id, item.product_name, item.sku, item.quantity_ordered, item.unit_cost, item.total, item.vendor_discount, item.vendor_discount_percent, item.tax_option, item.tax_rate, item.tax_amount] });
       }
       await tx.commit();
       committed = true;
@@ -206,36 +211,45 @@ router.put('/:id', async (req, res) => {
 
     const { rows: existingItems } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ?', args: [req.params.id] });
     const existingById = new Map(existingItems.map(i => [i.id, i]));
+    const { rows: [supplier] } = await db.execute({ sql: 'SELECT is_local FROM suppliers WHERE id = ?', args: [supplier_id || po.supplier_id] });
+    const taxRate = await localTaxRate();
 
     const tx = await db.transaction('write');
     let committed = false;
     try {
       const keepIds = new Set();
-      let subtotal = 0;
+      const priced = [];
       for (const item of items) {
-        const qty = parseInt(item.quantity_ordered) || 1;
-        const unit_cost = parseFloat(item.unit_cost) || 0;
-        const total = parseFloat((qty * unit_cost).toFixed(2));
-        subtotal += total;
         const existingId = item.id ? parseInt(item.id) : null;
-        if (existingId && existingById.has(existingId)) {
-          await tx.execute({ sql: 'UPDATE purchase_order_items SET quantity_ordered = ?, unit_cost = ?, total = ? WHERE id = ?', args: [qty, unit_cost, total, existingId] });
+        const existing = existingId ? existingById.get(existingId) : null;
+        let product = null;
+        if (!existing) {
+          if (!item.product_id) throw new Error('New items must reference a catalog product');
+          ({ rows: [product] } = await tx.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] }));
+          if (!product) throw new Error('Product not found');
+        }
+        // A line saved before tax options existed (or sent without one) keeps
+        // its own option; brand-new lines default to the vendor's.
+        const line = priceLine({
+          name: existing ? existing.product_name : product.name, quantity: item.quantity_ordered, unit_cost: item.unit_cost,
+          vendor_discount: item.vendor_discount, vendor_discount_percent: item.vendor_discount_percent, tax_option: item.tax_option || (existing ? existing.tax_option : defaultTaxOption(supplier)),
+        }, taxRate);
+        priced.push(line);
+        if (existing) {
+          await tx.execute({ sql: 'UPDATE purchase_order_items SET quantity_ordered = ?, unit_cost = ?, total = ?, vendor_discount = ?, vendor_discount_percent = ?, tax_option = ?, tax_rate = ?, tax_amount = ? WHERE id = ?', args: [line.quantity_ordered, line.unit_cost, line.total, line.vendor_discount, line.vendor_discount_percent, line.tax_option, line.tax_rate, line.tax_amount, existingId] });
           keepIds.add(existingId);
         } else {
-          if (!item.product_id) throw new Error('New items must reference a catalog product');
-          const { rows: [product] } = await tx.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] });
-          if (!product) throw new Error('Product not found');
-          const result = await tx.execute({ sql: 'INSERT INTO purchase_order_items (po_id,product_id,product_name,sku,quantity_ordered,unit_cost,total) VALUES (?,?,?,?,?,?,?)', args: [req.params.id, product.id, product.name, product.sku, qty, unit_cost, total] });
+          const result = await tx.execute({ sql: 'INSERT INTO purchase_order_items (po_id,product_id,product_name,sku,quantity_ordered,unit_cost,total,vendor_discount,vendor_discount_percent,tax_option,tax_rate,tax_amount) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', args: [req.params.id, product.id, product.name, product.sku, line.quantity_ordered, line.unit_cost, line.total, line.vendor_discount, line.vendor_discount_percent, line.tax_option, line.tax_rate, line.tax_amount] });
           keepIds.add(Number(result.lastInsertRowid));
         }
       }
       for (const existing of existingItems) {
         if (!keepIds.has(existing.id)) await tx.execute({ sql: 'DELETE FROM purchase_order_items WHERE id = ?', args: [existing.id] });
       }
-      subtotal = parseFloat(subtotal.toFixed(2));
+      const { subtotal, tax_amount, total } = poTotals(priced);
       await tx.execute({
-        sql: 'UPDATE purchase_orders SET supplier_id = ?, branch_id = ?, notes = ?, expected_date = ?, vendor_order_number = ?, subtotal = ?, total = ? WHERE id = ?',
-        args: [supplier_id || po.supplier_id, branch_id || null, notes ?? po.notes, expected_date || null, vendor_order_number || null, subtotal, subtotal, req.params.id],
+        sql: 'UPDATE purchase_orders SET supplier_id = ?, branch_id = ?, notes = ?, expected_date = ?, vendor_order_number = ?, subtotal = ?, tax_amount = ?, total = ? WHERE id = ?',
+        args: [supplier_id || po.supplier_id, branch_id || null, notes ?? po.notes, expected_date || null, vendor_order_number || null, subtotal, tax_amount, total, req.params.id],
       });
       await tx.commit();
       committed = true;
@@ -299,19 +313,23 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
 
     const tx = await db.transaction('write');
     try {
-      let receiptValue = 0;
+      let receiptValue = 0, receiptTax = 0;
       for (const { item_id, quantity_received } of (items || [])) {
         const qty = parseInt(quantity_received);
         if (!qty || qty <= 0) continue;
         const { rows: [item] } = await tx.execute({ sql: 'SELECT * FROM purchase_order_items WHERE id = ?', args: [item_id] });
         if (!item) continue;
-        receiptValue += qty * (Number(item.unit_cost) || 0);
+        const value = receivedValue(item, qty);
+        receiptValue += value.goods;
+        receiptTax += value.tax;
+        // Stock is costed at what was actually paid per unit — after the vendor's discount, before tax.
+        const netUnitCost = item.quantity_ordered ? (Number(item.total) || 0) / item.quantity_ordered : (Number(item.unit_cost) || 0);
         const newReceived = (item.quantity_received || 0) + qty;
         await tx.execute({ sql: 'UPDATE purchase_order_items SET quantity_received = ? WHERE id = ?', args: [newReceived, item_id] });
         if (item.product_id) {
           await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [qty, item.product_id] });
-          if (item.unit_cost && item.unit_cost > 0) {
-            await tx.execute({ sql: 'UPDATE products SET cost = ? WHERE id = ?', args: [item.unit_cost, item.product_id] });
+          if (netUnitCost > 0) {
+            await tx.execute({ sql: 'UPDATE products SET cost = ? WHERE id = ?', args: [parseFloat(netUnitCost.toFixed(4)), item.product_id] });
           }
           if (po.branch_id) {
             await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, po.branch_id, qty, item.product_id, qty] });
@@ -332,15 +350,15 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
       if (allReceived) {
         await tx.execute({ sql: `UPDATE purchase_requests SET status = 'received' WHERE converted_to_po_id = ? AND status != 'received'`, args: [req.params.id] });
       }
-      // Each receipt becomes an A/P bill for what was just received (plus the
-      // PO's tax in proportion), due per the vendor's terms — unless the
+      // Each receipt becomes an A/P bill for what was just received (after
+      // vendor discounts, plus each line's tax in proportion), due per the vendor's terms — unless the
       // vendor has Sync with A/P off or is set to "Not vouchered", in which
       // case the bill is entered by hand from the PO later.
       const { rows: [supplier] } = po.supplier_id
         ? await tx.execute({ sql: 'SELECT payment_terms, sync_ap, voucher_default FROM suppliers WHERE id = ?', args: [po.supplier_id] })
         : { rows: [] };
       if (receiptValue > 0 && autoBills(supplier)) {
-        const tax = po.subtotal > 0 ? (Number(po.tax_amount) || 0) * receiptValue / po.subtotal : 0;
+        const tax = receiptTax;
         const billDate = today();
         await createBill(tx, {
           supplier_id: po.supplier_id, po_id: po.id, branch_id: po.branch_id,

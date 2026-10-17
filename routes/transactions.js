@@ -134,7 +134,7 @@ router.get('/:id', requireAuth, async (req, res) => {
   try {
     const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, c.phone as customer_phone, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip, e.first_name || ' ' || e.last_name as employee_name, cbe.first_name || ' ' || cbe.last_name as created_by_name, b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone, q.id as source_quote_id, q.quote_number as source_quote_number, qe.first_name || ' ' || qe.last_name as quote_created_by, r.return_number as source_return_number, sh.carrier as shipment_carrier, sh.tracking_number as shipment_tracking_number, sh.status as shipment_status, sh.ship_date as shipment_ship_date, sh.estimated_delivery as shipment_estimated_delivery,
       ve.first_name || ' ' || ve.last_name as voided_by_name,
-      ra.id as rental_agreement_id, ra.agreement_number as rental_agreement_number, ra.status as rental_status,
+      ra.id as rental_agreement_id, ra.agreement_number as rental_agreement_number, ra.status as rental_status, ra.quotation_id as rental_quotation_id,
       ra.checkout_datetime as rental_checkout_datetime, ra.due_date as rental_due_date, ra.returned_at as rental_returned_at,
       ra.deposit_total as rental_deposit_total, ra.deposit_refunded as rental_deposit_refunded,
       ra.duration_adjustment_total as rental_duration_adjustment_total, ra.damage_fee_total as rental_damage_fee_total,

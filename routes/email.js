@@ -52,6 +52,10 @@ function logoImgTag(s, origin, maxHeight = 40) {
 // cashier and cashed out) goes out as a tax invoice, not a receipt — same
 // rule as App._txDocTitle() in public/index.html for the printed copy.
 function receiptDocTitle(tx) {
+  // A rental's checkout sale is the Rental Agreement (unless it's a Special
+  // Project's own invoice), the sale settling its return the Rental Settlement.
+  if (tx.rental_role === 'settlement') return 'Rental Settlement';
+  if (tx.rental_role === 'checkout' && !tx.rental_quotation_id) return 'Rental Agreement';
   return tx.source_quote_id ? 'Retail Tax Invoice' : 'Receipt';
 }
 
@@ -356,7 +360,7 @@ function buildRentalInvoiceHtml(agreement, tx, s, origin) {
 
   return `<!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"><title>Rental Tax Invoice ${tx.transaction_number}</title></head>
+<head><meta charset="utf-8"><title>Rental Agreement ${tx.transaction_number}</title></head>
 <body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
 <tr><td align="center">
@@ -368,7 +372,7 @@ function buildRentalInvoiceHtml(agreement, tx, s, origin) {
       ${storePhone ? `<div style="color:#ffffff;font-size:12px">${storePhone}</div>` : ''}
     </td></tr>
     <tr><td style="padding:20px 24px">
-      <div style="font-size:18px;font-weight:700;color:${BRAND.black};margin-bottom:4px">Rental Tax Invoice</div>
+      <div style="font-size:18px;font-weight:700;color:${BRAND.black};margin-bottom:4px">Rental Agreement</div>
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-bottom:16px">
         <tr><td style="padding:2px 0"><strong>Transaction #:</strong> ${tx.transaction_number}</td><td style="text-align:right;padding:2px 0"><strong>Date:</strong> ${new Date(tx.created_at).toLocaleString()}</td></tr>
         ${agreement.customer_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Customer:</strong> ${agreement.customer_name}</td></tr>` : ''}
@@ -435,7 +439,7 @@ function rentalSummaryFigures(agreement) {
     };
   });
 
-  const serviceFeesTotal = (agreement.delivery_required ? agreement.delivery_cost||0 : 0) + (agreement.pickup_required ? agreement.pickup_cost||0 : 0) + (agreement.operator_required ? agreement.operator_fee||0 : 0);
+  const serviceFeesTotal = (agreement.delivery_required ? agreement.delivery_cost||0 : 0) + (agreement.pickup_cost_charged != null ? agreement.pickup_cost_charged : (agreement.pickup_required ? agreement.pickup_cost||0 : 0)) + (agreement.operator_required ? agreement.operator_fee||0 : 0);
   const rentalFeeSubtotal = parseFloat(((agreement.checkout_subtotal||0) - agreement.deposit_total - serviceFeesTotal).toFixed(2));
   const checkoutRows = agreement.checkout_transaction_id ? [
     ['Rental Fee Subtotal', fmt(rentalFeeSubtotal)],
@@ -452,6 +456,7 @@ function rentalSummaryFigures(agreement) {
     agreement.damage_fee_total ? ['Damage Fees', fmt(agreement.damage_fee_total)] : null,
     agreement.duration_adjustment_total ? [durationAdjLabel, fmt(agreement.duration_adjustment_total)] : null,
     agreement.tax_adjustment_total ? ['Tax Adjustment', fmt(agreement.tax_adjustment_total)] : null,
+    agreement.service_adjustment_total ? [agreement.service_adjustment_total > 0 ? 'Pickup Fee (added after checkout)' : 'Pickup Fee Credit (pickup cancelled or reduced)', fmt(agreement.service_adjustment_total)] : null,
     ['Less: Deposit Applied', `-${fmt(agreement.deposit_total)}`],
   ].filter(Boolean) : [];
   const balanceLabel = agreement.balance_due > 0.004 ? 'BALANCE DUE' : agreement.balance_due < -0.004 ? 'REFUND DUE' : 'SETTLED IN FULL';
@@ -510,7 +515,7 @@ function buildRentalSummaryHtml(agreement, s) {
 
   return `<!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"><title>Rental Agreement Summary ${agreement.agreement_number}</title></head>
+<head><meta charset="utf-8"><title>Rental Tax Invoice ${agreement.agreement_number}</title></head>
 <body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
 <tr><td align="center">
@@ -522,7 +527,7 @@ function buildRentalSummaryHtml(agreement, s) {
       ${agreement.branch_phone || s.store_phone ? `<div style="color:#ffffff;font-size:12px">${agreement.branch_phone || s.store_phone}</div>` : ''}
     </td></tr>
     <tr><td style="padding:20px 24px">
-      <div style="font-size:18px;font-weight:700;color:${BRAND.black};margin-bottom:12px">Rental Agreement Summary</div>
+      <div style="font-size:18px;font-weight:700;color:${BRAND.black};margin-bottom:12px">Rental Tax Invoice</div>
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-bottom:16px">
         <tr><td style="padding:2px 0"><strong>Agreement #:</strong> ${agreement.agreement_number}</td>${agreement.customer_name ? `<td style="text-align:right;padding:2px 0"><strong>Customer:</strong> ${agreement.customer_name}</td>` : ''}</tr>
         <tr><td style="padding:2px 0"><strong>Checked Out:</strong> ${agreement.checkout_datetime ? new Date(agreement.checkout_datetime).toLocaleString() : '—'}</td><td style="text-align:right;padding:2px 0"><strong>Due Date:</strong> ${agreement.due_date}</td></tr>
@@ -779,13 +784,16 @@ router.post('/send-receipt/:id', requireAuth, async (req, res) => {
       e.first_name || ' ' || e.last_name as employee_name, cbe.first_name || ' ' || cbe.last_name as created_by_name,
       b.name as branch_name, b.address as branch_address, b.city as branch_city,
       b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone,
-      q.id as source_quote_id, q.quote_number as source_quote_number
+      q.id as source_quote_id, q.quote_number as source_quote_number,
+      CASE WHEN ra.checkout_transaction_id = t.id THEN 'checkout' WHEN ra.settlement_transaction_id = t.id THEN 'settlement' END as rental_role,
+      ra.quotation_id as rental_quotation_id
       FROM transactions t
       LEFT JOIN customers c ON t.customer_id = c.id
       LEFT JOIN employees e ON t.employee_id = e.id
       LEFT JOIN employees cbe ON cbe.id = COALESCE(t.created_by, t.employee_id)
       LEFT JOIN branches b ON t.branch_id = b.id
       LEFT JOIN quotations q ON q.converted_to_tx = t.id
+      LEFT JOIN rental_agreements ra ON ra.checkout_transaction_id = t.id OR ra.settlement_transaction_id = t.id
       WHERE t.id = ?`, args: [req.params.id] });
     if (!tx) return res.status(404).json({ error: 'Transaction not found' });
     const { rows: items } = await db.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [req.params.id] });
@@ -933,7 +941,7 @@ router.post('/send-rental-summary/:id', requireAuth, async (req, res) => {
       b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone,
       co.payment_method as checkout_payment_method, co.subtotal as checkout_subtotal, co.tax_amount as checkout_tax_amount, co.discount_amount as checkout_discount_amount, co.total as checkout_total, co.created_at as checkout_created_at,
       se.total as settlement_total, se.payment_method as settlement_payment_method, se.amount_tendered as settlement_amount_tendered, se.change_amount as settlement_change_amount, se.created_at as settlement_created_at,
-      (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total) as balance_due,
+      (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total + ra.service_adjustment_total) as balance_due,
       ise.first_name || ' ' || ise.last_name as issue_security_employee_name,
       rse.first_name || ' ' || rse.last_name as return_security_employee_name,
       rde.first_name || ' ' || rde.last_name as return_driver_employee_name,
@@ -962,12 +970,12 @@ router.post('/send-rental-summary/:id', requireAuth, async (req, res) => {
       await transporter.sendMail({
         from: `"${fromName}" <${fromAddr}>`,
         to,
-        subject: `Rental Agreement Summary - ${agreement.agreement_number} from ${s.store_name || 'Our Store'}`,
+        subject: `Rental Tax Invoice - ${agreement.agreement_number} from ${s.store_name || 'Our Store'}`,
         // Signatures are login-only on this server — embed them in the email
         // (or, as a PDF, read straight from disk by lib/documentPdf.js).
         ...(await documentEmailContent(req.body.as_pdf, s, rentalSummaryPdfModel(agreement, s), inlineProtectedImages(buildRentalSummaryHtml(agreement, s)))),
       });
-      res.json({ success: true, message: `Rental agreement summary sent to ${to}` });
+      res.json({ success: true, message: `Rental tax invoice sent to ${to}` });
     } catch (e) {
       res.status(500).json({ error: `Failed to send email: ${e.message}` });
     }
@@ -1015,12 +1023,12 @@ router.post('/send-rental-invoice/:id', requireAuth, async (req, res) => {
       await transporter.sendMail({
         from: `"${fromName}" <${fromAddr}>`,
         to,
-        subject: `Rental Tax Invoice - ${agreement.agreement_number} from ${s.store_name || 'Our Store'}`,
+        subject: `Rental Agreement - ${agreement.agreement_number} from ${s.store_name || 'Our Store'}`,
         // Signatures are login-only on this server — embed them in the email
         // (or, as a PDF, read straight from disk by lib/documentPdf.js).
         ...(await documentEmailContent(req.body.as_pdf, s, rentalInvoicePdfModel(agreement, tx, s), inlineProtectedImages(buildRentalInvoiceHtml(agreement, tx, s, origin)))),
       });
-      res.json({ success: true, message: `Rental tax invoice sent to ${to}` });
+      res.json({ success: true, message: `Rental agreement sent to ${to}` });
     } catch (e) {
       res.status(500).json({ error: `Failed to send email: ${e.message}` });
     }
@@ -1042,6 +1050,7 @@ async function loadQuoteForDocument(id) {
   q.items = items;
   if (q.quote_type === 'rental') {
     await attachRentalRates(db, q.items);
+    for (const i of q.items) i.rate_plan = q.rate_plan;
     attachRateBasis(q.items, rentalWindow(q.created_at, q.due_date));
   }
   return q;
@@ -1180,8 +1189,11 @@ function buildApprovedPoHtml(po, s, origin) {
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku || ''}</span></td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${i.quantity_ordered}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${fmt(i.unit_cost)}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${i.vendor_discount > 0 ? `−${fmt(i.vendor_discount)}${i.vendor_discount_percent != null ? ` (${i.vendor_discount_percent}%)` : ''}` : '—'}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${i.tax_option === 'local' ? `GCT ${i.tax_rate}%` : 'No tax'}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(i.total)}</td>
     </tr>`).join('');
+  const discounts = (po.items || []).reduce((sum, i) => sum + (Number(i.vendor_discount) || 0), 0);
 
   return `<!DOCTYPE html>
 <html>
@@ -1215,11 +1227,18 @@ function buildApprovedPoHtml(po, s, origin) {
           <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Item</th>
           <th style="padding:8px;text-align:center;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Qty</th>
           <th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Unit Cost</th>
+          <th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Discount</th>
+          <th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Tax</th>
           <th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Total</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
-      <div style="text-align:right;margin-top:10px;font-size:15px;font-weight:700;color:${BRAND.black}">Total: ${fmt(po.total)}</div>
+      <div style="text-align:right;margin-top:10px;font-size:13px;color:#444;line-height:1.7">
+        ${discounts > 0 ? `<div>Vendor discounts: −${fmt(discounts)}</div>` : ''}
+        <div>Subtotal: ${fmt(po.subtotal)}</div>
+        <div>GCT: ${fmt(po.tax_amount)}</div>
+      </div>
+      <div style="text-align:right;font-size:15px;font-weight:700;color:${BRAND.black}">Total: ${fmt(po.total)}</div>
       ${po.notes ? `<div style="margin-top:16px;font-size:13px;color:#444"><strong>Notes:</strong> ${po.notes}</div>` : ''}
       ${po.approval_signature ? `
       <div style="margin-top:24px;padding-top:16px;border-top:1px solid #e8e8e8">
@@ -1950,7 +1969,7 @@ function rentalInvoicePdfModel(agreement, tx, s) {
   const sig = (label, name, image, at) => image ? { label, name, image, signedAt: pdfDateTime(at) } : null;
   return {
     store: pdfStore(s, { ...tx, branch_name: agreement.branch_name }),
-    title: 'RENTAL TAX INVOICE', number: tx.transaction_number,
+    title: 'RENTAL AGREEMENT', number: tx.transaction_number,
     meta: [['Date', pdfDateTime(tx.created_at)], ['Agreement', agreement.agreement_number]],
     party: { label: 'Customer', lines: [agreement.customer_name] },
     info: [
@@ -2020,7 +2039,7 @@ function rentalSummaryPdfModel(agreement, s) {
   const f = rentalSummaryFigures(agreement);
   return {
     store: pdfStore(s, agreement),
-    title: 'RENTAL AGREEMENT SUMMARY', number: agreement.agreement_number,
+    title: 'RENTAL TAX INVOICE', number: agreement.agreement_number,
     meta: [['Checked Out', agreement.checkout_datetime ? pdfDateTime(agreement.checkout_datetime) : '-'], ['Due Date', pdfDate(agreement.due_date)], ['Returned', agreement.returned_at ? pdfDateTime(agreement.returned_at) : 'Not yet returned']],
     party: { label: 'Customer', lines: [agreement.customer_name] },
     tables: [{ heading: 'Items Rented',

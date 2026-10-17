@@ -6,7 +6,8 @@ const { nextNumber } = require('../lib/nextNumber');
 const { isSerialNumberProduct, serialNumberLabel, serialNumberOf } = require('../lib/serialNumber');
 const { createTransfer } = require('../lib/transfers');
 const { getOutstandingQty, getOutOfServiceQty } = require('../lib/rentalAvailability');
-const { feeFor, getBranchStock, buildRentalLines, revalidateQuoteLines, insertPendingAgreement, assertRentalCustomerEligible, assertNoUnpaidRentalReturns, rentalQuoteSummary, attachRentalRates, attachRateBasis, rentalWindow } = require('../lib/rentals');
+const { feeFor, getBranchStock, buildRentalLines, revalidateQuoteLines, insertPendingAgreement, assertRentalCustomerEligible, assertNoUnpaidRentalReturns, rentalQuoteSummary, attachRentalRates, attachRateBasis, rentalWindow, rateLineOf } = require('../lib/rentals');
+const { ratePlanError } = require('../lib/rentalPricing');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -73,7 +74,7 @@ router.get('/', async (req, res) => {
 async function insertQuoteLines(tx, quoteId, processedItems) {
   for (const item of processedItems) {
     const { product_id, product_name, sku, is_temp_item, is_q_item, purchase_request_id, sources, qty, unit_price, unit_cost, lineTotal, lineTax, lineDisc, serial_number } = item;
-    const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,unit_cost,discount_amount,tax_amount,total,is_temp_item,is_q_item,purchase_request_id,serial_number,is_rental_line,rental_start,rental_end,is_mandatory) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [quoteId, product_id, product_name, sku, qty, unit_price, unit_cost, lineDisc, lineTax, lineTotal, is_temp_item, is_q_item, purchase_request_id, serial_number || null, item.is_rental_line ? 1 : 0, item.rental_start || null, item.rental_end || null, item.is_mandatory ? 1 : 0] });
+    const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,unit_cost,discount_amount,tax_amount,total,is_temp_item,is_q_item,purchase_request_id,serial_number,is_rental_line,rental_start,rental_end,is_mandatory,rate_plan) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [quoteId, product_id, product_name, sku, qty, unit_price, unit_cost, lineDisc, lineTax, lineTotal, is_temp_item, is_q_item, purchase_request_id, serial_number || null, item.is_rental_line ? 1 : 0, item.rental_start || null, item.rental_end || null, item.is_mandatory ? 1 : 0, item.rate_plan || null] });
     item.id = Number(itemResult.lastInsertRowid);
     if (sources) {
       for (const src of sources) {
@@ -121,12 +122,15 @@ async function attachQuoteItemSources(items) {
 router.post('/rental-line-estimate', requirePermission('special_projects'), async (req, res) => {
   try {
     const { product_id, quantity, rental_start, rental_end, branch_id } = req.body;
+    const rate_plan = req.body.rate_plan || null;
     const { rows: [product] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [product_id] });
     if (!product || !product.is_rental) return res.status(400).json({ error: 'Not a rental item' });
     const qty = parseInt(quantity) || 1;
     let period;
     try { period = rentalLinePeriod(rental_start, rental_end); } catch(e) { return res.status(400).json({ error: e.message }); }
-    const fee = feeFor(product, qty, period.start, period.end);
+    const planError = ratePlanError(rate_plan, period.start, period.end, [rateLineOf({ product })]);
+    if (planError) return res.status(400).json({ error: planError });
+    const fee = feeFor({ ...product, rate_plan }, qty, period.start, period.end);
     let available = null;
     if (branch_id) {
       const branchStock = await getBranchStock(db, product.id, branch_id, product.stock_qty);
@@ -146,6 +150,7 @@ router.get('/:id', async (req, res) => {
     await attachSpecialProjectRentals(quote.items);
     if (quote.quote_type === 'rental') {
       await attachRentalRates(db, quote.items);
+      for (const i of quote.items) i.rate_plan = quote.rate_plan;
       attachRateBasis(quote.items, rentalWindow(quote.created_at, quote.due_date));
       quote.rental_summary = rentalQuoteSummary(quote);
       quote.total = quote.rental_summary.total;
@@ -178,7 +183,10 @@ async function processRentalLine(item, product, parentIndex) {
   if (!product.is_rental) throw new Error(`"${product.name}" is not a rental item`);
   const period = rentalLinePeriod(item.rental_start, item.rental_end);
   const qty = parseInt(item.quantity) || 1;
-  const estimate = feeFor(product, qty, period.start, period.end);
+  const rate_plan = item.rate_plan || null;
+  const planError = ratePlanError(rate_plan, period.start, period.end, [rateLineOf({ product })]);
+  if (planError) throw new Error(`${product.name}: ${planError}`);
+  const estimate = feeFor({ ...product, rate_plan }, qty, period.start, period.end);
   const unit_price = item.unit_price != null && item.unit_price !== '' ? parseFloat(item.unit_price) : parseFloat((estimate / qty).toFixed(2));
   const lineTotal = parseFloat((unit_price * qty).toFixed(2));
   const lines = [{
@@ -186,7 +194,7 @@ async function processRentalLine(item, product, parentIndex) {
     is_temp_item: 0, is_q_item: 0, purchase_request_id: null, sources: null,
     qty, unit_price, unit_cost: item.unit_cost != null && item.unit_cost !== '' ? parseFloat(item.unit_cost) : null,
     lineTotal, lineTax: parseFloat((lineTotal * (product.tax_rate || 0) / 100).toFixed(2)), lineDisc: parseFloat(item.discount || 0),
-    is_rental_line: 1, rental_start: item.rental_start, rental_end: item.rental_end, is_mandatory: 0, parentIndex: null,
+    is_rental_line: 1, rental_start: item.rental_start, rental_end: item.rental_end, is_mandatory: 0, parentIndex: null, rate_plan,
   }];
   const { rows: accessories } = await db.execute({ sql: 'SELECT pa.*, p.name, p.sku, p.is_rental FROM product_accessories pa JOIN products p ON p.id = pa.accessory_product_id WHERE pa.product_id = ? AND pa.is_mandatory = 1', args: [product.id] });
   for (const acc of accessories) {
@@ -195,7 +203,7 @@ async function processRentalLine(item, product, parentIndex) {
       product_id: acc.accessory_product_id, product_name: `${acc.name} (included with ${product.name})`, serial_number: null, sku: acc.sku,
       is_temp_item: 0, is_q_item: 0, purchase_request_id: null, sources: null,
       qty, unit_price: 0, unit_cost: null, lineTotal: 0, lineTax: 0, lineDisc: 0,
-      is_rental_line: 1, rental_start: item.rental_start, rental_end: item.rental_end, is_mandatory: 1, parentIndex,
+      is_rental_line: 1, rental_start: item.rental_start, rental_end: item.rental_end, is_mandatory: 1, parentIndex, rate_plan,
     });
   }
   return lines;
@@ -208,13 +216,13 @@ async function attachSpecialProjectRentals(items) {
   for (const id of ids) {
     const { rows: [ag] } = await db.execute({ sql: `SELECT ra.id, ra.agreement_number, ra.status, ra.due_date, ra.checkout_datetime, ra.returned_at, ra.is_paused,
         ra.damage_fee_total, ra.duration_adjustment_total, ra.tax_adjustment_total, ra.deposit_total, ra.settlement_transaction_id,
-        (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total) as balance_due,
+        (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total + ra.service_adjustment_total) as balance_due,
         ise.first_name || ' ' || ise.last_name as issued_by_name, rse.first_name || ' ' || rse.last_name as returned_by_name,
         st.transaction_number as settlement_transaction_number,
         CASE WHEN ra.status = 'awaiting_issue' AND ra.delivery_driver_confirmed_at IS NOT NULL THEN 'out_for_delivery'
              WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused'
              WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue'
-             WHEN ra.status = 'returned' AND ra.settlement_transaction_id IS NULL AND (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total) > 0 THEN 'returned_unpaid'
+             WHEN ra.status = 'returned' AND ra.settlement_transaction_id IS NULL AND (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total + ra.service_adjustment_total) > 0 THEN 'returned_unpaid'
              ELSE ra.status END as display_status
       FROM rental_agreements ra
       LEFT JOIN employees ise ON ra.issue_security_employee_id = ise.id
@@ -322,7 +330,7 @@ async function processQuoteItems(items, { allowRental = false } = {}) {
 // hour blocks), `unit_price` (the product's daily rate) deliberately does
 // NOT satisfy `unit_price * quantity === total` here, unlike every retail
 // quotation_items row — it's informational only.
-async function processRentalQuoteItems(items, branch_id, due_date) {
+async function processRentalQuoteItems(items, branch_id, due_date, rate_plan = null) {
   if (!branch_id) throw new Error('A branch/location is required for a rental quote');
   if (!due_date) throw new Error('Due date is required for a rental quote');
 
@@ -333,11 +341,13 @@ async function processRentalQuoteItems(items, branch_id, due_date) {
   // Whole seconds, same as checkout — see PATCH /rentals/agreements/:id/checkout.
   const now = new Date(Math.floor(Date.now() / 1000) * 1000);
   const due = new Date(`${due_date}T${now.toISOString().slice(11, 19)}.000Z`);
+  const planError = ratePlanError(rate_plan, now, due, lines.filter(l => !l.isMandatory).map(rateLineOf));
+  if (planError) throw new Error(planError);
 
   let subtotal = 0, tax_amount = 0;
   const processedItems = lines.map(line => {
     const p = line.product;
-    const estFee = line.isMandatory ? 0 : feeFor(p, line.quantity, now, due);
+    const estFee = line.isMandatory ? 0 : feeFor({ ...p, rate_plan }, line.quantity, now, due);
     const lineTax = parseFloat((estFee * (p.tax_rate || 0) / 100).toFixed(2));
     subtotal += estFee;
     tax_amount += lineTax;
@@ -386,6 +396,7 @@ async function holdSpecialProjectRentals(tx, quote, employeeId) {
       agreement_number, customer_id: quote.customer_id, employee_id: employeeId || quote.employee_id || null,
       branch_id: quote.branch_id, due_date: parent.rental_end,
       notes: `Special Project ${quote.quote_number} — rental ${parent.rental_start} to ${parent.rental_end}`, lines,
+      rate_plan: parent.rate_plan || null,
     });
     await tx.execute({ sql: 'UPDATE rental_agreements SET quotation_id = ? WHERE id = ?', args: [quote.id, agreementId] });
     // insertPendingAgreement inserts in `lines` order, which is `group` order.
@@ -550,10 +561,13 @@ router.post('/', async (req, res) => {
   try {
     const {
       customer_id, employee_id, branch_id, items, discount_amount, notes, valid_until, quote_type, due_date,
-      delivery_required, delivery_cost, delivery_address, pickup_required, pickup_cost, operator_required, operator_fee,
+      delivery_required, delivery_cost, delivery_address, pickup_required, pickup_cost, pickup_address, operator_required, operator_fee,
     } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in quotation' });
     const isRental = quote_type === 'rental';
+    const ratePlan = isRental ? (req.body.rate_plan || null) : null;
+    if (isRental && delivery_required && !String(delivery_address || '').trim()) return res.status(400).json({ error: "Enter the delivery address — ask the customer where it's going, even if it's their own address" });
+    if (isRental && pickup_required && !String(pickup_address || '').trim()) return res.status(400).json({ error: "Enter the pickup address — ask the customer where it's being collected from, even if it's their own address" });
     const isSpecialProject = quote_type === 'special_project';
     if (isSpecialProject && !req.apiKey && !can(req.employee && req.employee.permissions, 'special_projects')) {
       return res.status(403).json({ error: 'Missing permission: special_projects' });
@@ -571,7 +585,7 @@ router.post('/', async (req, res) => {
     let subtotal, tax_amount, processedItems;
     try {
       ({ subtotal, tax_amount, processedItems } = isRental
-        ? await processRentalQuoteItems(items, branch_id, due_date)
+        ? await processRentalQuoteItems(items, branch_id, due_date, ratePlan)
         : await processQuoteItems(items, { allowRental: isSpecialProject }));
     } catch(e) { return res.status(400).json({ error: e.message }); }
     const disc = parseFloat(discount_amount || 0);
@@ -588,12 +602,13 @@ router.post('/', async (req, res) => {
       // POST /transactions' quote_id handling).
       const result = await tx.execute({ sql: `INSERT INTO quotations
         (quote_number,customer_id,employee_id,original_employee_id,branch_id,subtotal,tax_amount,discount_amount,total,notes,valid_until,quote_type,due_date,
-         delivery_required,delivery_cost,delivery_address,pickup_required,pickup_cost,operator_required,operator_fee)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         delivery_required,delivery_cost,delivery_address,pickup_required,pickup_cost,operator_required,operator_fee,pickup_address,rate_plan)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         args: [quote_number, customer_id||null, employee_id||null, employee_id||null, branch_id||null, subtotal, tax_amount, disc, total, notes||null, retailValidUntil||null, isRental ? 'rental' : (isSpecialProject ? 'special_project' : 'retail'), isRental ? due_date : null,
           isRental && delivery_required ? 1 : 0, isRental && delivery_required ? parseFloat(delivery_cost||0) : 0, isRental && delivery_required ? (delivery_address||null) : null,
           isRental && pickup_required ? 1 : 0, isRental && pickup_required ? parseFloat(pickup_cost||0) : 0,
-          isRental && operator_required ? 1 : 0, isRental && operator_required ? parseFloat(operator_fee||0) : 0] });
+          isRental && operator_required ? 1 : 0, isRental && operator_required ? parseFloat(operator_fee||0) : 0,
+          isRental && pickup_required ? String(pickup_address).trim() : null, ratePlan] });
       const quoteId = Number(result.lastInsertRowid);
       if (isRental) {
         // No sources/branch-split concept for rentals — a rental quote only
@@ -646,15 +661,18 @@ router.put('/:id', async (req, res) => {
 
     const {
       customer_id, employee_id, branch_id, items, discount_amount, notes, valid_until, due_date,
-      delivery_required, delivery_cost, delivery_address, pickup_required, pickup_cost, operator_required, operator_fee,
+      delivery_required, delivery_cost, delivery_address, pickup_required, pickup_cost, pickup_address, operator_required, operator_fee,
     } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in quotation' });
     const isRental = quote.quote_type === 'rental'; // quote_type is fixed at creation — never taken from req.body here
+    const ratePlan = isRental ? (req.body.rate_plan || null) : null;
+    if (isRental && delivery_required && !String(delivery_address || '').trim()) return res.status(400).json({ error: "Enter the delivery address — ask the customer where it's going, even if it's their own address" });
+    if (isRental && pickup_required && !String(pickup_address || '').trim()) return res.status(400).json({ error: "Enter the pickup address — ask the customer where it's being collected from, even if it's their own address" });
 
     let subtotal, tax_amount, processedItems;
     try {
       ({ subtotal, tax_amount, processedItems } = isRental
-        ? await processRentalQuoteItems(items, branch_id, due_date || quote.due_date)
+        ? await processRentalQuoteItems(items, branch_id, due_date || quote.due_date, ratePlan)
         : await processQuoteItems(items, { allowRental: quote.quote_type === 'special_project' }));
     } catch(e) { return res.status(400).json({ error: e.message }); }
     const disc = parseFloat(discount_amount || 0);
@@ -666,11 +684,12 @@ router.put('/:id', async (req, res) => {
     let committed = false;
     try {
       await tx.execute({ sql: `UPDATE quotations SET customer_id=?, employee_id=?, branch_id=?, subtotal=?, tax_amount=?, discount_amount=?, total=?, notes=?, valid_until=?, due_date=?,
-        delivery_required=?, delivery_cost=?, delivery_address=?, pickup_required=?, pickup_cost=?, operator_required=?, operator_fee=? WHERE id=?`,
+        delivery_required=?, delivery_cost=?, delivery_address=?, pickup_required=?, pickup_cost=?, operator_required=?, operator_fee=?, pickup_address=?, rate_plan=? WHERE id=?`,
         args: [customer_id||null, employee_id||quote.employee_id||null, branch_id||null, subtotal, tax_amount, disc, total, notes||null, valid_until||null, isRental ? (due_date || quote.due_date) : null,
           isRental && delivery_required ? 1 : 0, isRental && delivery_required ? parseFloat(delivery_cost||0) : 0, isRental && delivery_required ? (delivery_address||null) : null,
           isRental && pickup_required ? 1 : 0, isRental && pickup_required ? parseFloat(pickup_cost||0) : 0,
-          isRental && operator_required ? 1 : 0, isRental && operator_required ? parseFloat(operator_fee||0) : 0, quote.id] });
+          isRental && operator_required ? 1 : 0, isRental && operator_required ? parseFloat(operator_fee||0) : 0,
+          isRental && pickup_required ? String(pickup_address).trim() : null, ratePlan, quote.id] });
       await tx.execute({ sql: 'DELETE FROM quotation_items WHERE quote_id = ?', args: [quote.id] });
       if (isRental) {
         for (const item of processedItems) {
@@ -865,6 +884,8 @@ router.post('/:id/convert', async (req, res) => {
       if (!targetBranchId) return res.status(400).json({ error: 'A branch/location is required to convert this rental quote' });
       if (!quote.due_date) return res.status(400).json({ error: 'This rental quote has no due date set' });
       if (!quote.customer_id) return res.status(400).json({ error: 'A customer is required to convert this rental quote' });
+      if (quote.delivery_required && !String(quote.delivery_address || '').trim()) return res.status(400).json({ error: 'This quote includes delivery but has no delivery address — edit the quote and enter where it\'s going (ask the customer) before converting' });
+      if (quote.pickup_required && !String(quote.pickup_address || '').trim()) return res.status(400).json({ error: 'This quote includes pickup but has no pickup address — edit the quote and enter where it\'s being collected from (ask the customer) before converting' });
 
       // Only gates converting to a real agreement — the quote itself (and any
       // already-converted agreement) is untouched by this rule.
@@ -891,9 +912,9 @@ router.post('/:id/convert', async (req, res) => {
           branch_id: targetBranchId, due_date: quote.due_date,
           notes: `Converted from quotation ${quote.quote_number}`, lines,
           delivery_required: quote.delivery_required, delivery_cost: quote.delivery_cost, delivery_address: quote.delivery_address,
-          pickup_required: quote.pickup_required, pickup_cost: quote.pickup_cost,
+          pickup_required: quote.pickup_required, pickup_cost: quote.pickup_cost, pickup_address: quote.pickup_address,
           operator_required: quote.operator_required, operator_fee: quote.operator_fee,
-          discount_amount: quote.discount_amount,
+          discount_amount: quote.discount_amount, rate_plan: quote.rate_plan,
         });
         await tx.execute({ sql: 'UPDATE quotations SET status = ?, converted_to_agreement_id = ? WHERE id = ?', args: ['converted', agreementId, quote.id] });
         await tx.commit();

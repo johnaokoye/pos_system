@@ -1991,7 +1991,8 @@ const App = {
   // where a pickup driver needs to go collect it back from. Shared with
   // loadDeliveriesTab's own toAddr (kept as a local alias there).
   _rentalPickupAddress(a) {
-    return a.delivery_address || [a.customer_address, [a.customer_city, a.customer_state, a.customer_zip].filter(Boolean).join(' ')].filter(Boolean).join(', ') || null;
+    // pickup_address is always entered for new rentals; older ones fall back.
+    return a.pickup_address || a.delivery_address || [a.customer_address, [a.customer_city, a.customer_state, a.customer_zip].filter(Boolean).join(' ')].filter(Boolean).join(', ') || null;
   },
 
   // showAgreementLink=false for the driver's own "My Recent Activity" (see
@@ -2080,6 +2081,63 @@ const App = {
       ${this._rentalDashSection('Pickups Needed', pickups.map(a => this._rentalDashRow(a, booked(a, 'pickup'), this.can('rentals_confirm_pickup') ? `<button class="btn btn-sm btn-primary" onclick="App.showConfirmPickupModal(${a.id})">Confirm Pickup</button>` : '', `<div style="font-size:12px;color:var(--text-muted)">📍 ${this._rentalPickupAddress(a) || 'No address on file'}</div>`)), 'No pickups assigned to you right now.')}
       ${this._rentalDashSection('My Recent Activity', history.map(a => this._rentalDashRow(a, `<div style="font-size:11px;color:var(--text-muted)">${a.display_status}</div>`, '', `<div style="font-size:12px;color:var(--text-muted)">📍 ${this._rentalPickupAddress(a) || 'No address on file'}</div>`, false)), 'No completed deliveries or pickups yet.')}
     `;
+  },
+
+  // Add / change / cancel the pickup after the rental was set up — see PATCH
+  // /rentals/agreements/:id/pickup-service for how the fee is settled.
+  async showChangePickupModal(id) {
+    const a = await this.api('GET', `/rentals/agreements/${id}`);
+    const has = !!a.pickup_required;
+    const paid = !!a.checkout_transaction_id;
+    const charged = a.pickup_cost_charged != null ? a.pickup_cost_charged : (has ? a.pickup_cost : 0);
+    this.showModal(`
+      <div class="modal" style="max-width:480px">
+        <div class="modal-header"><span class="modal-title">${has ? 'Change Pickup' : 'Add Pickup'} — ${a.agreement_number}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">${paid
+            ? `Pickup fee paid at checkout: <strong>${this.fmt(charged || 0)}</strong>. Any difference from the fee below is ${has ? 'added to or credited in' : 'added to'} the return settlement when the item comes back.`
+            : 'This rental hasn\'t been paid yet — the fee below is simply what the cashier will charge at checkout.'}</p>
+          <div class="form-group" style="max-width:220px"><label>Pickup Fee</label><input type="number" id="cp-cost" min="0" step="0.01" value="${has ? (a.pickup_cost || 0) : 0}" oninput="App._changePickupPreview(${paid ? charged || 0 : 'null'})"></div>
+          <div class="form-group"><label>Pickup Address *${a.delivery_address ? ` <a href="#" style="font-weight:400;text-transform:none;color:var(--primary);margin-left:6px" onclick="event.preventDefault();document.getElementById('cp-address').value=${this.escapeAttr(JSON.stringify(a.delivery_address))}">same as delivery address</a>` : ''}</label>
+            <textarea id="cp-address" rows="2" placeholder="Required — ask the customer where it's being collected from, even if it's their own address">${this.escapeAttr(has ? (a.pickup_address || '') : '')}</textarea></div>
+          <div class="form-group"><label>Reason${has ? ' <span style="font-weight:400;color:var(--text-muted);font-size:11px">(required to cancel)</span>' : ' <span style="font-weight:400;color:var(--text-muted);font-size:11px">(optional)</span>'}</label><input id="cp-reason" placeholder="${has ? 'e.g. Customer will return it themselves' : 'e.g. Customer asked us to collect it'}"></div>
+          <div id="cp-preview" style="font-size:12px;font-weight:600"></div>
+        </div>
+        <div class="modal-footer">
+          ${has ? `<button class="btn btn-danger" onclick="App.saveChangePickup(${id},'cancel')">Cancel Pickup</button>` : ''}
+          <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+          <button class="btn btn-primary" onclick="App.saveChangePickup(${id},'${has ? 'update' : 'add'}')">${has ? 'Save Changes' : 'Add Pickup'}</button>
+        </div>
+      </div>`);
+    this._changePickupPreview(paid ? charged || 0 : null);
+  },
+
+  _changePickupPreview(charged) {
+    const el = document.getElementById('cp-preview');
+    if (!el) return;
+    if (charged == null) { el.textContent = ''; return; }
+    const diff = parseFloat(((parseFloat(document.getElementById('cp-cost')?.value) || 0) - charged).toFixed(2));
+    el.style.color = diff ? 'var(--warning,#d97706)' : 'var(--text-muted)';
+    el.textContent = diff > 0 ? `${this.fmt(diff)} will be added to the return settlement` : diff < 0 ? `${this.fmt(-diff)} will be credited in the return settlement` : 'No change to what was charged';
+  },
+
+  async saveChangePickup(id, action) {
+    const body = { action, employee_id: this.currentUser.id, reason: document.getElementById('cp-reason')?.value.trim() || null };
+    if (action === 'cancel') {
+      if (!body.reason) { this.alert('Give a reason for cancelling the pickup', 'error'); document.getElementById('cp-reason')?.focus(); return; }
+      if (!confirm('Cancel the pickup? The customer will need to bring the item back themselves.')) return;
+    } else {
+      body.pickup_cost = document.getElementById('cp-cost').value;
+      body.pickup_address = document.getElementById('cp-address').value.trim();
+      if (!body.pickup_address) { this.alert("Enter the pickup address — ask the customer where it's being collected from, even if it's their own address", 'error'); document.getElementById('cp-address')?.focus(); return; }
+    }
+    try {
+      const r = await this.api('PATCH', `/rentals/agreements/${id}/pickup-service`, body);
+      this.closeModal();
+      const fee = r.fee_change ? ` — ${r.fee_change > 0 ? `${this.fmt(r.fee_change)} added to` : `${this.fmt(-r.fee_change)} credited in`} the return settlement` : '';
+      this.alert(`${action === 'add' ? 'Pickup added' : action === 'cancel' ? 'Pickup cancelled' : 'Pickup updated'}${fee}`);
+      this.viewRentalAgreement(id);
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   // ─── Pickup: dispatcher assignment + driver field confirmation ─────────
@@ -3907,7 +3965,11 @@ const App = {
   // POST /transactions and GET /transactions/:id. Mirrors receiptDocTitle()
   // in routes/email.js.
   _txDocTitle(tx) {
-    if (tx.rental_agreement_number) return 'Rental Tax Invoice';
+    // A rental's checkout invoice is the Rental Agreement (the Full Summary
+    // is the Rental Tax Invoice). A Special Project invoice that includes a
+    // rental is still the project's own Retail Tax Invoice.
+    if (tx.rental_role === 'settlement') return 'Rental Settlement';
+    if (tx.rental_role === 'checkout' && !tx.rental_quotation_id) return 'Rental Agreement';
     return tx.source_quote_id ? 'Retail Tax Invoice' : 'Retail Tax Receipt';
   },
 
@@ -6069,7 +6131,7 @@ const App = {
         <div class="modal-body">
           <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;line-height:1.6">
             ${a.customer_name || '—'} · ${a.items.filter(i => !i.parent_item_id).map(i => `${i.product_name} ×${i.quantity}`).join(', ')}<br>
-            📍 ${(isDelivery ? a.delivery_address : '') || this._rentalPickupAddress(a) || 'No address on file'}<br>
+            📍 ${(isDelivery ? a.delivery_address : this._rentalPickupAddress(a)) || 'No address on file'}<br>
             Due back ${this.fmtDate(a.due_date)}
           </div>
           <div class="form-group"><label>Date</label><input type="date" id="sd-date" value="${defDate}"></div>
@@ -6981,11 +7043,11 @@ const App = {
   },
 
   emailRentalSummary(agreementId, customerEmail) {
-    this.showEmailModal('Email Rental Agreement Summary', customerEmail, async (to, { as_pdf }) => {
+    this.showEmailModal('Email Rental Tax Invoice', customerEmail, async (to, { as_pdf }) => {
       this.closeModal();
       try {
         await this.api('POST', `/email/send-rental-summary/${agreementId}`, { to, as_pdf });
-        this.alert(`Rental agreement summary sent to ${to}`);
+        this.alert(`Rental tax invoice sent to ${to}`);
       } catch(e) { this.alert(e.message, 'error'); }
     }, { pdfOption: true });
   },
@@ -7029,7 +7091,7 @@ const App = {
       </tr>`;
     }).join('');
 
-    const serviceFeesTotal = (a.delivery_required ? a.delivery_cost||0 : 0) + (a.pickup_required ? a.pickup_cost||0 : 0) + (a.operator_required ? a.operator_fee||0 : 0);
+    const serviceFeesTotal = (a.delivery_required ? a.delivery_cost||0 : 0) + (a.pickup_cost_charged != null ? a.pickup_cost_charged : (a.pickup_required ? a.pickup_cost||0 : 0)) + (a.operator_required ? a.operator_fee||0 : 0);
     const rentalFeeSubtotal = parseFloat(((a.checkout_subtotal||0) - a.deposit_total - serviceFeesTotal).toFixed(2));
     const checkoutRows = a.checkout_transaction_id ? [
       ['Rental Fee Subtotal', this.fmt(rentalFeeSubtotal)],
@@ -7046,6 +7108,7 @@ const App = {
       a.damage_fee_total ? ['Damage Fees', this.fmt(a.damage_fee_total)] : null,
       a.duration_adjustment_total ? [durationAdjLabel, this.fmt(a.duration_adjustment_total)] : null,
       a.tax_adjustment_total ? ['Tax Adjustment', this.fmt(a.tax_adjustment_total)] : null,
+      a.service_adjustment_total ? [a.service_adjustment_total > 0 ? 'Pickup Fee (added after checkout)' : 'Pickup Fee Credit (pickup cancelled or reduced)', this.fmt(a.service_adjustment_total)] : null,
       ['Less: Deposit Applied', `-${this.fmt(a.deposit_total)}`],
     ].filter(Boolean) : [];
     const balanceLabel = a.balance_due > 0.004 ? 'BALANCE DUE' : a.balance_due < -0.004 ? 'REFUND DUE' : 'SETTLED IN FULL';
@@ -7077,7 +7140,7 @@ const App = {
     if (a.return_security_signature) issueSignatures.push(['Security (Return)', a.return_security_employee_name, a.return_security_signature, a.return_security_confirmed_at]);
     if (a.return_driver_signature) issueSignatures.push(['Driver (Return)', a.return_driver_employee_name, a.return_driver_signature, a.return_driver_confirmed_at]);
 
-    win.document.write(`<!DOCTYPE html><html><head><title>Rental Agreement Summary – ${a.agreement_number}</title>
+    win.document.write(`<!DOCTYPE html><html><head><title>Rental Tax Invoice – ${a.agreement_number}</title>
     <style>
       body{font-family:Arial,sans-serif;font-size:13px;margin:0;padding:48px;color:#111}
       .header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px}
@@ -7106,7 +7169,7 @@ const App = {
         ${addressLine ? `<div>${addressLine}${cityLine}</div>` : ''}
         ${phoneLine ? `<div>${phoneLine}</div>` : ''}
       </div>
-      <div class="doc-title">RENTAL AGREEMENT SUMMARY</div>
+      <div class="doc-title">RENTAL TAX INVOICE</div>
     </div>
     <div class="meta">
       <div><label>Agreement #</label>${a.agreement_number}</div>
@@ -7175,17 +7238,31 @@ const App = {
             <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Checkout Date</label><div>${notYetIssued ? `<span style="color:var(--text-muted)">${a.status==='pending'?'Awaiting checkout':'Awaiting issue'}</span>` : this.fmtDate(a.checkout_date)}</div></div>
             <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Due Date</label><div>${this.fmtDate(a.due_date)}${a.closed_day_grace ? `<div style="font-size:11px;color:var(--primary)">${this._closedDayGraceNote(a)}</div>` : ''}</div></div>
             <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Duration</label><div>${notYetIssued ? `<span style="color:var(--text-muted)">${a.status==='pending'?'TBD at checkout':'Clock starts on issue'}</span>` : this.rentalDurationLabel(a.checkout_date, a.due_date, a.returned_at)}</div></div>
+            <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Rate</label><div>${this._ratePlanLabel(a.rate_plan)}</div></div>
           </div>
           ${a.status==='pending' ? `<div style="padding:8px 12px;background:rgba(245,158,11,0.08);border-left:3px solid #d97706;border-radius:4px;font-size:12px;color:#d97706;margin-bottom:12px">Held — no payment collected yet. Fees and deposit are calculated when a cashier processes payment, based on the rental period starting at that moment.</div>` : ''}
           ${a.status==='awaiting_issue' ? `<div style="padding:8px 12px;background:rgba(245,158,11,0.08);border-left:3px solid #d97706;border-radius:4px;font-size:12px;color:#d97706;margin-bottom:12px">Paid — waiting to be issued (collected or delivered). The rental clock starts once it's issued.</div>` : ''}
           ${(a.delivery_required || a.pickup_required || a.operator_required || a.customer_pickup) ? `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:12px">
             <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Additional Services</strong>
             ${a.customer_pickup ? `<div>Customer Pickup — item collected by the customer at the counter</div>` : ''}
-            ${a.delivery_required ? `<div>Delivery — ${this.fmt(a.delivery_cost)}${a.delivery_driver_name ? ` — ${a.delivery_driver_name}` : ' — driver not yet assigned'}</div>` : ''}
+            ${a.delivery_required ? `<div>Delivery — ${this.fmt(a.delivery_cost)}${a.delivery_driver_name ? ` — ${a.delivery_driver_name}` : ' — driver not yet assigned'}${a.delivery_address ? `<div style="color:var(--text-muted)">📍 ${this.escapeAttr(a.delivery_address)}</div>` : ''}</div>` : ''}
             ${a.operator_required ? `<div>Operator — ${this.fmt(a.operator_fee)}${a.operator_name ? ` — ${a.operator_name}` : ' — not yet assigned'}</div>` : ''}
-            ${a.pickup_required ? `<div>Pickup — ${this.fmt(a.pickup_cost)}${a.pickup_driver_name ? ` — ${a.pickup_driver_name}` : ' — driver not yet assigned'}
+            ${a.pickup_required ? `<div>Pickup — ${this.fmt(a.pickup_cost)}${a.pickup_driver_name ? ` — ${a.pickup_driver_name}` : ' — driver not yet assigned'}${this._rentalPickupAddress(a) ? `<div style="color:var(--text-muted)">📍 ${this.escapeAttr(this._rentalPickupAddress(a))}</div>` : ''}
               ${a.pickup_confirmed_at ? ` <span class="badge-pill badge-success" style="font-size:10px">✓ Confirmed ${this.fmtDateTime(a.pickup_confirmed_at)}</span>${a.pickup_customer_name ? ` — signed by ${a.pickup_customer_name}` : ''}${this._sigButton(a.pickup_customer_signature, 'View Customer Signature')}`
-              : (a.status==='active' && this.can('rentals_issue') ? ` <button class="btn btn-sm btn-outline" style="padding:1px 8px;font-size:11px" onclick="App.closeModal();App.showAssignPickupDriverModal(${a.id})">${a.pickup_driver_name?'Reassign':'Assign'} Driver</button>` : '')}</div>` : ''}
+              : (a.status==='active' && this.can('rentals_issue') ? ` <button class="btn btn-sm btn-outline" style="padding:1px 8px;font-size:11px" onclick="App.closeModal();App.showAssignPickupDriverModal(${a.id})">${a.pickup_driver_name?'Reassign':'Assign'} Driver</button>` : '')}
+              ${!a.pickup_confirmed_at && ['pending','awaiting_issue','active'].includes(a.status) && this.can('rentals_issue') ? ` <button class="btn btn-sm btn-outline" style="padding:1px 8px;font-size:11px" onclick="App.closeModal();App.showChangePickupModal(${a.id})">Change Pickup</button>` : ''}</div>` : ''}
+            ${a.service_adjustment_total ? `<div style="margin-top:4px;color:var(--warning,#d97706)">Pickup fee ${a.service_adjustment_total > 0 ? `+${this.fmt(a.service_adjustment_total)} owed` : `${this.fmt(-a.service_adjustment_total)} credit`} — ${a.status === 'returned' ? 'included in the return settlement' : 'settled when the item is returned'}</div>` : ''}
+          </div>` : ''}
+          ${!a.pickup_required && ['pending','awaiting_issue','active'].includes(a.status) && this.can('rentals_issue') ? `<div style="margin:-6px 0 12px"><button class="btn btn-sm btn-outline" onclick="App.closeModal();App.showChangePickupModal(${a.id})">+ Add Pickup</button>${a.service_adjustment_total ? ` <span style="font-size:12px;color:var(--warning,#d97706)">Pickup cancelled — ${this.fmt(-a.service_adjustment_total)} credit settled at return</span>` : ''}</div>` : ''}
+          ${a.pickup_changes?.length ? `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:12px">
+            <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Pickup Changes</strong>
+            ${a.pickup_changes.map(c => `<div style="margin-top:4px"><strong>${c.action === 'add' ? 'Pickup added' : c.action === 'cancel' ? 'Pickup cancelled' : 'Pickup changed'}</strong> — ${this.fmtDateTime(c.created_at)}${c.employee_name ? ` by ${c.employee_name}` : ''}
+              <div style="color:var(--text-muted)">${[
+                c.action !== 'cancel' && c.old_address !== c.new_address && c.new_address ? `Address: ${this.escapeAttr(c.new_address)}` : '',
+                c.action !== 'cancel' && c.old_cost != c.new_cost ? `Fee: ${c.old_cost != null ? this.fmt(c.old_cost) + ' → ' : ''}${this.fmt(c.new_cost)}` : '',
+                c.fee_adjustment ? `${c.fee_adjustment > 0 ? '+' : ''}${this.fmt(c.fee_adjustment)} at return` : '',
+                c.reason ? this.escapeAttr(c.reason) : '',
+              ].filter(Boolean).join(' · ')}</div></div>`).join('')}
           </div>` : ''}
           ${a.customer_po_number ? `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:12px">
             <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Customer PO</strong>
@@ -7281,8 +7358,8 @@ const App = {
         <div class="modal-footer footer-wrap">
           ${a.status==='pending' && this.can('pos') && !a.quotation_id ? `<button class="btn btn-primary" onclick="App.closeModal();App.showFinalizeRentalModal(${a.id})">Process Payment</button>` : ''}
           ${a.status==='awaiting_issue' && this.can('rentals_issue') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showIssueRentalModal(${a.id})">Issue Rental</button>` : ''}
-          ${a.checkout_transaction_id ? `<button class="btn btn-secondary" onclick="App.printRentalInvoice(${a.id})">🖨️ Tax Invoice</button>
-          <button class="btn btn-secondary" onclick="App.emailRentalInvoice(${a.id},'${(a.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email Invoice</button>
+          ${a.checkout_transaction_id ? `<button class="btn btn-secondary" onclick="App.printRentalInvoice(${a.id})">🖨️ Rental Agreement</button>
+          <button class="btn btn-secondary" onclick="App.emailRentalInvoice(${a.id},'${(a.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email Agreement</button>
           <button class="btn btn-secondary" onclick="App.closeModal();App.launchRentalSummary(${a.id})">📋 Full Summary</button>` : ''}
           ${a.status==='active' ? `<button class="btn btn-secondary" onclick="App.printRentalDeliveryNote(${a.id})">🖨️ Delivery Note</button>` : ''}
           ${a.status==='active' && !a.is_paused ? `<button class="btn btn-secondary" onclick="App.closeModal();App.showPauseRentalModal(${a.id})">⏸ Pause / Schedule Stop</button>` : ''}
@@ -7840,7 +7917,7 @@ const App = {
     win.document.close();
   },
 
-  // Reprints the letter-size RENTAL TAX INVOICE for an already-checked-out
+  // Reprints the letter-size RENTAL AGREEMENT (checkout invoice) for an already-checked-out
   // agreement — same document (and same printReceiptLetter renderer) shown
   // right after Process Payment completes, just re-fetched from the
   // checkout transaction on demand rather than held in session state.
@@ -7992,6 +8069,7 @@ const App = {
               <input type="number" id="rc-duedate-daysinput" min="1" step="1" placeholder="days" style="width:80px" oninput="App._onRentalDaysInputChange()">
             </div>
           </div>
+          ${this._ratePlanSelectHtml('rc-rateplan', 'App._recalcRentalCheckoutEstimate()')}
           <hr style="margin:12px 0">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
             <strong>Items</strong>
@@ -8015,7 +8093,8 @@ const App = {
           </div>
           <div id="rc-delivery-fields" style="display:none">
             <div class="form-group" style="max-width:220px"><label style="font-size:11px">Delivery Cost</label><input type="number" id="rc-delivery-cost" value="0" min="0" step="0.01" oninput="App._recalcRentalCheckoutEstimate()"></div>
-            <div class="form-group"><label style="font-size:11px">Delivery Address</label><textarea id="rc-delivery-address" rows="2" placeholder="Leave blank to use the customer's address on file"></textarea></div>
+            <div class="form-group"><label style="font-size:11px">Delivery Address *</label><textarea id="rc-delivery-address" rows="2" placeholder="Required — ask the customer where it's going, even if it's their own address"></textarea></div>
+            ${this._rentalScheduleFieldsHtml('delivery')}
           </div>
           <div class="form-group">
             <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:normal">
@@ -8023,8 +8102,10 @@ const App = {
               Pickup (from customer) required
             </label>
           </div>
-          <div id="rc-pickup-fields" class="form-group" style="display:none;max-width:220px">
-            <label style="font-size:11px">Pickup Cost</label><input type="number" id="rc-pickup-cost" value="0" min="0" step="0.01" oninput="App._recalcRentalCheckoutEstimate()">
+          <div id="rc-pickup-fields" style="display:none">
+            <div class="form-group" style="max-width:220px"><label style="font-size:11px">Pickup Cost</label><input type="number" id="rc-pickup-cost" value="0" min="0" step="0.01" oninput="App._recalcRentalCheckoutEstimate()"></div>
+            <div class="form-group"><label style="font-size:11px">Pickup Address *<a href="#" style="font-weight:400;text-transform:none;color:var(--primary);margin-left:6px" onclick="event.preventDefault();const d=document.getElementById('rc-delivery-address');if(!document.getElementById('rc-delivery')?.checked||!d||!d.value.trim()){App.alert('Tick Delivery required and enter the delivery address first','warning');return;}document.getElementById('rc-pickup-address').value=d.value">same as delivery address</a></label><textarea id="rc-pickup-address" rows="2" placeholder="Required — ask the customer where it's being collected from, even if it's their own address"></textarea></div>
+            ${this._rentalScheduleFieldsHtml('pickup')}
           </div>
           <div class="form-group">
             <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:normal">
@@ -8056,6 +8137,48 @@ const App = {
     });
   },
 
+  // New Rental: optional delivery / pickup booking, same as Rental Dispatch →
+  // Schedule. Left blank, nothing is booked; "use due date" fills the pickup date.
+  _rentalScheduleFieldsHtml(leg) {
+    const id = f => `rc-${leg}-sched-${f}`;
+    return `<div style="border:1px dashed var(--border);border-radius:6px;padding:8px 10px;margin-bottom:10px">
+      <div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;margin-bottom:6px">Schedule ${leg} <span style="font-weight:400;text-transform:none">(optional — can also be done later from Rental Dispatch)</span></div>
+      <div class="input-row">
+        <div class="form-group"><label style="font-size:11px">Date${leg === 'pickup' ? ` <a href="#" style="font-weight:400;text-transform:none;color:var(--primary)" onclick="event.preventDefault();document.getElementById('${id('date')}').value=document.getElementById('rc-duedate')?.value||''">use due date</a>` : ''}</label><input type="date" id="${id('date')}"></div>
+        <div class="form-group"><label style="font-size:11px">From</label><input type="time" id="${id('start')}" value="09:00"></div>
+      </div>
+      <div class="input-row">
+        <div class="form-group"><label style="font-size:11px">To <span style="font-weight:400">(optional)</span></label><input type="time" id="${id('end')}"></div>
+        ${this.can('rentals_issue') ? `<div class="form-group"><label style="font-size:11px">Driver</label><select id="${id('driver')}"><option value="">— Assign later —</option></select></div>` : '<div class="form-group"></div>'}
+      </div>
+      <div class="form-group" style="margin-bottom:0"><label style="font-size:11px">Notes for the driver</label><input id="${id('notes')}" placeholder="Gate code, contact on site…"></div>
+    </div>`;
+  },
+
+  async _fillRentalScheduleDrivers(leg) {
+    const sel = document.getElementById(`rc-${leg}-sched-driver`);
+    if (!sel || sel.dataset.loaded) return;
+    if (!this._dispatchDrivers) {
+      try { this._dispatchDrivers = (await this.api('GET', '/employees')).filter(e => e.is_driver && e.active !== 0); } catch(e) { this._dispatchDrivers = []; }
+    }
+    sel.insertAdjacentHTML('beforeend', this._dispatchDrivers.map(d => `<option value="${d.id}">${d.first_name} ${d.last_name}</option>`).join(''));
+    sel.dataset.loaded = '1';
+  },
+
+  // Returns the booking to send, null when none, or false (after alerting) when incomplete.
+  _readRentalSchedule(leg) {
+    const v = f => document.getElementById(`rc-${leg}-sched-${f}`)?.value || '';
+    const date = v('date');
+    if (!date) return null;
+    if (!v('start')) { this.alert(`Choose the ${leg} start time, or clear the ${leg} date`, 'error'); return false; }
+    return {
+      start: new Date(`${date}T${v('start')}`).toISOString(),
+      end: v('end') ? new Date(`${date}T${v('end')}`).toISOString() : null,
+      driver_id: v('driver') || null,
+      notes: v('notes').trim() || null,
+    };
+  },
+
   _toggleRentalCreateService(which) {
     const box = document.getElementById(`rc-${which}`);
     const fields = document.getElementById(`rc-${which}-fields`);
@@ -8065,7 +8188,9 @@ const App = {
     if (which === 'delivery' && box?.checked) {
       const cp = document.getElementById('rc-customer-pickup');
       if (cp) cp.checked = false;
+      this._fillRentalScheduleDrivers('delivery');
     }
+    if (which === 'pickup' && box?.checked) this._fillRentalScheduleDrivers('pickup');
     this._recalcRentalCheckoutEstimate();
   },
 
@@ -8264,6 +8389,61 @@ const App = {
     this._recalcRentalCheckoutEstimate();
   },
 
+  // Rate plan (daily/weekly/monthly) chosen when setting up a rental — a cap
+  // on the tier billed, never a way up. Mirrors lib/rentalPricing.js's
+  // earnedRatePlan/effectiveRatePlan; the server re-checks the choice.
+  _RATE_PLANS: ['daily', 'weekly', 'monthly'],
+  _earnedRatePlan(classification, days) {
+    if (classification === 'equipment') return days >= 28 ? 'monthly' : days >= 7 ? 'weekly' : 'daily';
+    return days > 28 ? 'monthly' : days >= 7 ? 'weekly' : 'daily';
+  },
+  _effectiveRatePlan(classification, days, ratePlan) {
+    const earned = this._earnedRatePlan(classification, days);
+    if (!this._RATE_PLANS.includes(ratePlan)) return earned;
+    return this._RATE_PLANS[Math.min(this._RATE_PLANS.indexOf(earned), this._RATE_PLANS.indexOf(ratePlan))];
+  },
+  _ratePlanLabel(plan) {
+    return plan ? `${plan[0].toUpperCase()}${plan.slice(1)} rate` : 'Automatic (by rental length)';
+  },
+  _ratePlanSelectHtml(id, onchange, selected = '') {
+    const opt = (v, label) => `<option value="${v}" ${(selected || '') === v ? 'selected' : ''}>${label}</option>`;
+    return `<div class="form-group"><label>Rate</label>
+      <select id="${id}" onchange="${onchange}" onfocus="${onchange}">
+        ${opt('', 'Automatic — based on rental length')}${opt('daily', 'Daily rate')}${opt('weekly', 'Weekly rate')}${opt('monthly', 'Monthly rate')}
+      </select>
+      <div id="${id}-note" style="font-size:11px;color:var(--text-muted);margin-top:4px"></div>
+    </div>`;
+  },
+  // Disables the tiers the rental's length doesn't earn (for any of its
+  // items — `classifications` of the chargeable lines) and drops an
+  // ineligible choice back to Automatic, saying so.
+  _refreshRatePlanOptions(id, days, classifications) {
+    const sel = document.getElementById(id);
+    if (!sel) return;
+    const note = document.getElementById(`${id}-note`);
+    // No items picked yet: judge by the most lenient rule (the server has the final say).
+    const classes = classifications.length ? classifications : ['equipment'];
+    const allowed = plan => days != null && classes.every(c => this._RATE_PLANS.indexOf(plan) <= this._RATE_PLANS.indexOf(this._earnedRatePlan(c, days)));
+    const need = { weekly: 'needs 7+ days', monthly: classes.includes('equipment') && !classes.some(c => c !== 'equipment') ? 'needs 28+ days' : 'needs more than 28 days' };
+    for (const opt of sel.options) {
+      if (!opt.value || opt.value === 'daily') continue;
+      opt.disabled = !allowed(opt.value);
+      opt.textContent = `${this._ratePlanLabel(opt.value)}${opt.disabled ? ` (${need[opt.value]})` : ''}`;
+    }
+    let msg = '';
+    if (sel.value && sel.selectedOptions[0]?.disabled) {
+      msg = `${this._ratePlanLabel(sel.value)} needs a longer rental — set back to Automatic.`;
+      sel.value = '';
+    }
+    const explain = {
+      '': 'Uses the rate the rental length earns (weekly from 7 days, monthly from 28+).',
+      daily: 'Every day is billed at the daily rate, however long the rental runs.',
+      weekly: 'Billed at the weekly rate — never the monthly rate, even if it runs past a month.',
+      monthly: 'Billed at the monthly rate. If it comes back early, it drops to the rate the actual length earns.',
+    };
+    if (note) note.textContent = msg || explain[sel.value];
+  },
+
   // Client-side port of lib/rentalPricing.js's calculateRentalFee — used only
   // to show a live estimate on the New Rental form before the hold is placed.
   // The server recomputes this for real (and is authoritative) at finalize
@@ -8272,24 +8452,27 @@ const App = {
   // from what's actually billed. Returns the UNROUNDED per-unit fee — same
   // reasoning as lib/rentalPricing.js: round once, after the caller
   // multiplies by quantity, not before.
-  _calcRentalFeeEstimate({ classification, dailyRate, weeklyRate, monthlyRate, hourlyRate, start, end }) {
+  _calcRentalFeeEstimate({ classification, dailyRate, weeklyRate, monthlyRate, hourlyRate, start, end, ratePlan }) {
     const totalMs = Math.max(0, end - start);
     const totalHours = Math.floor(totalMs / 3600000);
     const totalCalendarDays = totalHours / 24;
     const daily = dailyRate || 0;
+    const plan = this._effectiveRatePlan(classification, totalCalendarDays, ratePlan);
 
     // Tools: 7-28 days bills the WHOLE rental at 85% of the daily rate per
     // day; above 28 days bills the whole rental at 75% of that (see the
-    // matching branch in lib/rentalPricing.js — must stay identical).
-    if (classification !== 'equipment' && totalCalendarDays >= 7) {
+    // matching branch in lib/rentalPricing.js — must stay identical). A
+    // chosen rate plan caps the tier (daily plan = full daily rate).
+    if (classification !== 'equipment' && plan !== 'daily') {
       const weekTierDayRate = daily * 0.85;
-      const perDayRate = totalCalendarDays > 28 ? weekTierDayRate * 0.75 : weekTierDayRate;
+      const perDayRate = plan === 'monthly' ? weekTierDayRate * 0.75 : weekTierDayRate;
       return totalCalendarDays * perDayRate;
     }
+    if (classification !== 'equipment' && totalCalendarDays >= 7) return totalCalendarDays * daily;
 
-    const months = Math.floor(totalCalendarDays / 28);
+    const months = plan === 'monthly' ? Math.floor(totalCalendarDays / 28) : 0;
     const remAfterMonths = totalCalendarDays - months * 28;
-    const weeks = Math.floor(remAfterMonths / 7);
+    const weeks = plan === 'daily' ? 0 : Math.floor(remAfterMonths / 7);
     const remAfterWeeks = remAfterMonths - weeks * 7;
     let days = Math.floor(remAfterWeeks);
     let remainderHours = (remAfterWeeks - days) * 24;
@@ -8360,6 +8543,22 @@ const App = {
     const rows = [];
     let feeSubtotal = 0, taxTotal = 0;
     let start, end;
+    // Rate picker first: which tiers this length earns for the items chosen.
+    const lineClasses = [];
+    document.querySelectorAll('#rental-checkout-lines [id^="rental-line-"]').forEach(line => {
+      const idx = line.id.replace('rental-line-', '');
+      const product = (this._rentalProducts || []).find(p => String(p.id) === String(document.getElementById(`rl-prod-${idx}`)?.value));
+      if (product) lineClasses.push(product.rental_classification || 'tool');
+      const accs = (this._rentalLineAccessories || {})[idx] || [];
+      document.querySelectorAll(`.rl-acc-${idx}:checked`).forEach(cb => {
+        const acc = accs.find(a => String(a.accessory_product_id) === String(cb.value));
+        if (acc) lineClasses.push(acc.rental_classification || 'tool');
+      });
+    });
+    const planStart = new Date();
+    const planDays = dueDateStr ? Math.floor(Math.max(0, new Date(`${dueDateStr}T${planStart.toISOString().slice(11,19)}.000Z`) - planStart) / 3600000) / 24 : null;
+    this._refreshRatePlanOptions('rc-rateplan', planDays, lineClasses);
+    const ratePlan = document.getElementById('rc-rateplan')?.value || null;
     if (dueDateStr) {
       start = new Date();
       end = new Date(`${dueDateStr}T${start.toISOString().slice(11,19)}.000Z`);
@@ -8374,7 +8573,7 @@ const App = {
         const fee = Math.round(this._calcRentalFeeEstimate({
           classification: product.rental_classification, dailyRate: product.rental_rate,
           weeklyRate: product.rental_weekly_rate, monthlyRate: product.rental_monthly_rate,
-          hourlyRate: product.rental_hourly_rate, start, end,
+          hourlyRate: product.rental_hourly_rate, start, end, ratePlan,
         }) * qty * 100) / 100;
         rows.push({ label: `${product.name} × ${qty}`, fee });
         feeSubtotal += fee;
@@ -8387,7 +8586,7 @@ const App = {
           const accFee = Math.round(this._calcRentalFeeEstimate({
             classification: acc.rental_classification, dailyRate: acc.rental_rate,
             weeklyRate: acc.rental_weekly_rate, monthlyRate: acc.rental_monthly_rate,
-            hourlyRate: acc.rental_hourly_rate, start, end,
+            hourlyRate: acc.rental_hourly_rate, start, end, ratePlan,
           }) * qty * 100) / 100;
           rows.push({ label: `+ ${acc.name} × ${qty}`, fee: accFee });
           feeSubtotal += accFee;
@@ -8421,7 +8620,7 @@ const App = {
     const days = this._rentalDaysFromDueDate(dueDateStr);
 
     summaryEl.innerHTML = `
-      <div style="font-weight:600;margin-bottom:6px">Estimated Total — ${days} day${days===1?'':'s'}</div>
+      <div style="font-weight:600;margin-bottom:6px">Estimated Total — ${days} day${days===1?'':'s'}${ratePlan ? ` · ${this._ratePlanLabel(ratePlan)}` : ''}</div>
       ${rows.map(r => `<div style="display:flex;justify-content:space-between"><span>${r.label}</span><span>${this.fmt(r.fee)}</span></div>`).join('')}
       <div style="display:flex;justify-content:space-between"><span>Sub-Total Amount</span><span>${this.fmt(feeSubtotal)}</span></div>
       <div style="display:flex;justify-content:space-between"><span>Sales Tax</span><span>${this.fmt(taxTotal)}</span></div>
@@ -8549,8 +8748,23 @@ const App = {
     const pickupRequired = document.getElementById('rc-pickup').checked;
     const operatorRequired = document.getElementById('rc-operator').checked;
     const customerPickup = document.getElementById('rc-customer-pickup').checked;
+    if (deliveryRequired && !document.getElementById('rc-delivery-address')?.value.trim()) {
+      this.alert("Enter the delivery address — ask the customer where it's going, even if it's their own address", 'error');
+      document.getElementById('rc-delivery-address')?.focus();
+      return;
+    }
+    if (pickupRequired && !document.getElementById('rc-pickup-address')?.value.trim()) {
+      this.alert("Enter the pickup address — ask the customer where it's being collected from, even if it's their own address", 'error');
+      document.getElementById('rc-pickup-address')?.focus();
+      return;
+    }
+    const delivery_schedule = deliveryRequired ? this._readRentalSchedule('delivery') : null;
+    const pickup_schedule = pickupRequired ? this._readRentalSchedule('pickup') : null;
+    if (delivery_schedule === false || pickup_schedule === false) return;
     try {
       const agreement = await this.api('POST', '/rentals/agreements', {
+        delivery_schedule, pickup_schedule,
+        rate_plan: document.getElementById('rc-rateplan')?.value || null,
         customer_id, branch_id, employee_id: this.currentUser.id, due_date, items,
         notes: document.getElementById('rc-agreement-notes')?.value.trim() || null,
         delivery_required: deliveryRequired ? 1 : 0,
@@ -8558,12 +8772,19 @@ const App = {
         delivery_address: deliveryRequired ? (document.getElementById('rc-delivery-address')?.value.trim() || null) : null,
         pickup_required: pickupRequired ? 1 : 0,
         pickup_cost: pickupRequired ? parseFloat(document.getElementById('rc-pickup-cost').value) || 0 : 0,
+        pickup_address: pickupRequired ? document.getElementById('rc-pickup-address').value.trim() : null,
         operator_required: operatorRequired ? 1 : 0,
         operator_fee: operatorRequired ? parseFloat(document.getElementById('rc-operator-fee').value) || 0 : 0,
         customer_pickup: customerPickup ? 1 : 0,
       });
       this.closeModal();
-      this.alert(`Rental ${agreement.agreement_number} placed on hold — a cashier can recall it from Held Orders in the POS to collect payment`);
+      const booked = [delivery_schedule && 'delivery', pickup_schedule && 'pickup'].filter(Boolean);
+      this.alert(`Rental ${agreement.agreement_number} placed on hold${booked.length ? `, ${booked.join(' and ')} scheduled` : ''} — a cashier can recall it from Held Orders in the POS to collect payment`);
+      for (const w of agreement.schedule_warnings || []) {
+        this.alert(w.type === 'driver_busy'
+          ? `Heads up: this driver also has the ${w.leg} for ${w.agreement_number} at ${this.fmtDateTime(w.at)}`
+          : `Heads up: the pickup is after the rental is due back (${this.fmtDate(w.due_date + 'T12:00:00')}) — time past the due date is billed as late unless the rental is paused`, 'warning');
+      }
       this.renderRentals();
       this.updateHoldBadge();
     } catch(e) { this.alert(e.message, 'error'); }
@@ -8758,7 +8979,7 @@ const App = {
       this.updateHoldBadge();
       // The checkout transaction (rental fee + deposit + delivery/pickup/
       // operator fees, all itemized) is what showReceipt/printReceiptLetter
-      // renders as the letter-size RENTAL TAX INVOICE — same receipt flow a
+      // renders as the letter-size RENTAL AGREEMENT — same receipt flow a
       // normal POS sale gets, just reached from the rental checkout path
       // instead of the cart.
       if (agreement.checkout_transaction_id) {
@@ -9098,7 +9319,7 @@ const App = {
         const tx = await this.api('GET', `/transactions/${updated.settlement_transaction_id}`);
         this.showReceipt(tx, tx.change_amount || 0);
       } else {
-        const balanceDue = (updated.damage_fee_total || 0) + (updated.duration_adjustment_total || 0) - (updated.deposit_total || 0) + (updated.tax_adjustment_total || 0);
+        const balanceDue = (updated.damage_fee_total || 0) + (updated.duration_adjustment_total || 0) - (updated.deposit_total || 0) + (updated.tax_adjustment_total || 0) + (updated.service_adjustment_total || 0);
         if (balanceDue > 0) {
           this.alert(`Item signed in. Balance of ${this.fmt(balanceDue)} is due — send the customer to the register to complete payment. Until it's paid, this rental is listed under Returned – Not Paid and the customer can't start a new rental.`, 'success');
         } else {
@@ -9116,7 +9337,7 @@ const App = {
   async showRentalBalanceDueModal(id) {
     try {
       const a = await this.api('GET', `/rentals/agreements/${id}`);
-      const balance = parseFloat(((a.damage_fee_total||0) + (a.duration_adjustment_total||0) - (a.deposit_total||0) + (a.tax_adjustment_total||0)).toFixed(2));
+      const balance = parseFloat(((a.damage_fee_total||0) + (a.duration_adjustment_total||0) - (a.deposit_total||0) + (a.tax_adjustment_total||0) + (a.service_adjustment_total||0)).toFixed(2));
       this.showModal(`
         <div class="modal" style="max-width:440px">
           <div class="modal-header"><span class="modal-title">Collect Rental Balance — ${a.agreement_number}</span><button class="modal-close">✕</button></div>
@@ -9126,6 +9347,7 @@ const App = {
               <div style="display:flex;justify-content:space-between"><span>Damage fees</span><span>${this.fmt(a.damage_fee_total)}</span></div>
               <div style="display:flex;justify-content:space-between"><span>Duration adjustment</span><span>${this.fmt(a.duration_adjustment_total)}</span></div>
               <div style="display:flex;justify-content:space-between"><span>Tax adjustment</span><span>${this.fmt(a.tax_adjustment_total)}</span></div>
+              ${a.service_adjustment_total ? `<div style="display:flex;justify-content:space-between"><span>${a.service_adjustment_total > 0 ? 'Pickup fee (added after checkout)' : 'Pickup fee credit'}</span><span>${this.fmt(a.service_adjustment_total)}</span></div>` : ''}
               <div style="display:flex;justify-content:space-between"><span>Less deposit</span><span>-${this.fmt(a.deposit_total)}</span></div>
               <div style="display:flex;justify-content:space-between;margin-top:4px;border-top:1px solid var(--border);padding-top:4px"><strong>Balance Due</strong><strong>${this.fmt(balance)}</strong></div>
             </div>
@@ -16038,11 +16260,11 @@ const App = {
   },
 
   emailRentalInvoice(agreementId, customerEmail) {
-    this.showEmailModal('Email Rental Tax Invoice', customerEmail, async (to, { as_pdf }) => {
+    this.showEmailModal('Email Rental Agreement', customerEmail, async (to, { as_pdf }) => {
       this.closeModal();
       try {
         await this.api('POST', `/email/send-rental-invoice/${agreementId}`, { to, as_pdf });
-        this.alert(`Rental tax invoice sent to ${to}`);
+        this.alert(`Rental agreement sent to ${to}`);
       } catch(e) { this.alert(e.message, 'error'); }
     }, { pdfOption: true });
   },
@@ -17322,7 +17544,7 @@ const App = {
     ]);
     const branches = this.currentUser.branches || [];
     this.showModal(`
-      <div class="modal" style="max-width:720px">
+      <div class="modal" style="max-width:960px">
         <div class="modal-header"><span class="modal-title">${editId ? `Edit Purchase Order: ${po.po_number}` : 'New Purchase Order'}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <div class="input-row">
@@ -17352,9 +17574,16 @@ const App = {
               </div>
             </div>
             <div id="po-items-status" style="font-size:12px;color:var(--text-muted);padding:4px 0 8px">Select a supplier above to see their products.</div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--text-muted);margin-bottom:6px">
+              <span>Each line: quantity · unit cost · vendor discount ($ off the line) · tax.</span>
+              <span style="margin-left:auto">Set every line to:</span>
+              <button type="button" class="btn btn-sm btn-outline" onclick="App._setAllPOTax('local')">${this._poTaxLabel('local')}</button>
+              <button type="button" class="btn btn-sm btn-outline" onclick="App._setAllPOTax('none')">${this._poTaxLabel('none')}</button>
+            </div>
             <div id="po-existing-items">${po ? po.items.map(i => this._poExistingItemRowHtml(i)).join('') : ''}</div>
             <div id="po-items"></div>
           </div>
+          <div id="po-totals" style="text-align:right;font-size:13px;line-height:1.7"></div>
           <div style="text-align:right;font-size:15px;font-weight:700">Total: <span id="po-total">$0.00</span></div>
         </div>
         <div class="modal-footer">
@@ -17363,6 +17592,7 @@ const App = {
         </div>
       </div>`);
     this._poAllProducts = products;
+    this._poSuppliers = suppliers;
     this._poProducts = [];
     this._poItems = [];
     if (po) {
@@ -17386,12 +17616,49 @@ const App = {
       <span style="flex:2;font-size:13px">${item.product_name}${item.sku?` <span style="color:var(--text-muted)">(${item.sku})</span>`:''}</span>
       <input type="number" class="poi-existing-qty" min="1" value="${item.quantity_ordered}" style="width:70px" placeholder="Qty" oninput="App.calcPOTotal()">
       <input type="number" class="poi-existing-cost" step="0.01" value="${item.unit_cost}" style="width:90px" placeholder="Unit Cost" oninput="App.calcPOTotal()">
+      ${this._poLineExtrasHtml('poi-existing', item.vendor_discount_percent != null ? `${item.vendor_discount_percent}%` : item.vendor_discount, item.tax_option || 'none', false)}
       <button class="btn btn-sm btn-danger" onclick="this.closest('.po-existing-item').remove();App.calcPOTotal()">✕</button>
     </div>`;
   },
 
+  // Purchase order line tax: the store's own sales tax (GCT, Settings → tax
+  // rate) for a local vendor, or none for an overseas one. Mirrors
+  // lib/poLines.js — discount comes off the line first, tax on the rest.
+  _poTaxRate() { return parseFloat(this.settings?.tax_rate) || 0; },
+  _poTaxLabel(option) { return option === 'local' ? `GCT ${this._poTaxRate()}% (local)` : 'No tax (overseas)'; },
+  _poSupplierTaxDefault() {
+    const sup = (this._poSuppliers || []).find(s => String(s.id) === String(document.getElementById('po-supplier')?.value));
+    return sup && sup.is_local ? 'local' : 'none';
+  },
+  // Vendor discount + tax select + line total, shared by new and existing
+  // rows. `auto` marks a tax choice that still follows the supplier's
+  // default (flips if the supplier changes) until someone picks one.
+  _poLineExtrasHtml(cls, discount, taxOption, auto) {
+    const shown = typeof discount === 'string' ? discount : (discount > 0 ? discount : '');
+    return `<input type="text" inputmode="decimal" class="${cls}-disc" value="${this.escapeAttr(shown)}" style="width:95px" placeholder="Disc. $ or %" title="Vendor discount before tax — dollars off this line (e.g. 50) or a percentage (e.g. 10%)" oninput="App.calcPOTotal()">
+      <select class="${cls}-tax" data-auto="${auto ? 1 : 0}" style="width:150px" title="Tax on this line" onchange="this.dataset.auto='0';App.calcPOTotal()">
+        ${['local', 'none'].map(o => `<option value="${o}" ${taxOption === o ? 'selected' : ''}>${this._poTaxLabel(o)}</option>`).join('')}
+      </select>
+      <span class="${cls}-line" style="width:90px;text-align:right;font-size:12px;font-weight:600"></span>`;
+  },
+  // "50" -> $50 off the line, "10%" -> 10% of it; blank -> none.
+  _parsePODiscount(raw) {
+    const str = String(raw || '').trim().replace(/[$,\s]/g, '');
+    if (!str) return { vendor_discount: 0, vendor_discount_percent: null };
+    const pct = str.match(/^(\d*\.?\d+)%$/);
+    if (pct) return { vendor_discount: 0, vendor_discount_percent: parseFloat(pct[1]) };
+    if (/^\d*\.?\d+$/.test(str)) return { vendor_discount: parseFloat(str), vendor_discount_percent: null };
+    return { error: true };
+  },
+  _setAllPOTax(option) {
+    document.querySelectorAll('.poi-existing-tax, .poi-new-tax').forEach(sel => { sel.value = option; sel.dataset.auto = '0'; });
+    this.calcPOTotal();
+  },
+
   onPOSupplierChange() {
     const supplierId = document.getElementById('po-supplier').value;
+    const taxDefault = this._poSupplierTaxDefault();
+    document.querySelectorAll('.poi-new-tax[data-auto="1"]').forEach(sel => { sel.value = taxDefault; });
     this._poProducts = supplierId
       ? (this._poAllProducts || []).filter(p => String(p.supplier_id) === String(supplierId))
       : [];
@@ -17443,6 +17710,7 @@ const App = {
       </span>
       <input id="poi-qty-${idx}" type="number" min="1" value="1" style="width:70px" placeholder="Qty" oninput="App.calcPOTotal()">
       <input id="poi-cost-${idx}" type="number" step="0.01" value="${preselectedProduct?(preselectedProduct.cost||''):''}" style="width:90px" placeholder="Unit Cost" oninput="App.calcPOTotal()">
+      ${this._poLineExtrasHtml('poi-new', 0, this._poSupplierTaxDefault(), true)}
       <button class="btn btn-sm btn-danger" onclick="document.getElementById('po-item-${idx}').remove();App.calcPOTotal()">✕</button>`;
     container.appendChild(div);
     this.calcPOTotal();
@@ -17561,20 +17829,38 @@ const App = {
   },
 
   calcPOTotal() {
-    let total = 0;
-    document.querySelectorAll('[id^="poi-qty-"]').forEach(qEl => {
-      const idx = qEl.id.split('-').pop();
-      const qty = parseFloat(qEl.value) || 0;
-      const cost = parseFloat(document.getElementById(`poi-cost-${idx}`)?.value) || 0;
-      total += qty * cost;
+    const rate = this._poTaxRate();
+    let gross = 0, discounts = 0, subtotal = 0, tax = 0;
+    const price = (row, qty, cost, cls) => {
+      const lineGross = qty * cost;
+      const parsed = this._parsePODiscount(row.querySelector(`.${cls}-disc`)?.value);
+      const disc = parsed.error ? 0 : (parsed.vendor_discount_percent != null ? Math.round(lineGross * parsed.vendor_discount_percent) / 100 : parsed.vendor_discount);
+      const bad = parsed.error || disc > lineGross || parsed.vendor_discount_percent > 100;
+      const net = lineGross - disc;
+      const lineTax = row.querySelector(`.${cls}-tax`)?.value === 'local' ? net * rate / 100 : 0;
+      const out = row.querySelector(`.${cls}-line`);
+      if (out) {
+        out.textContent = this.fmt(net);
+        out.style.color = bad ? 'var(--danger)' : '';
+        out.title = bad ? 'Enter the discount as dollars (50) or a percentage (10%), no more than the line cost' : `${parsed.vendor_discount_percent ? `${parsed.vendor_discount_percent}% = −${this.fmt(disc)} · ` : ''}${lineTax ? `+ ${this.fmt(lineTax)} GCT` : ''}`;
+      }
+      gross += lineGross; discounts += disc; subtotal += net; tax += lineTax;
+    };
+    document.querySelectorAll('#po-items [id^="po-item-"]').forEach(row => {
+      const idx = row.id.replace('po-item-', '');
+      price(row, parseFloat(document.getElementById(`poi-qty-${idx}`)?.value) || 0, parseFloat(document.getElementById(`poi-cost-${idx}`)?.value) || 0, 'poi-new');
     });
     document.querySelectorAll('.po-existing-item').forEach(row => {
-      const qty = parseFloat(row.querySelector('.poi-existing-qty')?.value) || 0;
-      const cost = parseFloat(row.querySelector('.poi-existing-cost')?.value) || 0;
-      total += qty * cost;
+      price(row, parseFloat(row.querySelector('.poi-existing-qty')?.value) || 0, parseFloat(row.querySelector('.poi-existing-cost')?.value) || 0, 'poi-existing');
     });
+    const r2 = n => Math.round(n * 100) / 100;
+    const totalsEl = document.getElementById('po-totals');
+    if (totalsEl) totalsEl.innerHTML = `
+      ${discounts ? `<div>Items: ${this.fmt(r2(gross))}</div><div>Vendor discounts: −${this.fmt(r2(discounts))}</div>` : ''}
+      <div>Subtotal: ${this.fmt(r2(subtotal))}</div>
+      <div>GCT: ${this.fmt(r2(tax))}</div>`;
     const el = document.getElementById('po-total');
-    if (el) el.textContent = this.fmt(total);
+    if (el) el.textContent = this.fmt(r2(subtotal) + r2(tax));
   },
 
   async savePO(editId) {
@@ -17584,10 +17870,14 @@ const App = {
     const notes = document.getElementById('po-notes').value;
     const vendor_order_number = document.getElementById('po-vendor-order').value.trim() || null;
     const items = [];
+    let discountError = false;
     document.querySelectorAll('.po-existing-item').forEach(row => {
       const qty = parseInt(row.querySelector('.poi-existing-qty').value) || 1;
       const unit_cost = parseFloat(row.querySelector('.poi-existing-cost').value) || 0;
-      items.push({ id: row.dataset.itemId, product_id: row.dataset.productId || null, quantity_ordered: qty, unit_cost });
+      const disc = this._parsePODiscount(row.querySelector('.poi-existing-disc').value);
+      if (disc.error) discountError = true;
+      const tax_option = row.querySelector('.poi-existing-tax').value;
+      items.push({ id: row.dataset.itemId, product_id: row.dataset.productId || null, quantity_ordered: qty, unit_cost, vendor_discount: disc.vendor_discount, vendor_discount_percent: disc.vendor_discount_percent, tax_option });
     });
     document.querySelectorAll('#po-items [id^="po-item-"]').forEach(line => {
       const idx = line.id.replace('po-item-','');
@@ -17595,10 +17885,14 @@ const App = {
       if (!product_id) return;
       const qty = parseInt(document.getElementById(`poi-qty-${idx}`).value) || 1;
       const unit_cost = parseFloat(document.getElementById(`poi-cost-${idx}`).value) || 0;
-      items.push({ product_id, quantity_ordered: qty, unit_cost });
+      const disc = this._parsePODiscount(line.querySelector('.poi-new-disc').value);
+      if (disc.error) discountError = true;
+      const tax_option = line.querySelector('.poi-new-tax').value;
+      items.push({ product_id, quantity_ordered: qty, unit_cost, vendor_discount: disc.vendor_discount, vendor_discount_percent: disc.vendor_discount_percent, tax_option });
     });
     if (!supplier_id) { this.alert('Please select a supplier', 'error'); return; }
     if (!items.length) { this.alert('Add at least one item', 'error'); return; }
+    if (discountError) { this.alert('Enter each vendor discount as dollars (e.g. 50) or a percentage (e.g. 10%)', 'error'); return; }
     try {
       if (editId) {
         await this.api('PUT', `/purchase-orders/${editId}`, { supplier_id, branch_id: branch_id||null, notes, expected_date: expected_date||null, vendor_order_number, items });
@@ -17638,7 +17932,7 @@ const App = {
       return badges.length ? `<br>${badges.join(' &bull; ')}` : '';
     };
     this.showModal(`
-      <div class="modal" style="max-width:700px">
+      <div class="modal" style="max-width:920px">
         <div class="modal-header">
           <span class="modal-title">PO: ${po.po_number}</span>
           <div style="display:flex;gap:8px;align-items:center">
@@ -17657,7 +17951,7 @@ const App = {
           ${po.source_pr_id ? `<div style="font-size:12px;color:var(--text-muted);margin:-6px 0 12px">Converted from <a href="#" style="color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${po.source_pr_id})">${po.source_pr_number}</a></div>` : ''}
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Product</th><th>SKU</th><th>Ordered</th><th>Received</th><th>Damaged</th><th>Unit Cost</th><th>Total</th></tr></thead>
+              <thead><tr><th>Product</th><th>SKU</th><th>Ordered</th><th>Received</th><th>Damaged</th><th>Unit Cost</th><th>Vendor Disc.</th><th>Tax</th><th>Total</th></tr></thead>
               <tbody>
                 ${po.items.map(i => `<tr>
                   <td>${i.product_name}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on the originating quote line">-${this.fmt(i.discount_amount)} quoted</span>` : ''}${itemLinkBadges(i)}${(!i.product_id && i.quantity_received>0) ? `<br><button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="App.showLinkToInventory(${po.id},${i.id})">+ Add to Inventory</button>` : ''}</td>
@@ -17666,12 +17960,19 @@ const App = {
                   <td><span class="${i.quantity_received>=i.quantity_ordered?'color-success':'color-warning'}">${i.quantity_received||0}</span></td>
                   <td>${i.quantity_damaged>0 ? `<span class="color-danger">${i.quantity_damaged}</span>` : '-'}</td>
                   <td>${this.fmt(i.unit_cost)}</td>
+                  <td>${i.vendor_discount > 0 ? `−${this.fmt(i.vendor_discount)}${i.vendor_discount_percent != null ? `<div style="font-size:11px;color:var(--text-muted)">${i.vendor_discount_percent}%</div>` : ''}` : '-'}</td>
+                  <td>${i.tax_option === 'local' ? `GCT ${i.tax_rate}%<div style="font-size:11px;color:var(--text-muted)">${this.fmt(i.tax_amount)}</div>` : '<span style="color:var(--text-muted)">No tax</span>'}</td>
                   <td class="fw-600">${this.fmt(i.total)}</td>
                 </tr>`).join('')}
               </tbody>
             </table>
           </div>
-          <div style="text-align:right;margin-top:10px;font-size:15px;font-weight:700">Total: ${this.fmt(po.total)}</div>
+          <div style="text-align:right;margin-top:10px;font-size:13px;line-height:1.7">
+            ${po.items.some(i => i.vendor_discount > 0) ? `<div>Vendor discounts: −${this.fmt(po.items.reduce((sum, i) => sum + (i.vendor_discount || 0), 0))}</div>` : ''}
+            <div>Subtotal: ${this.fmt(po.subtotal)}</div>
+            <div>GCT: ${this.fmt(po.tax_amount)}</div>
+          </div>
+          <div style="text-align:right;font-size:15px;font-weight:700">Total: ${this.fmt(po.total)}</div>
           ${billing ? `<div style="margin-top:20px;border-top:1px solid var(--border);padding-top:14px">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
               <span style="font-weight:700;font-size:14px">Accounts Payable</span>
@@ -18982,7 +19283,8 @@ const App = {
                 <input id="qt-valid" type="date" value="${q&&q.valid_until?String(q.valid_until).slice(0,10):''}" oninput="App._syncQuoteExpiryPreset()">
               </div>
             </div>
-            <div class="form-group" id="qt-duedate-group" style="display:none"><label>Due Date *</label><input id="qt-duedate" type="date" value="${q&&q.due_date?String(q.due_date).slice(0,10):tomorrow}"></div>
+            <div class="form-group" id="qt-duedate-group" style="display:none"><label>Due Date *</label><input id="qt-duedate" type="date" value="${q&&q.due_date?String(q.due_date).slice(0,10):tomorrow}" oninput="App._refreshQuoteRatePlan()"></div>
+            <div id="qt-rateplan-group" style="display:none;flex:1">${this._ratePlanSelectHtml('qt-rateplan', 'App._refreshQuoteRatePlan()', q && q.rate_plan)}</div>
             <div class="form-group"><label>Discount ($)</label><input id="qt-disc" type="number" step="0.01" value="${q?q.discount_amount:0}" oninput="App.calcQuoteTotal()"></div>
           </div>
           <div class="form-group"><label>Notes</label><input id="qt-notes" value="${this.escapeAttr(q&&q.notes)}"></div>
@@ -19014,7 +19316,7 @@ const App = {
             </div>
             <div id="qt-delivery-fields" style="display:${q&&q.delivery_required?'block':'none'}">
               <div class="form-group" style="max-width:220px"><label style="font-size:11px">Delivery Cost</label><input type="number" id="qt-delivery-cost" oninput="App.calcQuoteTotal()" value="${q&&q.delivery_cost||0}" min="0" step="0.01"></div>
-              <div class="form-group"><label style="font-size:11px">Delivery Address</label><textarea id="qt-delivery-address" rows="2" placeholder="Leave blank to use the customer's address on file">${this.escapeAttr(q&&q.delivery_address)}</textarea></div>
+              <div class="form-group"><label style="font-size:11px">Delivery Address *</label><textarea id="qt-delivery-address" rows="2" placeholder="Required — ask the customer where it's going, even if it's their own address">${this.escapeAttr(q&&q.delivery_address)}</textarea></div>
             </div>
             <div class="form-group">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:normal">
@@ -19022,8 +19324,9 @@ const App = {
                 Pickup (from customer) required
               </label>
             </div>
-            <div id="qt-pickup-fields" class="form-group" style="display:${q&&q.pickup_required?'block':'none'};max-width:220px">
-              <label style="font-size:11px">Pickup Cost</label><input type="number" id="qt-pickup-cost" oninput="App.calcQuoteTotal()" value="${q&&q.pickup_cost||0}" min="0" step="0.01">
+            <div id="qt-pickup-fields" style="display:${q&&q.pickup_required?'block':'none'}">
+              <div class="form-group" style="max-width:220px"><label style="font-size:11px">Pickup Cost</label><input type="number" id="qt-pickup-cost" oninput="App.calcQuoteTotal()" value="${q&&q.pickup_cost||0}" min="0" step="0.01"></div>
+              <div class="form-group"><label style="font-size:11px">Pickup Address *<a href="#" style="font-weight:400;text-transform:none;color:var(--primary);margin-left:6px" onclick="event.preventDefault();const d=document.getElementById('qt-delivery-address');if(!document.getElementById('qt-delivery')?.checked||!d||!d.value.trim()){App.alert('Tick Delivery required and enter the delivery address first','warning');return;}document.getElementById('qt-pickup-address').value=d.value">same as delivery address</a></label><textarea id="qt-pickup-address" rows="2" placeholder="Required — ask the customer where it's being collected from, even if it's their own address">${this.escapeAttr(q&&q.pickup_address)}</textarea></div>
             </div>
             <div class="form-group">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:normal">
@@ -19119,6 +19422,9 @@ const App = {
     if (rentalSection) rentalSection.style.display = type==='rental' ? '' : 'none';
     if (validGroup) validGroup.style.display = type!=='rental' ? '' : 'none';
     if (dueGroup) dueGroup.style.display = type==='rental' ? '' : 'none';
+    const ratePlanGroup = document.getElementById('qt-rateplan-group');
+    if (ratePlanGroup) ratePlanGroup.style.display = type==='rental' ? '' : 'none';
+    if (type === 'rental') this._refreshQuoteRatePlan();
     // Retail quotes default Valid Until to 30 days out when the field hasn't
     // been touched yet — a fresh new-quote render, or toggling back from
     // Rental — same idea as the rental Due Date field defaulting to
@@ -19301,6 +19607,9 @@ const App = {
       <input id="qti-rstart-${idx}" type="date" value="${prefill&&prefill.rental_start||today}" style="width:140px" title="Rental start" onchange="App._quoteRentalEstimate(${idx})">
       <span style="font-size:12px;color:var(--text-muted)">to</span>
       <input id="qti-rend-${idx}" type="date" value="${prefill&&prefill.rental_end||tomorrow}" style="width:140px" title="Rental end (due back)" onchange="App._quoteRentalEstimate(${idx})">
+      <select id="qti-rplan-${idx}" style="width:150px" title="Rate — Automatic uses the rate the rental length earns" onchange="App._quoteRentalEstimate(${idx})" onfocus="App._refreshQuoteRentalLinePlan(${idx})">
+        ${[['', 'Rate: Automatic'], ['daily', 'Daily rate'], ['weekly', 'Weekly rate'], ['monthly', 'Monthly rate']].map(([v, l]) => `<option value="${v}" ${(prefill && prefill.rate_plan || '') === v ? 'selected' : ''}>${l}</option>`).join('')}
+      </select>
       <input id="qti-cost-${idx}" type="number" step="0.01" value="${prefill&&prefill.unit_cost!=null?prefill.unit_cost:''}" style="width:80px" placeholder="Cost" title="Informational only — doesn't affect the total" oninput="App._updateQuoteItemMargin(${idx})">
       <input id="qti-price-${idx}" type="number" step="0.01" value="${prefill?prefill.unit_price:''}" data-auto="${prefill?'0':'1'}" style="width:90px" placeholder="Price" title="Price per unit for the whole rental period" oninput="this.dataset.auto='0';App.calcQuoteTotal();App._updateQuoteItemMargin(${idx})">
       <input id="qti-disc-${idx}" type="number" min="0" step="0.01" value="${prefill&&prefill.discount_amount||''}" style="width:75px" placeholder="Discount" title="Discount given on this line — recorded for reference, doesn't change the price">
@@ -19342,18 +19651,35 @@ const App = {
     this._quoteRentalEstimate(idx);
   },
 
+  // Greys out the rates this line's period doesn't earn (same rule as New
+  // Rental — see _refreshRatePlanOptions); returns false if it had to reset
+  // the choice back to Automatic.
+  _refreshQuoteRentalLinePlan(idx) {
+    const sel = document.getElementById(`qti-rplan-${idx}`);
+    if (!sel) return true;
+    const before = sel.value;
+    const st = document.getElementById(`qti-rstart-${idx}`)?.value, en = document.getElementById(`qti-rend-${idx}`)?.value;
+    const days = st && en ? Math.max(0, Math.round((new Date(`${en}T00:00:00Z`) - new Date(`${st}T00:00:00Z`)) / 86400000)) : null;
+    const p = (this._spRentalProducts || []).find(x => String(x.id) === String(document.getElementById(`qti-rprod-${idx}`)?.value));
+    this._refreshRatePlanOptions(`qti-rplan-${idx}`, days, p ? [p.rental_classification || 'tool'] : []);
+    if (!sel.value && sel.options[0]) sel.options[0].textContent = 'Rate: Automatic';
+    return sel.value === before;
+  },
+
   // Fills the catalog price for the period (unless the user typed their own)
   // and shows the length and how many are free to hold at the branch.
   async _quoteRentalEstimate(idx) {
     const info = document.getElementById(`qti-rinfo-${idx}`);
     const product_id = document.getElementById(`qti-rprod-${idx}`)?.value;
     if (!info || !product_id) return;
+    const planKept = this._refreshQuoteRentalLinePlan(idx);
+    const rate_plan = document.getElementById(`qti-rplan-${idx}`)?.value || null;
     const quantity = parseInt(document.getElementById(`qti-qty-${idx}`)?.value) || 1;
     const branch_id = document.getElementById('qt-branch')?.value || null;
     let est;
     try {
       est = await this.api('POST', '/quotations/rental-line-estimate', {
-        product_id, quantity, branch_id,
+        product_id, quantity, branch_id, rate_plan,
         rental_start: document.getElementById(`qti-rstart-${idx}`)?.value,
         rental_end: document.getElementById(`qti-rend-${idx}`)?.value,
       });
@@ -19365,7 +19691,7 @@ const App = {
     const availText = est.available == null ? 'choose a branch to check availability'
       : est.available >= quantity ? `${est.available} available at this branch now`
       : `<span style="color:var(--danger)">only ${est.available} available at this branch now</span>`;
-    info.innerHTML = `${est.days} day${est.days === 1 ? '' : 's'} · catalog rate ${this.fmt(est.fee)} for ${quantity} · ${availText}`;
+    info.innerHTML = `${est.days} day${est.days === 1 ? '' : 's'}${rate_plan ? ` · ${this._ratePlanLabel(rate_plan).toLowerCase()}` : ''} · catalog rate ${this.fmt(est.fee)} for ${quantity} · ${availText}${planKept ? '' : ' · <span style="color:var(--warning, #d97706)">rate set back to Automatic — the period is too short for it</span>'}`;
     this.calcQuoteTotal();
     this._updateQuoteItemMargin(idx);
   },
@@ -19719,6 +20045,20 @@ const App = {
     if (el) el.textContent = this.fmt(Math.max(0, subtotal - disc));
   },
 
+  // Rental quote Rate picker: tiers the quoted length earns for the items on it.
+  _refreshQuoteRatePlan() {
+    const dueDateStr = document.getElementById('qt-duedate')?.value;
+    const start = new Date();
+    const days = dueDateStr ? Math.floor(Math.max(0, new Date(`${dueDateStr}T${start.toISOString().slice(11,19)}.000Z`) - start) / 3600000) / 24 : null;
+    const classes = [];
+    document.querySelectorAll('#qt-rental-items [id^="rq-line-"]').forEach(line => {
+      const idx = line.id.replace('rq-line-','');
+      const p = (this._rentalQuoteProducts || []).find(x => String(x.id) === String(document.getElementById(`rql-prod-${idx}`)?.value));
+      if (p) classes.push(p.rental_classification || 'tool');
+    });
+    this._refreshRatePlanOptions('qt-rateplan', days, classes);
+  },
+
   async saveQuote() {
     const customer_id = document.getElementById('qt-cust').value;
     const branch_id = document.getElementById('qt-branch').value;
@@ -19742,14 +20082,26 @@ const App = {
       const deliveryRequired = document.getElementById('qt-delivery').checked;
       const pickupRequired = document.getElementById('qt-pickup').checked;
       const operatorRequired = document.getElementById('qt-operator').checked;
+      if (deliveryRequired && !document.getElementById('qt-delivery-address')?.value.trim()) {
+        this.alert("Enter the delivery address — ask the customer where it's going, even if it's their own address", 'error');
+        document.getElementById('qt-delivery-address')?.focus();
+        return;
+      }
+      if (pickupRequired && !document.getElementById('qt-pickup-address')?.value.trim()) {
+        this.alert("Enter the pickup address — ask the customer where it's being collected from, even if it's their own address", 'error');
+        document.getElementById('qt-pickup-address')?.focus();
+        return;
+      }
       try {
         const payload = {
           customer_id: customer_id||null, branch_id: branch_id||null, quote_type: 'rental', due_date, discount_amount, notes, items,
+          rate_plan: document.getElementById('qt-rateplan')?.value || null,
           delivery_required: deliveryRequired ? 1 : 0,
           delivery_cost: deliveryRequired ? parseFloat(document.getElementById('qt-delivery-cost').value) || 0 : 0,
           delivery_address: deliveryRequired ? (document.getElementById('qt-delivery-address')?.value.trim() || null) : null,
           pickup_required: pickupRequired ? 1 : 0,
           pickup_cost: pickupRequired ? parseFloat(document.getElementById('qt-pickup-cost').value) || 0 : 0,
+          pickup_address: pickupRequired ? document.getElementById('qt-pickup-address').value.trim() : null,
           operator_required: operatorRequired ? 1 : 0,
           operator_fee: operatorRequired ? parseFloat(document.getElementById('qt-operator-fee').value) || 0 : 0,
         };
@@ -19785,6 +20137,7 @@ const App = {
           quantity: parseInt(document.getElementById(`qti-qty-${idx}`).value) || 1,
           rental_start: document.getElementById(`qti-rstart-${idx}`).value,
           rental_end: document.getElementById(`qti-rend-${idx}`).value,
+          rate_plan: document.getElementById(`qti-rplan-${idx}`)?.value || null,
           unit_price: priceVal === '' ? null : parseFloat(priceVal),
           unit_cost: costVal === '' || costVal == null ? undefined : parseFloat(costVal),
           discount: parseFloat(document.getElementById(`qti-disc-${idx}`)?.value) || 0,
@@ -19867,11 +20220,11 @@ const App = {
     const r = i.rental;
     if (!r) {
       const note = ['draft', 'pending_approval'].includes(q.status) ? 'The item is held for this project when it\'s approved.' : 'Not held — send the project back to Draft and approve it again to hold the item.';
-      return cell(`<strong>Rental period:</strong> ${d(i.rental_start)} to ${d(i.rental_end)} · <span style="color:var(--text-muted)">${note}</span>`);
+      return cell(`<strong>Rental period:</strong> ${d(i.rental_start)} to ${d(i.rental_end)} · ${this._ratePlanLabel(i.rate_plan)} · <span style="color:var(--text-muted)">${note}</span>`);
     }
     const labels = { pending: ['Held — awaiting project payment', 'badge-warning'], awaiting_issue: ['Paid — ready to check out', 'badge-info'], out_for_delivery: ['Out for delivery', 'badge-teal'], active: ['Checked out', 'badge-info'], paused: ['Checked out (paused)', 'badge-warning'], overdue: ['Overdue', 'badge-danger'], returned: ['Checked in', 'badge-success'], returned_unpaid: ['Checked in — balance due', 'badge-danger'], cancelled: ['Hold cancelled', 'badge-secondary'] };
     const [label, badge] = labels[r.display_status] || [r.display_status, 'badge-secondary'];
-    const parts = [`<strong>Rental:</strong> <a href="#" style="color:var(--primary);font-weight:600;text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewRentalAgreement(${r.id})">${r.agreement_number}</a> <span class="badge-pill ${badge}" style="font-size:10px">${label}</span> · Period ${d(i.rental_start)} to ${d(i.rental_end)} · Due back ${d(r.due_date)}`];
+    const parts = [`<strong>Rental:</strong> <a href="#" style="color:var(--primary);font-weight:600;text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewRentalAgreement(${r.id})">${r.agreement_number}</a> <span class="badge-pill ${badge}" style="font-size:10px">${label}</span> · Period ${d(i.rental_start)} to ${d(i.rental_end)} · Due back ${d(r.due_date)} · ${this._ratePlanLabel(i.rate_plan)}`];
     parts.push(`<strong>Check-out:</strong> ${r.checkout_datetime ? `${this.fmtDateTime(r.checkout_datetime)}${r.issued_by_name ? ` · signed out by ${r.issued_by_name}` : ''}` : '<span style="color:var(--text-muted)">not yet</span>'}`
       + ` &nbsp; <strong>Check-in:</strong> ${r.returned_at ? `${this.fmtDateTime(r.returned_at)}${r.returned_by_name ? ` · signed in by ${r.returned_by_name}` : ''}` : '<span style="color:var(--text-muted)">not yet</span>'}`);
     const conds = (r.items || []).filter(it => it.condition_out || it.condition_in || it.damage_notes)
@@ -19990,14 +20343,14 @@ const App = {
           ${approvalBanner}
           <div class="two-col" style="margin-bottom:14px;font-size:13px">
             <div><strong>Customer:</strong> ${q.customer_name||'Walk-in'}<br><strong>Phone:</strong> ${q.customer_phone||'-'}<br><strong>Email:</strong> ${q.customer_email||'-'}</div>
-            <div><strong>Date:</strong> ${this.fmtDate(q.created_at)}<br><strong>${isRental?'Due Date':'Valid Until'}:</strong> ${(isRental?q.due_date:q.valid_until) ? this.fmtDate(isRental?q.due_date:q.valid_until) : 'N/A'}<br><strong>Branch:</strong> ${q.branch_name||'-'}<br><strong>Assigned to:</strong> ${q.employee_name||'-'}${q.original_employee_name && q.employee_name !== q.original_employee_name ? `<br><strong>Sale credited to:</strong> ${q.original_employee_name} <span class="badge-pill badge-info" style="font-size:10px" title="Reassigned for completion — commission still goes to the original salesperson">reassigned</span>` : ''}</div>
+            <div><strong>Date:</strong> ${this.fmtDate(q.created_at)}<br><strong>${isRental?'Due Date':'Valid Until'}:</strong> ${(isRental?q.due_date:q.valid_until) ? this.fmtDate(isRental?q.due_date:q.valid_until) : 'N/A'}<br><strong>Branch:</strong> ${q.branch_name||'-'}<br>${isRental ? `<strong>Rate:</strong> ${this._ratePlanLabel(q.rate_plan)}<br>` : ''}<strong>Assigned to:</strong> ${q.employee_name||'-'}${q.original_employee_name && q.employee_name !== q.original_employee_name ? `<br><strong>Sale credited to:</strong> ${q.original_employee_name} <span class="badge-pill badge-info" style="font-size:10px" title="Reassigned for completion — commission still goes to the original salesperson">reassigned</span>` : ''}</div>
           </div>
           ${itemsTable}
           ${isRental && (q.delivery_required || q.pickup_required || q.operator_required) ? `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-top:10px;font-size:12px">
             <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Additional Services</strong>
             ${q.delivery_required ? `<div>Delivery — ${this.fmt(q.delivery_cost)}${q.delivery_address ? ` — ${q.delivery_address}` : ''}</div>` : ''}
             ${q.operator_required ? `<div>Operator — ${this.fmt(q.operator_fee)}</div>` : ''}
-            ${q.pickup_required ? `<div>Pickup — ${this.fmt(q.pickup_cost)}</div>` : ''}
+            ${q.pickup_required ? `<div>Pickup — ${this.fmt(q.pickup_cost)}${q.pickup_address ? ` — ${this.escapeAttr(q.pickup_address)}` : ''}</div>` : ''}
           </div>` : ''}
           ${isRental && q.rental_summary ? (() => {
             const sm = q.rental_summary;

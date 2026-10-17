@@ -697,6 +697,20 @@ async function _init() {
       returned_to_service_at DATETIME,
       returned_to_service_by INTEGER REFERENCES employees(id)
     )` },
+    // History of pickup changes made after a rental was created (added,
+    // address/fee changed, cancelled) — shown on the agreement.
+    { sql: `CREATE TABLE IF NOT EXISTS rental_pickup_changes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agreement_id INTEGER NOT NULL REFERENCES rental_agreements(id),
+      action TEXT NOT NULL,
+      old_required INTEGER, new_required INTEGER,
+      old_cost REAL, new_cost REAL,
+      old_address TEXT, new_address TEXT,
+      fee_adjustment REAL,
+      reason TEXT,
+      employee_id INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     // Rental items taken in for maintenance/repair/servicing while their
     // rental is paused (POST /rentals/agreements/:id/pause) — one row per
     // agreement line, with a running log of the issues found and work done.
@@ -1620,6 +1634,37 @@ async function _init() {
     'ALTER TABLE rental_agreements ADD COLUMN pickup_scheduled_start DATETIME',
     'ALTER TABLE rental_agreements ADD COLUMN pickup_scheduled_end DATETIME',
     'ALTER TABLE rental_agreements ADD COLUMN pickup_schedule_notes TEXT',
+    // Where a pickup driver collects the item from — always asked, like
+    // delivery_address, never assumed from the customer's address on file.
+    'ALTER TABLE rental_agreements ADD COLUMN pickup_address TEXT',
+    'ALTER TABLE quotations ADD COLUMN pickup_address TEXT',
+    // Pickup changed after payment (PATCH /rentals/agreements/:id/pickup-service):
+    // pickup_cost_charged is the pickup fee actually paid at checkout, and
+    // service_adjustment_total the difference still to settle at return
+    // (+ owed for a pickup added, - credit for one cancelled). It's part of
+    // the settlement balance everywhere damage/duration/tax adjustments are.
+    'ALTER TABLE rental_agreements ADD COLUMN pickup_cost_charged REAL',
+    'ALTER TABLE rental_agreements ADD COLUMN service_adjustment_total REAL NOT NULL DEFAULT 0',
+    // Rate chosen when the rental was set up ('daily'/'weekly'/'monthly');
+    // NULL = automatic from the rental length. Caps the tier billed — see
+    // lib/rentalPricing.js's ratePlan.
+    'ALTER TABLE rental_agreements ADD COLUMN rate_plan TEXT',
+    'ALTER TABLE quotations ADD COLUMN rate_plan TEXT',
+    // Copied onto each line so every fee calculation that reads the line
+    // (checkout, return, swaps, documents) applies it.
+    'ALTER TABLE rental_agreement_items ADD COLUMN rate_plan TEXT',
+    // Special Project rental lines pick their own rate (each has its own period).
+    'ALTER TABLE quotation_items ADD COLUMN rate_plan TEXT',
+    // Purchase order line tax + vendor discount (lib/poLines.js): tax_option
+    // 'local' (GCT at the store's tax_rate, snapshotted in tax_rate) or
+    // 'none' (overseas vendor); vendor_discount comes off the line before tax.
+    "ALTER TABLE purchase_order_items ADD COLUMN tax_option TEXT NOT NULL DEFAULT 'none'",
+    'ALTER TABLE purchase_order_items ADD COLUMN tax_rate REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE purchase_order_items ADD COLUMN tax_amount REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE purchase_order_items ADD COLUMN vendor_discount REAL NOT NULL DEFAULT 0',
+    // Set when the vendor discount was entered as a percentage — vendor_discount
+    // then holds that % of the line, recomputed whenever qty/cost change.
+    'ALTER TABLE purchase_order_items ADD COLUMN vendor_discount_percent REAL',
     // Pickup driver pre-assignment + field confirmation. pickup_driver_id
     // already existed (set only at return time, as whoever did the pickup);
     // pickup_driver_assigned_at marks that a dispatcher assigned it ahead of

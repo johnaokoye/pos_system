@@ -3,6 +3,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
+const { localTaxRate, defaultTaxOption, priceLine, poTotals } = require('../lib/poLines');
 
 // Self-contained feature, not used as a cross-section lookup elsewhere —
 // module-level gate for all of it, matching the frontend's own section gate.
@@ -213,27 +214,33 @@ router.post('/:id/convert', async (req, res) => {
 
     const { rows: prItems } = await db.execute({ sql: 'SELECT * FROM purchase_request_items WHERE pr_id = ?', args: [pr.id] });
     if (!prItems.length) return res.status(400).json({ error: 'PR has no items' });
+    // Lines keep the PR's tax decision (it charges local tax when it's in the
+    // local currency); an older PR with no currency falls back to the
+    // vendor's default (GCT for a Local supplier). Editable on the draft PO.
+    const { rows: [supplier] } = (supplier_id || pr.supplier_id) ? await db.execute({ sql: 'SELECT is_local FROM suppliers WHERE id = ?', args: [supplier_id || pr.supplier_id] }) : { rows: [] };
+    const taxRate = await localTaxRate();
+    const prTaxOption = Number(pr.tax_rate) > 0 ? 'local' : (pr.currency ? 'none' : defaultTaxOption(supplier));
+    const priced = prItems.map(item => ({ ...priceLine({ name: item.product_name, quantity: item.quantity, unit_cost: item.unit_cost, tax_option: prTaxOption }, taxRate), total: item.total || 0 }));
+    for (const line of priced) line.tax_amount = parseFloat((line.total * line.tax_rate / 100).toFixed(2));
+    const totals = poTotals(priced);
 
     const tx = await db.transaction('write');
     let committed = false;
     try {
       const po_number = await nextNumber(tx, 'purchase_orders', 'po_number', 'PO-', 6);
-      let subtotal = 0;
-      prItems.forEach(item => { subtotal += item.total || 0; });
-      subtotal = parseFloat(subtotal.toFixed(2));
-
       const poResult = await tx.execute({
-        sql: 'INSERT INTO purchase_orders (po_number, supplier_id, branch_id, employee_id, subtotal, total, notes, expected_date) VALUES (?,?,?,?,?,?,?,?)',
-        args: [po_number, supplier_id || null, pr.branch_id, pr.employee_id, subtotal, subtotal, poNotes || pr.notes, expected_date || pr.required_date || null]
+        sql: 'INSERT INTO purchase_orders (po_number, supplier_id, branch_id, employee_id, subtotal, tax_amount, total, notes, expected_date) VALUES (?,?,?,?,?,?,?,?,?)',
+        args: [po_number, supplier_id || null, pr.branch_id, pr.employee_id, totals.subtotal, totals.tax_amount, totals.total, poNotes || pr.notes, expected_date || pr.required_date || null]
       });
       const poId = Number(poResult.lastInsertRowid);
 
-      for (const item of prItems) {
+      for (const [n, item] of prItems.entries()) {
+        const line = priced[n];
         // Internal-use items are added to PO but without a product link (won't update stock on receive)
         const productId = item.item_type === 'internal' ? null : item.product_id;
         await tx.execute({
-          sql: 'INSERT INTO purchase_order_items (po_id, product_id, product_name, sku, quantity_ordered, unit_cost, total, quotation_item_id, work_order_item_id, discount_amount) VALUES (?,?,?,?,?,?,?,?,?,?)',
-          args: [poId, productId, item.product_name, item.sku, item.quantity, item.unit_cost, item.total, item.quotation_item_id, item.work_order_item_id, item.discount_amount || 0]
+          sql: 'INSERT INTO purchase_order_items (po_id, product_id, product_name, sku, quantity_ordered, unit_cost, total, quotation_item_id, work_order_item_id, discount_amount, tax_option, tax_rate, tax_amount) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+          args: [poId, productId, item.product_name, item.sku, item.quantity, item.unit_cost, item.total, item.quotation_item_id, item.work_order_item_id, item.discount_amount || 0, line.tax_option, line.tax_rate, line.tax_amount]
         });
       }
 
