@@ -14991,7 +14991,7 @@ const App = {
     });
 
     if (!lines.length) { this.alert('Nothing to export', 'error'); return; }
-    const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+    const blob = new Blob([lines.join('\r\n')], { type: 'application/octet-stream' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;

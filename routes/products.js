@@ -309,7 +309,7 @@ router.get('/export', requirePermission('inventory_export'), async (req, res) =>
     }
 
     const timestamp = new Date().toISOString().slice(0, 10);
-    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="products_export_${timestamp}.csv"`);
     res.send(csvRows.join('\r\n'));
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -335,7 +335,7 @@ router.get('/export/issues', requirePermission('inventory_missing_data'), async 
     });
     const csv = rowsToCsv(rows, ['id','sku','name','price','cost','stock_qty','category_name','supplier_name','barcode','issue']);
     const timestamp = new Date().toISOString().slice(0, 10);
-    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="products_missing_data_${timestamp}.csv"`);
     res.send(csv);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -348,7 +348,7 @@ router.get('/export/template', requirePermission('inventory_template'), (req, re
   // quoted cell can also span several lines (the importer keeps them).
   const example = ['PROD-001','0001234567890','Example Product','Product description','"Detailed website copy: features, specs, what\'s included."','Electronics','19.99','9.99','8.5','100','10','1','TechSupply Co'];
   const csv = [headers.join(','), example.join(',')].join('\r\n');
-  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('Content-Disposition', 'attachment; filename="product_import_template.csv"');
   res.send(csv);
 });
@@ -623,7 +623,7 @@ router.get('/export/rentals', requirePermission('rentals_manage_items'), async (
     for (const p of rentals) csvRows.push(headers.map(h => escape(p[h])).join(','));
 
     const timestamp = new Date().toISOString().slice(0, 10);
-    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="rental_items_export_${timestamp}.csv"`);
     res.send(csvRows.join('\r\n'));
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -634,7 +634,7 @@ router.get('/export/rentals/template', requirePermission('rentals_manage_items')
   const headers = ['sku','name','description','long_description','model_number','size','category_name','branch_name','stock_qty','min_stock','tax_rate','taxable','rental_classification','daily_rate','weekly_rate','monthly_rate','hourly_rate','replacement_value','is_accessory','active'];
   const example = ['RENT-001','Example Drill','18V cordless drill','"Detailed website copy: what\'s included, specs, safety notes."','DW-18V','Standard','Tools','Drax Hall','5','1','8.5','1','tool','15.00','80.00','300.00','0','200.00','0','1'];
   const csv = [headers.join(','), example.join(',')].join('\r\n');
-  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('Content-Disposition', 'attachment; filename="rental_items_import_template.csv"');
   res.send(csv);
 });
@@ -739,7 +739,7 @@ router.get('/export/services', requirePermission('services'), async (req, res) =
     for (const s of services) csvRows.push(SERVICE_CSV_HEADERS.map(h => escape(s[h])).join(','));
 
     const timestamp = new Date().toISOString().slice(0, 10);
-    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="services_export_${timestamp}.csv"`);
     res.send(csvRows.join('\r\n'));
   } catch(e) { res.status(500).json({ error: e.message }); }

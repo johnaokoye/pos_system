@@ -224,7 +224,7 @@ router.get('/export/template', requirePermission('customers_import'), (req, res)
   const example = ['Jane','Doe','jane.doe@example.com','555-0100','123 Main St','Springfield','IL','62701','cash','30','0','0','','Individual','Prefers email contact',
     '1','drivers_license','D1234567','utility_bill','John Smith','555-0101','Brother','456 Oak St','Mary Jones','555-0102','Friend','Bob White','555-0103','Coworker','0'];
   const csv = [CSV_COLUMNS.join(','), example.map(escapeCsv).join(',')].join('\r\n');
-  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('Content-Disposition', 'attachment; filename="customer_import_template.csv"');
   res.send(csv);
 });
@@ -242,7 +242,7 @@ router.get('/export', requirePermission('customers_export'), async (req, res) =>
     const csvRows = [CSV_COLUMNS.join(',')];
     for (const c of rows) csvRows.push(CSV_COLUMNS.map(h => escapeCsv(c[h])).join(','));
     const timestamp = new Date().toISOString().slice(0, 10);
-    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="customers_export_${timestamp}.csv"`);
     res.send(csvRows.join('\r\n'));
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -286,7 +286,7 @@ router.get('/export/balances', requirePermission('customers_export_balances'), a
       csvRows.push(headers.map(h => escapeCsv(row[h])).join(','));
     }
     const timestamp = new Date().toISOString().slice(0, 10);
-    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="customer_balances_${type || 'all'}_${timestamp}.csv"`);
     res.send(csvRows.join('\r\n'));
   } catch(e) { res.status(500).json({ error: e.message }); }

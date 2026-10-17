@@ -76,7 +76,7 @@ router.get('/export/template', requirePermission('suppliers_add'), (req, res) =>
     account_number: 'ACCT-1234', voucher_default: 'Fully vouchered', is_local: '1',
   };
   const csv = [CSV_COLUMNS.join(','), CSV_COLUMNS.map(c => escapeCsv(example[c])).join(',')].join('\r\n');
-  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('Content-Disposition', 'attachment; filename="supplier_import_template.csv"');
   res.send(csv);
 });

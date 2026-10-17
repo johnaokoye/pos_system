@@ -463,7 +463,10 @@ router.get('/cycle-counts/:id/export', requirePermission('cycle-counts'), async 
     items.forEach(i => csvRows.push([i.id, i.sku, i.product_name, i.category_name || '', i.bin_code || '', i.expected_qty, i.counted_qty !== null ? i.counted_qty : '']));
 
     const csv = csvRows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\r\n');
-    res.setHeader('Content-Type', 'text/csv');
+    // Served as octet-stream, not text/csv: on Windows with Excel installed,
+    // text/csv is registered to .xls and the browser saves "…csv.xls", which
+    // scanner apps won't import. octet-stream keeps the filename as given.
+    res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="${session.session_number}-cycle-count.csv"`);
     res.send(csv);
   } catch(e) { res.status(500).json({ error: e.message }); }

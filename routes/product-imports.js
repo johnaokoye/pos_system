@@ -107,7 +107,7 @@ router.get('/:id/export-issues', requirePermission('inventory_import_history'), 
       args: [req.params.id],
     });
     const csv = rowsToCsv(rows, ['id','sku','name','price','cost','stock_qty','category_name','supplier_name','barcode','issue']);
-    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="import_${req.params.id}_issues.csv"`);
     res.send(csv);
   } catch(e) { res.status(500).json({ error: e.message }); }
