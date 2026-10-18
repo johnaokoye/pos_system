@@ -12079,9 +12079,11 @@ const App = {
     { key: 'name',   label: 'Accessory Name', required: true, aliases: ['Accessory', 'Name', 'Description'] },
     { key: 'active', label: 'Active (Yes/No, True/False, 1/0)', aliases: ['Is Active', 'Status'] },
   ],
+  // First/Last Name aren't flagged required: a file of businesses can map
+  // Business Name instead (checked by importCustomersCsv's mapping validate).
   _customerImportFields: [
-    { key: 'first_name',            label: 'First Name', required: true },
-    { key: 'last_name',             label: 'Last Name',  required: true },
+    { key: 'first_name',            label: 'First Name (individuals)' },
+    { key: 'last_name',             label: 'Last Name (individuals)' },
     { key: 'email',                 label: 'Email' },
     { key: 'phone',                 label: 'Phone' },
     { key: 'address',               label: 'Address' },
@@ -12095,6 +12097,14 @@ const App = {
     { key: 'tax_exemption_number',  label: 'Tax Exemption #' },
     { key: 'customer_category_name', label: 'Category' },
     { key: 'notes',                 label: 'Notes' },
+    { key: 'customer_kind',          label: 'Customer Type (Individual/Business)', aliases: ['Kind', 'Customer Kind', 'Individual or Business', 'Entity Type'], group: 'Business (optional)' },
+    { key: 'business_name',          label: 'Business Name', aliases: ['Company', 'Company Name', 'Business', 'Organization', 'Organisation'], group: 'Business (optional)' },
+    ...[1, 2, 3].flatMap(n => [
+      { key: `contact${n}_name`,      label: `Contact ${n} Name`,      aliases: [`Contact ${n}`, `Contact Person ${n}`], group: 'Business (optional)' },
+      { key: `contact${n}_job_title`, label: `Contact ${n} Job Title`, aliases: [`Contact ${n} Title`, `Contact ${n} Position`], group: 'Business (optional)' },
+      { key: `contact${n}_phone`,     label: `Contact ${n} Phone`, group: 'Business (optional)' },
+      { key: `contact${n}_email`,     label: `Contact ${n} Email`, group: 'Business (optional)' },
+    ]),
     { key: 'is_rental_customer',              label: 'Rental Customer? (1/0)',      group: 'Rental Compliance (optional)' },
     { key: 'rental_id_type',                  label: 'Rental ID Type',              group: 'Rental Compliance (optional)' },
     { key: 'rental_id_number',                label: 'Rental ID Number',            group: 'Rental Compliance (optional)' },
@@ -12166,7 +12176,9 @@ const App = {
   // spellings it should auto-match (e.g. another system's export names).
   // Resolves to a { targetField: csvHeader } mapping, or null if the user
   // cancels.
-  _showFieldMappingModal({ title, headers, fields }) {
+  // `validate(mapping)` (optional) returns an error message for a mapping
+  // that can't work beyond the per-field `required` flags.
+  _showFieldMappingModal({ title, headers, fields, validate }) {
     const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
     const normedHeaders = headers.map(h => ({ header: h, n: norm(h) }));
     const autoMap = {};
@@ -12214,6 +12226,8 @@ const App = {
         overlay.querySelectorAll('select[data-field]').forEach(sel => { mapping[sel.dataset.field] = sel.value; });
         const missing = fields.filter(f => f.required && !mapping[f.key]);
         if (missing.length) { this.alert(`Please map required field(s): ${missing.map(f => f.label).join(', ')}`, 'error'); return; }
+        const invalid = validate && validate(mapping);
+        if (invalid) { this.alert(invalid, 'error'); return; }
         finish(mapping);
       });
     });
@@ -13117,7 +13131,10 @@ const App = {
     // column anyway without that permission; hiding it here avoids a mapping
     // choice that would quietly do nothing.
     const importFields = this._customerImportFields.filter(f => f.key !== 'rental_preapproved' || this.can('customers_rental_preapprove'));
-    const mapping = await this._showFieldMappingModal({ title: 'Map Import Columns', headers, fields: importFields });
+    const mapping = await this._showFieldMappingModal({
+      title: 'Map Import Columns', headers, fields: importFields,
+      validate: m => (m.first_name && m.last_name) || m.business_name ? null : 'Map First Name and Last Name, or Business Name for a file of businesses',
+    });
     if (!mapping) return;
     const rows = this._remapCsvRows(rawRows, mapping);
 

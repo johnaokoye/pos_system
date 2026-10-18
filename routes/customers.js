@@ -212,7 +212,29 @@ const RENTAL_CSV_COLUMNS = ['is_rental_customer','rental_id_type','rental_id_num
   'rental_reference_name','rental_reference_phone','rental_reference_relationship','rental_reference_address',
   'rental_reference2_name','rental_reference2_phone','rental_reference2_relationship',
   'rental_reference3_name','rental_reference3_phone','rental_reference3_relationship','rental_preapproved'];
-CSV_COLUMNS.push(...RENTAL_CSV_COLUMNS);
+// Business customers (customer_kind 'business'): the business name stands in
+// for first/last name, and up to three contact persons ride along as
+// contact1_* … contact3_* (customer_contacts).
+const CONTACT_CSV_SLOTS = 3;
+const BUSINESS_CSV_COLUMNS = ['customer_kind', 'business_name'];
+for (let n = 1; n <= CONTACT_CSV_SLOTS; n++) BUSINESS_CSV_COLUMNS.push(`contact${n}_name`, `contact${n}_job_title`, `contact${n}_phone`, `contact${n}_email`);
+CSV_COLUMNS.push(...BUSINESS_CSV_COLUMNS, ...RENTAL_CSV_COLUMNS);
+
+const contactsFromCsvRow = row => Array.from({ length: CONTACT_CSV_SLOTS }, (_, i) => ({
+  name: row[`contact${i + 1}_name`], job_title: row[`contact${i + 1}_job_title`],
+  phone: row[`contact${i + 1}_phone`], email: row[`contact${i + 1}_email`],
+}));
+
+// "Business"/"Company"/… → business, "Individual"/"Person"/blank → individual,
+// anything else → null (a row error). A row with a business name but no
+// first/last name and no type given is taken as a business.
+function csvCustomerKind(row) {
+  const v = String(row.customer_kind ?? '').trim().toLowerCase();
+  if (['business', 'company', 'corporate', 'organization', 'organisation', 'b'].includes(v)) return 'business';
+  if (['individual', 'person', 'personal', 'i'].includes(v)) return 'individual';
+  if (v) return null;
+  return String(row.business_name || '').trim() && !(String(row.first_name || '').trim() && String(row.last_name || '').trim()) ? 'business' : 'individual';
+}
 
 function escapeCsv(v) {
   if (v == null) return '';
@@ -227,9 +249,21 @@ function csvBool(v) {
 
 // GET CSV template for bulk import
 router.get('/export/template', requirePermission('customers_import'), (req, res) => {
-  const example = ['Jane','Doe','jane.doe@example.com','555-0100','123 Main St','Springfield','IL','62701','cash','30','0','0','','Individual','Prefers email contact',
-    '1','drivers_license','D1234567','utility_bill','John Smith','555-0101','Brother','456 Oak St','Mary Jones','555-0102','Friend','Bob White','555-0103','Coworker','0'];
-  const csv = [CSV_COLUMNS.join(','), example.map(escapeCsv).join(',')].join('\r\n');
+  const examples = [
+    { first_name: 'Jane', last_name: 'Doe', email: 'jane.doe@example.com', phone: '555-0100', address: '123 Main St', city: 'Ocho Rios', state: 'St. Ann', zip: '',
+      customer_type: 'cash', credit_terms_days: '30', credit_limit: '0', tax_exempt: '0', customer_category_name: 'Individual', notes: 'Prefers email contact',
+      customer_kind: 'individual',
+      is_rental_customer: '1', rental_id_type: 'drivers_license', rental_id_number: 'D1234567', rental_address_proof_type: 'utility_bill',
+      rental_reference_name: 'John Smith', rental_reference_phone: '555-0101', rental_reference_relationship: 'Brother', rental_reference_address: '456 Oak St',
+      rental_reference2_name: 'Mary Jones', rental_reference2_phone: '555-0102', rental_reference2_relationship: 'Friend',
+      rental_reference3_name: 'Bob White', rental_reference3_phone: '555-0103', rental_reference3_relationship: 'Coworker', rental_preapproved: '0' },
+    { customer_kind: 'business', business_name: 'Acme Hardware Ltd', email: 'accounts@acme.example.com', phone: '555-0200', address: '12 Harbour Rd', city: 'Kingston', state: 'Kingston',
+      customer_type: 'credit', credit_terms_days: '30', credit_limit: '500000', tax_exempt: '0',
+      contact1_name: 'Mark Reid', contact1_job_title: 'Director', contact1_phone: '555-0201', contact1_email: 'mark@acme.example.com',
+      contact2_name: 'Sue Hall', contact2_job_title: 'Procurement Officer', contact2_phone: '555-0202',
+      contact3_name: 'Kim Lowe', contact3_job_title: 'Accountant', contact3_email: 'kim@acme.example.com' },
+  ];
+  const csv = [CSV_COLUMNS.join(','), ...examples.map(ex => CSV_COLUMNS.map(h => escapeCsv(ex[h] ?? '')).join(','))].join('\r\n');
   res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('Content-Disposition', 'attachment; filename="customer_import_template.csv"');
   res.send(csv);
@@ -245,8 +279,19 @@ router.get('/export', requirePermission('customers_export'), async (req, res) =>
         WHERE c.active = 1 ORDER BY c.first_name, c.last_name`,
       args: [],
     });
+    const { rows: contacts } = await db.execute({ sql: 'SELECT cc.* FROM customer_contacts cc JOIN customers c ON c.id = cc.customer_id WHERE c.active = 1 ORDER BY cc.customer_id, cc.sort_order, cc.id', args: [] });
+    const contactsBy = new Map();
+    for (const ct of contacts) (contactsBy.get(ct.customer_id) || contactsBy.set(ct.customer_id, []).get(ct.customer_id)).push(ct);
     const csvRows = [CSV_COLUMNS.join(',')];
-    for (const c of rows) csvRows.push(CSV_COLUMNS.map(h => escapeCsv(c[h])).join(','));
+    for (const c of rows) {
+      const row = { ...c };
+      (contactsBy.get(c.id) || []).slice(0, CONTACT_CSV_SLOTS).forEach((ct, i) => {
+        Object.assign(row, { [`contact${i + 1}_name`]: ct.name, [`contact${i + 1}_job_title`]: ct.job_title, [`contact${i + 1}_phone`]: ct.phone, [`contact${i + 1}_email`]: ct.email });
+      });
+      // A business's name lives in business_name; first_name just mirrors it.
+      if (c.customer_kind === 'business') { row.first_name = ''; row.last_name = ''; }
+      csvRows.push(CSV_COLUMNS.map(h => escapeCsv(row[h])).join(','));
+    }
     const timestamp = new Date().toISOString().slice(0, 10);
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="customers_export_${timestamp}.csv"`);
@@ -628,18 +673,27 @@ router.post('/import', requirePermission('customers_import'), async (req, res) =
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       const rowNum = i + 2;
-      const { first_name, last_name, email, phone, address, city, state, zip, customer_type, credit_terms_days, credit_limit, tax_exempt, tax_exemption_number, customer_category_name, notes,
+      const { email, phone, address, city, state, zip, customer_type, credit_terms_days, credit_limit, tax_exempt, tax_exemption_number, customer_category_name, notes,
         is_rental_customer, rental_id_type, rental_id_number, rental_address_proof_type,
         rental_reference_name, rental_reference_phone, rental_reference_relationship, rental_reference_address,
         rental_reference2_name, rental_reference2_phone, rental_reference2_relationship,
         rental_reference3_name, rental_reference3_phone, rental_reference3_relationship, rental_preapproved } = row;
-      const rowLabel = `${first_name || ''} ${last_name || ''}`.trim() || email || phone || `row ${rowNum}`;
-      if (!first_name || !last_name) {
-        const msg = `Row ${rowNum}: first and last name are required`;
+      const kind = csvCustomerKind(row);
+      const names = kind === 'business'
+        ? resolveCustomerNames({ customer_kind: 'business', business_name: String(row.business_name || '').trim() || `${row.first_name || ''} ${row.last_name || ''}`.trim() })
+        : kind === 'individual' ? resolveCustomerNames({ first_name: row.first_name, last_name: row.last_name }) : null;
+      const contactSet = cleanContacts(contactsFromCsvRow(row));
+      const rowLabel = (names && !names.error ? `${names.first_name} ${names.last_name}`.trim() : `${row.first_name || ''} ${row.last_name || ''}`.trim() || row.business_name) || email || phone || `row ${rowNum}`;
+      const rowError = !names ? `customer type must be Individual or Business — got "${row.customer_kind}"`
+        : names.error ? (kind === 'business' ? 'a business name is required' : 'first and last name are required (or a business name for a business)')
+        : contactSet.error ? contactSet.error.toLowerCase().replace(/^each/, 'each') : null;
+      if (rowError) {
+        const msg = `Row ${rowNum}: ${rowError}`;
         errors.push(msg);
         await logItem(rowLabel, null, 'error', null, msg);
         continue;
       }
+      const { first_name, last_name } = names;
       try {
         {
           // 'force' only overrides name-only matches — a row whose phone or
@@ -674,8 +728,11 @@ router.post('/import', requirePermission('customers_import'), async (req, res) =
             isRentalCust ? (rental_reference3_name||null) : null, isRentalCust ? (rental_reference3_phone||null) : null, isRentalCust ? (rental_reference3_relationship||null) : null,
             isPreapproved ? 1 : 0, isPreapproved ? (req.employee?.id || null) : null, isPreapproved ? new Date().toISOString() : null],
         });
+        const newId = Number(result.lastInsertRowid);
+        await db.execute({ sql: 'UPDATE customers SET customer_kind = ?, business_name = ? WHERE id = ?', args: [names.kind, names.business_name, newId] });
+        if (contactSet.rows.length) await saveContacts(newId, contactSet.rows);
         created++;
-        await logItem(rowLabel, Number(result.lastInsertRowid), 'created', null, null);
+        await logItem(rowLabel, newId, 'created', null, null);
       } catch (e) {
         errors.push(`Row ${rowNum} (${rowLabel}): ${e.message}`);
         await logItem(rowLabel, null, 'error', null, e.message);
