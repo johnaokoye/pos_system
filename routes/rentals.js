@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { getOutstandingQty, getOutOfServiceQty } = require('../lib/rentalAvailability');
-const { blockedMessage } = require('../lib/creditBlock');
+const { blockedMessage, creditLimitError } = require('../lib/creditBlock');
 const { depositWaiver, isCreditCustomerType, getBranchStock, feeFor, blendedFeePerUnit, checkAvailability, parseDbTime, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, assertNoUnpaidRentalReturns, dueDateTime, requiredDepositReturnMethod, rentalDiscount, attachRateBasis, rentalWindow, rateLineOf } = require('../lib/rentals');
 const { ratePlanError } = require('../lib/rentalPricing');
 const { requirePermission, requireAnyPermission, requireAuth, can, canManageRentals, requireRentalsManage } = require('../lib/permissions');
@@ -556,10 +556,8 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
 
     const total = parseFloat((rentalSubtotal + taxAmount + depositTotal + serviceFeesTotal - discountAmount).toFixed(2));
 
-    if (isCredit && creditCustomer.credit_limit > 0 && parseFloat((creditCustomer.account_balance + total).toFixed(2)) > creditCustomer.credit_limit) {
-      const available = Math.max(0, parseFloat((creditCustomer.credit_limit - creditCustomer.account_balance).toFixed(2)));
-      return res.status(400).json({ error: `This rental (${total.toFixed(2)}) would exceed the customer's credit limit. Available credit: ${available.toFixed(2)}` });
-    }
+    const limitError = isCredit ? creditLimitError(creditCustomer, total, 'This rental') : null;
+    if (limitError) return res.status(400).json({ error: limitError });
 
     // The total is recomputed here at the checkout instant, so it can drift
     // slightly from the estimate the cashier split against (e.g. crossing a

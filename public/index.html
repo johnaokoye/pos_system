@@ -3480,6 +3480,21 @@ const App = {
 
     const { subtotal, tax, discount, total } = this.getCartTotals();
 
+    // Refuse up front a charge that would take the account over its credit
+    // limit (same rule the server applies — lib/creditBlock.js
+    // creditLimitError), using the customer's current balance, not the one
+    // from when they were added to the ticket.
+    if (method === 'credit') {
+      const fresh = await this.api('GET', `/customers/${this.cartCustomer.id}`).catch(() => this.cartCustomer);
+      this.cartCustomer = { ...this.cartCustomer, ...fresh };
+      if (fresh.account_blocked) { this.alert(this._creditBlockedText(fresh), 'error'); return; }
+      const limit = Number(fresh.credit_limit) || 0, balance = Number(fresh.account_balance) || 0;
+      if (limit > 0 && fresh.block_override !== 'unblock' && balance + total - limit > 0.005) {
+        this.alert(`This sale (${this.fmt(total)}) would take the account over its credit limit of ${this.fmt(limit)}. Available credit: ${this.fmt(Math.max(0, limit - balance))}.`, 'error');
+        return;
+      }
+    }
+
     let amountTendered = total;
     let changeAmount = 0;
     let cashResult = null;

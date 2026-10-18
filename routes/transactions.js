@@ -6,7 +6,7 @@ const { getWcSettings, wcRequest } = require('./woocommerce');
 const { syncBinQty } = require('../lib/binSync');
 const { requireAuth, requirePermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
-const { blockedMessage } = require('../lib/creditBlock');
+const { blockedMessage, creditLimitError } = require('../lib/creditBlock');
 const { isSerialNumberProduct, serialNumberLabel, serialNumberOf } = require('../lib/serialNumber');
 const { checkDiscountEligibility } = require('./promotions');
 
@@ -320,6 +320,8 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       if (!cust) return res.status(400).json({ error: 'Customer not found' });
       if (cust.customer_type !== 'credit') return res.status(400).json({ error: 'Customer does not have a credit account' });
       if (cust.account_blocked) return res.status(400).json({ error: blockedMessage(cust) });
+      const limitError = creditLimitError(cust, total);
+      if (limitError) return res.status(400).json({ error: limitError });
     }
 
     const tendered = tenderLegs ? total : parseFloat(amount_tendered || (isCredit ? 0 : total));
