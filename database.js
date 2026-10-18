@@ -304,6 +304,36 @@ async function _init() {
       amount REAL NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // A/R invoices carried over from the old system. The accounts team enters
+    // them in RetailPOS Books (~/accounting), which pushes each one here
+    // (POST /api/accounts/legacy-invoices) — external_id is Books' invoice id,
+    // so a re-sent push is a no-op. Kept out of `transactions` so they never
+    // count as sales, revenue, commissions or drawer takings; the A/R screens
+    // (routes/accounts.js) list, age and take payments against them alongside
+    // credit-sale invoices. status is 'open' or 'void' — paid/partial comes
+    // from legacy_invoice_allocations.
+    { sql: `CREATE TABLE IF NOT EXISTS ar_legacy_invoices (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      customer_id INTEGER NOT NULL REFERENCES customers(id),
+      invoice_number TEXT NOT NULL,
+      invoice_date DATE NOT NULL,
+      due_date DATE,
+      amount REAL NOT NULL,
+      memo TEXT,
+      status TEXT NOT NULL DEFAULT 'open',
+      external_id TEXT UNIQUE,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      voided_at DATETIME
+    )` },
+    // payment_allocations for legacy invoices (that table's transaction_id is
+    // NOT NULL and references transactions, so these get their own).
+    { sql: `CREATE TABLE IF NOT EXISTS legacy_invoice_allocations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      payment_id INTEGER NOT NULL REFERENCES account_payments(id),
+      legacy_invoice_id INTEGER NOT NULL REFERENCES ar_legacy_invoices(id),
+      amount REAL NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS branch_inventory (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       product_id INTEGER NOT NULL REFERENCES products(id),
@@ -2365,6 +2395,20 @@ async function _init() {
         await db.execute({ sql: 'UPDATE security_groups SET permissions = ? WHERE id = ?', args: [JSON.stringify(perms), g.id] });
       }
     }
+  } catch(e) {}
+
+  // One-time cleanup: the legacy customer migration (old system's Crystal
+  // export, 2026-10-17) wrote each A/R customer's old balance into notes as
+  // "Legacy #<code>; Legacy A/R balance <amount>[; …]". Those figures aren't
+  // being used — opening balances come from another source — so strip just
+  // that segment, keeping the Legacy # and anything after it. Matches only
+  // notes that start with "Legacy #", so hand-typed notes are never touched.
+  try {
+    await db.execute({ sql: `UPDATE customers SET notes = (
+        SELECT CASE WHEN instr(rest, '; ') = 0 THEN before ELSE before || substr(rest, instr(rest, '; ')) END
+        FROM (SELECT substr(customers.notes, 1, instr(customers.notes, '; Legacy A/R balance ') - 1) AS before,
+                     substr(customers.notes, instr(customers.notes, '; Legacy A/R balance ') + 2) AS rest))
+      WHERE notes LIKE 'Legacy #%' AND instr(notes, '; Legacy A/R balance ') > 0`, args: [] });
   } catch(e) {}
 
   // One-time backfill: existing quotations never had original_employee_id,

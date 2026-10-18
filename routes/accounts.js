@@ -5,6 +5,7 @@ const { runCreditCheck } = require('./customers');
 const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { calcRentalCommission } = require('./commissions');
+const { LEGACY_BALANCE_SQL, openArInvoices, buildAllocations, insertAllocations, paymentAllocations } = require('../lib/legacyInvoices');
 
 // Every endpoint in this file is specific to the Accounts Receivable
 // screen (unlike e.g. employees.js, nothing here is used as a cross-feature
@@ -42,6 +43,22 @@ router.get('/aging', async (req, res) => {
       WHERE c.credit_enabled = 1 AND c.active = 1
       GROUP BY c.id
       ORDER BY c.account_balance DESC`, args: [] });
+    // Legacy invoices (lib/legacyInvoices.js) age from their old-system
+    // invoice date, into the same buckets.
+    const { rows: legacy } = await db.execute({ sql: `
+      SELECT li.customer_id,
+        COALESCE(SUM(CASE WHEN CAST(julianday('now') - julianday(li.invoice_date) AS INTEGER) <= 30 THEN ${LEGACY_BALANCE_SQL} ELSE 0 END), 0) as current_30,
+        COALESCE(SUM(CASE WHEN CAST(julianday('now') - julianday(li.invoice_date) AS INTEGER) BETWEEN 31 AND 60 THEN ${LEGACY_BALANCE_SQL} ELSE 0 END), 0) as days_31_60,
+        COALESCE(SUM(CASE WHEN CAST(julianday('now') - julianday(li.invoice_date) AS INTEGER) BETWEEN 61 AND 90 THEN ${LEGACY_BALANCE_SQL} ELSE 0 END), 0) as days_61_90,
+        COALESCE(SUM(CASE WHEN CAST(julianday('now') - julianday(li.invoice_date) AS INTEGER) > 90 THEN ${LEGACY_BALANCE_SQL} ELSE 0 END), 0) as over_90
+      FROM ar_legacy_invoices li WHERE li.status = 'open' AND ${LEGACY_BALANCE_SQL} > 0.001
+      GROUP BY li.customer_id`, args: [] });
+    const byCustomer = new Map(aging.map(a => [a.id, a]));
+    for (const l of legacy) {
+      const a = byCustomer.get(l.customer_id);
+      if (!a) continue;
+      for (const k of ['current_30', 'days_31_60', 'days_61_90', 'over_90']) a[k] = parseFloat(((a[k] || 0) + (l[k] || 0)).toFixed(2));
+    }
     res.json(aging);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -61,7 +78,8 @@ router.get('/customer/:id', async (req, res) => {
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
     const { rows: invoices } = await db.execute({ sql: `SELECT t.id, t.transaction_number, t.total, t.status, t.created_at, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name FROM transactions t LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN branches b ON t.branch_id = b.id WHERE t.customer_id = ? AND t.payment_method = 'credit' ORDER BY t.created_at DESC`, args: [req.params.id] });
     const { rows: payments } = await db.execute({ sql: `SELECT p.*, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name FROM account_payments p LEFT JOIN employees e ON p.employee_id = e.id LEFT JOIN branches b ON p.branch_id = b.id WHERE p.customer_id = ? ORDER BY p.created_at DESC`, args: [req.params.id] });
-    res.json({ customer, invoices, payments });
+    const { rows: legacy_invoices } = await db.execute({ sql: `SELECT li.*, ${LEGACY_BALANCE_SQL} as balance_due FROM ar_legacy_invoices li WHERE li.customer_id = ? ORDER BY li.invoice_date DESC, li.id DESC`, args: [req.params.id] });
+    res.json({ customer, invoices, payments, legacy_invoices });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -83,42 +101,18 @@ router.patch('/customer/:id', async (req, res) => {
   }
 });
 
-// Outstanding invoices for a customer (with per-invoice balance_due)
+// Outstanding invoices for a customer (with per-invoice balance_due) —
+// credit sales and legacy invoices together, oldest first.
 router.get('/invoices/:customer_id', async (req, res) => {
   try {
-    const { rows } = await db.execute({
-      sql: `SELECT t.id, t.transaction_number, t.total, t.created_at,
-              COALESCE(SUM(pa.amount), 0) as paid_amount,
-              t.total - COALESCE(SUM(pa.amount), 0) as balance_due
-            FROM transactions t
-            LEFT JOIN payment_allocations pa ON t.id = pa.transaction_id
-            WHERE t.customer_id = ? AND t.payment_method = 'credit' AND t.status = 'completed'
-              -- A returned rental's checkout invoice is already reconciled by its
-              -- settlement transaction (routes/rentals.js return handler) — without
-              -- this it would double-count here since that reconciliation isn't
-              -- expressed as a payment_allocations row.
-              AND t.id NOT IN (SELECT checkout_transaction_id FROM rental_agreements WHERE status = 'returned' AND checkout_transaction_id IS NOT NULL)
-            GROUP BY t.id
-            HAVING t.total - COALESCE(SUM(pa.amount), 0) > 0.001
-            ORDER BY t.created_at ASC`,
-      args: [req.params.customer_id]
-    });
-    res.json(rows);
+    res.json(await openArInvoices(db, req.params.customer_id));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // Allocations for a specific payment
 router.get('/payments/:id/allocations', async (req, res) => {
   try {
-    const { rows } = await db.execute({
-      sql: `SELECT pa.*, t.transaction_number, t.total as invoice_total, t.created_at as invoice_date
-            FROM payment_allocations pa
-            LEFT JOIN transactions t ON pa.transaction_id = t.id
-            WHERE pa.payment_id = ?
-            ORDER BY t.created_at ASC`,
-      args: [req.params.id]
-    });
-    res.json(rows);
+    res.json(await paymentAllocations(db, req.params.id));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -134,40 +128,18 @@ router.post('/payments', async (req, res) => {
     const payment_number = await nextNumber(db, 'account_payments', 'payment_number', 'PMT-', 6);
     const amt = parseFloat(parseFloat(amount).toFixed(2));
 
-    // Build allocations: use provided or auto-FIFO oldest-first
-    let finalAllocations = [];
-    if (allocations && Array.isArray(allocations) && allocations.length > 0) {
-      finalAllocations = allocations.filter(a => parseFloat(a.amount) > 0).map(a => ({ transaction_id: parseInt(a.transaction_id), amount: parseFloat(parseFloat(a.amount).toFixed(2)) }));
-    } else {
-      const { rows: invoices } = await db.execute({
-        sql: `SELECT t.id, t.total, COALESCE(SUM(pa.amount), 0) as paid_amount
-              FROM transactions t
-              LEFT JOIN payment_allocations pa ON t.id = pa.transaction_id
-              WHERE t.customer_id = ? AND t.payment_method = 'credit' AND t.status = 'completed'
-                AND t.id NOT IN (SELECT checkout_transaction_id FROM rental_agreements WHERE status = 'returned' AND checkout_transaction_id IS NOT NULL)
-              GROUP BY t.id
-              HAVING t.total - COALESCE(SUM(pa.amount), 0) > 0.001
-              ORDER BY t.created_at ASC`,
-        args: [customer_id]
-      });
-      let remaining = amt;
-      for (const inv of invoices) {
-        if (remaining <= 0.001) break;
-        const balance = parseFloat((inv.total - inv.paid_amount).toFixed(2));
-        const apply = parseFloat(Math.min(remaining, balance).toFixed(2));
-        finalAllocations.push({ transaction_id: inv.id, amount: apply });
-        remaining = parseFloat((remaining - apply).toFixed(2));
-      }
-    }
+    // Use the allocations given, or spread oldest-first across open credit
+    // sales and legacy invoices (lib/legacyInvoices.js).
+    let finalAllocations;
+    try { finalAllocations = await buildAllocations(db, customer_id, amt, allocations); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
 
     const payTx = await db.transaction('write');
     let committed = false;
     try {
       const result = await payTx.execute({ sql: 'INSERT INTO account_payments (payment_number,customer_id,employee_id,branch_id,amount,payment_method,notes) VALUES (?,?,?,?,?,?,?)', args: [payment_number, customer_id, employee_id||null, branch_id||null, amt, payment_method||'cash', notes||null] });
       const payId = Number(result.lastInsertRowid);
-      for (const alloc of finalAllocations) {
-        await payTx.execute({ sql: 'INSERT INTO payment_allocations (payment_id, transaction_id, amount) VALUES (?,?,?)', args: [payId, alloc.transaction_id, alloc.amount] });
-      }
+      await insertAllocations(payTx, payId, finalAllocations);
       await payTx.execute({ sql: 'UPDATE customers SET account_balance = MAX(0, account_balance - ?) WHERE id = ?', args: [amt, customer_id] });
       await payTx.commit();
       committed = true;
@@ -182,7 +154,7 @@ router.post('/payments', async (req, res) => {
       // subject to the "exclude returned rentals" filter that only applies
       // to the auto-FIFO candidate query above.
       try {
-        for (const alloc of finalAllocations) {
+        for (const alloc of finalAllocations.filter(a => a.transaction_id)) {
           const { rows: [rentalAgreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE checkout_transaction_id = ?', args: [alloc.transaction_id] });
           if (!rentalAgreement) continue;
           const { rows: [checkoutTx] } = await db.execute({ sql: 'SELECT * FROM transactions WHERE id = ?', args: [alloc.transaction_id] });
@@ -224,39 +196,16 @@ router.post('/writeoff', requirePermission('accounts_writeoff'), async (req, res
     const payment_number = await nextNumber(db, 'account_payments', 'payment_number', 'WO-', 6);
     const amt = parseFloat(parseFloat(amount).toFixed(2));
 
-    let finalAllocations = [];
-    if (allocations && Array.isArray(allocations) && allocations.length > 0) {
-      finalAllocations = allocations.filter(a => parseFloat(a.amount) > 0).map(a => ({ transaction_id: parseInt(a.transaction_id), amount: parseFloat(parseFloat(a.amount).toFixed(2)) }));
-    } else {
-      const { rows: invoices } = await db.execute({
-        sql: `SELECT t.id, t.total, COALESCE(SUM(pa.amount), 0) as paid_amount
-              FROM transactions t
-              LEFT JOIN payment_allocations pa ON t.id = pa.transaction_id
-              WHERE t.customer_id = ? AND t.payment_method = 'credit' AND t.status = 'completed'
-                AND t.id NOT IN (SELECT checkout_transaction_id FROM rental_agreements WHERE status = 'returned' AND checkout_transaction_id IS NOT NULL)
-              GROUP BY t.id
-              HAVING t.total - COALESCE(SUM(pa.amount), 0) > 0.001
-              ORDER BY t.created_at ASC`,
-        args: [customer_id]
-      });
-      let remaining = amt;
-      for (const inv of invoices) {
-        if (remaining <= 0.001) break;
-        const balance = parseFloat((inv.total - inv.paid_amount).toFixed(2));
-        const apply = parseFloat(Math.min(remaining, balance).toFixed(2));
-        finalAllocations.push({ transaction_id: inv.id, amount: apply });
-        remaining = parseFloat((remaining - apply).toFixed(2));
-      }
-    }
+    let finalAllocations;
+    try { finalAllocations = await buildAllocations(db, customer_id, amt, allocations); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
 
     const woTx = await db.transaction('write');
     let committed = false;
     try {
       const result = await woTx.execute({ sql: 'INSERT INTO account_payments (payment_number,customer_id,employee_id,branch_id,amount,payment_method,notes) VALUES (?,?,?,?,?,?,?)', args: [payment_number, customer_id, employee_id||null, branch_id||null, amt, 'writeoff', reason.trim()] });
       const woId = Number(result.lastInsertRowid);
-      for (const alloc of finalAllocations) {
-        await woTx.execute({ sql: 'INSERT INTO payment_allocations (payment_id, transaction_id, amount) VALUES (?,?,?)', args: [woId, alloc.transaction_id, alloc.amount] });
-      }
+      await insertAllocations(woTx, woId, finalAllocations);
       await woTx.execute({ sql: 'UPDATE customers SET account_balance = MAX(0, account_balance - ?) WHERE id = ?', args: [amt, customer_id] });
       await woTx.commit();
       committed = true;
@@ -288,15 +237,7 @@ router.get('/statement/:customer_id', async (req, res) => {
     if (end)   { sql += ' AND date(p.created_at) <= ?'; params.push(end); }
     sql += ' ORDER BY p.created_at ASC';
     const { rows: payments } = await db.execute({ sql, args: params });
-    for (const p of payments) {
-      const { rows: allocs } = await db.execute({
-        sql: `SELECT pa.*, t.transaction_number, t.total as invoice_total, t.created_at as invoice_date
-              FROM payment_allocations pa LEFT JOIN transactions t ON pa.transaction_id = t.id
-              WHERE pa.payment_id = ? ORDER BY t.created_at ASC`,
-        args: [p.id]
-      });
-      p.allocations = allocs;
-    }
+    for (const p of payments) p.allocations = await paymentAllocations(db, p.id);
     res.json({ customer, payments, period: { start: start || null, end: end || null } });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -314,6 +255,101 @@ router.get('/payments', async (req, res) => {
     params.push(parseInt(limit));
     const { rows } = await db.execute({ sql, args: params });
     res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Legacy invoices ─────────────────────────────────────────────
+// Invoices carried over from the old system, entered by the accounts team in
+// RetailPOS Books and pushed here with an API key (scope accounts:write).
+// Each adds to the customer's account_balance and is then worked like any
+// credit invoice (lib/legacyInvoices.js). external_id is Books' invoice id:
+// pushing the same one again returns the invoice already recorded.
+
+router.get('/legacy-invoices', async (req, res) => {
+  try {
+    const { customer_id, external_id } = req.query;
+    let sql = `SELECT li.*, ${LEGACY_BALANCE_SQL} as balance_due FROM ar_legacy_invoices li WHERE 1=1`;
+    const args = [];
+    if (customer_id) { sql += ' AND li.customer_id = ?'; args.push(customer_id); }
+    if (external_id) { sql += ' AND li.external_id = ?'; args.push(String(external_id)); }
+    sql += ' ORDER BY li.invoice_date, li.id';
+    const { rows } = await db.execute({ sql, args });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+async function legacyInvoiceRow(id) {
+  const { rows: [row] } = await db.execute({ sql: `SELECT li.*, ${LEGACY_BALANCE_SQL} as balance_due FROM ar_legacy_invoices li WHERE li.id = ?`, args: [id] });
+  return row;
+}
+
+router.post('/legacy-invoices', requirePermission('accounts_create'), async (req, res) => {
+  try {
+    const { customer_id, invoice_number, invoice_date, due_date, memo } = req.body;
+    const external_id = req.body.external_id != null && req.body.external_id !== '' ? String(req.body.external_id) : null;
+    const amount = parseFloat(parseFloat(req.body.amount).toFixed(2));
+    const isDate = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d || '')) && !isNaN(new Date(d));
+    if (!customer_id) return res.status(400).json({ error: 'customer_id is required' });
+    if (!String(invoice_number || '').trim()) return res.status(400).json({ error: 'The old invoice number is required' });
+    if (!isDate(invoice_date)) return res.status(400).json({ error: 'invoice_date must be a date (YYYY-MM-DD)' });
+    if (due_date && !isDate(due_date)) return res.status(400).json({ error: 'due_date must be a date (YYYY-MM-DD)' });
+    if (!(amount > 0)) return res.status(400).json({ error: 'amount must be more than 0' });
+
+    if (external_id) {
+      const { rows: [already] } = await db.execute({ sql: 'SELECT id FROM ar_legacy_invoices WHERE external_id = ?', args: [external_id] });
+      if (already) return res.json({ ...(await legacyInvoiceRow(already.id)), already_recorded: true });
+    }
+
+    const { rows: [customer] } = await db.execute({ sql: 'SELECT id, first_name, last_name, credit_enabled, active FROM customers WHERE id = ?', args: [customer_id] });
+    if (!customer) return res.status(404).json({ error: `No POS customer with id ${customer_id}` });
+    if (!customer.credit_enabled) return res.status(400).json({ error: `${customer.first_name} ${customer.last_name} isn't set up for credit in the POS — enable credit on their account (Accounts) first` });
+    const number = String(invoice_number).trim();
+    const { rows: [dup] } = await db.execute({ sql: "SELECT id FROM ar_legacy_invoices WHERE customer_id = ? AND invoice_number = ? AND status = 'open'", args: [customer_id, number] });
+    if (dup) return res.status(409).json({ error: `Legacy invoice ${number} is already on this customer's account` });
+
+    const tx = await db.transaction('write');
+    let committed = false, id;
+    try {
+      const result = await tx.execute({
+        sql: 'INSERT INTO ar_legacy_invoices (customer_id, invoice_number, invoice_date, due_date, amount, memo, external_id) VALUES (?,?,?,?,?,?,?)',
+        args: [customer_id, number, invoice_date, due_date || null, amount, memo || null, external_id],
+      });
+      id = Number(result.lastInsertRowid);
+      await tx.execute({ sql: 'UPDATE customers SET account_balance = account_balance + ? WHERE id = ?', args: [amount, customer_id] });
+      await tx.commit();
+      committed = true;
+    } catch(e) {
+      if (!committed) await tx.rollback();
+      throw e;
+    }
+    try { await runCreditCheck(customer_id); } catch(e) {}
+    res.status(201).json(await legacyInvoiceRow(id));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Void a legacy invoice entered by mistake — only while nothing has been
+// paid or written off against it, since those payments would otherwise be
+// left pointing at an invoice that no longer counts.
+router.post('/legacy-invoices/:id/void', requirePermission('accounts_create'), async (req, res) => {
+  try {
+    const inv = await legacyInvoiceRow(req.params.id);
+    if (!inv) return res.status(404).json({ error: 'Legacy invoice not found' });
+    if (inv.status === 'void') return res.json(inv);
+    if (inv.amount - inv.balance_due > 0.001) return res.status(409).json({ error: `${(inv.amount - inv.balance_due).toFixed(2)} has already been paid or written off against legacy invoice ${inv.invoice_number}, so it can't be voided` });
+
+    const tx = await db.transaction('write');
+    let committed = false;
+    try {
+      await tx.execute({ sql: "UPDATE ar_legacy_invoices SET status = 'void', voided_at = CURRENT_TIMESTAMP WHERE id = ?", args: [inv.id] });
+      await tx.execute({ sql: 'UPDATE customers SET account_balance = MAX(0, account_balance - ?) WHERE id = ?', args: [inv.amount, inv.customer_id] });
+      await tx.commit();
+      committed = true;
+    } catch(e) {
+      if (!committed) await tx.rollback();
+      throw e;
+    }
+    try { await runCreditCheck(inv.customer_id); } catch(e) {}
+    res.json(await legacyInvoiceRow(inv.id));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

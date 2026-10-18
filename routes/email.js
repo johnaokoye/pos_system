@@ -6,6 +6,7 @@ const { requireAuth, requirePermission, can } = require('../lib/permissions');
 const { inlineProtectedImages } = require('../lib/protectedUploads');
 const { rentalQuoteSummary, attachRentalRates, attachRateBasis, rentalWindow, rateBasisLabel } = require('../lib/rentals');
 const { renderDocumentPdf } = require('../lib/documentPdf');
+const { paymentAllocations } = require('../lib/legacyInvoices');
 
 // Brand palette for every email sent out (receipts, quotes, invoices,
 // statements, notices): green header with a yellow accent stripe, black
@@ -1370,7 +1371,7 @@ function buildStatementHtml(data, s, origin) {
     const allocRows = p.allocations && p.allocations.length
       ? p.allocations.map(a => `
           <tr style="background:#f9fafb">
-            <td style="padding:4px 8px 4px 28px;font-size:11px;color:#555;border-bottom:1px solid #f0f0f0">↳ ${a.transaction_number}</td>
+            <td style="padding:4px 8px 4px 28px;font-size:11px;color:#555;border-bottom:1px solid #f0f0f0">↳ ${a.transaction_number}${a.legacy_invoice_id ? ' (legacy invoice)' : ''}</td>
             <td style="padding:4px 8px;font-size:11px;color:#555;border-bottom:1px solid #f0f0f0">${new Date(a.invoice_date).toLocaleDateString()}</td>
             <td style="padding:4px 8px;font-size:11px;color:#555;border-bottom:1px solid #f0f0f0;text-align:right">${fmt(a.invoice_total)}</td>
             <td style="padding:4px 8px;font-size:11px;color:${BRAND.green};border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(a.amount)}</td>
@@ -1457,8 +1458,7 @@ router.get('/statement-preview/:customer_id', requireAuth, async (req, res) => {
     sql += ' ORDER BY p.created_at ASC';
     const { rows: payments } = await db.execute({ sql, args: params });
     for (const p of payments) {
-      const { rows: allocs } = await db.execute({ sql: `SELECT pa.*, t.transaction_number, t.total as invoice_total, t.created_at as invoice_date FROM payment_allocations pa LEFT JOIN transactions t ON pa.transaction_id = t.id WHERE pa.payment_id = ? ORDER BY t.created_at ASC`, args: [p.id] });
-      p.allocations = allocs;
+      p.allocations = await paymentAllocations(db, p.id);
     }
     const s = await getSettings();
     const origin = `${req.protocol}://${req.get('host')}`;
@@ -1482,8 +1482,7 @@ router.post('/send-statement/:customer_id', requireAuth, async (req, res) => {
     sql += ' ORDER BY p.created_at ASC';
     const { rows: payments } = await db.execute({ sql, args: params });
     for (const p of payments) {
-      const { rows: allocs } = await db.execute({ sql: `SELECT pa.*, t.transaction_number, t.total as invoice_total, t.created_at as invoice_date FROM payment_allocations pa LEFT JOIN transactions t ON pa.transaction_id = t.id WHERE pa.payment_id = ? ORDER BY t.created_at ASC`, args: [p.id] });
-      p.allocations = allocs;
+      p.allocations = await paymentAllocations(db, p.id);
     }
     const s = await getSettings();
     const origin = `${req.protocol}://${req.get('host')}`;

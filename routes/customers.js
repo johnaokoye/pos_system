@@ -3,6 +3,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { requireAuth, requirePermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
+const { oldestOpenLegacySql, earliestDate } = require('../lib/legacyInvoices');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -119,11 +120,14 @@ async function runCreditCheck(customerId) {
       return;
     }
 
-    const { rows: [oldest] } = await db.execute({ sql: `SELECT MIN(created_at) as oldest_date FROM transactions WHERE customer_id = ? AND payment_method = 'credit' AND status = 'completed'`, args: [customerId] });
+    const { rows: [oldest] } = await db.execute({ sql: `SELECT (SELECT MIN(created_at) FROM transactions WHERE customer_id = ? AND payment_method = 'credit' AND status = 'completed') as oldest_date,
+      ${oldestOpenLegacySql('?')} as legacy_oldest_date`, args: [customerId, customerId] });
 
-    if (!oldest || !oldest.oldest_date) return;
+    // Unpaid invoices carried over from the old system count too.
+    const oldestDate = earliestDate(oldest?.oldest_date, oldest?.legacy_oldest_date);
+    if (!oldestDate) return;
 
-    const daysSince = Math.floor((Date.now() - new Date(oldest.oldest_date).getTime()) / 86400000);
+    const daysSince = Math.floor((Date.now() - new Date(oldestDate).getTime()) / 86400000);
     const exceeded = daysSince > (customer.credit_terms_days || 30);
     await db.execute({ sql: 'UPDATE customers SET account_blocked = ? WHERE id = ?', args: [exceeded ? 1 : 0, customerId] });
   } catch(e) {}
@@ -143,14 +147,16 @@ async function runCreditCheckBatch(customerIds) {
     const placeholders = customerIds.map(() => '?').join(',');
     const { rows } = await db.execute({
       sql: `SELECT c.id, c.credit_terms_days,
-              (SELECT MIN(created_at) FROM transactions WHERE customer_id = c.id AND payment_method = 'credit' AND status = 'completed') as oldest_date
+              (SELECT MIN(created_at) FROM transactions WHERE customer_id = c.id AND payment_method = 'credit' AND status = 'completed') as oldest_date,
+              ${oldestOpenLegacySql('c.id')} as legacy_oldest_date
             FROM customers c WHERE c.id IN (${placeholders})`,
       args: customerIds,
     });
     const exceededIds = [], okIds = [];
     for (const r of rows) {
-      if (!r.oldest_date) continue;
-      const daysSince = Math.floor((Date.now() - new Date(r.oldest_date).getTime()) / 86400000);
+      const oldestDate = earliestDate(r.oldest_date, r.legacy_oldest_date);
+      if (!oldestDate) continue;
+      const daysSince = Math.floor((Date.now() - new Date(oldestDate).getTime()) / 86400000);
       (daysSince > (r.credit_terms_days || 30) ? exceededIds : okIds).push(r.id);
     }
     if (exceededIds.length) await db.execute({ sql: `UPDATE customers SET account_blocked = 1 WHERE id IN (${exceededIds.map(() => '?').join(',')})`, args: exceededIds });

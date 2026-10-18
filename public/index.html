@@ -16086,6 +16086,7 @@ const App = {
       { value: 'orders:read',     label: 'Orders — Read' },
       { value: 'orders:write',    label: 'Orders — Write' },
       { value: 'accounts:read',   label: 'Accounts Receivable — Read' },
+      { value: 'accounts:write',  label: 'Accounts Receivable — Write legacy invoices (RetailPOS Books)' },
       { value: 'suppliers:read',  label: 'Vendors — Read' },
       { value: 'payables:read',   label: 'Accounts Payable — Read' },
     ];
@@ -21001,8 +21002,8 @@ const App = {
             </tr></thead>
             <tbody>
               ${allocs.map(a => `<tr>
-                <td style="font-size:12px"><a href="#" class="fw-600" style="color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.viewTransaction(${a.transaction_id})">${a.transaction_number}</a></td>
-                <td style="font-size:12px;color:var(--text-muted)">${this.fmtDate(a.invoice_date)}</td>
+                <td style="font-size:12px">${a.legacy_invoice_id ? `<span class="fw-600">${this.escapeAttr(a.transaction_number)}</span> <span class="badge-pill badge-secondary" style="font-size:10px">Legacy</span>` : `<a href="#" class="fw-600" style="color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.viewTransaction(${a.transaction_id})">${a.transaction_number}</a>`}</td>
+                <td style="font-size:12px;color:var(--text-muted)">${a.legacy_invoice_id ? this._apDate(a.invoice_date) : this.fmtDate(a.invoice_date)}</td>
                 <td style="font-size:12px">${this.fmt(a.invoice_total)}</td>
                 <td class="fw-600 color-success" style="font-size:12px">${this.fmt(a.amount)}</td>
               </tr>`).join('')}
@@ -21094,12 +21095,12 @@ const App = {
                 <thead><tr><th>Invoice</th><th>Date</th><th>Total</th><th>Balance Due</th><th>Apply</th></tr></thead>
                 <tbody id="pmt-inv-rows">
                   ${invoices.map(inv => `<tr>
-                    <td class="fw-600" style="font-size:12px">${inv.transaction_number}</td>
-                    <td style="font-size:12px;color:var(--text-muted)">${this.fmtDate(inv.created_at)}</td>
+                    <td class="fw-600" style="font-size:12px">${this.escapeAttr(inv.transaction_number)}${inv.kind === 'legacy' ? ' <span class="badge-pill badge-secondary" style="font-size:10px" title="Carried over from the old system">Legacy</span>' : ''}</td>
+                    <td style="font-size:12px;color:var(--text-muted)">${inv.kind === 'legacy' ? this._apDate(inv.created_at) : this.fmtDate(inv.created_at)}</td>
                     <td style="font-size:12px">${this.fmt(inv.total)}</td>
                     <td style="font-size:12px" class="color-danger fw-600">${this.fmt(inv.balance_due)}</td>
                     <td><input type="number" step="0.01" min="0" max="${inv.balance_due.toFixed(2)}"
-                         class="pmt-inv-input" data-inv-id="${inv.id}" data-max="${inv.balance_due.toFixed(2)}"
+                         class="pmt-inv-input" data-inv-id="${inv.id}" data-kind="${inv.kind || 'sale'}" data-max="${inv.balance_due.toFixed(2)}"
                          style="width:85px;padding:3px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px"
                          oninput="App._pmtUpdateTotal()" placeholder="0.00"></td>
                   </tr>`).join('')}
@@ -21153,7 +21154,7 @@ const App = {
     const allocations = [];
     document.querySelectorAll('.pmt-inv-input').forEach(inp => {
       const val = parseFloat(inp.value);
-      if (val > 0) allocations.push({ transaction_id: parseInt(inp.dataset.invId), amount: val });
+      if (val > 0) allocations.push(inp.dataset.kind === 'legacy' ? { legacy_invoice_id: parseInt(inp.dataset.invId), amount: val } : { transaction_id: parseInt(inp.dataset.invId), amount: val });
     });
     try {
       await this.api('POST', '/accounts/payments', { customer_id: customerId, amount, payment_method, branch_id: branch_id||null, notes, allocations: allocations.length ? allocations : undefined });
@@ -21241,6 +21242,7 @@ const App = {
           <div class="tab-bar" style="margin-bottom:10px">
             <button class="tab-btn active" onclick="App.showModalTab(this,'acct-inv')">Invoices (${data.invoices.length})</button>
             <button class="tab-btn" onclick="App.showModalTab(this,'acct-pmts')">Payments (${data.payments.length})</button>
+            ${(data.legacy_invoices || []).length ? `<button class="tab-btn" onclick="App.showModalTab(this,'acct-legacy')">Legacy Invoices (${data.legacy_invoices.length})</button>` : ''}
           </div>
           <div id="acct-inv">
             <div class="table-wrap"><table>
@@ -21254,6 +21256,13 @@ const App = {
               <tbody>${data.payments.map(p => `<tr><td class="fw-600">${p.payment_number}</td><td class="color-success">${this.fmt(p.amount)}</td><td>${p.payment_method}</td><td>${this.fmtDate(p.created_at)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">No payments</td></tr>'}</tbody>
             </table></div>
           </div>
+          ${(data.legacy_invoices || []).length ? `<div id="acct-legacy" style="display:none">
+            <p style="font-size:12px;color:var(--text-muted);margin:0 0 8px">Invoices carried over from the old system, entered by the accounts team in RetailPOS Books. Payments apply to them like any other invoice.</p>
+            <div class="table-wrap"><table>
+              <thead><tr><th>Old Invoice #</th><th>Date</th><th>Due</th><th>Amount</th><th>Balance Due</th><th>Status</th></tr></thead>
+              <tbody>${data.legacy_invoices.map(i => `<tr><td class="fw-600">${this.escapeAttr(i.invoice_number)}</td><td>${this._apDate(i.invoice_date)}</td><td>${this._apDate(i.due_date)}</td><td>${this.fmt(i.amount)}</td><td class="${i.status === 'open' && i.balance_due > 0.001 ? 'color-danger fw-600' : ''}">${i.status === 'void' ? '—' : this.fmt(i.balance_due)}</td><td><span class="badge-pill ${i.status === 'void' ? 'badge-secondary' : i.balance_due > 0.001 ? 'badge-danger' : 'badge-success'}">${i.status === 'void' ? 'void' : i.balance_due > 0.001 ? (i.balance_due < i.amount ? 'partial' : 'open') : 'paid'}</span></td></tr>`).join('')}</tbody>
+            </table></div>
+          </div>` : ''}
         </div>
         <div class="modal-footer">
           <button class="btn btn-primary" onclick="App.closeModal();App.showPaymentModal(${c.id},'${c.first_name} ${c.last_name}',${c.account_balance||0})">Record Payment</button>
