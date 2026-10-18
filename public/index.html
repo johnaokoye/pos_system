@@ -3475,7 +3475,7 @@ const App = {
     if (method === 'credit') {
       if (!this.cartCustomer) { this.alert('Please select a customer to use charge account', 'error'); return; }
       if (this.cartCustomer.customer_type !== 'credit') { this.alert('Selected customer does not have a credit account. Edit the customer and set type to Credit.', 'error'); return; }
-      if (this.cartCustomer.account_blocked) { this.alert('This customer\'s account is blocked due to overdue payment. Please settle the outstanding balance before making new credit purchases.', 'error'); return; }
+      if (this.cartCustomer.account_blocked) { this.alert(this._creditBlockedText(this.cartCustomer), 'error'); return; }
     }
 
     const { subtotal, tax, discount, total } = this.getCartTotals();
@@ -4428,7 +4428,7 @@ const App = {
       c.customer_category_name ? `<span class="badge-pill badge-teal" title="Customer category">${esc(c.customer_category_name)}</span>` : '',
       `<span class="badge-pill ${isCredit ? 'badge-blue' : 'badge-success'}" title="Customer type">${isCredit ? 'Credit' : 'Cash'}</span>`,
       c.is_rental_customer ? `<span class="badge-pill badge-purple" title="Rental customer">🔑 Rental</span>` : '',
-      c.account_blocked ? `<span class="badge-pill badge-danger" title="Account blocked for overdue payment">Blocked</span>` : '',
+      c.account_blocked ? `<span class="badge-pill badge-danger" title="${this.escapeAttr(this._creditBlockedText(c))}">Blocked</span>` : '',
     ].filter(Boolean).join('');
     return `<div class="cart-cust-name">${esc(`${c.first_name || ''} ${c.last_name || ''}`.trim())}</div><div class="cart-cust-meta">${meta}</div>`;
   },
@@ -12735,7 +12735,7 @@ const App = {
               <div class="form-group"><label>Credit Terms (days)</label><input type="number" id="cf-terms" value="${c.credit_terms_days||30}" min="1" placeholder="e.g. 30"></div>
               <div class="form-group"><label>Credit Limit</label><input type="number" id="cf-limit" value="${c.credit_limit||0}" min="0" step="0.01" placeholder="0 = unlimited"></div>
             </div>
-            ${id && c.account_blocked ? `<div style="padding:8px 12px;background:#fff3f3;border:1px solid #f44336;border-radius:6px;color:#c62828;font-size:13px;margin-top:4px">&#9888; Account is blocked due to overdue payment.</div>` : ''}
+            ${id && c.credit_block ? this._creditBlockBoxHtml(c) : ''}
           </div>
           <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">
             <label style="display:flex;align-items:center;gap:4px;font-weight:600;cursor:pointer">
@@ -12960,6 +12960,50 @@ const App = {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
+  // Why a credit customer can't buy on account right now (lib/creditBlock.js).
+  _creditBlockedText(c) {
+    if (c.block_override === 'block') return `Account blocked${c.block_override_reason ? `: ${c.block_override_reason}` : ''}. It stays blocked until someone with permission unblocks it.`;
+    if ((c.credit_limit || 0) > 0 && (c.account_balance || 0) - c.credit_limit > 0.005) return `Account blocked: the balance (${this.fmt(c.account_balance)}) is over the credit limit (${this.fmt(c.credit_limit)}). A payment is needed to bring it back under the limit.`;
+    return `Account blocked: payment is overdue (credit terms ${c.credit_terms_days || 30} days). Settle the overdue balance to restore credit purchases.`;
+  },
+
+  // The Block box on a credit customer's form. Ticked whenever the account is
+  // blocked — automatically for an overdue balance, or by hand. Changing it
+  // needs customers_credit_block and a reason, and is saved with the form
+  // (PATCH /customers/:id/credit-block).
+  _creditBlockBoxHtml(c) {
+    const b = c.credit_block;
+    const canChange = this.can('customers_credit_block');
+    const by = b.override_by_name ? ` by ${this.escapeAttr(b.override_by_name)}` : '';
+    const when = b.override_at ? ` on ${new Date(b.override_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}` : '';
+    const why = b.reason ? ` — “${this.escapeAttr(b.reason)}”` : '';
+    // Why the automatic rule blocks it: overdue, over the credit limit, or both.
+    const autoWhy = [
+      b.overdue ? `the oldest unpaid invoice is ${b.days_since} days old (terms ${b.terms_days} days)` : '',
+      b.over_limit ? `the balance (${this.fmt(b.balance)}) is over the credit limit (${this.fmt(b.credit_limit)})` : '',
+    ].filter(Boolean).join(' and ');
+    const status = b.override === 'block' ? `Blocked by hand${by}${when}${why}. Stays blocked until unticked, even once payments are up to date.`
+      : b.override === 'unblock' ? `Would be blocked (${autoWhy}) but unblocked${by}${when}${why}. Stays unblocked until the account is up to date and within its limit; if it falls behind again it's blocked automatically.`
+      : b.blocked ? `Blocked automatically: ${autoWhy}. Unblocks by itself once payments are up to date and the balance is within the limit.`
+      : `Not blocked — payments are up to date and the balance is within the limit.`;
+    return `<div id="cf-block-box" data-initial="${b.blocked ? 1 : 0}" style="margin-top:6px;padding:10px 12px;border-radius:6px;border:1px solid ${b.blocked ? '#f44336' : 'var(--border)'};background:${b.blocked ? '#fff3f3' : 'transparent'}">
+      <label style="display:flex;align-items:center;gap:8px;margin:0;cursor:${canChange ? 'pointer' : 'default'};font-weight:600;${b.blocked ? 'color:#c62828' : ''}">
+        <input type="checkbox" id="cf-blocked" ${b.blocked ? 'checked' : ''} ${canChange ? '' : 'disabled'} onchange="App._toggleBlockReason()" style="width:auto;margin:0">
+        Block account (no new credit sales)
+      </label>
+      <p style="font-size:12px;margin:6px 0 0;color:var(--text-muted)">${status}${canChange ? '' : ' Only staff with the Block / Unblock Credit Accounts permission can change this.'}</p>
+      <div id="cf-block-reason-wrap" style="display:none;margin-top:8px">
+        <input id="cf-block-reason" placeholder="${b.blocked ? 'Why is this account being unblocked? (required)' : 'Why is this account being blocked? (required)'}">
+      </div>
+    </div>`;
+  },
+
+  _toggleBlockReason() {
+    const box = document.getElementById('cf-block-box');
+    const changed = document.getElementById('cf-blocked').checked !== (box.dataset.initial === '1');
+    document.getElementById('cf-block-reason-wrap').style.display = changed ? '' : 'none';
+  },
+
   _customerContactRowHtml(ct = {}) {
     const v = x => this.escapeAttr(x || '');
     return `<div class="cf-contact-row" style="display:grid;grid-template-columns:1.2fr 1fr 1fr 1.2fr;gap:6px;margin-bottom:6px">
@@ -13044,11 +13088,18 @@ const App = {
     if (customerKind === 'business' && !data.business_name) { this.alert('Business name is required', 'error'); return; }
     if (customerKind === 'individual' && (!data.first_name || !data.last_name)) { this.alert('First and last name required', 'error'); return; }
     if (data.contacts.some(ct => !ct.name && (ct.job_title || ct.phone || ct.email))) { this.alert('Each contact person needs a name', 'error'); return; }
+    // A changed Block box is saved separately (needs customers_credit_block).
+    const blockBox = document.getElementById('cf-block-box');
+    const blockChange = blockBox && data.customer_type === 'credit' && document.getElementById('cf-blocked').checked !== (blockBox.dataset.initial === '1')
+      ? { blocked: document.getElementById('cf-blocked').checked, reason: document.getElementById('cf-block-reason').value.trim() } : null;
+    if (blockChange && !blockChange.reason) { this.alert(`Enter a reason for ${blockChange.blocked ? 'blocking' : 'unblocking'} this account`, 'error'); return; }
     if (data.customer_type === 'credit' && data.credit_terms_days < 1) { this.alert('Credit terms must be at least 1 day', 'error'); return; }
     if (opts.force) data.force = true;
     try {
-      if (id) await this.api('PUT', `/customers/${id}`, data);
-      else {
+      if (id) {
+        await this.api('PUT', `/customers/${id}`, data);
+        if (blockChange) await this.api('PATCH', `/customers/${id}/credit-block`, blockChange);
+      } else {
         const created = await this.api('POST', '/customers', data);
         if (this._customerFormStack) return this._finishStackedCustomerForm(created.id);
       }
@@ -13355,7 +13406,7 @@ const App = {
           <button class="modal-close">✕</button>
         </div>
         <div class="modal-body">
-          ${c.account_blocked ? `<div style="padding:10px 14px;background:#ffebee;border:1px solid #f44336;border-radius:6px;color:#c62828;margin-bottom:12px;font-size:13px">&#9888; Account blocked: outstanding balance exceeds credit terms of ${c.credit_terms_days} days. Balance must be settled to restore purchasing access.</div>` : ''}
+          ${c.account_blocked ? `<div style="padding:10px 14px;background:#ffebee;border:1px solid #f44336;border-radius:6px;color:#c62828;margin-bottom:12px;font-size:13px">&#9888; ${this.escapeAttr(this._creditBlockedText(c))}</div>` : ''}
           <div class="stats-grid" style="grid-template-columns:1fr 1fr 1fr;margin-bottom:16px">
             <div class="stat-card blue"><div class="stat-label">Total Spent</div><div class="stat-value" style="font-size:20px">${this.fmt(c.total_spent)}</div></div>
             <div class="stat-card green"><div class="stat-label">Loyalty Points</div><div class="stat-value" style="font-size:20px">🏆 ${c.loyalty_points}</div></div>
@@ -22691,6 +22742,16 @@ const App = {
             </label>
           </div>
           <div class="form-group">
+            <label>Credit Control</label>
+            <label class="perm-item" style="padding:10px 12px;border:1px solid var(--border);border-radius:6px;display:flex;align-items:flex-start;gap:10px;cursor:pointer;margin-top:6px">
+              <input type="checkbox" id="sg-credit-block" ${perms.customers_credit_block ? 'checked' : ''} style="margin-top:2px;flex-shrink:0">
+              <span>
+                <strong>Block / Unblock Credit Accounts</strong><br>
+                <span style="font-size:12px;color:var(--text-muted)">Change the Block box on a credit customer: unblock an overdue account, or block one that's up to date. Separate from Customers access, so it isn't granted with the Customers module.</span>
+              </span>
+            </label>
+          </div>
+          <div class="form-group">
             <label>Module Access &amp; Permissions</label>
             <div style="margin-top:6px">${moduleRows}</div>
           </div>
@@ -22750,7 +22811,7 @@ const App = {
     const description = document.getElementById('sg-desc').value.trim();
     if (!name) { this.alert('Name required', 'error'); return; }
     // Start from the stored blob so keys outside _permissionTree survive a save.
-    const permissions = { ...(id ? this._sgEditingPerms : {}), multi_branch_access: document.getElementById('sg-multi-branch')?.checked || false, pos_view_margin: document.getElementById('sg-pos-margin')?.checked || false };
+    const permissions = { ...(id ? this._sgEditingPerms : {}), multi_branch_access: document.getElementById('sg-multi-branch')?.checked || false, pos_view_margin: document.getElementById('sg-pos-margin')?.checked || false, customers_credit_block: document.getElementById('sg-credit-block')?.checked || false };
     this._permissionTree.forEach(mod => {
       permissions[mod.key] = document.getElementById(`perm-${mod.key}`)?.checked || false;
       mod.subs.forEach(s => { permissions[s.key] = document.getElementById(`perm-${s.key}`)?.checked || false; });

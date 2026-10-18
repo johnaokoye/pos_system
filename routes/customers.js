@@ -3,7 +3,8 @@ const router = express.Router();
 const { db } = require('../database');
 const { requireAuth, requirePermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
-const { oldestOpenLegacySql, earliestDate } = require('../lib/legacyInvoices');
+const { oldestOpenLegacySql, oldestUnpaidSaleSql, earliestDate } = require('../lib/legacyInvoices');
+const { resolveBlock } = require('../lib/creditBlock');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -109,32 +110,56 @@ function resolveRentalPreapproval(req, current, isRentalCust, requested, canGran
     : { rental_preapproved: 0, rental_preapproved_by: null, rental_preapproved_at: null };
 }
 
-// Check if a credit customer has exceeded their payment terms and block/unblock accordingly
+// Over the credit limit: a limit is set (0 = unlimited) and the balance is
+// above it.
+const isOverLimit = c => (c.credit_limit || 0) > 0 && (c.account_balance || 0) - c.credit_limit > 0.005;
+
+// Days since `oldestDate` and whether that's past the customer's terms.
+function overdueFrom(oldestDate, termsDays) {
+  if (!oldestDate) return { overdue: false, days_since: null };
+  const daysSince = Math.floor((Date.now() - new Date(oldestDate).getTime()) / 86400000);
+  return { overdue: daysSince > (termsDays || 30), days_since: daysSince };
+}
+
+// Whether a credit customer should be blocked automatically: past their
+// payment terms (their oldest invoice still owing — credit sale or legacy
+// invoice — is older than credit_terms_days), or over their credit limit.
+// `auto` is either; a zero balance is neither.
+async function creditStatus(customer) {
+  const over_limit = isOverLimit(customer);
+  if (!(customer.account_balance > 0)) return { auto: false, overdue: false, over_limit: false, oldest_date: null, days_since: null };
+  const { rows: [oldest] } = await db.execute({ sql: `SELECT ${oldestUnpaidSaleSql('?')} as oldest_date, ${oldestOpenLegacySql('?')} as legacy_oldest_date`, args: [customer.id, customer.id] });
+  const oldestDate = earliestDate(oldest?.oldest_date, oldest?.legacy_oldest_date);
+  const { overdue, days_since } = overdueFrom(oldestDate, customer.credit_terms_days);
+  return { auto: overdue || over_limit, overdue, over_limit, oldest_date: oldestDate, days_since };
+}
+
+// Writes a customer's block flag and override; the override's who/when/why
+// are cleared along with it.
+async function writeBlock(customerId, { blocked, override }, meta = null) {
+  if (override && meta) {
+    await db.execute({ sql: 'UPDATE customers SET account_blocked = ?, block_override = ?, block_override_by = ?, block_override_at = ?, block_override_reason = ? WHERE id = ?',
+      args: [blocked, override, meta.by, meta.at, meta.reason, customerId] });
+  } else if (override) {
+    await db.execute({ sql: 'UPDATE customers SET account_blocked = ? WHERE id = ?', args: [blocked, customerId] });
+  } else {
+    await db.execute({ sql: 'UPDATE customers SET account_blocked = ?, block_override = NULL, block_override_by = NULL, block_override_at = NULL, block_override_reason = NULL WHERE id = ?', args: [blocked, customerId] });
+  }
+}
+
+// Check if a credit customer has exceeded their payment terms and block/unblock
+// accordingly — honoring a manual block/unblock (lib/creditBlock.js).
 async function runCreditCheck(customerId) {
   try {
     const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [customerId] });
     if (!customer || customer.customer_type !== 'credit') return;
-
-    if (customer.account_balance <= 0) {
-      await db.execute({ sql: 'UPDATE customers SET account_blocked = 0 WHERE id = ?', args: [customerId] });
-      return;
-    }
-
-    const { rows: [oldest] } = await db.execute({ sql: `SELECT (SELECT MIN(created_at) FROM transactions WHERE customer_id = ? AND payment_method = 'credit' AND status = 'completed') as oldest_date,
-      ${oldestOpenLegacySql('?')} as legacy_oldest_date`, args: [customerId, customerId] });
-
-    // Unpaid invoices carried over from the old system count too.
-    const oldestDate = earliestDate(oldest?.oldest_date, oldest?.legacy_oldest_date);
-    if (!oldestDate) return;
-
-    const daysSince = Math.floor((Date.now() - new Date(oldestDate).getTime()) / 86400000);
-    const exceeded = daysSince > (customer.credit_terms_days || 30);
-    await db.execute({ sql: 'UPDATE customers SET account_blocked = ? WHERE id = ?', args: [exceeded ? 1 : 0, customerId] });
+    const { auto } = await creditStatus(customer);
+    await writeBlock(customerId, resolveBlock(auto, customer.block_override));
   } catch(e) {}
 }
 
 // Same logic as runCreditCheck above, but for a whole batch of customers in
-// a bounded number of queries (1 SELECT + up to 2 UPDATEs) instead of one
+// a bounded number of queries (1 SELECT + up to 3 UPDATEs) instead of one
 // runCreditCheck() call per customer — GET / below runs this on every
 // request (it's used broadly: POS customer picker, CRM, accounts, not just
 // the Customers screen), so a per-customer loop here would get slower with
@@ -146,21 +171,23 @@ async function runCreditCheckBatch(customerIds) {
   try {
     const placeholders = customerIds.map(() => '?').join(',');
     const { rows } = await db.execute({
-      sql: `SELECT c.id, c.credit_terms_days,
-              (SELECT MIN(created_at) FROM transactions WHERE customer_id = c.id AND payment_method = 'credit' AND status = 'completed') as oldest_date,
+      sql: `SELECT c.id, c.credit_terms_days, c.credit_limit, c.account_balance, c.block_override,
+              ${oldestUnpaidSaleSql('c.id')} as oldest_date,
               ${oldestOpenLegacySql('c.id')} as legacy_oldest_date
             FROM customers c WHERE c.id IN (${placeholders})`,
       args: customerIds,
     });
-    const exceededIds = [], okIds = [];
+    const blockedIds = [], okIds = [], clearOverrideIds = [];
     for (const r of rows) {
-      const oldestDate = earliestDate(r.oldest_date, r.legacy_oldest_date);
-      if (!oldestDate) continue;
-      const daysSince = Math.floor((Date.now() - new Date(oldestDate).getTime()) / 86400000);
-      (daysSince > (r.credit_terms_days || 30) ? exceededIds : okIds).push(r.id);
+      const { overdue } = overdueFrom(earliestDate(r.oldest_date, r.legacy_oldest_date), r.credit_terms_days);
+      const { blocked, override } = resolveBlock(overdue || isOverLimit(r), r.block_override);
+      (blocked ? blockedIds : okIds).push(r.id);
+      if (r.block_override && !override) clearOverrideIds.push(r.id);
     }
-    if (exceededIds.length) await db.execute({ sql: `UPDATE customers SET account_blocked = 1 WHERE id IN (${exceededIds.map(() => '?').join(',')})`, args: exceededIds });
-    if (okIds.length) await db.execute({ sql: `UPDATE customers SET account_blocked = 0 WHERE id IN (${okIds.map(() => '?').join(',')})`, args: okIds });
+    const ph = ids => ids.map(() => '?').join(',');
+    if (blockedIds.length) await db.execute({ sql: `UPDATE customers SET account_blocked = 1 WHERE id IN (${ph(blockedIds)})`, args: blockedIds });
+    if (okIds.length) await db.execute({ sql: `UPDATE customers SET account_blocked = 0 WHERE id IN (${ph(okIds)})`, args: okIds });
+    if (clearOverrideIds.length) await db.execute({ sql: `UPDATE customers SET block_override = NULL, block_override_by = NULL, block_override_at = NULL, block_override_reason = NULL WHERE id IN (${ph(clearOverrideIds)})`, args: clearOverrideIds });
   } catch(e) {}
 }
 
@@ -426,6 +453,42 @@ async function saveContacts(customerId, rows) {
   }
 }
 
+// The Block box's state for the customer form: the automatic overdue
+// position plus any manual decision and who made it.
+async function creditBlockInfo(customer) {
+  if (!customer || customer.customer_type !== 'credit') return null;
+  const status = await creditStatus(customer);
+  let override_by_name = null;
+  if (customer.block_override_by) {
+    const { rows: [e] } = await db.execute({ sql: 'SELECT first_name, last_name FROM employees WHERE id = ?', args: [customer.block_override_by] });
+    if (e) override_by_name = `${e.first_name} ${e.last_name}`;
+  }
+  return { ...status, terms_days: customer.credit_terms_days || 30, credit_limit: customer.credit_limit || 0, balance: customer.account_balance || 0, blocked: !!customer.account_blocked,
+    override: customer.block_override || null, override_by_name, override_at: customer.block_override_at || null, reason: customer.block_override_reason || null };
+}
+
+// Tick/untick the Block box. Ticking an up-to-date account blocks it by hand
+// until someone unticks it; unticking an overdue one lets it through until
+// it's up to date again (lib/creditBlock.js). A reason is required either way.
+router.patch('/:id/credit-block', requirePermission('customers_credit_block'), async (req, res) => {
+  try {
+    const reason = String(req.body.reason || '').trim();
+    if (!reason) return res.status(400).json({ error: 'A reason is required to block or unblock an account' });
+    const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.id] });
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    if (customer.customer_type !== 'credit') return res.status(400).json({ error: 'Only credit customers can be blocked' });
+    const { auto } = await creditStatus(customer);
+    const wantBlocked = !!req.body.blocked;
+    // Blocking an account the automatic rule already blocks (overdue or over
+    // limit) just leaves that in place; unblocking an up-to-date one just
+    // removes a manual block.
+    const override = wantBlocked ? (auto ? null : 'block') : (auto ? 'unblock' : null);
+    await writeBlock(customer.id, resolveBlock(auto, override), override ? { by: req.employee?.id || null, at: new Date().toISOString(), reason } : null);
+    const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [customer.id] });
+    res.json({ ...row, credit_block: await creditBlockInfo(row) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/:id', requireAuth, async (req, res) => {
   try {
     const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.id] });
@@ -434,7 +497,7 @@ router.get('/:id', requireAuth, async (req, res) => {
     const { rows: [updated] } = await db.execute({ sql: CUSTOMER_WITH_CARD_SELECT, args: [req.params.id] });
     const { rows: transactions } = await db.execute({ sql: 'SELECT * FROM transactions WHERE customer_id = ? ORDER BY created_at DESC LIMIT 10', args: [req.params.id] });
     const { rows: contacts } = await db.execute({ sql: 'SELECT id, name, job_title, phone, email FROM customer_contacts WHERE customer_id = ? ORDER BY sort_order, id', args: [req.params.id] });
-    res.json({ ...updated, recent_transactions: transactions, contacts });
+    res.json({ ...updated, recent_transactions: transactions, contacts, credit_block: await creditBlockInfo(updated) });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -618,7 +681,7 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
     if (names) await db.execute({ sql: 'UPDATE customers SET customer_kind = ?, business_name = ? WHERE id = ?', args: [names.kind, names.business_name, req.params.id] });
     if (contactSet) await saveContacts(req.params.id, contactSet.rows);
     if (type === 'cash') {
-      await db.execute({ sql: 'UPDATE customers SET account_blocked = 0 WHERE id = ?', args: [req.params.id] });
+      await writeBlock(req.params.id, { blocked: 0, override: null });
     } else {
       await runCreditCheck(req.params.id);
     }

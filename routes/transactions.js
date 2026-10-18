@@ -6,6 +6,7 @@ const { getWcSettings, wcRequest } = require('./woocommerce');
 const { syncBinQty } = require('../lib/binSync');
 const { requireAuth, requirePermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
+const { blockedMessage } = require('../lib/creditBlock');
 const { isSerialNumberProduct, serialNumberLabel, serialNumberOf } = require('../lib/serialNumber');
 const { checkDiscountEligibility } = require('./promotions');
 
@@ -315,10 +316,10 @@ router.post('/', requirePermission('pos'), async (req, res) => {
     const isCredit = method === 'credit';
 
     if (isCredit && customer_id) {
-      const { rows: [cust] } = await db.execute({ sql: 'SELECT customer_type, account_blocked FROM customers WHERE id = ?', args: [customer_id] });
+      const { rows: [cust] } = await db.execute({ sql: 'SELECT customer_type, account_blocked, block_override, block_override_reason, credit_limit, account_balance FROM customers WHERE id = ?', args: [customer_id] });
       if (!cust) return res.status(400).json({ error: 'Customer not found' });
       if (cust.customer_type !== 'credit') return res.status(400).json({ error: 'Customer does not have a credit account' });
-      if (cust.account_blocked) return res.status(400).json({ error: 'Customer account is blocked due to overdue payment. Please settle the outstanding balance first.' });
+      if (cust.account_blocked) return res.status(400).json({ error: blockedMessage(cust) });
     }
 
     const tendered = tenderLegs ? total : parseFloat(amount_tendered || (isCredit ? 0 : total));
@@ -417,6 +418,10 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       }
       // Auto-calculate commission (non-blocking, best-effort)
       try { await calcCommission(commissionEmployeeId, savedTx.total, 'transaction', txId, savedTx.transaction_number); } catch(e) {}
+      // A credit sale can take the account over its limit — re-check so the
+      // Block box (lib/creditBlock.js) reflects it straight away, as rental
+      // credit checkouts already do. Required lazily: customers.js loads after.
+      if (isCredit && customer_id) { try { await require('./customers').runCreditCheck(customer_id); } catch(e) {} }
       res.status(201).json(savedTx);
     } catch(e) {
       // Once committed, the sale is saved — rolling back a closed transaction

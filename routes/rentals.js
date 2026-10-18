@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { getOutstandingQty, getOutOfServiceQty } = require('../lib/rentalAvailability');
+const { blockedMessage } = require('../lib/creditBlock');
 const { depositWaiver, isCreditCustomerType, getBranchStock, feeFor, blendedFeePerUnit, checkAvailability, parseDbTime, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, assertNoUnpaidRentalReturns, dueDateTime, requiredDepositReturnMethod, rentalDiscount, attachRateBasis, rentalWindow, rateLineOf } = require('../lib/rentals');
 const { ratePlanError } = require('../lib/rentalPricing');
 const { requirePermission, requireAnyPermission, requireAuth, can, canManageRentals, requireRentalsManage } = require('../lib/permissions');
@@ -497,7 +498,7 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
       const cust = rentalCustomer;
       if (!cust) return res.status(400).json({ error: 'Customer not found' });
       if (!isCreditCustomerType(cust.customer_type)) return res.status(400).json({ error: 'Customer does not have a credit account' });
-      if (cust.account_blocked) return res.status(400).json({ error: 'Customer account is blocked due to overdue payment. Please settle the outstanding balance first.' });
+      if (cust.account_blocked) return res.status(400).json({ error: blockedMessage(cust) });
       // A credit rental charges straight to the customer's account with no
       // cash/card in hand — the PO is what ties that charge back to the
       // customer's own paperwork, so it's required before the charge posts.

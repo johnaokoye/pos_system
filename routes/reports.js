@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { requireAuth, requirePermission, requireAnyPermission } = require('../lib/permissions');
-const { oldestOpenLegacySql, earliestDate } = require('../lib/legacyInvoices');
+const { oldestOpenLegacySql, oldestUnpaidSaleSql, earliestDate } = require('../lib/legacyInvoices');
 
 // Sales summary for a date range
 router.get('/sales', requirePermission('reports'), async (req, res) => {
@@ -849,7 +849,7 @@ router.get('/credit-risk', requirePermission('reports'), async (req, res) => {
     const { rows: customers } = await db.execute({
       sql: `SELECT c.id, c.customer_number, c.first_name || ' ' || c.last_name as customer_name,
               c.credit_limit, c.account_balance, c.account_blocked, c.credit_terms_days,
-              (SELECT MIN(created_at) FROM transactions WHERE customer_id = c.id AND payment_method = 'credit' AND status = 'completed') as oldest_unpaid_date,
+              ${oldestUnpaidSaleSql('c.id')} as oldest_unpaid_date,
               ${oldestOpenLegacySql('c.id')} as legacy_oldest_date
             FROM customers c
             WHERE c.credit_enabled = 1 AND c.active = 1 AND c.account_balance > 0

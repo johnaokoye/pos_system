@@ -1868,6 +1868,12 @@ async function _init() {
     // first_name + last_name shows the business name unchanged. Its people
     // are in customer_contacts.
     "ALTER TABLE customers ADD COLUMN customer_kind TEXT NOT NULL DEFAULT 'individual'",
+    // Manual credit block decision on top of the automatic overdue block —
+    // 'block' or 'unblock' (see lib/creditBlock.js), with who/when/why.
+    'ALTER TABLE customers ADD COLUMN block_override TEXT',
+    'ALTER TABLE customers ADD COLUMN block_override_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE customers ADD COLUMN block_override_at DATETIME',
+    'ALTER TABLE customers ADD COLUMN block_override_reason TEXT',
     'ALTER TABLE customers ADD COLUMN business_name TEXT',
     // Express same-day service — a supervisor-only surcharge (see the
     // wo_signoff check in PATCH /work-orders/:id/estimate) applied at
@@ -2543,6 +2549,14 @@ async function _init() {
       // included, and cost shouldn't show on a customer-facing screen by
       // default.
       if (!('pos_view_margin' in perms)) { perms.pos_view_margin = can(perms, 'reports_financial'); changed = true; }
+      // Credit-account Block box (lib/creditBlock.js) — standalone for the
+      // same reason: as a `customers` sub it would go to every group with
+      // full Customers access, cashiers included. Starts on the groups the
+      // owner chose (2026-10-18); others are ticked in Security Groups.
+      if (!('customers_credit_block' in perms)) {
+        perms.customers_credit_block = /^(administrator|manager|accounts? receivables?)$/i.test(String(g.name || '').trim());
+        changed = true;
+      }
       if (changed) await db.execute({ sql: 'UPDATE security_groups SET permissions = ? WHERE id = ?', args: [JSON.stringify(perms), g.id] });
     }
   } catch(e) {}
