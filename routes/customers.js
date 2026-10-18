@@ -5,6 +5,7 @@ const { requireAuth, requirePermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { oldestOpenLegacySql, oldestUnpaidSaleSql, earliestDate } = require('../lib/legacyInvoices');
 const { resolveBlock } = require('../lib/creditBlock');
+const { phoneKeys, syncPhoneKeys } = require('../lib/phoneKeys');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -42,19 +43,32 @@ const PHONE_MATCH_SQL = `(phone IS NOT NULL AND phone != '' AND (CASE WHEN LENGT
 // match is a hard duplicate — the contact details belong to someone else, so
 // the record is refused outright; a name-only match is just a warning (two
 // people can share a name) that the caller may override with `force`.
+//
+// Phones match when any number in one field is any number in the other
+// (lib/phoneKeys.js — handles several numbers per field, 7-digit local
+// numbers, a leading 1, and ignores placeholders like 000-0000), via the
+// indexed customer_phone_keys; the older whole-field comparison is kept as a
+// fallback for a phone whose keys haven't been rebuilt yet. Emails only count
+// when they look like an address.
 async function findDuplicateCustomers({ email, phone, first_name, last_name }, excludeCustomerId = null) {
-  const phoneNorm = normalizePhone(phone);
-  const emailNorm = String(email || '').trim().toLowerCase();
+  const keys = phoneKeys(phone);
+  // No real number (blank, partial, or a placeholder like 000-0000) → no
+  // phone match at all, including the older whole-field fallback.
+  const phoneNorm = keys.length ? normalizePhone(phone) : '';
+  const emailRaw = String(email || '').trim().toLowerCase();
+  const emailNorm = emailRaw.includes('@') ? emailRaw : '';
   const { rows } = await db.execute({
     sql: `SELECT * FROM customers WHERE active = 1 AND id != ? AND (
       (email IS NOT NULL AND email != '' AND LOWER(TRIM(email)) = ?)
+      ${keys.length ? `OR id IN (SELECT customer_id FROM customer_phone_keys WHERE phone_key IN (${keys.map(() => '?').join(',')}))` : ''}
       OR ${PHONE_MATCH_SQL}
       OR (LOWER(first_name) = LOWER(?) AND LOWER(last_name) = LOWER(?)))`,
-    args: [excludeCustomerId || 0, emailNorm || '\u0000', phoneNorm || '\u0000', first_name || '', last_name || ''],
+    args: [excludeCustomerId || 0, emailNorm || '\u0000', ...keys, phoneNorm.length >= 7 ? phoneNorm : '\u0000', first_name || '', last_name || ''],
   });
   return rows.map(r => {
     const match_on = [];
-    if (phoneNorm && normalizePhone(r.phone) === phoneNorm) match_on.push('phone');
+    const theirKeys = phoneKeys(r.phone);
+    if ((phoneNorm.length >= 7 && normalizePhone(r.phone) === phoneNorm) || keys.some(k => theirKeys.includes(k))) match_on.push('phone');
     if (emailNorm && String(r.email || '').trim().toLowerCase() === emailNorm) match_on.push('email');
     if (first_name && last_name && String(r.first_name || '').toLowerCase() === String(first_name).toLowerCase()
       && String(r.last_name || '').toLowerCase() === String(last_name).toLowerCase()) match_on.push('name');
@@ -199,7 +213,7 @@ router.get('/', requireAuth, async (req, res) => {
     const { rows: overdue } = await db.execute({ sql: "SELECT id FROM customers WHERE customer_type = 'credit' AND active = 1 AND account_balance > 0", args: [] });
     await runCreditCheckBatch(overdue.map(c => c.id));
 
-    const { search, active } = req.query;
+    const { search, active, type } = req.query;
     let sql = 'SELECT * FROM customers WHERE 1=1';
     const params = [];
     if (search) {
@@ -208,8 +222,16 @@ router.get('/', requireAuth, async (req, res) => {
       params.push(s, s, s, s, s);
     }
     if (active !== undefined) { sql += ' AND active = ?'; params.push(active); }
+    // Customers list filter: credit / cash, or rental approved (can rent
+    // today — a rental customer who's preapproved or has every required
+    // document, lib/rentals.js) vs other (everyone who can't yet).
+    if (type === 'credit' || type === 'cash') { sql += ' AND customer_type = ?'; params.push(type); }
     sql += ' ORDER BY last_name, first_name';
     const { rows } = await db.execute({ sql, args: params });
+    if (type === 'rental_approved' || type === 'other') {
+      const approved = c => !!c.is_rental_customer && (!!c.rental_preapproved || getMissingRentalFields(c).length === 0);
+      return res.json(rows.filter(c => approved(c) === (type === 'rental_approved')));
+    }
     res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -608,6 +630,7 @@ router.post('/', requirePermission('customers_add'), async (req, res) => {
         cash_back_card_type_id || null, cash_back_card_type_id ? (cash_back_card_number || null) : null,
         customer_category_id || null] });
     const newId = Number(result.lastInsertRowid);
+    await syncPhoneKeys(db, newId, phone);
     if (names) await db.execute({ sql: 'UPDATE customers SET customer_kind = ?, business_name = ? WHERE id = ?', args: [names.kind, names.business_name, newId] });
     if (contactSet) await saveContacts(newId, contactSet.rows);
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [newId] });
@@ -679,6 +702,7 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
         cash_back_card_type_id || null, cash_back_card_type_id ? (cash_back_card_number || null) : null,
         customer_category_id || null, req.params.id] });
     if (names) await db.execute({ sql: 'UPDATE customers SET customer_kind = ?, business_name = ? WHERE id = ?', args: [names.kind, names.business_name, req.params.id] });
+    await syncPhoneKeys(db, req.params.id, phone);
     if (contactSet) await saveContacts(req.params.id, contactSet.rows);
     if (type === 'cash') {
       await writeBlock(req.params.id, { blocked: 0, override: null });
@@ -792,6 +816,9 @@ router.post('/import', requirePermission('customers_import'), async (req, res) =
             isPreapproved ? 1 : 0, isPreapproved ? (req.employee?.id || null) : null, isPreapproved ? new Date().toISOString() : null],
         });
         const newId = Number(result.lastInsertRowid);
+        // Keys first, so a later row in the same file with this number is
+        // caught as a duplicate too.
+        await syncPhoneKeys(db, newId, phone);
         await db.execute({ sql: 'UPDATE customers SET customer_kind = ?, business_name = ? WHERE id = ?', args: [names.kind, names.business_name, newId] });
         if (contactSet.rows.length) await saveContacts(newId, contactSet.rows);
         created++;

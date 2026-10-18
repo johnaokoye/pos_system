@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { syncPhoneKeys } = require('../lib/phoneKeys');
 const { calcCommission } = require('./commissions');
 const { findDuplicateCustomers, isHardDuplicate, hardDuplicateError } = require('./customers');
 const { requirePermission, can } = require('../lib/permissions');
@@ -155,6 +156,7 @@ router.post('/leads/:id/convert', async (req, res) => {
       await convTx.commit();
       committed = true;
       const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [custId] });
+      try { await syncPhoneKeys(db, custId, customer.phone); } catch(e) {}
       res.json({ customer, message: 'Lead converted to customer' });
     } catch(e) {
       // Once committed, the customer is saved — rolling back a closed transaction

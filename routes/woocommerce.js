@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const { db } = require('../database');
+const { syncPhoneKeys } = require('../lib/phoneKeys');
 const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { findDuplicateCustomers } = require('./customers');
@@ -453,6 +454,7 @@ async function resolveOrderCustomer(order) {
     sql: `INSERT INTO customers (customer_number, first_name, last_name, email, phone, address, city, state, zip, notes) VALUES (?,?,?,?,?,?,?,?,?,?)`,
     args: [customer_number, billing.first_name || 'WooCommerce', billing.last_name || 'Customer', billing.email || null, billing.phone || null, billing.address_1 || null, billing.city || null, billing.state || null, billing.postcode || null, `Auto-created from WooCommerce order #${order.number}`],
   });
+  await syncPhoneKeys(db, Number(result.lastInsertRowid), billing.phone);
   return Number(result.lastInsertRowid);
 }
 

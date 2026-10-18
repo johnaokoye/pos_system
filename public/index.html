@@ -12611,25 +12611,42 @@ const App = {
   },
 
   // ─── Customers ────────────────────────────────────────────
+  // Search box + type filter together (GET /customers ?search= &type=).
+  _customerListQuery() {
+    const q = document.getElementById('cust-search')?.value || '';
+    const type = document.getElementById('cust-type-filter')?.value || '';
+    return `/customers?active=1${q ? `&search=${encodeURIComponent(q)}` : ''}${type ? `&type=${type}` : ''}`;
+  },
+
   async renderCustomers() {
     const customers = await this.api('GET', '/customers?active=1');
     if (this.section !== 'customers') return;
 
     document.getElementById('content').innerHTML = `
-      <div class="section-header">
+      <div class="section-header" style="gap:16px;flex-wrap:wrap">
         <h2>Customers</h2>
-        <div style="display:flex;gap:10px;">
-          <div class="search-bar">
-            <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
-            <input type="text" id="cust-search" placeholder="Search customers..." style="width:260px">
-          </div>
-          ${this.can('customers_import') ? `<a class="btn btn-secondary btn-sm" href="/api/customers/export/template" download title="Download import template">&#8659; Template</a>` : ''}
-          ${this.can('customers_import') ? `<label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import customers from CSV or Excel">&#8657; Import<input type="file" accept=".csv,.tsv,.txt,.xls,.xlsx" style="display:none" onchange="App.importCustomersCsv(this)"></label>` : ''}
-          ${this.can('customers_import_history') ? `<button class="btn btn-secondary btn-sm" onclick="App.showCustomerImportHistory()" title="Review or reverse past CSV imports">Import History</button>` : ''}
-          ${this.can('customers_export_balances') ? `<button class="btn btn-secondary btn-sm" onclick="App.showCustomerBalancesExport()" title="Export AR balance, credit note total, and status by customer type">Export Balances</button>` : ''}
-          ${this.can('customers_missing_rental_info') ? `<button class="btn btn-secondary btn-sm" onclick="App.showRentalIncompleteReport()" title="Rental customers missing the ID/reference/document info required to create a rental">🔑 Missing Rental Info</button>` : ''}
-          ${this.can('customers_add') ? `<button class="btn btn-primary" onclick="App.showCustomerForm()">+ Add Customer</button>` : ''}
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
+          ${this.can('customers_import') ? `<a class="btn btn-secondary btn-sm" style="white-space:nowrap;text-decoration:none" href="/api/customers/export/template" download title="Download import template">&#8659; Template</a>` : ''}
+          ${this.can('customers_import') ? `<label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0;white-space:nowrap;text-transform:none;letter-spacing:normal" title="Import customers from CSV or Excel">&#8657; Import<input type="file" accept=".csv,.tsv,.txt,.xls,.xlsx" style="display:none" onchange="App.importCustomersCsv(this)"></label>` : ''}
+          ${this.can('customers_import_history') ? `<button class="btn btn-secondary btn-sm" style="white-space:nowrap" onclick="App.showCustomerImportHistory()" title="Review or reverse past CSV imports">Import History</button>` : ''}
+          ${this.can('customers_export_balances') ? `<button class="btn btn-secondary btn-sm" style="white-space:nowrap" onclick="App.showCustomerBalancesExport()" title="Export AR balance, credit note total, and status by customer type">Export Balances</button>` : ''}
+          ${this.can('customers_missing_rental_info') ? `<button class="btn btn-secondary btn-sm" style="white-space:nowrap" onclick="App.showRentalIncompleteReport()" title="Rental customers missing the ID/reference/document info required to create a rental">🔑 Missing Rental Info</button>` : ''}
+          ${this.can('customers_add') ? `<button class="btn btn-primary" style="white-space:nowrap" onclick="App.showCustomerForm()">+ Add Customer</button>` : ''}
         </div>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+        <div class="search-bar" style="flex:1 1 280px;max-width:420px">
+          <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+          <input type="text" id="cust-search" placeholder="Search name, number, phone or email…" style="width:100%">
+        </div>
+        <select id="cust-type-filter" title="Show only this kind of customer" style="width:auto;flex:0 0 auto">
+          <option value="">All Customers</option>
+          <option value="credit">Credit</option>
+          <option value="cash">Cash</option>
+          <option value="rental_approved">Rental Approved</option>
+          <option value="other">Other (not rental approved)</option>
+        </select>
+        <span id="cust-count" style="font-size:13px;color:var(--text-muted);margin-left:auto"></span>
       </div>
       <div class="card">
         <div class="table-wrap" id="cust-table"></div>
@@ -12637,16 +12654,21 @@ const App = {
 
     this.buildCustomerTable(customers);
 
-    document.getElementById('cust-search').addEventListener('input', async e => {
-      const q = e.target.value;
-      const data = await this.api('GET', `/customers?search=${encodeURIComponent(q)}&active=1`);
-      this.buildCustomerTable(data);
-    });
+    const refresh = async () => {
+      const url = this._customerListQuery();
+      this._customerListUrl = url;
+      const data = await this.api('GET', url);
+      if (this._customerListUrl === url) this.buildCustomerTable(data); // ignore a slower, older response
+    };
+    document.getElementById('cust-search').addEventListener('input', refresh);
+    document.getElementById('cust-type-filter').addEventListener('change', refresh);
   },
 
   buildCustomerTable(customers) {
     const el = document.getElementById('cust-table');
     if (!el) return;
+    const count = document.getElementById('cust-count');
+    if (count) count.textContent = `${customers.length.toLocaleString()} customer${customers.length === 1 ? '' : 's'}`;
     if (!customers.length) { el.innerHTML = '<div class="empty-state"><p>No customers found</p></div>'; return; }
     el.innerHTML = `<table>
       <thead><tr><th>Customer #</th><th>Name</th><th>Type</th><th>Email</th><th>Phone</th><th>City</th><th>Loyalty Pts</th><th>Total Spent</th><th>Actions</th></tr></thead>

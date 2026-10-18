@@ -315,6 +315,15 @@ async function _init() {
     // Contact people at a business customer (customers.customer_kind =
     // 'business') — name and job title, plus how to reach them. Replaced as
     // a set on each save of the customer form (routes/customers.js).
+    // Each number in a customer's phone field as a 10-digit key, for
+    // duplicate checks (lib/phoneKeys.js). customers.phone_keys_src is the
+    // phone the keys were last built from.
+    { sql: `CREATE TABLE IF NOT EXISTS customer_phone_keys (
+      customer_id INTEGER NOT NULL REFERENCES customers(id),
+      phone_key TEXT NOT NULL
+    )` },
+    { sql: 'CREATE INDEX IF NOT EXISTS idx_customer_phone_keys_key ON customer_phone_keys(phone_key)' },
+    { sql: 'CREATE INDEX IF NOT EXISTS idx_customer_phone_keys_customer ON customer_phone_keys(customer_id)' },
     { sql: `CREATE TABLE IF NOT EXISTS customer_contacts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       customer_id INTEGER NOT NULL REFERENCES customers(id),
@@ -1875,6 +1884,7 @@ async function _init() {
     'ALTER TABLE customers ADD COLUMN block_override_at DATETIME',
     'ALTER TABLE customers ADD COLUMN block_override_reason TEXT',
     'ALTER TABLE customers ADD COLUMN business_name TEXT',
+    'ALTER TABLE customers ADD COLUMN phone_keys_src TEXT',
     // Express same-day service — a supervisor-only surcharge (see the
     // wo_signoff check in PATCH /work-orders/:id/estimate) applied at
     // assessment time. The 25% is baked directly into estimate_labor/
@@ -2421,6 +2431,27 @@ async function _init() {
       }
     }
   } catch(e) {}
+
+  // Build/refresh customer_phone_keys for every customer whose phone changed
+  // since its keys were made — all of them the first time, then only ones
+  // written by something that didn't call syncPhoneKeys. Batched, and NOT
+  // awaited: a migrated list of tens of thousands of customers takes minutes
+  // on a remote DB, and the app shouldn't be unavailable meanwhile —
+  // findDuplicateCustomers' whole-field fallback covers rows not done yet.
+  (async () => {
+    const { phoneKeys } = require('./lib/phoneKeys');
+    for (;;) {
+      const { rows } = await db.execute({ sql: "SELECT id, phone FROM customers WHERE phone_keys_src IS NULL OR phone_keys_src != COALESCE(phone, '') LIMIT 500", args: [] });
+      if (!rows.length) break;
+      const stmts = [];
+      for (const r of rows) {
+        stmts.push({ sql: 'DELETE FROM customer_phone_keys WHERE customer_id = ?', args: [r.id] });
+        for (const key of phoneKeys(r.phone)) stmts.push({ sql: 'INSERT INTO customer_phone_keys (customer_id, phone_key) VALUES (?, ?)', args: [r.id, key] });
+        stmts.push({ sql: 'UPDATE customers SET phone_keys_src = ? WHERE id = ?', args: [r.phone || '', r.id] });
+      }
+      await db.batch(stmts, 'write');
+    }
+  })().catch(e => console.error('phone key backfill:', e.message));
 
   // One-time cleanup: the legacy customer migration (old system's Crystal
   // export, 2026-10-17) wrote each A/R customer's old balance into notes as
