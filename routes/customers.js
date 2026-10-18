@@ -345,6 +345,42 @@ const CUSTOMER_WITH_CARD_SELECT = `SELECT c.*, dct.name as discount_card_type_na
   LEFT JOIN customer_categories cc ON c.customer_category_id = cc.id
   LEFT JOIN employees rpe ON c.rental_preapproved_by = rpe.id WHERE c.id = ?`;
 
+// Individual vs business. A business's name is stored in business_name and
+// mirrored into first_name (last_name '') so everywhere that prints
+// first_name + last_name shows it. Returns { kind, business_name,
+// first_name, last_name } or { error }. Only used when the request says which
+// kind it is — older callers (imports, API clients) keep sending first/last.
+function resolveCustomerNames(body) {
+  if (body.customer_kind === 'business') {
+    const name = String(body.business_name || '').trim();
+    if (!name) return { error: 'Business name is required' };
+    return { kind: 'business', business_name: name, first_name: name, last_name: '' };
+  }
+  const first = String(body.first_name || '').trim(), last = String(body.last_name || '').trim();
+  if (!first || !last) return { error: 'First and last name required' };
+  return { kind: 'individual', business_name: null, first_name: first, last_name: last };
+}
+
+// Replaces a customer's contact people with `contacts` ([{ name, job_title,
+// phone, email }]) — rows with nothing filled in are dropped; a row with
+// details but no name is refused.
+function cleanContacts(contacts) {
+  const rows = (Array.isArray(contacts) ? contacts : []).map(c => ({
+    name: String(c?.name || '').trim(), job_title: String(c?.job_title || '').trim() || null,
+    phone: String(c?.phone || '').trim() || null, email: String(c?.email || '').trim() || null,
+  })).filter(c => c.name || c.job_title || c.phone || c.email);
+  const unnamed = rows.find(c => !c.name);
+  if (unnamed) return { error: 'Each contact person needs a name' };
+  return { rows };
+}
+
+async function saveContacts(customerId, rows) {
+  await db.execute({ sql: 'DELETE FROM customer_contacts WHERE customer_id = ?', args: [customerId] });
+  for (const [i, c] of rows.entries()) {
+    await db.execute({ sql: 'INSERT INTO customer_contacts (customer_id, name, job_title, phone, email, sort_order) VALUES (?,?,?,?,?,?)', args: [customerId, c.name, c.job_title, c.phone, c.email, i] });
+  }
+}
+
 router.get('/:id', requireAuth, async (req, res) => {
   try {
     const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.id] });
@@ -352,7 +388,8 @@ router.get('/:id', requireAuth, async (req, res) => {
     await runCreditCheck(req.params.id);
     const { rows: [updated] } = await db.execute({ sql: CUSTOMER_WITH_CARD_SELECT, args: [req.params.id] });
     const { rows: transactions } = await db.execute({ sql: 'SELECT * FROM transactions WHERE customer_id = ? ORDER BY created_at DESC LIMIT 10', args: [req.params.id] });
-    res.json({ ...updated, recent_transactions: transactions });
+    const { rows: contacts } = await db.execute({ sql: 'SELECT id, name, job_title, phone, email FROM customer_contacts WHERE customer_id = ? ORDER BY sort_order, id', args: [req.params.id] });
+    res.json({ ...updated, recent_transactions: transactions, contacts });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -405,7 +442,7 @@ async function validateCashBackCard(cash_back_card_type_id, cash_back_card_numbe
 
 router.post('/', requirePermission('customers_add'), async (req, res) => {
   const {
-    first_name, last_name, email, phone, address, city, state, zip, notes, customer_type, credit_terms_days, credit_limit, tax_exempt, tax_exemption_number,
+    email, phone, address, city, state, zip, notes, customer_type, credit_terms_days, credit_limit, tax_exempt, tax_exemption_number,
     is_rental_customer, rental_id_type, rental_id_number, rental_address_proof_type,
     rental_reference_name, rental_reference_phone, rental_reference_relationship, rental_reference_address,
     rental_reference2_name, rental_reference2_phone, rental_reference2_relationship,
@@ -415,7 +452,14 @@ router.post('/', requirePermission('customers_add'), async (req, res) => {
     cash_back_card_type_id, cash_back_card_number,
     customer_category_id,
   } = req.body;
-  if (!first_name || !last_name) return res.status(400).json({ error: 'First and last name required' });
+  let { first_name, last_name } = req.body;
+  const hasKind = 'customer_kind' in req.body;
+  const names = hasKind ? resolveCustomerNames(req.body) : null;
+  if (names?.error) return res.status(400).json({ error: names.error });
+  if (names) ({ first_name, last_name } = names);
+  const contactSet = 'contacts' in req.body ? cleanContacts(req.body.contacts) : null;
+  if (contactSet?.error) return res.status(400).json({ error: contactSet.error });
+  if (!first_name || (!last_name && names?.kind !== 'business')) return res.status(400).json({ error: 'First and last name required' });
   try {
     // Guard against creating a duplicate customer record: match on email,
     // phone, or full name against active customers.
@@ -455,7 +499,10 @@ router.post('/', requirePermission('customers_add'), async (req, res) => {
         discount_card_type_id || null, discount_card_type_id ? (discount_card_number || null) : null,
         cash_back_card_type_id || null, cash_back_card_type_id ? (cash_back_card_number || null) : null,
         customer_category_id || null] });
-    const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [Number(result.lastInsertRowid)] });
+    const newId = Number(result.lastInsertRowid);
+    if (names) await db.execute({ sql: 'UPDATE customers SET customer_kind = ?, business_name = ? WHERE id = ?', args: [names.kind, names.business_name, newId] });
+    if (contactSet) await saveContacts(newId, contactSet.rows);
+    const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [newId] });
     res.status(201).json(row);
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -464,7 +511,7 @@ router.post('/', requirePermission('customers_add'), async (req, res) => {
 
 router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
   const {
-    first_name, last_name, email, phone, address, city, state, zip, notes, active, customer_type, credit_terms_days, credit_limit, tax_exempt, tax_exemption_number,
+    email, phone, address, city, state, zip, notes, active, customer_type, credit_terms_days, credit_limit, tax_exempt, tax_exemption_number,
     is_rental_customer, rental_id_type, rental_id_number, rental_address_proof_type,
     rental_reference_name, rental_reference_phone, rental_reference_relationship, rental_reference_address,
     rental_reference2_name, rental_reference2_phone, rental_reference2_relationship,
@@ -474,6 +521,14 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
     cash_back_card_type_id, cash_back_card_number,
     customer_category_id,
   } = req.body;
+  // Kind/business name and contacts only change when the caller sends them
+  // (PUT otherwise overwrites every column, and older callers don't know them).
+  let { first_name, last_name } = req.body;
+  const names = 'customer_kind' in req.body ? resolveCustomerNames(req.body) : null;
+  if (names?.error) return res.status(400).json({ error: names.error });
+  if (names) ({ first_name, last_name } = names);
+  const contactSet = 'contacts' in req.body ? cleanContacts(req.body.contacts) : null;
+  if (contactSet?.error) return res.status(400).json({ error: contactSet.error });
   try {
     const cardError = await validateDiscountCard(discount_card_type_id, discount_card_number, req.params.id);
     if (cardError) return res.status(400).json({ error: cardError });
@@ -515,6 +570,8 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
         discount_card_type_id || null, discount_card_type_id ? (discount_card_number || null) : null,
         cash_back_card_type_id || null, cash_back_card_type_id ? (cash_back_card_number || null) : null,
         customer_category_id || null, req.params.id] });
+    if (names) await db.execute({ sql: 'UPDATE customers SET customer_kind = ?, business_name = ? WHERE id = ?', args: [names.kind, names.business_name, req.params.id] });
+    if (contactSet) await saveContacts(req.params.id, contactSet.rows);
     if (type === 'cash') {
       await db.execute({ sql: 'UPDATE customers SET account_blocked = 0 WHERE id = ?', args: [req.params.id] });
     } else {

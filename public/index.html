@@ -12086,7 +12086,7 @@ const App = {
     { key: 'phone',                 label: 'Phone' },
     { key: 'address',               label: 'Address' },
     { key: 'city',                  label: 'City' },
-    { key: 'state',                 label: 'State' },
+    { key: 'state',                 label: 'Parish', aliases: ['State', 'Parish / State'] },
     { key: 'zip',                   label: 'ZIP' },
     { key: 'customer_type',         label: 'Customer Type (cash/credit)' },
     { key: 'credit_terms_days',     label: 'Credit Terms (days)' },
@@ -12631,7 +12631,7 @@ const App = {
         const preapprovedBadge = c.is_rental_customer && c.rental_preapproved ? ' <span class="badge-pill badge-success" title="Can be rented to despite incomplete compliance info">Preapproved</span>' : '';
         return `<tr>
         <td style="font-family:monospace;font-size:12px">${c.customer_number}</td>
-        <td class="fw-600">${c.first_name} ${c.last_name}</td>
+        <td class="fw-600">${c.first_name} ${c.last_name}${c.customer_kind === 'business' ? ' <span class="badge-pill badge-secondary" style="font-size:10px">Business</span>' : ''}</td>
         <td style="white-space:nowrap">${typeBadge}${taxExemptBadge}${rentalBadge}${preapprovedBadge}</td>
         <td style="color:var(--text-muted)">${c.email||'—'}</td>
         <td>${c.phone||'—'}</td>
@@ -12656,6 +12656,10 @@ const App = {
     const isCredit = (c.customer_type || 'cash') === 'credit';
     const isTaxExempt = c.tax_exempt ? true : false;
     const isRentalCust = c.is_rental_customer ? true : false;
+    const isBusiness = c.customer_kind === 'business';
+    // A business always offers at least 3 contact rows.
+    const contactRows = [...(c.contacts || [])];
+    while (contactRows.length < 3) contactRows.push({});
     // Include the customer's current type even if it's since been
     // deactivated, so editing them doesn't silently drop it from the list.
     const cardTypeOptions = c.discount_card_type_id && !cardTypes.some(t => t.id === c.discount_card_type_id)
@@ -12671,19 +12675,31 @@ const App = {
       <div class="modal">
         <div class="modal-header"><span class="modal-title">${id ? 'Edit Customer' : 'Add Customer'}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
-          <div class="input-row">
-            <div class="form-group"><label>First Name *</label><input id="cf-first" value="${c.first_name||''}"></div>
-            <div class="form-group"><label>Last Name *</label><input id="cf-last" value="${c.last_name||''}"></div>
+          <div class="form-group" style="display:flex;gap:18px;align-items:center;margin-bottom:12px">
+            <label style="margin:0;font-weight:600">Customer is</label>
+            <label style="display:flex;align-items:center;gap:6px;margin:0;font-weight:normal;cursor:pointer"><input type="radio" name="cf-kind" value="individual" ${!isBusiness?'checked':''} onchange="App._toggleCustomerKind()" style="width:auto;margin:0"> Individual</label>
+            <label style="display:flex;align-items:center;gap:6px;margin:0;font-weight:normal;cursor:pointer"><input type="radio" name="cf-kind" value="business" ${isBusiness?'checked':''} onchange="App._toggleCustomerKind()" style="width:auto;margin:0"> Business</label>
           </div>
+          <div class="input-row" id="cf-individual-names" style="${isBusiness?'display:none':''}">
+            <div class="form-group"><label>First Name *</label><input id="cf-first" value="${this.escapeAttr(isBusiness ? '' : c.first_name)}"></div>
+            <div class="form-group"><label>Last Name *</label><input id="cf-last" value="${this.escapeAttr(isBusiness ? '' : c.last_name)}"></div>
+          </div>
+          <div class="form-group" id="cf-business-name-wrap" style="${isBusiness?'':'display:none'}"><label>Business Name *</label><input id="cf-business-name" value="${this.escapeAttr(isBusiness ? (c.business_name || c.first_name) : '')}"></div>
           <div class="input-row">
             <div class="form-group"><label>Email</label><input type="email" id="cf-email" value="${c.email||''}"></div>
             <div class="form-group"><label>Phone</label><input id="cf-phone" value="${c.phone||''}"></div>
           </div>
-          <div class="form-group"><label>Address</label><input id="cf-addr" value="${c.address||''}"></div>
+          <div class="form-group"><label id="cf-addr-label">${isBusiness ? 'Business Address' : 'Address'}</label><input id="cf-addr" value="${c.address||''}"></div>
           <div class="input-row-3">
             <div class="form-group"><label>City</label><input id="cf-city" value="${c.city||''}"></div>
-            <div class="form-group"><label>State</label><input id="cf-state" value="${c.state||''}" maxlength="2"></div>
+            <div class="form-group"><label>Parish</label><input id="cf-state" value="${c.state||''}"></div>
             <div class="form-group"><label>ZIP</label><input id="cf-zip" value="${c.zip||''}"></div>
+          </div>
+          <div id="cf-contacts-section" style="${isBusiness?'':'display:none'};border-top:1px solid var(--border);margin-top:4px;padding-top:12px;margin-bottom:12px">
+            <strong style="font-size:12px;color:var(--text-muted);text-transform:uppercase">Contact Persons</strong>
+            <p style="font-size:11px;color:var(--text-muted);margin:2px 0 8px">The people you deal with at this business. Leave unused rows blank.</p>
+            <div id="cf-contacts">${contactRows.map(ct => this._customerContactRowHtml(ct)).join('')}</div>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="App._addCustomerContactRow()">+ Add Contact</button>
           </div>
           <div class="form-group"><label>Notes</label><textarea id="cf-notes" rows="2">${c.notes||''}</textarea></div>
           <div class="form-group">
@@ -12930,13 +12946,54 @@ const App = {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
+  _customerContactRowHtml(ct = {}) {
+    const v = x => this.escapeAttr(x || '');
+    return `<div class="cf-contact-row" style="display:grid;grid-template-columns:1.2fr 1fr 1fr 1.2fr;gap:6px;margin-bottom:6px">
+      <input class="cf-contact-name" placeholder="Name" value="${v(ct.name)}">
+      <input class="cf-contact-title" placeholder="Job title" value="${v(ct.job_title)}">
+      <input class="cf-contact-phone" placeholder="Phone" value="${v(ct.phone)}">
+      <input class="cf-contact-email" type="email" placeholder="Email" value="${v(ct.email)}">
+    </div>`;
+  },
+
+  _addCustomerContactRow() {
+    document.getElementById('cf-contacts').insertAdjacentHTML('beforeend', this._customerContactRowHtml());
+  },
+
+  // Individual shows First/Last Name; Business shows Business Name, labels the
+  // address as the business's, and adds the contact persons. Switching an
+  // existing individual to a business starts the business name from their
+  // current name (and back), so nothing typed is lost.
+  _toggleCustomerKind() {
+    const isBusiness = document.querySelector('input[name="cf-kind"]:checked')?.value === 'business';
+    const first = document.getElementById('cf-first'), last = document.getElementById('cf-last'), biz = document.getElementById('cf-business-name');
+    if (isBusiness && !biz.value.trim()) biz.value = `${first.value} ${last.value}`.trim();
+    if (!isBusiness && !first.value.trim() && !last.value.trim() && biz.value.trim()) {
+      const [f, ...rest] = biz.value.trim().split(/\s+/);
+      first.value = f; last.value = rest.join(' ');
+    }
+    document.getElementById('cf-individual-names').style.display = isBusiness ? 'none' : '';
+    document.getElementById('cf-business-name-wrap').style.display = isBusiness ? '' : 'none';
+    document.getElementById('cf-contacts-section').style.display = isBusiness ? '' : 'none';
+    document.getElementById('cf-addr-label').textContent = isBusiness ? 'Business Address' : 'Address';
+  },
+
   async saveCustomer(id, opts = {}) {
     const customerType = document.getElementById('cf-type')?.value || 'cash';
     const taxExempt = document.getElementById('cf-tax-exempt')?.checked ? 1 : 0;
     const isRentalCustomer = document.getElementById('cf-rental-customer')?.checked ? 1 : 0;
+    const customerKind = document.querySelector('input[name="cf-kind"]:checked')?.value === 'business' ? 'business' : 'individual';
     const data = {
+      customer_kind: customerKind,
       first_name: document.getElementById('cf-first').value.trim(),
       last_name: document.getElementById('cf-last').value.trim(),
+      business_name: document.getElementById('cf-business-name').value.trim(),
+      contacts: customerKind === 'business' ? Array.from(document.querySelectorAll('.cf-contact-row')).map(r => ({
+        name: r.querySelector('.cf-contact-name').value.trim(),
+        job_title: r.querySelector('.cf-contact-title').value.trim(),
+        phone: r.querySelector('.cf-contact-phone').value.trim(),
+        email: r.querySelector('.cf-contact-email').value.trim(),
+      })) : [],
       email: document.getElementById('cf-email').value.trim() || null,
       phone: document.getElementById('cf-phone').value.trim() || null,
       address: document.getElementById('cf-addr').value.trim() || null,
@@ -12970,7 +13027,9 @@ const App = {
       cash_back_card_number: document.getElementById('cf-cash-back-card-number')?.value.trim() || null,
       customer_category_id: document.getElementById('cf-category')?.value || null,
     };
-    if (!data.first_name || !data.last_name) { this.alert('First and last name required', 'error'); return; }
+    if (customerKind === 'business' && !data.business_name) { this.alert('Business name is required', 'error'); return; }
+    if (customerKind === 'individual' && (!data.first_name || !data.last_name)) { this.alert('First and last name required', 'error'); return; }
+    if (data.contacts.some(ct => !ct.name && (ct.job_title || ct.phone || ct.email))) { this.alert('Each contact person needs a name', 'error'); return; }
     if (data.customer_type === 'credit' && data.credit_terms_days < 1) { this.alert('Credit terms must be at least 1 day', 'error'); return; }
     if (opts.force) data.force = true;
     try {

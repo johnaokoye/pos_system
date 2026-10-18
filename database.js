@@ -312,6 +312,19 @@ async function _init() {
     // (routes/accounts.js) list, age and take payments against them alongside
     // credit-sale invoices. status is 'open' or 'void' — paid/partial comes
     // from legacy_invoice_allocations.
+    // Contact people at a business customer (customers.customer_kind =
+    // 'business') — name and job title, plus how to reach them. Replaced as
+    // a set on each save of the customer form (routes/customers.js).
+    { sql: `CREATE TABLE IF NOT EXISTS customer_contacts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      customer_id INTEGER NOT NULL REFERENCES customers(id),
+      name TEXT NOT NULL,
+      job_title TEXT,
+      phone TEXT,
+      email TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS ar_legacy_invoices (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       customer_id INTEGER NOT NULL REFERENCES customers(id),
@@ -1850,6 +1863,12 @@ async function _init() {
     'ALTER TABLE customers ADD COLUMN rental_reference_id_path TEXT',
     // See customer_categories table above.
     'ALTER TABLE customers ADD COLUMN customer_category_id INTEGER REFERENCES customer_categories(id)',
+    // 'individual' or 'business'. A business keeps its name in business_name
+    // AND first_name (last_name ''), so every screen/document that shows
+    // first_name + last_name shows the business name unchanged. Its people
+    // are in customer_contacts.
+    "ALTER TABLE customers ADD COLUMN customer_kind TEXT NOT NULL DEFAULT 'individual'",
+    'ALTER TABLE customers ADD COLUMN business_name TEXT',
     // Express same-day service — a supervisor-only surcharge (see the
     // wo_signoff check in PATCH /work-orders/:id/estimate) applied at
     // assessment time. The 25% is baked directly into estimate_labor/
