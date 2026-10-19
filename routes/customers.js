@@ -5,6 +5,8 @@ const { requireAuth, requirePermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { oldestOpenLegacySql, oldestUnpaidSaleSql, earliestDate } = require('../lib/legacyInvoices');
 const { resolveBlock } = require('../lib/creditBlock');
+const { UNAPPLIED_SQL, unappliedTotal, oldestOwingDate } = require('../lib/customerPayments');
+const { mergeCustomers, mergePreview } = require('../lib/customerMerge');
 const { phoneKeys, syncPhoneKeys } = require('../lib/phoneKeys');
 const multer = require('multer');
 const path = require('path');
@@ -142,8 +144,13 @@ function overdueFrom(oldestDate, termsDays) {
 async function creditStatus(customer) {
   const over_limit = isOverLimit(customer);
   if (!(customer.account_balance > 0)) return { auto: false, overdue: false, over_limit: false, oldest_date: null, days_since: null };
-  const { rows: [oldest] } = await db.execute({ sql: `SELECT ${oldestUnpaidSaleSql('?')} as oldest_date, ${oldestOpenLegacySql('?')} as legacy_oldest_date`, args: [customer.id, customer.id] });
-  const oldestDate = earliestDate(oldest?.oldest_date, oldest?.legacy_oldest_date);
+  // Open (unapplied) payments count against the oldest invoices first.
+  const oldestDate = (await unappliedTotal(db, customer.id)) > 0
+    ? await oldestOwingDate(db, customer.id)
+    : await (async () => {
+      const { rows: [oldest] } = await db.execute({ sql: `SELECT ${oldestUnpaidSaleSql('?')} as oldest_date, ${oldestOpenLegacySql('?')} as legacy_oldest_date`, args: [customer.id, customer.id] });
+      return earliestDate(oldest?.oldest_date, oldest?.legacy_oldest_date);
+    })();
   const { overdue, days_since } = overdueFrom(oldestDate, customer.credit_terms_days);
   return { auto: overdue || over_limit, overdue, over_limit, oldest_date: oldestDate, days_since };
 }
@@ -186,6 +193,7 @@ async function runCreditCheckBatch(customerIds) {
     const placeholders = customerIds.map(() => '?').join(',');
     const { rows } = await db.execute({
       sql: `SELECT c.id, c.credit_terms_days, c.credit_limit, c.account_balance, c.block_override,
+              (SELECT COUNT(*) FROM account_payments ap WHERE ap.customer_id = c.id AND ap.payment_method != 'writeoff' AND ${UNAPPLIED_SQL} > 0.005) as open_payments,
               ${oldestUnpaidSaleSql('c.id')} as oldest_date,
               ${oldestOpenLegacySql('c.id')} as legacy_oldest_date
             FROM customers c WHERE c.id IN (${placeholders})`,
@@ -193,7 +201,10 @@ async function runCreditCheckBatch(customerIds) {
     });
     const blockedIds = [], okIds = [], clearOverrideIds = [];
     for (const r of rows) {
-      const { overdue } = overdueFrom(earliestDate(r.oldest_date, r.legacy_oldest_date), r.credit_terms_days);
+      // A customer with open payments waiting to be applied needs the
+      // per-customer calculation (lib/customerPayments.js oldestOwingDate).
+      const oldestDate = Number(r.open_payments) > 0 ? await oldestOwingDate(db, r.id) : earliestDate(r.oldest_date, r.legacy_oldest_date);
+      const { overdue } = overdueFrom(oldestDate, r.credit_terms_days);
       const { blocked, override } = resolveBlock(overdue || isOverLimit(r), r.block_override);
       (blocked ? blockedIds : okIds).push(r.id);
       if (r.block_override && !override) clearOverrideIds.push(r.id);
@@ -226,6 +237,8 @@ router.get('/', requireAuth, async (req, res) => {
     // today — a rental customer who's preapproved or has every required
     // document, lib/rentals.js) vs other (everyone who can't yet).
     if (type === 'credit' || type === 'cash') { sql += ' AND customer_type = ?'; params.push(type); }
+    // Only customers with something owing on account (POS Receive Payment).
+    if (req.query.owing) sql += ' AND account_balance > 0.005';
     sql += ' ORDER BY last_name, first_name';
     const { rows } = await db.execute({ sql, args: params });
     if (type === 'rental_approved' || type === 'other') {
@@ -233,6 +246,119 @@ router.get('/', requireAuth, async (req, res) => {
       return res.json(rows.filter(c => approved(c) === (type === 'rental_approved')));
     }
     res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Duplicate finder & merge ──────────────────────────────
+// Groups of active customers that share a phone number (customer_phone_keys,
+// so differently-written numbers still match) or an email. Customers linked
+// by either are one group. Registered before GET /:id.
+async function duplicateGroups() {
+  const { rows: phoneRows } = await db.execute({ sql: `SELECT k.phone_key AS key, k.customer_id AS id FROM customer_phone_keys k JOIN customers c ON c.id = k.customer_id AND c.active = 1
+    WHERE k.phone_key IN (SELECT k2.phone_key FROM customer_phone_keys k2 JOIN customers c2 ON c2.id = k2.customer_id AND c2.active = 1 GROUP BY k2.phone_key HAVING COUNT(DISTINCT k2.customer_id) > 1)`, args: [] });
+  const { rows: emailRows } = await db.execute({ sql: `SELECT LOWER(TRIM(email)) AS key, id FROM customers WHERE active = 1 AND email LIKE '%@%'
+    AND LOWER(TRIM(email)) IN (SELECT LOWER(TRIM(email)) FROM customers WHERE active = 1 AND email LIKE '%@%' GROUP BY LOWER(TRIM(email)) HAVING COUNT(*) > 1)`, args: [] });
+  // Union-find over customers sharing any key.
+  const parent = new Map();
+  const find = x => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); } return x; };
+  const union = (a, b) => { for (const x of [a, b]) if (!parent.has(x)) parent.set(x, x); const ra = find(a), rb = find(b); if (ra !== rb) parent.set(ra, rb); };
+  const reasons = new Map();
+  for (const [rows, kind] of [[phoneRows, 'phone'], [emailRows, 'email']]) {
+    const byKey = new Map();
+    for (const r of rows) (byKey.get(r.key) || byKey.set(r.key, []).get(r.key)).push(Number(r.id));
+    for (const [key, ids] of byKey) {
+      for (const id of ids) union(ids[0], id);
+      reasons.set(`${kind}:${key}`, ids);
+    }
+  }
+  const groups = new Map();
+  for (const id of parent.keys()) { const root = find(id); (groups.get(root) || groups.set(root, []).get(root)).push(id); }
+  const { rows: dismissed } = await db.execute({ sql: 'SELECT group_key FROM customer_duplicate_dismissals', args: [] });
+  const dismissedKeys = new Set(dismissed.map(d => d.group_key));
+  const out = [];
+  for (const ids of groups.values()) {
+    ids.sort((a, b) => a - b);
+    const key = ids.join(',');
+    if (dismissedKeys.has(key)) continue;
+    const shared = [...reasons.entries()].filter(([, rIds]) => rIds.some(i => ids.includes(i))).map(([k]) => {
+      const [kind, value] = [k.slice(0, k.indexOf(':')), k.slice(k.indexOf(':') + 1)];
+      return kind === 'phone' ? `phone ${value.slice(0, 3)}-${value.slice(3, 6)}-${value.slice(6)}` : `email ${value}`;
+    });
+    out.push({ key, ids, shared });
+  }
+  return out.sort((a, b) => b.ids.length - a.ids.length || a.ids[0] - b.ids[0]);
+}
+
+// Find Duplicates screen: one page of groups with each customer's details and
+// activity, plus a suggested customer to keep — the one with the most history,
+// preferring a rental-approved record, then the oldest.
+router.get('/duplicates', requirePermission('customers_merge'), async (req, res) => {
+  try {
+    const all = await duplicateGroups();
+    const pageSize = 25;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const slice = all.slice((page - 1) * pageSize, page * pageSize);
+    const ids = slice.flatMap(g => g.ids);
+    const byId = new Map();
+    if (ids.length) {
+      const ph = ids.map(() => '?').join(',');
+      const { rows } = await db.execute({ sql: `SELECT c.*,
+          (SELECT COUNT(*) FROM transactions t WHERE t.customer_id = c.id) AS sales_count,
+          (SELECT MAX(created_at) FROM transactions t WHERE t.customer_id = c.id) AS last_sale_at,
+          (SELECT COUNT(*) FROM rental_agreements r WHERE r.customer_id = c.id) AS rentals_count,
+          (SELECT COUNT(*) FROM ar_legacy_invoices li WHERE li.customer_id = c.id) AS legacy_invoice_count,
+          EXISTS (SELECT 1 FROM customer_import_batch_items b WHERE b.customer_id = c.id AND b.action = 'created') AS from_import
+        FROM customers c WHERE c.id IN (${ph})`, args: ids });
+      for (const r of rows) byId.set(Number(r.id), r);
+    }
+    const approved = c => !!c.is_rental_customer && (!!c.rental_preapproved || getMissingRentalFields(c).length === 0);
+    const score = c => (approved(c) ? 100000 : 0) + (Number(c.sales_count) + Number(c.rentals_count) + Number(c.legacy_invoice_count)) * 100 + (c.account_balance ? 50 : 0) - Number(c.id) / 1e7;
+    const groups = slice.map(g => {
+      const customers = g.ids.map(id => byId.get(id)).filter(Boolean).map(c => ({
+        id: c.id, customer_number: c.customer_number, name: `${c.first_name} ${c.last_name}`.trim(), customer_kind: c.customer_kind,
+        phone: c.phone, email: c.email, address: [c.address, c.city, c.state].filter(Boolean).join(', '),
+        customer_type: c.customer_type, account_balance: c.account_balance || 0, loyalty_points: c.loyalty_points || 0,
+        rental_approved: approved(c), is_rental_customer: !!c.is_rental_customer, created_at: c.created_at, from_import: !!c.from_import,
+        sales_count: Number(c.sales_count), rentals_count: Number(c.rentals_count), legacy_invoice_count: Number(c.legacy_invoice_count), last_sale_at: c.last_sale_at,
+        _score: score(c),
+      }));
+      const keep = customers.reduce((best, c) => (!best || c._score > best._score ? c : best), null);
+      customers.forEach(c => delete c._score);
+      return { key: g.key, shared: g.shared, suggested_keep_id: keep?.id || null, customers };
+    });
+    res.json({ total_groups: all.length, total_customers: all.reduce((n, g) => n + g.ids.length, 0), page, page_size: pageSize, groups });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// What merging these customers would move onto the kept one, per customer.
+router.get('/merge-preview', requirePermission('customers_merge'), async (req, res) => {
+  try {
+    const ids = String(req.query.ids || '').split(',').map(Number).filter(Boolean);
+    const out = {};
+    for (const id of ids) out[id] = await mergePreview(id);
+    res.json(out);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Merge one or more duplicates into the customer being kept.
+router.post('/merge', requirePermission('customers_merge'), async (req, res) => {
+  try {
+    const keepId = parseInt(req.body.keep_id);
+    const mergeIds = (Array.isArray(req.body.merge_ids) ? req.body.merge_ids : []).map(Number).filter(id => id && id !== keepId);
+    if (!keepId || !mergeIds.length) return res.status(400).json({ error: 'Choose the customer to keep and at least one to merge into it' });
+    let kept;
+    for (const id of mergeIds) kept = await mergeCustomers(id, keepId, req.employee?.id || null);
+    res.json({ kept, merged: mergeIds.length });
+  } catch(e) { res.status(400).json({ error: e.message }); }
+});
+
+// "Not duplicates" — hide this exact group from the finder.
+router.post('/duplicates/dismiss', requirePermission('customers_merge'), async (req, res) => {
+  try {
+    const ids = (Array.isArray(req.body.ids) ? req.body.ids : []).map(Number).filter(Boolean).sort((a, b) => a - b);
+    if (ids.length < 2) return res.status(400).json({ error: 'A group needs at least two customers' });
+    await db.execute({ sql: 'INSERT OR IGNORE INTO customer_duplicate_dismissals (group_key, dismissed_by) VALUES (?, ?)', args: [ids.join(','), req.employee?.id || null] });
+    res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

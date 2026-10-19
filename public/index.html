@@ -2583,6 +2583,7 @@ const App = {
       this.can('pos_reprint_ticket') ? `<button class="pos-grid-btn" onclick="App.posReprintTicket()">Reprint Ticket</button>` : '',
       this.can('transactions') ? `<button class="pos-grid-btn" onclick="App.showSection('transactions')">Returns</button>` : '',
       this.can('pos_pay_on_account') ? `<button class="pos-grid-btn pay-acct" onclick="App.processPayment('credit')">Pay On Acct</button>` : '',
+      this.currentUser?.permissions?.pos_receive_payment ? `<button class="pos-grid-btn pay-acct" onclick="App.showReceivePaymentModal()" title="Take a payment from a customer toward their account">Receive Payment</button>` : '',
       this.can('pos_change_quantity') ? `<button class="pos-grid-btn" onclick="App.posQuantitySelectedLine()">Quantity</button>` : '',
       this.can('pos_cancel_ticket') ? `<button class="pos-grid-btn void" onclick="App.posCancelTicket()">Cancel Ticket</button>` : '',
       this.can('pos_payment') ? `<button class="pos-grid-btn payment" style="grid-column:1 / -1" onclick="App.showPOSPaymentModal()">PAYMENT</button>` : '',
@@ -2758,10 +2759,192 @@ const App = {
 
   // "Payment" grid button — the same 6 tender buttons that used to sit
   // always-visible under the cart, now opened on demand; processPayment()
-  // itself is untouched. Named distinctly from the unrelated Accounts
-  // Receivable showPaymentModal(customerId,...) elsewhere in this file —
-  // App is one flat object, so a same-named method here would have silently
-  // won or lost the definition depending on declaration order.
+  // itself is untouched. Named distinctly from other payment modals (e.g.
+  // showReceivePaymentModal for account payments) — App is one flat object,
+  // so a same-named method would silently win or lose the definition
+  // depending on declaration order.
+  // ─── Receive Payment (POS) ────────────────────────────────
+  // A cashier takes a payment toward a customer's credit account
+  // (lib/customerPayments.js, permission pos_receive_payment): either an
+  // open payment on account, or applied to invoices the cashier picks. It
+  // goes into the open drawer session. Open payments waiting to be applied
+  // are listed too, and can be applied to invoices here.
+  async showReceivePaymentModal() {
+    if (!this.currentDrawerSession) { this.alert('Open a cash drawer before receiving a payment', 'error'); return; }
+    let owing = [];
+    try { owing = await this.api('GET', '/customers?active=1&owing=1'); } catch (e) { this.alert(e.message, 'error'); return; }
+    const preset = this.cartCustomer && owing.find(c => c.id === this.cartCustomer.id) ? this.cartCustomer.id : null;
+    this._custPickerOnSelect = { ...(this._custPickerOnSelect || {}), 'rp-customer': c => this._rpLoad(c?.id || null) };
+    this.showModal(`
+      <div class="modal" style="max-width:760px">
+        <div class="modal-header"><span class="modal-title">Receive Payment</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div class="form-group"><label>Customer</label>${this._customerPickerHtml('rp-customer', owing, preset, { placeholder: `Search ${owing.length.toLocaleString()} customer${owing.length === 1 ? '' : 's'} with a balance…` })}</div>
+          <div id="rp-body"><p style="font-size:13px;color:var(--text-muted)">Choose the customer who is paying.</p></div>
+        </div>
+        <div class="modal-footer" id="rp-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+        </div>
+      </div>`);
+    if (preset) this._rpLoad(preset);
+  },
+
+  async _rpLoad(customerId, keep = {}) {
+    const body = document.getElementById('rp-body');
+    if (!body) return;
+    if (!customerId) { body.innerHTML = '<p style="font-size:13px;color:var(--text-muted)">Choose the customer who is paying.</p>'; this._rpFooter(''); return; }
+    body.innerHTML = '<p style="font-size:13px;color:var(--text-muted)">Loading account…</p>';
+    try { this._rp = { summary: await this.api('GET', `/customer-payments/${customerId}`), mode: keep.mode || 'open', applying: null }; }
+    catch (e) { body.innerHTML = `<p class="color-danger">${this.escapeAttr(e.message)}</p>`; return; }
+    this._rpRender();
+  },
+
+  _rpFooter(html) {
+    const f = document.getElementById('rp-footer');
+    if (f) f.innerHTML = `<button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>${html}`;
+  },
+
+  _rpInvoiceRows(prefix) {
+    const { invoices } = this._rp.summary;
+    if (!invoices.length) return '<p style="font-size:12px;color:var(--text-muted);margin:6px 0">No open invoices on this account.</p>';
+    return `<div class="table-wrap" style="max-height:240px;overflow-y:auto"><table>
+      <thead><tr><th style="width:32px"></th><th>Invoice</th><th>Date</th><th>Total</th><th>Balance Due</th><th style="width:120px">Apply</th></tr></thead>
+      <tbody>${invoices.map((inv, i) => `<tr>
+        <td><input type="checkbox" class="${prefix}-pick" data-i="${i}" onchange="App._rpPick(this,'${prefix}')" style="width:auto;margin:0"></td>
+        <td class="fw-600" style="font-size:12px">${this.escapeAttr(inv.transaction_number)}${inv.kind === 'legacy' ? ' <span class="badge-pill badge-secondary" style="font-size:10px">Legacy</span>' : ''}</td>
+        <td style="font-size:12px;color:var(--text-muted)">${inv.kind === 'legacy' ? this._apDate(inv.created_at) : this.fmtDate(inv.created_at)}</td>
+        <td style="font-size:12px">${this.fmt(inv.total)}</td>
+        <td style="font-size:12px" class="color-danger fw-600">${this.fmt(inv.balance_due)}</td>
+        <td><input type="number" class="${prefix}-amt" data-i="${i}" step="0.01" min="0" max="${Number(inv.balance_due).toFixed(2)}" disabled placeholder="0.00" oninput="App._rpRecalc('${prefix}')" style="width:110px;padding:4px 6px;font-size:12px"></td>
+      </tr>`).join('')}</tbody>
+    </table></div>`;
+  },
+
+  _rpPick(cb, prefix) {
+    const inv = this._rp.summary.invoices[cb.dataset.i];
+    const amt = document.querySelector(`.${prefix}-amt[data-i="${cb.dataset.i}"]`);
+    amt.disabled = !cb.checked;
+    amt.value = cb.checked ? Number(inv.balance_due).toFixed(2) : '';
+    this._rpRecalc(prefix);
+  },
+
+  _rpAllocations(prefix) {
+    return Array.from(document.querySelectorAll(`.${prefix}-pick:checked`)).map(cb => {
+      const inv = this._rp.summary.invoices[cb.dataset.i];
+      const amount = parseFloat(document.querySelector(`.${prefix}-amt[data-i="${cb.dataset.i}"]`).value) || 0;
+      return inv.kind === 'legacy' ? { legacy_invoice_id: inv.legacy_invoice_id, amount } : { transaction_id: inv.id, amount };
+    }).filter(a => a.amount > 0);
+  },
+
+  _rpRecalc(prefix) {
+    const total = this._rpAllocations(prefix).reduce((t, a) => t + a.amount, 0);
+    if (prefix === 'rp' && this._rp.mode === 'invoices') { const amt = document.getElementById('rp-amount'); if (amt) amt.value = total ? total.toFixed(2) : ''; }
+    const el = document.getElementById(`${prefix}-applied-total`);
+    if (el) el.textContent = this.fmt(total);
+  },
+
+  _rpRender() {
+    const { summary, mode } = this._rp;
+    const c = summary.customer;
+    const methods = [['cash', 'Cash'], ['credit_card', 'Credit Card'], ['debit_card', 'Debit Card'], ['check', 'Cheque'], ['direct_deposit', 'Direct Deposit']];
+    document.getElementById('rp-body').innerHTML = `
+      <div style="display:flex;gap:20px;flex-wrap:wrap;font-size:13px;padding:10px 12px;border:1px solid var(--border);border-radius:6px;margin-bottom:12px">
+        <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Balance Owed</div><div class="fw-600 color-danger" style="font-size:18px">${this.fmt(c.account_balance)}</div></div>
+        <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Open Invoices</div><div class="fw-600" style="font-size:18px">${summary.invoices.length}</div></div>
+        ${summary.unapplied_total > 0 ? `<div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Paid, Not Yet Applied</div><div class="fw-600 color-success" style="font-size:18px">${this.fmt(summary.unapplied_total)}</div></div>` : ''}
+        ${c.account_blocked ? `<div style="align-self:center"><span class="badge-pill badge-danger">Account Blocked</span></div>` : ''}
+      </div>
+      <div style="display:flex;gap:18px;margin-bottom:10px;font-size:13px">
+        <label style="display:flex;gap:6px;align-items:center;margin:0;cursor:pointer;font-weight:${mode === 'open' ? 600 : 400}"><input type="radio" name="rp-mode" value="open" ${mode === 'open' ? 'checked' : ''} onchange="App._rpSetMode('open')" style="width:auto;margin:0"> Open payment (on account)</label>
+        <label style="display:flex;gap:6px;align-items:center;margin:0;cursor:pointer;font-weight:${mode === 'invoices' ? 600 : 400}"><input type="radio" name="rp-mode" value="invoices" ${mode === 'invoices' ? 'checked' : ''} onchange="App._rpSetMode('invoices')" style="width:auto;margin:0" ${summary.invoices.length ? '' : 'disabled'}> Pay specific invoices</label>
+      </div>
+      <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px">${mode === 'open'
+        ? 'The payment comes off the balance now without being applied to any invoice. It can be applied to invoices later from this screen.'
+        : 'Tick the invoices being paid. Each one defaults to its full balance due — change the amount for a part payment. The payment total is the sum.'}</p>
+      ${mode === 'invoices' ? `${this._rpInvoiceRows('rp')}<div style="text-align:right;font-size:12px;margin-top:6px">Applied: <strong id="rp-applied-total">${this.fmt(0)}</strong></div>` : ''}
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:12px">
+        <div class="form-group" style="margin:0"><label>Amount Received *</label><input type="number" id="rp-amount" step="0.01" min="0" max="${Number(c.account_balance).toFixed(2)}" ${mode === 'invoices' ? 'readonly' : ''} placeholder="0.00"></div>
+        <div class="form-group" style="margin:0"><label>Paid By *</label><select id="rp-method" onchange="App._rpMethodChanged()">${methods.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></div>
+        <div class="form-group" style="margin:0" id="rp-ref-wrap"><label id="rp-ref-label">Reference</label><input id="rp-ref" placeholder="Optional for cash"></div>
+      </div>
+      <div class="form-group" style="margin:10px 0 0"><label>Notes</label><input id="rp-notes" placeholder="Optional"></div>
+      ${summary.open_payments.length ? `
+      <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:12px">
+        <strong style="font-size:12px;color:var(--text-muted);text-transform:uppercase">Payments Waiting to Be Applied</strong>
+        ${summary.open_payments.map(p => `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:13px;padding:6px 0;border-bottom:1px solid var(--border)">
+          <span><span class="fw-600">${this.escapeAttr(p.payment_number)}</span> · ${this.fmtDate(p.created_at)} · ${this.fmt(p.amount)} paid, <span class="color-success fw-600">${this.fmt(p.unapplied)} not yet applied</span></span>
+          ${summary.invoices.length ? `<button class="btn btn-secondary btn-sm" onclick="App._rpStartApply(${p.id})">Apply to Invoices</button>` : ''}
+        </div>`).join('')}
+        <div id="rp-apply"></div>
+      </div>` : ''}`;
+    this._rpMethodChanged();
+    this._rpFooter(`<button class="btn btn-success" id="rp-submit" onclick="App._rpSubmit()">Receive Payment</button>`);
+  },
+
+  _rpSetMode(mode) { this._rp.mode = mode; this._rpRender(); },
+
+  // Card, cheque and deposit payments need their approval / cheque / deposit number.
+  _rpMethodChanged() {
+    const m = document.getElementById('rp-method')?.value;
+    const label = document.getElementById('rp-ref-label'), ref = document.getElementById('rp-ref');
+    if (!label || !ref) return;
+    const labels = { cash: ['Reference', 'Optional for cash'], credit_card: ['Approval Code *', 'Card approval code'], debit_card: ['Approval Code *', 'Card approval code'], check: ['Cheque # *', 'Cheque number'], direct_deposit: ['Deposit Ref # *', 'Bank deposit reference'] };
+    [label.textContent, ref.placeholder] = labels[m] || labels.cash;
+  },
+
+  async _rpSubmit() {
+    const { summary, mode } = this._rp;
+    const amount = parseFloat(document.getElementById('rp-amount').value) || 0;
+    const payment_method = document.getElementById('rp-method').value;
+    const reference = document.getElementById('rp-ref').value.trim();
+    if (!(amount > 0)) { this.alert(mode === 'invoices' ? 'Tick at least one invoice to pay' : 'Enter the amount received', 'error'); return; }
+    if (amount - summary.customer.account_balance > 0.005) { this.alert(`That's more than the ${this.fmt(summary.customer.account_balance)} owed`, 'error'); return; }
+    if (payment_method !== 'cash' && !reference) { this.alert('Enter the approval code, cheque number or deposit reference', 'error'); return; }
+    const btn = document.getElementById('rp-submit');
+    if (btn) btn.disabled = true;
+    try {
+      const p = await this.api('POST', '/customer-payments', {
+        customer_id: summary.customer.id, amount, payment_method, payment_mode: mode, reference,
+        allocations: mode === 'invoices' ? this._rpAllocations('rp') : undefined,
+        notes: document.getElementById('rp-notes').value.trim(), drawer_session_id: this.currentDrawerSession?.id || null,
+        branch_id: this.currentDrawerSession?.branch_id || null,
+      });
+      this.closeModal();
+      this.alert(`Payment ${p.payment_number} received: ${this.fmt(p.amount)} from ${p.customer_name}${p.unapplied > 0.005 ? ' (on account)' : ''}. Balance now ${this.fmt(p.balance_after)}.`);
+      if (this.cartCustomer?.id === p.customer_id) this.setCartCustomer(p.customer_id);
+    } catch (e) { if (btn) btn.disabled = false; this.alert(e.message, 'error'); }
+  },
+
+  _rpStartApply(paymentId) {
+    const p = this._rp.summary.open_payments.find(x => x.id === paymentId);
+    this._rp.applying = p;
+    document.getElementById('rp-apply').innerHTML = `
+      <div style="margin-top:10px;padding:10px 12px;border:1px solid var(--border);border-radius:6px">
+        <div style="font-size:13px;margin-bottom:6px">Apply up to <strong>${this.fmt(p.unapplied)}</strong> of ${this.escapeAttr(p.payment_number)} to:</div>
+        ${this._rpInvoiceRows('rpa')}
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;font-size:12px">
+          <span>Applying: <strong id="rpa-applied-total">${this.fmt(0)}</strong></span>
+          <span style="display:flex;gap:8px"><button class="btn btn-secondary btn-sm" onclick="document.getElementById('rp-apply').innerHTML=''">Cancel</button>
+          <button class="btn btn-primary btn-sm" id="rpa-submit" onclick="App._rpSubmitApply()">Apply</button></span>
+        </div>
+      </div>`;
+  },
+
+  async _rpSubmitApply() {
+    const p = this._rp.applying;
+    const allocations = this._rpAllocations('rpa');
+    const total = allocations.reduce((t, a) => t + a.amount, 0);
+    if (!allocations.length) { this.alert('Tick at least one invoice', 'error'); return; }
+    if (total - p.unapplied > 0.005) { this.alert(`Only ${this.fmt(p.unapplied)} of ${p.payment_number} is left to apply`, 'error'); return; }
+    const btn = document.getElementById('rpa-submit');
+    if (btn) btn.disabled = true;
+    try {
+      await this.api('POST', `/customer-payments/${p.id}/apply`, { allocations });
+      this.alert(`Applied ${this.fmt(total)} of ${p.payment_number} to ${allocations.length} invoice${allocations.length === 1 ? '' : 's'}`);
+      this._rpLoad(this._rp.summary.customer.id, { mode: this._rp.mode });
+    } catch (e) { if (btn) btn.disabled = false; this.alert(e.message, 'error'); }
+  },
+
   showPOSPaymentModal() {
     if (!this.cart.length) { this.alert('Cart is empty', 'warning'); return; }
     // Available Credit and/or Cash Back already cover the whole ticket — no
@@ -10919,6 +11102,8 @@ const App = {
     if (idEl) idEl.value = c ? c.id : '';
     if (searchEl) searchEl.value = c ? `${c.first_name} ${c.last_name}` : '';
     if (dd) dd.style.display = 'none';
+    const onSelect = (this._custPickerOnSelect || {})[id];
+    if (onSelect) onSelect(c);
   },
 
   _selectLayawayCustomer(id) {
@@ -12611,6 +12796,105 @@ const App = {
   },
 
   // ─── Customers ────────────────────────────────────────────
+  // ─── Find Duplicates ──────────────────────────────────────
+  // Groups of active customers sharing a phone number or email (GET
+  // /customers/duplicates). Pick the one to keep and merge the rest into it
+  // (lib/customerMerge.js), or mark the group as not duplicates.
+  async renderCustomerDuplicates(page = 1) {
+    const c = document.getElementById('content');
+    c.innerHTML = '<div class="empty-state"><p>Looking for duplicates…</p></div>';
+    let data;
+    try { data = await this.api('GET', `/customers/duplicates?page=${page}`); }
+    catch (e) { c.innerHTML = `<div class="empty-state"><p>${this.escapeAttr(e.message)}</p></div>`; return; }
+    if (this.section !== 'customers') return;
+    this._dupPage = page;
+    const pages = Math.max(1, Math.ceil(data.total_groups / data.page_size));
+    const esc = v => this.escapeAttr(v ?? '');
+    const date = d => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
+    const groupHtml = g => `
+      <div class="card" id="dup-group-${g.key.replace(/,/g, '-')}" style="margin-bottom:14px;padding:14px 16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+          <div style="font-size:13px"><strong>${g.customers.length} customers</strong> <span style="color:var(--text-muted)">share ${g.shared.map(esc).join(' · ')}</span></div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-secondary btn-sm" onclick="App._dismissDuplicateGroup('${g.key}')">Not Duplicates</button>
+            <button class="btn btn-primary btn-sm" onclick="App._mergeDuplicateGroup('${g.key}')">Merge into Kept Customer</button>
+          </div>
+        </div>
+        <div class="table-wrap"><table>
+          <thead><tr><th style="width:52px">Keep</th><th>Customer</th><th>Phone / Email</th><th>Address</th><th>History</th><th>Balance</th><th>Added</th></tr></thead>
+          <tbody>${g.customers.map(cu => `<tr>
+            <td><input type="radio" name="dup-keep-${g.key}" value="${cu.id}" ${cu.id === g.suggested_keep_id ? 'checked' : ''} style="width:auto"></td>
+            <td><div class="fw-600">${esc(cu.name)}</div><div style="font-size:11px;color:var(--text-muted);font-family:monospace">${esc(cu.customer_number)}</div>
+              <div style="margin-top:3px">${cu.customer_type === 'credit' ? '<span class="badge-pill badge-info" style="font-size:10px">Credit</span>' : '<span class="badge-pill" style="font-size:10px;background:#e0e0e0;color:#555">Cash</span>'}${cu.rental_approved ? ' <span class="badge-pill badge-success" style="font-size:10px">Rental Approved</span>' : cu.is_rental_customer ? ' <span class="badge-pill badge-purple" style="font-size:10px">Rental</span>' : ''}${cu.customer_kind === 'business' ? ' <span class="badge-pill badge-secondary" style="font-size:10px">Business</span>' : ''}</div></td>
+            <td style="font-size:12px">${esc(cu.phone) || '—'}<br><span style="color:var(--text-muted)">${esc(cu.email) || '—'}</span></td>
+            <td style="font-size:12px;color:var(--text-muted)">${esc(cu.address) || '—'}</td>
+            <td style="font-size:12px">${cu.sales_count} sale${cu.sales_count === 1 ? '' : 's'}${cu.rentals_count ? ` · ${cu.rentals_count} rental${cu.rentals_count === 1 ? '' : 's'}` : ''}${cu.legacy_invoice_count ? ` · ${cu.legacy_invoice_count} legacy inv.` : ''}${cu.last_sale_at ? `<br><span style="color:var(--text-muted)">last ${date(cu.last_sale_at)}</span>` : ''}</td>
+            <td style="font-size:12px">${cu.account_balance ? this.fmt(cu.account_balance) : '—'}</td>
+            <td style="font-size:12px;color:var(--text-muted)">${date(cu.created_at)}${cu.from_import ? '<br>by import' : ''}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>
+      </div>`;
+    this._dupGroups = Object.fromEntries(data.groups.map(g => [g.key, g]));
+    c.innerHTML = `
+      <div class="section-header" style="gap:16px;flex-wrap:wrap">
+        <h2>Duplicate Customers</h2>
+        <button class="btn btn-secondary btn-sm" onclick="App.renderCustomers()">&larr; Back to Customers</button>
+      </div>
+      <p style="font-size:13px;color:var(--text-muted);margin:-6px 0 14px">${data.total_groups ? `${data.total_groups.toLocaleString()} group${data.total_groups === 1 ? '' : 's'} of active customers (${data.total_customers.toLocaleString()} customers) share a phone number or email. In each group, pick the customer to <strong>keep</strong> — the suggestion is the one with the most history — and merge the others into it: their sales, rentals, payments, quotes, layaways, work orders, legacy invoices and contacts move over, balances and loyalty points are added together, details the kept customer is missing are filled in, and the others are deactivated (marked as merged, not deleted). Merging can't be undone.` : 'No duplicates found — no two active customers share a phone number or email.'}</p>
+      ${data.groups.map(groupHtml).join('')}
+      ${pages > 1 ? `<div style="display:flex;gap:8px;align-items:center;justify-content:center;margin:10px 0">
+        <button class="btn btn-secondary btn-sm" ${page <= 1 ? 'disabled' : ''} onclick="App.renderCustomerDuplicates(${page - 1})">&larr; Previous</button>
+        <span style="font-size:13px;color:var(--text-muted)">Page ${page} of ${pages}</span>
+        <button class="btn btn-secondary btn-sm" ${page >= pages ? 'disabled' : ''} onclick="App.renderCustomerDuplicates(${page + 1})">Next &rarr;</button>
+      </div>` : ''}`;
+  },
+
+  _removeDuplicateGroupCard(key) {
+    document.getElementById(`dup-group-${key.replace(/,/g, '-')}`)?.remove();
+    if (!document.querySelector('[id^="dup-group-"]')) this.renderCustomerDuplicates(this._dupPage || 1);
+  },
+
+  async _dismissDuplicateGroup(key) {
+    try {
+      await this.api('POST', '/customers/duplicates/dismiss', { ids: key.split(',').map(Number) });
+      this._removeDuplicateGroupCard(key);
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  async _mergeDuplicateGroup(key) {
+    const g = this._dupGroups?.[key];
+    const keepId = Number(document.querySelector(`input[name="dup-keep-${key}"]:checked`)?.value);
+    if (!g || !keepId) return;
+    const keep = g.customers.find(cu => cu.id === keepId);
+    const others = g.customers.filter(cu => cu.id !== keepId);
+    let preview = {};
+    try { preview = await this.api('GET', `/customers/merge-preview?ids=${others.map(o => o.id).join(',')}`); } catch (e) {}
+    const labels = { transactions: 'sales', returns: 'returns', account_payments: 'payments', ar_legacy_invoices: 'legacy invoices', quotations: 'quotes', rental_agreements: 'rentals', layaway_plans: 'layaways', work_orders: 'work orders', shipments: 'shipments', crm_leads: 'CRM leads', crm_opportunities: 'CRM opportunities', crm_activities: 'CRM activities', customer_contacts: 'contacts' };
+    const moving = o => { const p = preview[o.id] || {}; const parts = Object.entries(p).map(([t, n]) => `${n} ${labels[t] || t}`); return parts.length ? parts.join(', ') : 'no history'; };
+    this.showModal(`
+      <div class="modal" style="max-width:560px">
+        <div class="modal-header"><span class="modal-title">Merge Duplicate Customers</span><button class="modal-close">✕</button></div>
+        <div class="modal-body" style="font-size:13px">
+          <p>Keep <strong>${this.escapeAttr(keep.name)}</strong> (${this.escapeAttr(keep.customer_number)}) and merge into it:</p>
+          <ul style="margin:8px 0 12px 18px">${others.map(o => `<li><strong>${this.escapeAttr(o.name)}</strong> (${this.escapeAttr(o.customer_number)}) — ${moving(o)}${o.account_balance ? `, balance ${this.fmt(o.account_balance)}` : ''}</li>`).join('')}</ul>
+          <p style="color:var(--text-muted)">Their history moves to ${this.escapeAttr(keep.name)}, balances and loyalty points are added together, missing details are filled in, and they're deactivated. This can't be undone.</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-danger" id="dup-merge-confirm">Merge ${others.length} into ${this.escapeAttr(keep.name)}</button>
+        </div>
+      </div>`);
+    document.getElementById('dup-merge-confirm').addEventListener('click', async e => {
+      e.target.disabled = true;
+      try {
+        await this.api('POST', '/customers/merge', { keep_id: keepId, merge_ids: others.map(o => o.id) });
+        this.closeModal();
+        this.alert(`Merged ${others.length} customer${others.length === 1 ? '' : 's'} into ${keep.name}`);
+        this._removeDuplicateGroupCard(key);
+      } catch (err) { e.target.disabled = false; this.alert(err.message, 'error'); }
+    });
+  },
+
   // Search box + type filter together (GET /customers ?search= &type=).
   _customerListQuery() {
     const q = document.getElementById('cust-search')?.value || '';
@@ -12631,6 +12915,7 @@ const App = {
           ${this.can('customers_import_history') ? `<button class="btn btn-secondary btn-sm" style="white-space:nowrap" onclick="App.showCustomerImportHistory()" title="Review or reverse past CSV imports">Import History</button>` : ''}
           ${this.can('customers_export_balances') ? `<button class="btn btn-secondary btn-sm" style="white-space:nowrap" onclick="App.showCustomerBalancesExport()" title="Export AR balance, credit note total, and status by customer type">Export Balances</button>` : ''}
           ${this.can('customers_missing_rental_info') ? `<button class="btn btn-secondary btn-sm" style="white-space:nowrap" onclick="App.showRentalIncompleteReport()" title="Rental customers missing the ID/reference/document info required to create a rental">🔑 Missing Rental Info</button>` : ''}
+          ${this.can('customers_merge') ? `<button class="btn btn-secondary btn-sm" style="white-space:nowrap" onclick="App.renderCustomerDuplicates()" title="Customers sharing a phone number or email — review and merge">Find Duplicates</button>` : ''}
           ${this.can('customers_add') ? `<button class="btn btn-primary" style="white-space:nowrap" onclick="App.showCustomerForm()">+ Add Customer</button>` : ''}
         </div>
       </div>
@@ -20967,7 +21252,6 @@ const App = {
                     <td>${this.fmt(a.total_paid||0)}</td>
                     <td class="${avail > 0 ? 'color-success' : 'color-danger'}">${this.fmt(avail)}</td>
                     <td>
-                      <button class="btn btn-sm btn-primary" onclick="App.showPaymentModal(${a.id},'${a.first_name} ${a.last_name}',${a.account_balance||0})">Record Payment</button>
                       ${this.can('accounts_writeoff') && a.account_balance > 0 ? `<button class="btn btn-sm btn-danger" onclick="App.showWriteoffModal(${a.id},'${a.first_name} ${a.last_name}',${a.account_balance||0})">Write Off</button>` : ''}
                       <button class="btn btn-sm btn-secondary" onclick="App.viewCustomerAccount(${a.id})">Details</button>
                     </td>
@@ -20982,7 +21266,7 @@ const App = {
           <div class="card-header"><span class="card-title">AR Aging Report</span></div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Customer</th><th>Balance</th><th>Current (0-30)</th><th>31-60 Days</th><th>61-90 Days</th><th>90+ Days</th></tr></thead>
+              <thead><tr><th>Customer</th><th>Balance</th><th>Current (0-30)</th><th>31-60 Days</th><th>61-90 Days</th><th>90+ Days</th><th title="Payments received on account but not yet applied to the invoices aged here">Unapplied Payments</th></tr></thead>
               <tbody>
                 ${aging.length ? aging.map(a => `
                   <tr>
@@ -20992,7 +21276,8 @@ const App = {
                     <td class="${a.days_31_60 > 0 ? 'color-warning' : ''}">${this.fmt(a.days_31_60||0)}</td>
                     <td class="${a.days_61_90 > 0 ? 'color-warning' : ''}">${this.fmt(a.days_61_90||0)}</td>
                     <td class="${a.over_90 > 0 ? 'color-danger fw-600' : ''}">${this.fmt(a.over_90||0)}</td>
-                  </tr>`).join('') : '<tr><td colspan="6" class="empty-state">No aging data</td></tr>'}
+                    <td class="${a.unapplied_credit > 0 ? 'color-success' : ''}">${a.unapplied_credit > 0 ? `−${this.fmt(a.unapplied_credit)}` : '—'}</td>
+                  </tr>`).join('') : '<tr><td colspan="7" class="empty-state">No aging data</td></tr>'}
               </tbody>
             </table>
           </div>
@@ -21069,7 +21354,7 @@ const App = {
                 </td>
                 <td class="fw-600">${p.payment_number}</td>
                 <td>${p.customer_name||'-'} <small style="color:var(--text-muted)">${p.customer_number||''}</small></td>
-                <td class="fw-600 color-success">${this.fmt(p.amount)}</td>
+                <td class="fw-600 color-success">${this.fmt(p.amount)}${p.unapplied > 0.005 ? `<div style="font-size:11px;font-weight:400;color:var(--text-muted)">${this.fmt(p.unapplied)} not yet applied</div>` : ''}</td>
                 <td><span class="badge-pill badge-info">${p.payment_method}</span></td>
                 <td>${p.employee_name||'-'}</td>
                 <td style="color:var(--text-muted)">${this.fmtDateTime(p.created_at)}</td>
@@ -21220,114 +21505,6 @@ const App = {
     });
   },
 
-  async showPaymentModal(customerId, customerName, balance) {
-    const branches = this.currentUser.branches || [];
-    let invoices = [];
-    try { invoices = await this.api('GET', `/accounts/invoices/${customerId}`); } catch(e) {}
-    const hasInvoices = invoices.length > 0;
-    this.showModal(`
-      <div class="modal" style="max-width:600px">
-        <div class="modal-header"><span class="modal-title">Record Payment</span><button class="modal-close">✕</button></div>
-        <div class="modal-body">
-          <p style="margin-bottom:14px;font-size:13px">Recording payment for <strong>${customerName}</strong> &nbsp;|&nbsp; Outstanding Balance: <strong style="color:var(--danger)">${this.fmt(balance)}</strong></p>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-            <div class="form-group" style="margin:0"><label>Amount *</label><input id="pmt-amount" type="number" step="0.01" value="${balance.toFixed(2)}" oninput="App._pmtAutoFill()"></div>
-            <div class="form-group" style="margin:0"><label>Payment Method</label>
-              <select id="pmt-method">
-                <option value="cash">Cash</option>
-                <option value="credit_card">Credit Card</option>
-                <option value="check">Check</option>
-                <option value="bank_transfer">Bank Transfer</option>
-              </select>
-            </div>
-            <div class="form-group" style="margin:0"><label>Branch</label>
-              <select id="pmt-branch">
-                <option value="">-- Select Branch --</option>
-                ${branches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
-              </select>
-            </div>
-            <div class="form-group" style="margin:0"><label>Notes</label><input id="pmt-notes"></div>
-          </div>
-          ${hasInvoices ? `
-          <div style="border-top:1px solid var(--border);margin-top:16px;padding-top:14px">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-              <span style="font-weight:600;font-size:13px">Apply to Invoices</span>
-              <span style="font-size:11px;color:var(--text-muted)">Leave blank to auto-apply oldest first</span>
-            </div>
-            <div class="table-wrap" style="max-height:200px;overflow-y:auto">
-              <table>
-                <thead><tr><th>Invoice</th><th>Date</th><th>Total</th><th>Balance Due</th><th>Apply</th></tr></thead>
-                <tbody id="pmt-inv-rows">
-                  ${invoices.map(inv => `<tr>
-                    <td class="fw-600" style="font-size:12px">${this.escapeAttr(inv.transaction_number)}${inv.kind === 'legacy' ? ' <span class="badge-pill badge-secondary" style="font-size:10px" title="Carried over from the old system">Legacy</span>' : ''}</td>
-                    <td style="font-size:12px;color:var(--text-muted)">${inv.kind === 'legacy' ? this._apDate(inv.created_at) : this.fmtDate(inv.created_at)}</td>
-                    <td style="font-size:12px">${this.fmt(inv.total)}</td>
-                    <td style="font-size:12px" class="color-danger fw-600">${this.fmt(inv.balance_due)}</td>
-                    <td><input type="number" step="0.01" min="0" max="${inv.balance_due.toFixed(2)}"
-                         class="pmt-inv-input" data-inv-id="${inv.id}" data-kind="${inv.kind || 'sale'}" data-max="${inv.balance_due.toFixed(2)}"
-                         style="width:85px;padding:3px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px"
-                         oninput="App._pmtUpdateTotal()" placeholder="0.00"></td>
-                  </tr>`).join('')}
-                </tbody>
-              </table>
-            </div>
-            <div style="text-align:right;margin-top:8px;font-size:12px;color:var(--text-muted)">
-              Allocated: <strong id="pmt-alloc-total" style="color:var(--accent)">$0.00</strong>
-              &nbsp;&mdash;&nbsp;<span id="pmt-alloc-remaining">$0.00 unallocated</span>
-            </div>
-          </div>` : `<p style="margin-top:14px;font-size:12px;color:var(--text-muted)">No outstanding invoices found — payment will be applied to account balance.</p>`}
-        </div>
-        <div class="modal-footer">
-          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-          <button class="btn btn-success" onclick="App.savePayment(${customerId})">Record Payment</button>
-        </div>
-      </div>`);
-    this._pmtAutoFill();
-  },
-
-  _pmtAutoFill() {
-    const amt = parseFloat(document.getElementById('pmt-amount')?.value) || 0;
-    const inputs = document.querySelectorAll('.pmt-inv-input');
-    let remaining = amt;
-    inputs.forEach(inp => {
-      const max = parseFloat(inp.dataset.max) || 0;
-      const apply = Math.min(remaining, max);
-      inp.value = apply > 0.001 ? apply.toFixed(2) : '';
-      remaining = Math.max(0, parseFloat((remaining - apply).toFixed(2)));
-    });
-    this._pmtUpdateTotal();
-  },
-
-  _pmtUpdateTotal() {
-    const amt = parseFloat(document.getElementById('pmt-amount')?.value) || 0;
-    let allocated = 0;
-    document.querySelectorAll('.pmt-inv-input').forEach(inp => { allocated += parseFloat(inp.value) || 0; });
-    allocated = parseFloat(allocated.toFixed(2));
-    const el = document.getElementById('pmt-alloc-total');
-    const rem = document.getElementById('pmt-alloc-remaining');
-    if (el) el.textContent = this.fmt(allocated);
-    if (rem) rem.textContent = `${this.fmt(Math.max(0, amt - allocated))} unallocated`;
-  },
-
-  async savePayment(customerId) {
-    const amount = parseFloat(document.getElementById('pmt-amount').value);
-    const payment_method = document.getElementById('pmt-method').value;
-    const branch_id = document.getElementById('pmt-branch').value;
-    const notes = document.getElementById('pmt-notes').value;
-    if (!amount || amount <= 0) { this.alert('Enter a valid amount', 'error'); return; }
-    const allocations = [];
-    document.querySelectorAll('.pmt-inv-input').forEach(inp => {
-      const val = parseFloat(inp.value);
-      if (val > 0) allocations.push(inp.dataset.kind === 'legacy' ? { legacy_invoice_id: parseInt(inp.dataset.invId), amount: val } : { transaction_id: parseInt(inp.dataset.invId), amount: val });
-    });
-    try {
-      await this.api('POST', '/accounts/payments', { customer_id: customerId, amount, payment_method, branch_id: branch_id||null, notes, allocations: allocations.length ? allocations : undefined });
-      this.closeModal();
-      this.alert('Payment recorded');
-      this.renderAccounts();
-    } catch(e) { this.alert(e.message, 'error'); }
-  },
-
   // Forgives part or all of a balance instead of collecting it — same
   // FIFO-oldest-first invoice allocation as Record Payment, minus the
   // invoice-by-invoice override table (kept deliberately simpler, since a
@@ -21417,7 +21594,7 @@ const App = {
           <div id="acct-pmts" style="display:none">
             <div class="table-wrap"><table>
               <thead><tr><th>Payment #</th><th>Amount</th><th>Method</th><th>Date</th></tr></thead>
-              <tbody>${data.payments.map(p => `<tr><td class="fw-600">${p.payment_number}</td><td class="color-success">${this.fmt(p.amount)}</td><td>${p.payment_method}</td><td>${this.fmtDate(p.created_at)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">No payments</td></tr>'}</tbody>
+              <tbody>${data.payments.map(p => `<tr><td class="fw-600">${p.payment_number}</td><td class="color-success">${this.fmt(p.amount)}${p.unapplied > 0.005 ? `<div style="font-size:11px;color:var(--text-muted)">${this.fmt(p.unapplied)} on account, not yet applied</div>` : ''}</td><td>${p.payment_method}</td><td>${this.fmtDate(p.created_at)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">No payments</td></tr>'}</tbody>
             </table></div>
           </div>
           ${(data.legacy_invoices || []).length ? `<div id="acct-legacy" style="display:none">
@@ -21429,7 +21606,7 @@ const App = {
           </div>` : ''}
         </div>
         <div class="modal-footer">
-          <button class="btn btn-primary" onclick="App.closeModal();App.showPaymentModal(${c.id},'${c.first_name} ${c.last_name}',${c.account_balance||0})">Record Payment</button>
+          <span style="font-size:12px;color:var(--text-muted);margin-right:auto">Payments are received at the POS (Receive Payment).</span>
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
@@ -22561,6 +22738,7 @@ const App = {
       { key: 'customers_edit', label: 'Edit Customers' },
       { key: 'customers_delete', label: 'Delete Customers' },
       { key: 'customers_credit', label: 'Manage Credit Limits' },
+      { key: 'customers_merge', label: 'Find & Merge Duplicate Customers' },
       { key: 'customers_import', label: 'Import Customers (CSV)' },
       { key: 'customers_import_history', label: 'View & Reverse Import History' },
       { key: 'customers_export', label: 'Export Customers (CSV)' },
@@ -22779,6 +22957,16 @@ const App = {
             </label>
           </div>
           <div class="form-group">
+            <label>Customer Payments</label>
+            <label class="perm-item" style="padding:10px 12px;border:1px solid var(--border);border-radius:6px;display:flex;align-items:flex-start;gap:10px;cursor:pointer;margin-top:6px">
+              <input type="checkbox" id="sg-receive-payment" ${perms.pos_receive_payment ? 'checked' : ''} style="margin-top:2px;flex-shrink:0">
+              <span>
+                <strong>Receive Customer Payments (POS)</strong><br>
+                <span style="font-size:12px;color:var(--text-muted)">Take payments toward customers' credit accounts at the POS — on account, or applied to chosen invoices — and apply open payments to invoices later. Meant for cashiers only; separate from POS access, so it isn't granted with the POS module.</span>
+              </span>
+            </label>
+          </div>
+          <div class="form-group">
             <label>Credit Control</label>
             <label class="perm-item" style="padding:10px 12px;border:1px solid var(--border);border-radius:6px;display:flex;align-items:flex-start;gap:10px;cursor:pointer;margin-top:6px">
               <input type="checkbox" id="sg-credit-block" ${perms.customers_credit_block ? 'checked' : ''} style="margin-top:2px;flex-shrink:0">
@@ -22848,7 +23036,7 @@ const App = {
     const description = document.getElementById('sg-desc').value.trim();
     if (!name) { this.alert('Name required', 'error'); return; }
     // Start from the stored blob so keys outside _permissionTree survive a save.
-    const permissions = { ...(id ? this._sgEditingPerms : {}), multi_branch_access: document.getElementById('sg-multi-branch')?.checked || false, pos_view_margin: document.getElementById('sg-pos-margin')?.checked || false, customers_credit_block: document.getElementById('sg-credit-block')?.checked || false };
+    const permissions = { ...(id ? this._sgEditingPerms : {}), multi_branch_access: document.getElementById('sg-multi-branch')?.checked || false, pos_view_margin: document.getElementById('sg-pos-margin')?.checked || false, customers_credit_block: document.getElementById('sg-credit-block')?.checked || false, pos_receive_payment: document.getElementById('sg-receive-payment')?.checked || false };
     this._permissionTree.forEach(mod => {
       permissions[mod.key] = document.getElementById(`perm-${mod.key}`)?.checked || false;
       mod.subs.forEach(s => { permissions[s.key] = document.getElementById(`perm-${s.key}`)?.checked || false; });

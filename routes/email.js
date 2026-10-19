@@ -1376,14 +1376,18 @@ function buildStatementHtml(data, s, origin) {
             <td style="padding:4px 8px;font-size:11px;color:#555;border-bottom:1px solid #f0f0f0;text-align:right">${fmt(a.invoice_total)}</td>
             <td style="padding:4px 8px;font-size:11px;color:${BRAND.green};border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(a.amount)}</td>
           </tr>`).join('')
-      : `<tr style="background:#f9fafb"><td colspan="4" style="padding:4px 8px 4px 28px;font-size:11px;color:#aaa;border-bottom:1px solid #f0f0f0;font-style:italic">No invoice allocations</td></tr>`;
+      : '';
+    // An open (on-account) payment, or the part of one not yet applied to an invoice.
+    const unappliedRow = p.unapplied > 0.005
+      ? `<tr style="background:#f9fafb"><td colspan="3" style="padding:4px 8px 4px 28px;font-size:11px;color:#555;border-bottom:1px solid #f0f0f0;font-style:italic">↳ On account — not yet applied to an invoice</td><td style="padding:4px 8px;font-size:11px;color:${BRAND.green};border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(p.unapplied)}</td></tr>`
+      : (allocRows ? '' : `<tr style="background:#f9fafb"><td colspan="4" style="padding:4px 8px 4px 28px;font-size:11px;color:#aaa;border-bottom:1px solid #f0f0f0;font-style:italic">No invoice allocations</td></tr>`);
     return `
       <tr>
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;font-weight:700;font-size:13px">${p.payment_number}</td>
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;font-size:13px">${new Date(p.created_at).toLocaleDateString()}</td>
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;font-size:13px">${(p.payment_method||'cash').replace(/_/g,' ').toUpperCase()}</td>
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;font-size:13px;text-align:right;font-weight:700;color:${BRAND.green}">${fmt(p.amount)}</td>
-      </tr>${allocRows}`;
+      </tr>${allocRows}${unappliedRow}`;
   }).join('');
 
   return `<!DOCTYPE html>
@@ -1459,6 +1463,7 @@ router.get('/statement-preview/:customer_id', requireAuth, async (req, res) => {
     const { rows: payments } = await db.execute({ sql, args: params });
     for (const p of payments) {
       p.allocations = await paymentAllocations(db, p.id);
+      p.unapplied = p.payment_method === 'writeoff' ? 0 : Math.max(0, parseFloat((p.amount - p.allocations.reduce((s, a) => s + a.amount, 0)).toFixed(2)));
     }
     const s = await getSettings();
     const origin = `${req.protocol}://${req.get('host')}`;
@@ -1483,6 +1488,7 @@ router.post('/send-statement/:customer_id', requireAuth, async (req, res) => {
     const { rows: payments } = await db.execute({ sql, args: params });
     for (const p of payments) {
       p.allocations = await paymentAllocations(db, p.id);
+      p.unapplied = p.payment_method === 'writeoff' ? 0 : Math.max(0, parseFloat((p.amount - p.allocations.reduce((s, a) => s + a.amount, 0)).toFixed(2)));
     }
     const s = await getSettings();
     const origin = `${req.protocol}://${req.get('host')}`;

@@ -118,6 +118,7 @@ app.use('/api/purchase-requests', require('./routes/purchase-requests'));
 app.use('/api/security-groups',  require('./routes/security-groups'));
 app.use('/api/quotations',       require('./routes/quotations'));
 app.use('/api/accounts',         require('./routes/accounts'));
+app.use('/api/customer-payments', require('./routes/customer-payments'));
 app.use('/api/transfers',        require('./routes/transfers'));
 app.use('/api/crm',              require('./routes/crm'));
 app.use('/api/commissions',      require('./routes/commissions'));

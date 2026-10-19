@@ -125,8 +125,19 @@ router.get('/sessions/:id', requireAuth, async (req, res) => {
         SELECT t.id as transaction_id, t.payment_method, t.total as amount
         FROM transactions t
         WHERE t.drawer_session_id = ? AND NOT EXISTS (SELECT 1 FROM transaction_payments tp2 WHERE tp2.transaction_id = t.id)
+        UNION ALL
+        -- Customer account payments received into this drawer at the POS
+        -- (lib/customerPayments.js), counted with the sales by tender.
+        -- Negative ids keep them distinct from transaction ids in the count.
+        SELECT -ap.id as transaction_id, ap.payment_method, ap.amount
+        FROM account_payments ap
+        WHERE ap.drawer_session_id = ?
       )
-      GROUP BY payment_method`, args: [req.params.id, req.params.id] });
+      GROUP BY payment_method`, args: [req.params.id, req.params.id, req.params.id] });
+    // The same payments listed on their own, for the drawer report.
+    const { rows: accountPayments } = await db.execute({ sql: `SELECT ap.payment_number, ap.payment_method, ap.amount, ap.payment_mode, ap.created_at, c.first_name || ' ' || c.last_name AS customer_name
+      FROM account_payments ap LEFT JOIN customers c ON c.id = ap.customer_id WHERE ap.drawer_session_id = ? ORDER BY ap.created_at`, args: [req.params.id] });
+    session.account_payments = accountPayments;
     session.tenders = tenders;
 
     const { rows: [reconciliation] } = await db.execute({ sql: `SELECT dr.*, e.first_name || ' ' || e.last_name as reconciled_by_name FROM drawer_reconciliations dr LEFT JOIN employees e ON e.id = dr.reconciled_by WHERE dr.session_id = ?`, args: [req.params.id] });

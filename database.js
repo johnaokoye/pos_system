@@ -324,6 +324,14 @@ async function _init() {
     )` },
     { sql: 'CREATE INDEX IF NOT EXISTS idx_customer_phone_keys_key ON customer_phone_keys(phone_key)' },
     { sql: 'CREATE INDEX IF NOT EXISTS idx_customer_phone_keys_customer ON customer_phone_keys(customer_id)' },
+    // Groups the Find Duplicates screen was told aren't duplicates (e.g.
+    // family members sharing a phone). group_key is the sorted customer ids,
+    // so a group that gains a new member shows up again.
+    { sql: `CREATE TABLE IF NOT EXISTS customer_duplicate_dismissals (
+      group_key TEXT PRIMARY KEY,
+      dismissed_by INTEGER REFERENCES employees(id),
+      dismissed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS customer_contacts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       customer_id INTEGER NOT NULL REFERENCES customers(id),
@@ -332,6 +340,22 @@ async function _init() {
       phone TEXT,
       email TEXT,
       sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    // Every change to which invoices a customer payment is applied to —
+    // allocating an open payment or reallocating between invoices
+    // (lib/customerPayments.js setPaymentAllocations). The payment itself
+    // never changes. before/after are JSON lists of {transaction_id |
+    // legacy_invoice_id, amount}; changed_by is the POS employee or, for
+    // RetailPOS Books, the Books user's name.
+    { sql: `CREATE TABLE IF NOT EXISTS payment_allocation_changes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      payment_id INTEGER NOT NULL REFERENCES account_payments(id),
+      customer_id INTEGER NOT NULL REFERENCES customers(id),
+      before_json TEXT NOT NULL,
+      after_json TEXT NOT NULL,
+      changed_by TEXT,
+      source TEXT NOT NULL DEFAULT 'pos',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
     { sql: `CREATE TABLE IF NOT EXISTS ar_legacy_invoices (
@@ -1885,6 +1909,17 @@ async function _init() {
     'ALTER TABLE customers ADD COLUMN block_override_reason TEXT',
     'ALTER TABLE customers ADD COLUMN business_name TEXT',
     'ALTER TABLE customers ADD COLUMN phone_keys_src TEXT',
+    // Customer payments taken at the POS (lib/customerPayments.js): the
+    // drawer session the money went into, 'open' (on account, applied to
+    // invoices later) or 'invoices' (applied to chosen invoices), and the
+    // card approval / cheque / deposit reference.
+    'ALTER TABLE account_payments ADD COLUMN drawer_session_id INTEGER REFERENCES drawer_sessions(id)',
+    'ALTER TABLE account_payments ADD COLUMN payment_mode TEXT',
+    'ALTER TABLE account_payments ADD COLUMN reference TEXT',
+    // Set on a duplicate folded into another customer (lib/customerMerge.js).
+    'ALTER TABLE customers ADD COLUMN merged_into_customer_id INTEGER REFERENCES customers(id)',
+    'ALTER TABLE customers ADD COLUMN merged_at DATETIME',
+    'ALTER TABLE customers ADD COLUMN merged_by INTEGER REFERENCES employees(id)',
     // Express same-day service — a supervisor-only surcharge (see the
     // wo_signoff check in PATCH /work-orders/:id/estimate) applied at
     // assessment time. The 25% is baked directly into estimate_labor/
@@ -2584,6 +2619,16 @@ async function _init() {
       // same reason: as a `customers` sub it would go to every group with
       // full Customers access, cashiers included. Starts on the groups the
       // owner chose (2026-10-18); others are ticked in Security Groups.
+      // Merge Duplicate Customers — the same power as deleting a customer
+      // (the duplicates are deactivated), so it starts wherever that is.
+      if (!('customers_merge' in perms)) { perms.customers_merge = can(perms, 'customers_delete'); changed = true; }
+      // Receiving customer account payments at the POS — standalone (not a
+      // `pos` sub, which every full-POS group would inherit) and, by the
+      // owner's choice (2026-10-19), only for the cashier groups.
+      if (!('pos_receive_payment' in perms)) {
+        perms.pos_receive_payment = /^(senior )?cashiers?$/i.test(String(g.name || '').trim());
+        changed = true;
+      }
       if (!('customers_credit_block' in perms)) {
         perms.customers_credit_block = /^(administrator|manager|accounts? receivables?)$/i.test(String(g.name || '').trim());
         changed = true;

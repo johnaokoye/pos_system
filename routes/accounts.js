@@ -4,8 +4,8 @@ const { db } = require('../database');
 const { runCreditCheck } = require('./customers');
 const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
-const { calcRentalCommission } = require('./commissions');
 const { LEGACY_BALANCE_SQL, openArInvoices, buildAllocations, insertAllocations, paymentAllocations } = require('../lib/legacyInvoices');
+const { UNAPPLIED_SQL, allArInvoices, currentAllocations, setPaymentAllocations } = require('../lib/customerPayments');
 
 // Every endpoint in this file is specific to the Accounts Receivable
 // screen (unlike e.g. employees.js, nothing here is used as a cross-feature
@@ -59,6 +59,12 @@ router.get('/aging', async (req, res) => {
       if (!a) continue;
       for (const k of ['current_30', 'days_31_60', 'days_61_90', 'over_90']) a[k] = parseFloat(((a[k] || 0) + (l[k] || 0)).toFixed(2));
     }
+    // Payments received on account but not yet applied to invoices
+    // (lib/customerPayments.js) — the buckets above still show those invoices
+    // as owing, so the aging shows this credit alongside.
+    const { rows: unapplied } = await db.execute({ sql: `SELECT ap.customer_id, SUM(${UNAPPLIED_SQL}) AS unapplied FROM account_payments ap
+      WHERE ap.payment_method != 'writeoff' AND ${UNAPPLIED_SQL} > 0.005 GROUP BY ap.customer_id`, args: [] });
+    for (const u of unapplied) { const a = byCustomer.get(u.customer_id); if (a) a.unapplied_credit = parseFloat(Number(u.unapplied).toFixed(2)); }
     res.json(aging);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -77,7 +83,7 @@ router.get('/customer/:id', async (req, res) => {
     const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.id] });
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
     const { rows: invoices } = await db.execute({ sql: `SELECT t.id, t.transaction_number, t.total, t.status, t.created_at, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name FROM transactions t LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN branches b ON t.branch_id = b.id WHERE t.customer_id = ? AND t.payment_method = 'credit' ORDER BY t.created_at DESC`, args: [req.params.id] });
-    const { rows: payments } = await db.execute({ sql: `SELECT p.*, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name FROM account_payments p LEFT JOIN employees e ON p.employee_id = e.id LEFT JOIN branches b ON p.branch_id = b.id WHERE p.customer_id = ? ORDER BY p.created_at DESC`, args: [req.params.id] });
+    const { rows: payments } = await db.execute({ sql: `SELECT ap.*, CASE WHEN ap.payment_method = 'writeoff' THEN 0 ELSE ${UNAPPLIED_SQL} END AS unapplied, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name FROM account_payments ap LEFT JOIN employees e ON ap.employee_id = e.id LEFT JOIN branches b ON ap.branch_id = b.id WHERE ap.customer_id = ? ORDER BY ap.created_at DESC`, args: [req.params.id] });
     const { rows: legacy_invoices } = await db.execute({ sql: `SELECT li.*, ${LEGACY_BALANCE_SQL} as balance_due FROM ar_legacy_invoices li WHERE li.customer_id = ? ORDER BY li.invoice_date DESC, li.id DESC`, args: [req.params.id] });
     res.json({ customer, invoices, payments, legacy_invoices });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -116,63 +122,81 @@ router.get('/payments/:id/allocations', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Record a payment from a customer
-router.post('/payments', async (req, res) => {
+// ── Receivables feeds & allocation (RetailPOS Books) ─────────────
+// Books' receivables representatives allocate open payments to invoices and
+// reallocate between invoices from Books; the POS stays the record. These
+// never change a payment's amount or create one (lib/customerPayments.js).
+
+// One customer's account as Books' allocation screen needs it: every invoice
+// with what's owed, every payment with its allocations and unapplied amount,
+// and recent allocation changes.
+router.get('/customer/:id/receivables', async (req, res) => {
   try {
-    const { customer_id, employee_id, branch_id, amount, payment_method, notes, allocations } = req.body;
-    if (!customer_id || !amount || parseFloat(amount) <= 0) return res.status(400).json({ error: 'customer_id and positive amount required' });
-
-    const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [customer_id] });
+    const { rows: [customer] } = await db.execute({ sql: 'SELECT id, customer_number, first_name, last_name, account_balance, credit_limit, customer_type FROM customers WHERE id = ?', args: [req.params.id] });
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
-
-    const payment_number = await nextNumber(db, 'account_payments', 'payment_number', 'PMT-', 6);
-    const amt = parseFloat(parseFloat(amount).toFixed(2));
-
-    // Use the allocations given, or spread oldest-first across open credit
-    // sales and legacy invoices (lib/legacyInvoices.js).
-    let finalAllocations;
-    try { finalAllocations = await buildAllocations(db, customer_id, amt, allocations); }
-    catch (e) { return res.status(400).json({ error: e.message }); }
-
-    const payTx = await db.transaction('write');
-    let committed = false;
-    try {
-      const result = await payTx.execute({ sql: 'INSERT INTO account_payments (payment_number,customer_id,employee_id,branch_id,amount,payment_method,notes) VALUES (?,?,?,?,?,?,?)', args: [payment_number, customer_id, employee_id||null, branch_id||null, amt, payment_method||'cash', notes||null] });
-      const payId = Number(result.lastInsertRowid);
-      await insertAllocations(payTx, payId, finalAllocations);
-      await payTx.execute({ sql: 'UPDATE customers SET account_balance = MAX(0, account_balance - ?) WHERE id = ?', args: [amt, customer_id] });
-      await payTx.commit();
-      committed = true;
-
-      const { rows: [payRow] } = await db.execute({ sql: `SELECT p.*, c.first_name || ' ' || c.last_name as customer_name FROM account_payments p LEFT JOIN customers c ON p.customer_id = c.id WHERE p.id = ?`, args: [payId] });
-      try { await runCreditCheck(customer_id); } catch(e) {}
-      // A credit-financed rental's commission is deliberately gated on the
-      // customer actually paying, not on booking — see calcRentalCommission.
-      // Only fires once this (or an earlier) payment brings the specific
-      // checkout invoice to fully paid; works whether or not the rental has
-      // been returned yet, since an explicit allocation like this one isn't
-      // subject to the "exclude returned rentals" filter that only applies
-      // to the auto-FIFO candidate query above.
-      try {
-        for (const alloc of finalAllocations.filter(a => a.transaction_id)) {
-          const { rows: [rentalAgreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE checkout_transaction_id = ?', args: [alloc.transaction_id] });
-          if (!rentalAgreement) continue;
-          const { rows: [checkoutTx] } = await db.execute({ sql: 'SELECT * FROM transactions WHERE id = ?', args: [alloc.transaction_id] });
-          if (!checkoutTx) continue;
-          const { rows: [{ paid }] } = await db.execute({ sql: 'SELECT COALESCE(SUM(amount),0) as paid FROM payment_allocations WHERE transaction_id = ?', args: [alloc.transaction_id] });
-          if (checkoutTx.total - paid > 0.001) continue;
-          await calcRentalCommission(rentalAgreement, checkoutTx);
-        }
-      } catch(e) {}
-      res.status(201).json(payRow);
-    } catch(e) {
-      // Once committed, the payment is saved — rolling back a closed transaction
-      // throws and would crash the process (unhandled rejection), so only
-      // roll back if the commit itself never happened.
-      if (!committed) await payTx.rollback();
-      res.status(committed ? 500 : 400).json({ error: e.message });
+    const invoices = await allArInvoices(db, customer.id);
+    const byKey = new Map(invoices.map(i => [i.key, i]));
+    const { rows: payRows } = await db.execute({ sql: `SELECT ap.*, CASE WHEN ap.payment_method = 'writeoff' THEN 0 ELSE ${UNAPPLIED_SQL} END AS unapplied, e.first_name || ' ' || e.last_name AS employee_name
+      FROM account_payments ap LEFT JOIN employees e ON e.id = ap.employee_id WHERE ap.customer_id = ? ORDER BY ap.created_at, ap.id`, args: [customer.id] });
+    const payments = [];
+    for (const p of payRows) {
+      const allocations = (await currentAllocations(db, p.id)).map(a => ({ ...a, invoice_number: byKey.get(a.legacy_invoice_id ? `L${a.legacy_invoice_id}` : `T${a.transaction_id}`)?.number || null }));
+      payments.push({ id: p.id, payment_number: p.payment_number, created_at: p.created_at, amount: p.amount, payment_method: p.payment_method, payment_mode: p.payment_mode, reference: p.reference, employee_name: p.employee_name, unapplied: Math.max(0, parseFloat(Number(p.unapplied).toFixed(2))), allocations });
     }
+    const { rows: changes } = await db.execute({ sql: 'SELECT c.*, ap.payment_number FROM payment_allocation_changes c JOIN account_payments ap ON ap.id = c.payment_id WHERE c.customer_id = ? ORDER BY c.created_at DESC, c.id DESC LIMIT 50', args: [customer.id] });
+    res.json({ customer, invoices, payments, changes: changes.map(c => ({ ...c, before: JSON.parse(c.before_json), after: JSON.parse(c.after_json) })) });
   } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Set which invoices a payment is applied to (allocate / reallocate).
+// changed_by names the Books user when called with an API key.
+router.put('/payments/:id/allocations', requirePermission('accounts_payments'), async (req, res) => {
+  try {
+    const changedBy = req.apiKey ? (String(req.body.changed_by || '').trim() || 'RetailPOS Books') : `${req.employee?.first_name || ''} ${req.employee?.last_name || ''}`.trim();
+    res.json(await setPaymentAllocations(req.params.id, req.body.allocations, { changedBy, source: req.apiKey ? 'books' : 'pos' }));
+  } catch(e) { res.status(400).json({ error: e.message }); }
+});
+
+// New payments since a payment id (oldest first) — Books posts each one to
+// its ledger once.
+router.get('/payments-feed', async (req, res) => {
+  try {
+    const sinceId = parseInt(req.query.since_id) || 0;
+    const limit = Math.min(1000, parseInt(req.query.limit) || 500);
+    const { rows } = await db.execute({ sql: `SELECT ap.id, ap.payment_number, ap.customer_id, ap.amount, ap.payment_method, ap.payment_mode, ap.reference, ap.notes, ap.created_at
+      FROM account_payments ap WHERE ap.id > ? ORDER BY ap.id LIMIT ?`, args: [sinceId, limit] });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Current paid / written-off totals for the given invoices (comma-separated
+// transaction ids and legacy invoice ids) — Books mirrors each invoice's paid
+// amount from these.
+router.get('/allocation-totals', async (req, res) => {
+  try {
+    const ids = v => String(v || '').split(',').map(Number).filter(Boolean).slice(0, 500);
+    const tx = ids(req.query.transactions), legacy = ids(req.query.legacy);
+    const out = { transactions: {}, legacy: {} };
+    if (tx.length) {
+      const { rows } = await db.execute({ sql: `SELECT pa.transaction_id AS id, SUM(CASE WHEN ap.payment_method = 'writeoff' THEN 0 ELSE pa.amount END) AS paid, SUM(CASE WHEN ap.payment_method = 'writeoff' THEN pa.amount ELSE 0 END) AS written_off
+        FROM payment_allocations pa JOIN account_payments ap ON ap.id = pa.payment_id WHERE pa.transaction_id IN (${tx.map(() => '?').join(',')}) GROUP BY pa.transaction_id`, args: tx });
+      for (const r of rows) out.transactions[r.id] = { paid: Number(r.paid) || 0, written_off: Number(r.written_off) || 0 };
+    }
+    if (legacy.length) {
+      const { rows } = await db.execute({ sql: `SELECT lia.legacy_invoice_id AS id, SUM(CASE WHEN ap.payment_method = 'writeoff' THEN 0 ELSE lia.amount END) AS paid, SUM(CASE WHEN ap.payment_method = 'writeoff' THEN lia.amount ELSE 0 END) AS written_off
+        FROM legacy_invoice_allocations lia JOIN account_payments ap ON ap.id = lia.payment_id WHERE lia.legacy_invoice_id IN (${legacy.map(() => '?').join(',')}) GROUP BY lia.legacy_invoice_id`, args: legacy });
+      for (const r of rows) out.legacy[r.id] = { paid: Number(r.paid) || 0, written_off: Number(r.written_off) || 0 };
+    }
+    res.json(out);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Customer payments are received by cashiers at the POS — POST
+// /api/customer-payments (lib/customerPayments.js, permission
+// pos_receive_payment) — so they're tied to a cash drawer. This endpoint used
+// to post them from the Accounts screen and is kept only to say so.
+router.post('/payments', (req, res) => {
+  res.status(410).json({ error: 'Customer payments are received at the POS (Receive Payment) by cashiers.' });
 });
 
 // Write off (forgive) part or all of a customer's outstanding balance —
@@ -237,7 +261,10 @@ router.get('/statement/:customer_id', async (req, res) => {
     if (end)   { sql += ' AND date(p.created_at) <= ?'; params.push(end); }
     sql += ' ORDER BY p.created_at ASC';
     const { rows: payments } = await db.execute({ sql, args: params });
-    for (const p of payments) p.allocations = await paymentAllocations(db, p.id);
+    for (const p of payments) {
+      p.allocations = await paymentAllocations(db, p.id);
+      p.unapplied = p.payment_method === 'writeoff' ? 0 : Math.max(0, parseFloat((p.amount - p.allocations.reduce((s, a) => s + a.amount, 0)).toFixed(2)));
+    }
     res.json({ customer, payments, period: { start: start || null, end: end || null } });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -246,7 +273,7 @@ router.get('/statement/:customer_id', async (req, res) => {
 router.get('/payments', async (req, res) => {
   try {
     const { customer_id, start, end, limit = 200, sort = 'desc' } = req.query;
-    let sql = `SELECT p.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name FROM account_payments p LEFT JOIN customers c ON p.customer_id = c.id LEFT JOIN employees e ON p.employee_id = e.id LEFT JOIN branches b ON p.branch_id = b.id WHERE 1=1`;
+    let sql = `SELECT p.*, CASE WHEN p.payment_method = 'writeoff' THEN 0 ELSE ${UNAPPLIED_SQL.replace(/\bap\./g, 'p.')} END AS unapplied, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name FROM account_payments p LEFT JOIN customers c ON p.customer_id = c.id LEFT JOIN employees e ON p.employee_id = e.id LEFT JOIN branches b ON p.branch_id = b.id WHERE 1=1`;
     const params = [];
     if (customer_id) { sql += ' AND p.customer_id = ?'; params.push(customer_id); }
     if (start) { sql += ' AND date(p.created_at) >= ?'; params.push(start); }
