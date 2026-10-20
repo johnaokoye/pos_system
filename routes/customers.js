@@ -239,6 +239,15 @@ router.get('/', requireAuth, async (req, res) => {
       params.push(s, s, s, s, s, s, s);
     }
     if (active !== undefined) { sql += ' AND active = ?'; params.push(active); }
+    // Type-to-search pickers: ?ids= fetches the already-chosen customer(s)
+    // of a saved form; ?rental=1 / ?credit_enabled= narrow the matches.
+    if (req.query.ids) {
+      const ids = String(req.query.ids).split(',').map(Number).filter(Number.isInteger).slice(0, 200);
+      sql += ids.length ? ` AND id IN (${ids.map(() => '?').join(',')})` : ' AND 0';
+      params.push(...ids);
+    }
+    if (req.query.rental === '1') sql += ' AND is_rental_customer = 1';
+    if (req.query.credit_enabled === '0' || req.query.credit_enabled === '1') { sql += ' AND COALESCE(credit_enabled, 0) = ?'; params.push(Number(req.query.credit_enabled)); }
     // Customers list filter: credit / cash, or rental approved (can rent
     // today — a rental customer who's preapproved or has every required
     // document, lib/rentals.js) vs other (everyone who can't yet).

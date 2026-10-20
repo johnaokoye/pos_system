@@ -1240,8 +1240,8 @@ async function _init() {
     // One row per salesperson — current-value targets, not date-ranged
     // history (matches how e.g. discount_card_types/cash_back_card_types
     // hold a current rate, not a log). "Current sales" for each period is
-    // computed live from transactions.employee_id (who actually rang up
-    // the sale), not the commission-credit chain (quotations.
+    // computed live from transactions.salesperson_id (picked on the POS
+    // ticket), else employee_id (who rang up the sale), not the commission-credit chain (quotations.
     // original_employee_id) — a target is about a salesperson's own
     // activity, a distinct question from who a sale's commission credits.
     // See routes/sales-targets.js.
@@ -1609,6 +1609,10 @@ async function _init() {
     // cart, or the quote's creator. NULL on older rows means "same as
     // employee_id"; readers COALESCE the two.
     'ALTER TABLE transactions ADD COLUMN created_by INTEGER REFERENCES employees(id)',
+    // The Salesperson picked on the POS ticket (an is_salesperson employee),
+    // when it isn't the cashier — the sale counts toward their targets
+    // (routes/sales-targets.js). NULL = the cashier (employee_id) made it.
+    'ALTER TABLE transactions ADD COLUMN salesperson_id INTEGER REFERENCES employees(id)',
     // Raw serial number on an "SN" line (see lib/serialNumber.js) — the line's
     // product_name already reads "SN: <serial>"; this copy is for lookups.
     'ALTER TABLE transaction_items ADD COLUMN serial_number TEXT',

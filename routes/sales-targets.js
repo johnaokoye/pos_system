@@ -3,8 +3,9 @@ const router = express.Router();
 const { db } = require('../database');
 const { requireAuth, requirePermission, can } = require('../lib/permissions');
 
-// "Current sales" per period uses transactions.employee_id (who actually
-// rang up the sale) — deliberately not the commission-credit chain
+// "Current sales" per period goes to the Salesperson picked on the POS
+// ticket (transactions.salesperson_id), else whoever rang it up
+// (employee_id) — deliberately not the commission-credit chain
 // (quotations.original_employee_id) a reassigned quote's sale uses
 // elsewhere in this app. A target tracks a salesperson's own selling
 // activity, a different question from whose commission a sale counts
@@ -13,14 +14,14 @@ const { requireAuth, requirePermission, can } = require('../lib/permissions');
 // hour/day/week/month" — 31 days safely covers the current month from
 // any day within it.
 const CURRENT_SALES_SELECT = `
-  SELECT employee_id,
+  SELECT COALESCE(salesperson_id, employee_id) as employee_id,
     COALESCE(SUM(CASE WHEN strftime('%Y-%m-%d %H', created_at) = strftime('%Y-%m-%d %H', 'now') THEN total ELSE 0 END), 0) as hourly_sales,
     COALESCE(SUM(CASE WHEN date(created_at) = date('now') THEN total ELSE 0 END), 0) as daily_sales,
     COALESCE(SUM(CASE WHEN strftime('%Y-%W', created_at) = strftime('%Y-%W', 'now') THEN total ELSE 0 END), 0) as weekly_sales,
     COALESCE(SUM(CASE WHEN strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now') THEN total ELSE 0 END), 0) as monthly_sales
   FROM transactions
-  WHERE status = 'completed' AND employee_id IS NOT NULL AND date(created_at) >= date('now', '-31 days')
-  GROUP BY employee_id`;
+  WHERE status = 'completed' AND COALESCE(salesperson_id, employee_id) IS NOT NULL AND date(created_at) >= date('now', '-31 days')
+  GROUP BY COALESCE(salesperson_id, employee_id)`;
 
 // A plain salesperson (no sales_manager/reports) only ever sees their own
 // numbers, regardless of what they ask for — same "mine" scoping pattern
@@ -67,6 +68,15 @@ router.get('/', requireAuth, async (req, res) => {
       emp.monthly_sales = sales.monthly_sales;
     }
     res.json(employees);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Active salespeople for the POS ticket's Salesperson picker — any
+// signed-in POS user can read just the names, unlike /api/employees.
+router.get('/salespeople', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await db.execute({ sql: "SELECT id, first_name, last_name FROM employees WHERE is_salesperson = 1 AND active = 1 ORDER BY first_name, last_name", args: [] });
+    res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

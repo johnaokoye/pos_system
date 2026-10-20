@@ -638,6 +638,7 @@ const App = {
   // Employee who started the current cart, when recalled from a hold someone
   // else created — sent as created_by so the receipt can show both people.
   _ticketCreatedBy: null,
+  _ticketSalesperson: null,
   allProducts: [],
   allCategories: [],
   posCategory: 'all',
@@ -2618,7 +2619,11 @@ const App = {
             <button class="btn btn-outline btn-sm" onclick="App.selectCustomer()">Select</button>
             <button class="btn btn-secondary btn-sm" id="remove-customer-btn" style="display:${this.cartCustomer ? 'inline-flex' : 'none'}" onclick="App.removeCustomer()">✕</button>
           </div>
-          <span style="color:var(--text-muted)">Sales rep: <strong style="color:var(--text)">${cashierName}</strong></span>
+          <label style="color:var(--text-muted);display:flex;align-items:center;gap:6px;margin:0" title="Who made this sale — it counts toward their sales targets. Leave on the cashier when they made it.">Salesperson:
+            <select id="pos-salesperson" onchange="App._ticketSalesperson = this.value ? Number(this.value) : null" style="margin:0;padding:3px 6px;width:auto;min-width:160px">
+              <option value="">${this.escapeAttr(cashierName)} (cashier)</option>
+            </select>
+          </label>
           <div id="active-quote-bar" style="display:none;background:#e8f0fe;border:1px solid #b3c8f7;border-radius:6px;padding:6px 10px;font-size:12px;align-items:center;gap:8px">
             <svg viewBox="0 0 24 24" fill="#1a73e8" width="14" height="14"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 1.5L18.5 9H13V3.5zM16 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-4H8V6h5v2z"/></svg>
             <span style="color:#1a73e8">Invoice: <strong id="active-quote-number"></strong></span>
@@ -2652,6 +2657,7 @@ const App = {
       </div>`;
 
     this._posHasDrawers = false;
+    this._loadPOSSalespeople();
     this.renderPOSBranchBar();
     this.renderCart();
     this.checkPOSDrawer();
@@ -3548,12 +3554,30 @@ const App = {
     this.renderCart();
   },
 
+  // The ticket's Salesperson dropdown: active salespeople (fetched once per
+  // POS visit), with the cashier as the default blank choice.
+  async _loadPOSSalespeople() {
+    try { this._posSalespeople = await this.api('GET', '/sales-targets/salespeople'); } catch (e) { this._posSalespeople = []; }
+    this._renderTicketSalesperson();
+  },
+
+  _renderTicketSalesperson() {
+    const sel = document.getElementById('pos-salesperson');
+    if (!sel) return;
+    const list = [...(this._posSalespeople || [])];
+    // A recalled hold's salesperson stays shown even if no longer flagged.
+    if (this._ticketSalesperson && !list.some(s => s.id === this._ticketSalesperson)) list.push({ id: this._ticketSalesperson, first_name: this._ticketSalespersonName || `Employee #${this._ticketSalesperson}`, last_name: '' });
+    sel.innerHTML = sel.options[0].outerHTML + list.map(s => `<option value="${s.id}">${this.escapeAttr(`${s.first_name} ${s.last_name}`.trim())}</option>`).join('');
+    sel.value = this._ticketSalesperson ? String(this._ticketSalesperson) : '';
+  },
+
   clearCart() {
-    this.cart = []; this.cartCustomer = null; this.cartDiscount = 0; this._storeCreditApplied = 0; this._cashBackApplied = 0; this.appliedPromoCode = null; this.autoAppliedPromo = null; this._availablePromos = []; this._returnCredit = null; this._activeQuoteId = null; this._ticketCreatedBy = null; this.appliedDiscountCard = null; this._manualTaxExempt = null;
+    this.cart = []; this.cartCustomer = null; this.cartDiscount = 0; this._storeCreditApplied = 0; this._cashBackApplied = 0; this.appliedPromoCode = null; this.autoAppliedPromo = null; this._availablePromos = []; this._returnCredit = null; this._activeQuoteId = null; this._ticketCreatedBy = null; this._ticketSalesperson = null; this.appliedDiscountCard = null; this._manualTaxExempt = null;
     this.renderCart();
     const aqBar = document.getElementById('active-quote-bar');
     if (aqBar) aqBar.style.display = 'none';
     this._renderCartCustomer();
+    this._renderTicketSalesperson();
     const di = document.getElementById('discount-input');
     if (di) di.value = '';
     const dd = document.getElementById('discount-display');
@@ -3831,6 +3855,7 @@ const App = {
         customer_id: this.cartCustomer?.id || null,
         employee_id: this.currentUser?.id || 1,
         created_by: this._ticketCreatedBy || null,
+        salesperson_id: this._ticketSalesperson || null,
         branch_id: this.posBranch?.id || null,
         drawer_session_id: this.currentDrawerSession?.id || null,
         // A custom/temp line (no product_id — e.g. a Special Project's
@@ -3905,6 +3930,7 @@ const App = {
         customer_id: this.cartCustomer?.id || null,
         employee_id: this.currentUser?.id || 1,
         created_by: this._ticketCreatedBy || null,
+        salesperson_id: this._ticketSalesperson || null,
         branch_id: this.posBranch?.id || null,
         items: cartItems,
         discount_amount: this.cartDiscount || 0,
@@ -4058,6 +4084,9 @@ const App = {
       // exactly like loadQuoteToCart does for its own "Load Quote" pull flow.
       this._activeQuoteId = held.source_quote_id || null;
       this._ticketCreatedBy = held.created_by || held.employee_id || null;
+      this._ticketSalesperson = held.salesperson_id || null;
+      this._ticketSalespersonName = held.salesperson_name || null;
+      this._renderTicketSalesperson();
       if (held.customer_id) {
         const customer = await this.api('GET', `/customers/${held.customer_id}`);
         this.cartCustomer = customer;
@@ -4357,6 +4386,7 @@ const App = {
             <div class="receipt-row"><span>Date:</span><span>${this.fmtDateTime(tx.created_at)}</span></div>
             ${tx.customer_name ? `<div class="receipt-row"><span>Customer:</span><span>${tx.customer_name}</span></div>` : ''}
             ${tx.created_by_name ? `<div class="receipt-row"><span>Created By:</span><span>${tx.created_by_name}</span></div>` : ''}
+            ${tx.salesperson_name ? `<div class="receipt-row"><span>Salesperson:</span><span>${tx.salesperson_name}</span></div>` : ''}
             ${tx.employee_name ? `<div class="receipt-row"><span>Cashier:</span><span>${tx.employee_name}</span></div>` : ''}
             <hr>
             ${items.map(i => { const pct = this._lineDiscountPct(i); return `<div class="receipt-item">
@@ -4564,6 +4594,7 @@ const App = {
       ${tx.customer_name ? `<div><label>Customer</label>${tx.customer_name}</div>` : ''}
       ${tx.rental_agreement_number ? `<div><label>Rental Agreement</label>${tx.rental_agreement_number}</div>` : ''}
       ${tx.created_by_name || tx.employee_name ? `<div><label>Created By</label>${tx.created_by_name || tx.employee_name}</div>` : ''}
+      ${tx.salesperson_name ? `<div><label>Salesperson</label>${tx.salesperson_name}</div>` : ''}
       ${tx.employee_name ? `<div><label>Cashier</label>${tx.employee_name}</div>` : ''}
       ${rentedItemsLabel ? `<div><label>Item(s) Rented</label>${rentedItemsLabel}</div>` : ''}
       ${tx.rental_due_date ? `<div><label>Due Date</label>${this.fmtDate(tx.rental_due_date)}</div>` : ''}
@@ -4685,7 +4716,6 @@ const App = {
       else if (kind === 'rental') { addTo(this._rentalCustomers, c); this._selectRentalCustomer(c.id); }
       else if (kind === 'layaway') { addTo(this._layawayCustomers, c); this._selectLayawayCustomer(c.id); }
       else {
-        if (kind === 'qt-cust') addTo(this._quoteAllCustomers, c);
         addTo((this._custPickerLists || {})[kind]?.customers, c);
         this._selectCustomerPicker(kind, c.id);
       }
@@ -8533,16 +8563,13 @@ const App = {
     // multi_branch_access AND more than one assigned branch get a picker —
     // everyone else is locked to their own (default) branch.
     const isMultiBranch = this.currentUser.permissions?.multi_branch_access && branches.length > 1;
-    const [customers, products] = await Promise.all([
-      this.api('GET', '/customers?active=1'),
-      this.api('GET', `/products?is_rental=1&active=1${defaultBranch ? '&branch_id='+defaultBranch.id : ''}`),
-    ]);
+    const products = await this.api('GET', `/products?is_rental=1&active=1${defaultBranch ? '&branch_id='+defaultBranch.id : ''}`);
     // Only items actually available at this branch are offered for
     // selection — stock_qty already reflects branch-scoped stock when
     // branch_id is passed (see routes/products.js), so this nets that
     // against what's currently checked out elsewhere.
     this._rentalProducts = products.filter(p => (p.stock_qty - (p.rental_outstanding_qty||0)) > 0);
-    this._rentalCustomers = customers;
+    this._rentalCustomers = [];
     this._rentalLineIdx = 0;
     const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0,10);
     this.showModal(`
@@ -8719,12 +8746,19 @@ const App = {
   // Mirrors the main POS customer picker (App.selectCustomer/setCartCustomer)
   // — same Credit/Blocked/Tax Exempt badges, and a blocked account can be seen
   // but not selected (click shows the same alert instead of picking it).
-  _filterRentalCustomers(q) {
+  // Searches the server as you type (App._customerSearch); every customer
+  // shown is kept in _rentalCustomers, which the rest of the rental form
+  // reads the chosen customer from.
+  async _filterRentalCustomers(q) {
     const dd = document.getElementById('rc-customer-dd');
     if (!dd) return;
-    const query = (q || '').toLowerCase();
-    const matches = (this._rentalCustomers || []).filter(c =>
-      !query || `${c.first_name} ${c.last_name} ${c.customer_number || ''}`.toLowerCase().includes(query));
+    if (dd.style.display === 'none') { dd.innerHTML = '<div style="padding:10px;color:var(--text-muted);font-size:13px">Searching…</div>'; dd.style.display = ''; }
+    let matches;
+    try { matches = await this._customerSearch('rental', q); }
+    catch (e) { dd.innerHTML = `<div style="padding:10px;color:var(--danger);font-size:13px">${this.escapeAttr(e.message)}</div>`; return; }
+    if (!matches) return;
+    this._rentalCustomers = this._mergeCustomers(this._rentalCustomers, matches);
+    const esc = v => this.escapeAttr(v ?? '');
     if (!matches.length) {
       dd.innerHTML = this._addCustomerRowHtml('rental') + '<div style="padding:10px;color:var(--text-muted);font-size:13px">No customers found</div>';
       dd.style.display = '';
@@ -8745,7 +8779,7 @@ const App = {
         ? `App.alert('Account blocked: overdue balance must be settled before making purchases.','error')`
         : `App._selectRentalCustomer(${c.id})`;
       return `<div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text);${blocked?'opacity:0.6':''}" onclick="${clickHandler}">
-        <div><strong>${c.first_name} ${c.last_name}</strong><span style="color:var(--text-muted);font-size:12px;margin-left:4px">${c.customer_number||''}</span>${typeTag}${blockedTag}${taxExemptTag}</div>
+        <div><strong>${esc(c.first_name)} ${esc(c.last_name)}</strong><span style="color:var(--text-muted);font-size:12px;margin-left:4px">${esc(c.customer_number)}</span>${typeTag}${blockedTag}${taxExemptTag}</div>
       </div>`;
     }).join('');
     dd.style.display = '';
@@ -8777,9 +8811,13 @@ const App = {
   // Label for a waived rental deposit, keyed by depositWaiver's reason.
   _depositWaivedLabel(reason) { return reason === 'credit' ? 'not required — credit account' : 'waived — operator provided'; },
 
-  _selectRentalCustomer(id) {
-    const c = (this._rentalCustomers || []).find(x => x.id === id);
-    if (!c) return;
+  async _selectRentalCustomer(id) {
+    let c = (this._rentalCustomers || []).find(x => x.id === id);
+    if (!c) {
+      try { c = await this._customerById(id); } catch (e) { c = null; }
+      if (!c) return;
+      this._rentalCustomers = this._mergeCustomers(this._rentalCustomers, [c]);
+    }
     const idEl = document.getElementById('rc-customer');
     const searchEl = document.getElementById('rc-customer-search');
     const dd = document.getElementById('rc-customer-dd');
@@ -10046,10 +10084,7 @@ const App = {
   },
 
   async showWOIntakeModal() {
-    const [customers, feeServices] = await Promise.all([
-      this.api('GET', '/customers?active=1'),
-      this.api('GET', '/products?is_service=1&active=1'),
-    ]);
+    const feeServices = await this.api('GET', '/products?is_service=1&active=1');
     this._woFeeServices = feeServices;
     const branches = this.currentUser.branches || [];
     const isMultiBranch = this.currentUser.permissions?.multi_branch_access && branches.length > 1;
@@ -10059,7 +10094,7 @@ const App = {
         <div class="modal-header"><span class="modal-title">New Work Order</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <div class="form-group"><label>Customer *</label>
-            ${this._customerPickerHtml('wo-customer', customers)}
+            ${this._customerPickerHtml('wo-customer', [], null, { remote: '' })}
           </div>
           <div class="form-group"><label>Branch / Location</label>
             ${isMultiBranch ? `<select id="wo-branch">${branches.map(b=>`<option value="${b.id}" ${defaultBranch && b.id===defaultBranch.id?'selected':''}>${b.name}</option>`).join('')}</select>`
@@ -11191,12 +11226,9 @@ const App = {
     this._layawayFromPOSCart = false;
     const branches = this.currentUser.branches || [];
     const defaultBranch = branches.find(b => b.is_default) || branches[0] || null;
-    const [customers, products] = await Promise.all([
-      this.api('GET', '/customers?active=1'),
-      this.api('GET', `/products?is_layaway_eligible=1&active=1${defaultBranch ? '&branch_id='+defaultBranch.id : ''}`),
-    ]);
+    const products = await this.api('GET', `/products?is_layaway_eligible=1&active=1${defaultBranch ? '&branch_id='+defaultBranch.id : ''}`);
     this._layawayProducts = products;
-    this._layawayCustomers = customers;
+    this._layawayCustomers = [];
     this._layawayLineIdx = 0;
     const depositPct = this.settings?.layaway_deposit_percent || 20;
     this.showModal(`
@@ -11263,30 +11295,73 @@ const App = {
     });
   },
 
-  _filterLayawayCustomers(q) {
+  async _filterLayawayCustomers(q) {
     const dd = document.getElementById('lc-customer-dd');
     if (!dd) return;
-    const query = (q || '').toLowerCase();
-    const matches = (this._layawayCustomers || []).filter(c =>
-      !query || `${c.first_name} ${c.last_name} ${c.customer_number || ''}`.toLowerCase().includes(query));
+    if (dd.style.display === 'none') { dd.innerHTML = '<div style="padding:10px;color:var(--text-muted);font-size:13px">Searching…</div>'; dd.style.display = ''; }
+    let matches;
+    try { matches = await this._customerSearch('layaway', q); }
+    catch (e) { dd.innerHTML = `<div style="padding:10px;color:var(--danger);font-size:13px">${this.escapeAttr(e.message)}</div>`; return; }
+    if (!matches) return;
+    this._layawayCustomers = this._mergeCustomers(this._layawayCustomers, matches);
+    const esc = v => this.escapeAttr(v ?? '');
     if (!matches.length) {
       dd.innerHTML = this._addCustomerRowHtml('layaway') + '<div style="padding:10px;color:var(--text-muted);font-size:13px">No customers found</div>';
       dd.style.display = '';
       return;
     }
     dd.innerHTML = this._addCustomerRowHtml('layaway') + matches.map(c => `<div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text)" onclick="App._selectLayawayCustomer(${c.id})">
-        <div><strong>${c.first_name} ${c.last_name}</strong><span style="color:var(--text-muted);font-size:12px;margin-left:4px">${c.customer_number||''}</span></div>
+        <div><strong>${esc(c.first_name)} ${esc(c.last_name)}</strong><span style="color:var(--text-muted);font-size:12px;margin-left:4px">${esc(c.customer_number)}</span></div>
       </div>`).join('');
     dd.style.display = '';
+  },
+
+  // Server-side customer search for the type-to-search pickers: the first
+  // 50 matches for what's typed (plus any extra query, e.g. '&rental=1'),
+  // never the whole customer table. Debounced per picker key; resolves null
+  // when newer typing has overtaken the request.
+  _customerSearch(key, q, extra = '') {
+    this._custSearchState = this._custSearchState || {};
+    const st = this._custSearchState[key] = this._custSearchState[key] || { seq: 0 };
+    clearTimeout(st.timer);
+    const mine = ++st.seq;
+    const query = (q || '').trim();
+    return new Promise((resolve, reject) => {
+      st.timer = setTimeout(() => {
+        this.api('GET', `/customers?active=1&limit=50${query ? `&search=${encodeURIComponent(query)}` : ''}${extra}`)
+          .then(rows => resolve(mine === st.seq ? rows : null), e => (mine === st.seq ? reject(e) : resolve(null)));
+      }, 200);
+    });
+  },
+
+  // One customer by id (active or not), for preselecting a saved form's
+  // customer in a picker that only holds search results.
+  async _customerById(id) {
+    if (id == null || id === '') return null;
+    const [c] = await this.api('GET', `/customers?ids=${encodeURIComponent(id)}&limit=1`);
+    return c || null;
+  },
+
+  // Adds/refreshes rows (by id) in a picker's cache of loaded customers.
+  _mergeCustomers(list, rows) {
+    const out = [...(list || [])];
+    for (const r of rows || []) {
+      const i = out.findIndex(c => String(c.id) === String(r.id));
+      if (i >= 0) out[i] = r; else out.push(r);
+    }
+    return out;
   },
 
   // Shared type-to-search customer picker for forms that used to render a
   // plain <select> of every customer. The hidden input keeps the old
   // select's id, so callers keep reading document.getElementById(id).value
   // unchanged. emptyLabel (optional) adds a "none" row that clears the pick.
-  _customerPickerHtml(id, customers, selectedId, { placeholder = 'Search customer…', emptyLabel = '' } = {}) {
+  // remote (a query-string suffix, '' for none) searches the server as you
+  // type instead of filtering `customers`, which then only needs to hold the
+  // preselected customer, if any.
+  _customerPickerHtml(id, customers, selectedId, { placeholder = 'Search customer…', emptyLabel = '', remote = null } = {}) {
     this._custPickerLists = this._custPickerLists || {};
-    this._custPickerLists[id] = { customers: customers || [], emptyLabel };
+    this._custPickerLists[id] = { customers: customers || [], emptyLabel, remote };
     const sel = selectedId != null && selectedId !== '' ? (customers || []).find(c => String(c.id) === String(selectedId)) : null;
     if (!this._custPickerListenerBound) {
       this._custPickerListenerBound = true;
@@ -11305,27 +11380,45 @@ const App = {
     </div>`;
   },
 
-  _filterCustomerPicker(id, q) {
+  async _filterCustomerPicker(id, q) {
     const dd = document.getElementById(`${id}-dd`);
     const cfg = (this._custPickerLists || {})[id];
     if (!dd || !cfg) return;
     const query = (q || '').toLowerCase().trim();
-    const matches = cfg.customers.filter(c =>
-      !query || `${c.first_name} ${c.last_name} ${c.customer_number || ''} ${c.phone || ''} ${c.email || ''}`.toLowerCase().includes(query));
     const noneRow = cfg.emptyLabel && !query
       ? `<div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text-muted)" onclick="App._selectCustomerPicker('${id}',null)">${cfg.emptyLabel}</div>`
       : '';
+    let matches;
+    if (cfg.remote != null) {
+      if (dd.style.display === 'none') { dd.innerHTML = this._addCustomerRowHtml(id) + noneRow + '<div style="padding:10px;color:var(--text-muted);font-size:13px">Searching…</div>'; dd.style.display = ''; }
+      let rows;
+      try { rows = await this._customerSearch(id, query, cfg.remote); }
+      catch (e) { dd.innerHTML = `<div style="padding:10px;color:var(--danger);font-size:13px">${this.escapeAttr(e.message)}</div>`; return; }
+      if (!rows) return;
+      cfg.customers = this._mergeCustomers(cfg.customers, rows);
+      matches = rows;
+    } else {
+      matches = cfg.customers.filter(c =>
+        !query || `${c.first_name} ${c.last_name} ${c.customer_number || ''} ${c.phone || ''} ${c.email || ''}`.toLowerCase().includes(query));
+    }
+    const esc = v => this.escapeAttr(v ?? '');
     dd.innerHTML = this._addCustomerRowHtml(id) + noneRow + (matches.length
       ? matches.slice(0, 50).map(c => `<div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text)" onclick="App._selectCustomerPicker('${id}',${c.id})">
-          <div><strong>${c.first_name} ${c.last_name}</strong><span style="color:var(--text-muted);font-size:12px;margin-left:4px">${c.customer_number||''}</span></div>
+          <div><strong>${esc(c.first_name)} ${esc(c.last_name)}</strong><span style="color:var(--text-muted);font-size:12px;margin-left:4px">${esc(c.customer_number)}</span></div>
         </div>`).join('')
       : '<div style="padding:10px;color:var(--text-muted);font-size:13px">No customers found</div>');
     dd.style.display = '';
   },
 
-  _selectCustomerPicker(id, customerId) {
+  async _selectCustomerPicker(id, customerId) {
     const cfg = (this._custPickerLists || {})[id];
-    const c = customerId != null && cfg ? cfg.customers.find(x => String(x.id) === String(customerId)) : null;
+    let c = customerId != null && cfg ? cfg.customers.find(x => String(x.id) === String(customerId)) : null;
+    // A remote picker only holds search results — fetch a customer chosen
+    // from elsewhere (the POS ticket, a form being carried over).
+    if (customerId != null && cfg && !c && cfg.remote != null) {
+      try { c = await this._customerById(customerId); } catch (e) { c = null; }
+      if (c) cfg.customers = this._mergeCustomers(cfg.customers, [c]);
+    }
     const idEl = document.getElementById(id);
     const searchEl = document.getElementById(`${id}-search`);
     const dd = document.getElementById(`${id}-dd`);
@@ -11336,9 +11429,13 @@ const App = {
     if (onSelect) onSelect(c);
   },
 
-  _selectLayawayCustomer(id) {
-    const c = (this._layawayCustomers || []).find(x => x.id === id);
-    if (!c) return;
+  async _selectLayawayCustomer(id) {
+    let c = (this._layawayCustomers || []).find(x => x.id === id);
+    if (!c) {
+      try { c = await this._customerById(id); } catch (e) { c = null; }
+      if (!c) return;
+      this._layawayCustomers = this._mergeCustomers(this._layawayCustomers, [c]);
+    }
     const idEl = document.getElementById('lc-customer');
     const searchEl = document.getElementById('lc-customer-search');
     const dd = document.getElementById('lc-customer-dd');
@@ -15665,7 +15762,7 @@ const App = {
           </table>
         </div>
       </div>
-      <p style="font-size:11px;color:var(--text-muted);margin-top:8px">Current sales are transactions each salesperson personally rang up in the current hour/day/week/month — not the commission-credit chain a reassigned quote uses elsewhere. Targets are set from CRM &amp; Sales → Targets.</p>`;
+      <p style="font-size:11px;color:var(--text-muted);margin-top:8px">Current sales are transactions in the current hour/day/week/month where the salesperson was picked on the POS ticket, or rang it up themselves when no salesperson was picked — not the commission-credit chain a reassigned quote uses elsewhere. Targets are set from CRM &amp; Sales → Targets.</p>`;
   },
 
   // Shared modal shell for the report-with-filters pattern below — takes a
@@ -20125,14 +20222,12 @@ const App = {
   },
 
   async showQuoteForm(editId, initialType) {
-    const [customers, employees, products] = await Promise.all([
-      this.api('GET', '/customers'),
+    const [employees, products] = await Promise.all([
       this.api('GET', '/employees'),
       this.api('GET', '/products?for_sale=1'),
     ]);
     const branches = this.currentUser.branches || [];
     this._quoteProducts = products;
-    this._quoteAllCustomers = customers;
     this._quoteItems = [];
     this._quoteBranches = branches;
     this._quoteStockCache = {};
@@ -20141,6 +20236,7 @@ const App = {
     this._rentalQuoteLineIdx = 0;
     this._spRentalProducts = null;
     const q = editId ? await this.api('GET', `/quotations/${editId}`) : null;
+    const quoteCustomer = q?.customer_id ? await this._customerById(q.customer_id) : null;
     const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0,10);
     this.showModal(`
       <div class="modal" style="max-width:720px">
@@ -20156,7 +20252,7 @@ const App = {
           </div>` : ''}
           <div class="input-row">
             <div class="form-group"><label>Customer</label>
-              ${this._customerPickerHtml('qt-cust', customers, q && q.customer_id, { emptyLabel: '-- Walk-in / No Customer --' })}
+              ${this._customerPickerHtml('qt-cust', quoteCustomer ? [quoteCustomer] : [], q && q.customer_id, { emptyLabel: '-- Walk-in / No Customer --', remote: '' })}
               <p id="qt-cust-hint" style="display:none;font-size:11px;color:var(--text-muted);margin:4px 0 0">Only approved rental customers are listed.</p>
             </div>
             <div class="form-group"><label>Branch</label>
@@ -20345,9 +20441,7 @@ const App = {
     const hint = document.getElementById('qt-cust-hint');
     const cfg = (this._custPickerLists || {})['qt-cust'];
     if (!input || !cfg) return;
-    const selectedId = input.value;
-    const list = this._quoteAllCustomers || [];
-    cfg.customers = type === 'rental' ? list.filter(c => c.is_rental_customer || String(c.id) === String(selectedId)) : list;
+    cfg.remote = type === 'rental' ? '&rental=1' : '';
     if (hint) hint.style.display = type === 'rental' ? '' : 'none';
   },
 
@@ -21972,13 +22066,12 @@ const App = {
   },
 
   async showEnableCreditModal() {
-    const customers = await this.api('GET', '/customers');
     this.showModal(`
       <div class="modal" style="max-width:440px">
         <div class="modal-header"><span class="modal-title">Enable Credit Account</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <div class="form-group"><label>Customer *</label>
-            ${this._customerPickerHtml('ec-cust', customers.filter(c => !c.credit_enabled))}
+            ${this._customerPickerHtml('ec-cust', [], null, { remote: '&credit_enabled=0' })}
           </div>
           <div class="form-group"><label>Credit Limit ($)</label><input id="ec-limit" type="number" step="0.01" value="1000.00"></div>
         </div>
@@ -24730,13 +24823,13 @@ const App = {
   },
 
   async showOppModal(id = null) {
-    const [employees, leads, customers, opp] = await Promise.all([
+    const [employees, leads, opp] = await Promise.all([
       this.api('GET', '/employees'),
       this.api('GET', '/crm/leads'),
-      this.api('GET', '/customers'),
       id ? this.api('GET', `/crm/opportunities/${id}`) : Promise.resolve(null),
     ]);
     const o = opp || {};
+    const oppCustomer = o.customer_id ? await this._customerById(o.customer_id) : null;
     const stages = ['qualification','proposal','negotiation','closed_won','closed_lost'];
     this.showModal(`
       <div class="modal" style="max-width:600px">
@@ -24754,7 +24847,7 @@ const App = {
               </select>
             </div>
             <div class="form-group"><label>Customer</label>
-              ${this._customerPickerHtml('o-cust', customers, o.customer_id, { emptyLabel: 'None' })}
+              ${this._customerPickerHtml('o-cust', oppCustomer ? [oppCustomer] : [], o.customer_id, { emptyLabel: 'None', remote: '' })}
             </div>
           </div>
           <div class="input-row">
@@ -24913,10 +25006,9 @@ const App = {
   },
 
   async showActivityModal(leadId = null, oppId = null) {
-    const [employees, leads, customers] = await Promise.all([
+    const [employees, leads] = await Promise.all([
       this.api('GET', '/employees'),
       this.api('GET', '/crm/leads'),
-      this.api('GET', '/customers'),
     ]);
     const types = ['call','email','meeting','task','note'];
     const tomorrow = new Date(Date.now() + 86400000);
@@ -24948,7 +25040,7 @@ const App = {
               </select>
             </div>
             <div class="form-group"><label>Customer</label>
-              ${this._customerPickerHtml('a-cust', customers, null, { emptyLabel: 'None' })}
+              ${this._customerPickerHtml('a-cust', [], null, { emptyLabel: 'None', remote: '' })}
             </div>
           </div>
           <div class="form-group"><label>Due Date / Time</label><input id="a-due" type="datetime-local" value="${defaultDue}"></div>
@@ -25658,9 +25750,8 @@ const App = {
   },
 
   async showShipmentModal() {
-    const [branches, customers, products, bins] = await Promise.all([
+    const [branches, products, bins] = await Promise.all([
       this.api('GET','/branches'),
-      this.api('GET','/customers'),
       this.api('GET','/products'),
       this.api('GET','/warehouse/bins'),
     ]);
@@ -25682,7 +25773,7 @@ const App = {
               </select>
             </div>
             <div class="form-group"><label>Ship To (Customer)</label>
-              ${this._customerPickerHtml('sh-cust', customers, null, { emptyLabel: 'Walk-in / Other' })}
+              ${this._customerPickerHtml('sh-cust', [], null, { emptyLabel: 'Walk-in / Other', remote: '' })}
             </div>
           </div>
           <div class="input-row">
