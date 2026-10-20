@@ -2585,6 +2585,7 @@ const App = {
       this.can('transactions') ? `<button class="pos-grid-btn" onclick="App.showSection('transactions')">Returns</button>` : '',
       this.can('pos_pay_on_account') ? `<button class="pos-grid-btn pay-acct" onclick="App.processPayment('credit')">Pay On Acct</button>` : '',
       this.currentUser?.permissions?.pos_receive_payment ? `<button class="pos-grid-btn pay-acct" onclick="App.showReceivePaymentModal()" title="Take a payment from a customer toward their account">Receive Payment</button>` : '',
+      this.currentUser?.permissions?.pos_petty_cash ? `<button class="pos-grid-btn" onclick="App.showPettyCashModal()" title="Pay petty cash out of your drawer against a petty cash request slip">Petty Cash</button>` : '',
       this.can('pos_change_quantity') ? `<button class="pos-grid-btn" onclick="App.posQuantitySelectedLine()">Quantity</button>` : '',
       this.can('pos_cancel_ticket') ? `<button class="pos-grid-btn void" onclick="App.posCancelTicket()">Cancel Ticket</button>` : '',
       this.can('pos_payment') ? `<button class="pos-grid-btn payment" style="grid-column:1 / -1" onclick="App.showPOSPaymentModal()">PAYMENT</button>` : '',
@@ -23493,6 +23494,16 @@ const App = {
             </label>
           </div>
           <div class="form-group">
+            <label>Petty Cash</label>
+            <label class="perm-item" style="padding:10px 12px;border:1px solid var(--border);border-radius:6px;display:flex;align-items:flex-start;gap:10px;cursor:pointer;margin-top:6px">
+              <input type="checkbox" id="sg-petty-cash" ${perms.pos_petty_cash ? 'checked' : ''} style="margin-top:2px;flex-shrink:0">
+              <span>
+                <strong>Pay Out Petty Cash (POS)</strong><br>
+                <span style="font-size:12px;color:var(--text-muted)">Pay cash out of the open drawer against a numbered petty cash request slip; it comes off the drawer's expected cash at reconciliation. Separate from POS access, so it isn't granted with the POS module.</span>
+              </span>
+            </label>
+          </div>
+          <div class="form-group">
             <label>Credit Control</label>
             <label class="perm-item" style="padding:10px 12px;border:1px solid var(--border);border-radius:6px;display:flex;align-items:flex-start;gap:10px;cursor:pointer;margin-top:6px">
               <input type="checkbox" id="sg-credit-block" ${perms.customers_credit_block ? 'checked' : ''} style="margin-top:2px;flex-shrink:0">
@@ -23562,7 +23573,7 @@ const App = {
     const description = document.getElementById('sg-desc').value.trim();
     if (!name) { this.alert('Name required', 'error'); return; }
     // Start from the stored blob so keys outside _permissionTree survive a save.
-    const permissions = { ...(id ? this._sgEditingPerms : {}), multi_branch_access: document.getElementById('sg-multi-branch')?.checked || false, pos_view_margin: document.getElementById('sg-pos-margin')?.checked || false, customers_credit_block: document.getElementById('sg-credit-block')?.checked || false, pos_receive_payment: document.getElementById('sg-receive-payment')?.checked || false };
+    const permissions = { ...(id ? this._sgEditingPerms : {}), multi_branch_access: document.getElementById('sg-multi-branch')?.checked || false, pos_view_margin: document.getElementById('sg-pos-margin')?.checked || false, customers_credit_block: document.getElementById('sg-credit-block')?.checked || false, pos_receive_payment: document.getElementById('sg-receive-payment')?.checked || false, pos_petty_cash: document.getElementById('sg-petty-cash')?.checked || false };
     this._permissionTree.forEach(mod => {
       permissions[mod.key] = document.getElementById(`perm-${mod.key}`)?.checked || false;
       mod.subs.forEach(s => { permissions[s.key] = document.getElementById(`perm-${s.key}`)?.checked || false; });
@@ -26360,171 +26371,239 @@ const App = {
     this.renderDrawerSessions();
   },
 
-  async viewDrawerReport(id) {
-    const s = await this.api('GET', `/drawers/sessions/${id}`);
-    const tenderMap = {};
-    // A credit/debit terminal typically settles as one lump "Card" batch,
-    // not split by credit vs debit — combine both into a single bucket so
-    // they compare against the one card_counted column instead of each
-    // wrongly comparing its own half against the full counted amount.
-    (s.tenders || []).forEach(t => {
-      const key = (t.payment_method === 'credit_card' || t.payment_method === 'debit_card') ? 'card' : t.payment_method;
-      if (!tenderMap[key]) tenderMap[key] = { tx_count: 0, total: 0 };
-      tenderMap[key].tx_count += t.tx_count || 0;
-      tenderMap[key].total += parseFloat(t.total || 0);
-    });
-    const tenderLabels = { cash:'Cash', card:'Card', check:'Check', gift_card:'Gift Card', credit:'Charge Account', direct_deposit:'Direct Deposit', available_credit:'Available Credit' };
-    const allTenders = ['cash','card','check','gift_card','credit','direct_deposit','available_credit'];
-    const expectedCash = parseFloat(s.opening_float||0) + parseFloat(tenderMap['cash']?.total||0);
-    const rec = s.reconciliation;
+  // Drawer amounts: '$' in the base currency like the rest of the drawer
+  // screens; a foreign currency shows its code (US$ 100.00).
+  _drawerMoney(n, currency = null) {
+    const v = Number(n) || 0;
+    const s = Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return `${v < 0 ? '-' : ''}${currency ? `${currency === 'USD' ? 'US$' : currency + ' '}` : '$'}${s}`;
+  },
 
-    const tenderRows = allTenders.map(k => {
-      const t = tenderMap[k] || { tx_count:0, total:0 };
-      const expected = k === 'cash' ? expectedCash : parseFloat(t.total||0);
-      // Available Credit never involves a physical tender to reconcile —
-      // leave it out of counted/variance entirely.
-      const counted = (rec && k !== 'available_credit') ? parseFloat(rec[`${k}_counted`]||0) : null;
-      const variance = counted !== null ? (counted - expected) : null;
-      const varStyle = variance === null ? '' : variance < 0 ? 'color:var(--danger)' : variance > 0 ? 'color:var(--success)' : 'color:var(--text-muted)';
+  _drawerVarianceHtml(v) {
+    if (v == null) return '<span style="color:var(--text-muted)">—</span>';
+    const style = v < 0 ? 'color:var(--danger)' : v > 0 ? 'color:var(--success)' : 'color:var(--text-muted)';
+    return `<span style="${style}">${v >= 0 ? '+' : '-'}${this._drawerMoney(Math.abs(v)).replace('$', '')}</span>`;
+  },
+
+  // The body of a drawer report (lib/drawerReport.js figures) — shared by
+  // the on-screen report and the printed copy. With `actions`, petty cash
+  // rows get a Void button for drawers_manage before reconciliation.
+  _drawerReportBodyHtml(s, { actions = false } = {}) {
+    const r = s.report, rec = s.reconciliation, esc = v => this.escapeAttr(v ?? ''), m = n => this._drawerMoney(n);
+    const cash = r.tenders.find(t => t.key === 'cash');
+    const canVoid = actions && s.status !== 'reconciled' && this.can('drawers_manage');
+    const tenderRows = r.tenders.filter(t => !t.uncounted || t.sales || t.key === 'available_credit').map(t => {
+      const note = t.key === 'cash'
+        ? [r.float.included_in_cash ? `incl. ${m(r.float.opening)} float` : 'float returned separately', r.payouts_total ? `less ${m(r.payouts_total)} petty cash` : ''].filter(Boolean).join(', ')
+        : t.key === 'available_credit' ? 'store credit — no money in the drawer' : '';
       return `<tr>
-        <td>${tenderLabels[k]||k}${k==='cash'?` <small style="color:var(--text-muted)">(incl. $${parseFloat(s.opening_float||0).toFixed(2)} float)</small>`:''}</td>
-        <td>${t.tx_count}</td>
-        <td><strong>$${parseFloat(t.total||0).toFixed(2)}</strong></td>
-        <td>$${expected.toFixed(2)}</td>
-        <td>${counted !== null ? '$'+counted.toFixed(2) : '<span style="color:var(--text-muted)">—</span>'}</td>
-        <td style="${varStyle}">${variance !== null ? (variance>=0?'+':'')+variance.toFixed(2) : '—'}</td>
+        <td>${esc(t.label)}${note ? ` <small style="color:var(--text-muted,#777)">(${note})</small>` : ''}</td>
+        <td style="text-align:center">${t.tx_count}</td>
+        <td style="text-align:right"><strong>${m(t.sales)}</strong></td>
+        <td style="text-align:right">${t.uncounted ? '—' : m(t.expected)}</td>
+        <td style="text-align:right">${t.uncounted ? 'n/a' : t.counted != null ? m(t.counted) : '<span style="color:var(--text-muted,#777)">—</span>'}</td>
+        <td style="text-align:right">${t.uncounted ? '—' : this._drawerVarianceHtml(t.variance)}</td>
       </tr>`;
     }).join('');
+    const floatHtml = `
+      <h3 style="font-size:13px;margin:14px 0 6px">Float</h3>
+      <table class="table" style="margin-bottom:0"><thead><tr><th>Opening Float</th><th style="text-align:right">Returned</th><th style="text-align:right">Variance</th></tr></thead>
+        <tbody><tr><td>${m(r.float.opening)}</td><td style="text-align:right">${r.float.included_in_cash ? '<span style="color:var(--text-muted,#777)">counted with cash</span>' : r.float.returned != null ? m(r.float.returned) : '—'}</td><td style="text-align:right">${this._drawerVarianceHtml(r.float.variance)}</td></tr></tbody></table>`;
+    const payouts = s.payouts || [];
+    const payoutsHtml = payouts.length ? `
+      <h3 style="font-size:13px;margin:14px 0 6px">Petty Cash Paid Out</h3>
+      <table class="table" style="margin-bottom:0"><thead><tr><th>Voucher #</th><th>Paid To</th><th>Reason</th><th>By</th><th style="text-align:right">Amount</th>${canVoid ? '<th></th>' : ''}</tr></thead>
+        <tbody>${payouts.map(p => `<tr style="${p.voided_at ? 'opacity:0.55' : ''}">
+          <td><strong>${esc(p.voucher_number)}</strong><div style="font-size:11px;color:var(--text-muted,#777)">${this.fmtDateTime(p.created_at)}</div></td>
+          <td>${esc(p.paid_to) || '—'}</td>
+          <td>${esc(p.reason)}${p.voided_at ? `<div style="font-size:11px;color:var(--danger,#c00)">Voided by ${esc(p.voided_by_name) || '—'}: ${esc(p.void_reason)}</div>` : ''}</td>
+          <td>${esc(p.employee_name) || '—'}</td>
+          <td style="text-align:right">${p.voided_at ? '<s>' + m(p.amount) + '</s> VOID' : m(p.amount)}</td>
+          ${canVoid ? `<td style="text-align:right">${p.voided_at ? '' : `<button class="btn btn-sm btn-secondary" onclick="App.voidDrawerPayout(${p.id}, ${s.id})">Void</button>`}</td>` : ''}
+        </tr>`).join('')}
+        <tr style="font-weight:600"><td colspan="4">Total paid out</td><td style="text-align:right">${m(r.payouts_total)}</td>${canVoid ? '<td></td>' : ''}</tr></tbody></table>` : '';
+    const acctHtml = (s.account_payments || []).length ? `
+      <h3 style="font-size:13px;margin:14px 0 6px">Customer Account Payments</h3>
+      <table class="table" style="margin-bottom:0"><thead><tr><th>Payment #</th><th>Customer</th><th>Tender</th><th style="text-align:right">Amount</th></tr></thead>
+        <tbody>${s.account_payments.map(p => `<tr><td>${esc(p.payment_number)}</td><td>${esc(p.customer_name)}</td><td style="text-transform:capitalize">${esc(String(p.payment_method || '').replace(/_/g, ' '))}</td><td style="text-align:right">${m(p.amount)}</td></tr>`).join('')}</tbody></table>` : '';
+    const denomHtml = r.denominations.map(g => {
+      const foreign = g.currency !== r.base_currency;
+      const gm = n => this._drawerMoney(n, foreign ? g.currency : null);
+      return `
+      <h3 style="font-size:13px;margin:14px 0 6px">Cash Count — ${esc(g.currency)}${foreign && g.rate ? ` <small style="font-weight:400;color:var(--text-muted,#777)">(1 ${esc(r.base_currency)} = ${g.rate} ${esc(g.currency)})</small>` : ''}</h3>
+      <table class="table" style="margin-bottom:0"><thead><tr><th>Denomination</th><th style="text-align:center">Qty</th><th style="text-align:right">Amount</th></tr></thead>
+        <tbody>${g.lines.map(l => `<tr><td>${esc(l.label)}</td><td style="text-align:center">${l.quantity}</td><td style="text-align:right">${gm(l.amount)}</td></tr>`).join('')}
+        <tr style="font-weight:600"><td colspan="2">Total ${esc(g.currency)}</td><td style="text-align:right">${gm(g.total)}${foreign && g.base_equivalent != null ? `<div style="font-weight:400;font-size:12px;color:var(--text-muted,#777)">= ${m(g.base_equivalent)} ${esc(r.base_currency)}</div>` : ''}</td></tr></tbody></table>`;
+    }).join('');
+    return `
+      ${floatHtml}
+      <h3 style="font-size:13px;margin:14px 0 6px">Takings</h3>
+      <table class="table" style="margin-bottom:0">
+        <thead><tr><th>Tender</th><th style="text-align:center">Txns</th><th style="text-align:right">Sales</th><th style="text-align:right">Expected</th><th style="text-align:right">Counted</th><th style="text-align:right">Variance</th></tr></thead>
+        <tbody>${tenderRows}</tbody>
+      </table>
+      <p style="font-size:12px;color:var(--text-muted,#777);margin:6px 0 0">Expected cash = cash sales &amp; account payments ${m(r.cash_sales)}${r.payouts_total ? ` − petty cash ${m(r.payouts_total)}` : ''}${r.float.included_in_cash ? ` + float ${m(r.float.opening)}` : ''} = <strong>${m(cash.expected)}</strong></p>
+      ${payoutsHtml}
+      ${acctHtml}
+      ${denomHtml}
+      ${rec?.notes ? `<p style="margin-top:10px;font-size:13px"><strong>Notes:</strong> ${esc(rec.notes)}</p>` : ''}`;
+  },
 
+  async viewDrawerReport(id) {
+    const s = await this.api('GET', `/drawers/sessions/${id}`);
+    const rec = s.reconciliation;
     const sc = { open:'badge-success', closed:'badge-secondary', reconciled:'badge-info' };
+    const label = t => `<label style="font-size:10px;text-transform:uppercase;color:var(--text-muted)">${t}</label>`;
     this.showModal(`
-      <div class="modal" style="max-width:660px">
+      <div class="modal" style="max-width:760px">
         <div class="modal-header">
-          <span class="modal-title">Drawer Report — ${s.drawer_name||'Session #'+s.id}</span>
+          <span class="modal-title">Drawer Report — ${this.escapeAttr(s.drawer_name||'Session #'+s.id)}</span>
           <button class="modal-close">✕</button>
         </div>
-        <div class="modal-body">
-          <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:14px;font-size:13px">
-            <div><label style="font-size:10px;text-transform:uppercase;color:var(--text-muted)">Cashier</label><div>${s.employee_name||'—'}</div></div>
-            <div><label style="font-size:10px;text-transform:uppercase;color:var(--text-muted)">Branch</label><div>${s.branch_name||'—'}</div></div>
-            <div><label style="font-size:10px;text-transform:uppercase;color:var(--text-muted)">Opening Float</label><div>$${parseFloat(s.opening_float||0).toFixed(2)}</div></div>
-            <div><label style="font-size:10px;text-transform:uppercase;color:var(--text-muted)">Opened</label><div>${s.opened_at ? new Date(s.opened_at).toLocaleString() : '—'}</div></div>
-            <div><label style="font-size:10px;text-transform:uppercase;color:var(--text-muted)">Status</label><div><span class="badge ${sc[s.status]}">${s.status}</span></div></div>
+        <div class="modal-body" style="max-height:78vh;overflow-y:auto">
+          <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:6px;font-size:13px">
+            <div>${label('Cashier')}<div>${this.escapeAttr(s.employee_name||'—')}</div></div>
+            <div>${label('Branch')}<div>${this.escapeAttr(s.branch_name||'—')}</div></div>
+            <div>${label('Opened')}<div>${s.opened_at ? this.fmtDateTime(s.opened_at) : '—'}</div></div>
+            <div>${label('Closed')}<div>${s.closed_at ? this.fmtDateTime(s.closed_at) : '—'}</div></div>
+            <div>${label('Status')}<div><span class="badge ${sc[s.status]}">${s.status}</span></div></div>
           </div>
-          <table class="table" style="margin-bottom:0">
-            <thead><tr><th>Tender</th><th>Txns</th><th>Sales</th><th>Expected in Drawer</th><th>Counted</th><th>Variance</th></tr></thead>
-            <tbody>${tenderRows}</tbody>
-          </table>
-          ${rec?.notes ? `<p style="margin-top:10px;font-size:13px"><strong>Notes:</strong> ${rec.notes}</p>` : ''}
-          ${rec ? `<p style="margin-top:6px;font-size:12px;color:var(--text-muted)">Reconciled by ${s.reconciliation.reconciled_by_name||'—'} at ${new Date(rec.reconciled_at).toLocaleString()}</p>` : ''}
+          ${this._drawerReportBodyHtml(s, { actions: true })}
+          ${rec ? `<p style="margin-top:6px;font-size:12px;color:var(--text-muted)">Reconciled by ${this.escapeAttr(rec.reconciled_by_name||'—')} at ${this.fmtDateTime(rec.reconciled_at)}</p>` : ''}
         </div>
         <div class="modal-footer">
           <button class="btn btn-outline" onclick="App.printDrawerReport(${id})">🖨 Print</button>
-          ${!!(this.currentUser?.permissions?.drawers_manage) && s.status !== 'reconciled' ? `<button class="btn btn-primary" onclick="App.closeModal();App.showReconcileModal(${id})">Reconcile</button>` : ''}
+          <button class="btn btn-outline" onclick="App.emailDrawerReport(${id})">✉ Email PDF</button>
+          ${this.can('drawers_manage') && s.status !== 'reconciled' ? `<button class="btn btn-primary" onclick="App.closeModal();App.showReconcileModal(${id})">Reconcile</button>` : ''}
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
   },
 
-  async showReconcileModal(id) {
-    const s = await this.api('GET', `/drawers/sessions/${id}`);
-    const tenderMap = {};
-    (s.tenders || []).forEach(t => { tenderMap[t.payment_method] = t; });
-    const rec = s.reconciliation || {};
-    const expectedCash = parseFloat(s.opening_float||0) + parseFloat(tenderMap['cash']?.total||0);
+  emailDrawerReport(id) {
+    this.showEmailModal('Email Drawer Report (PDF)', this.settings?.store_email || '', async to => {
+      this.closeModal();
+      try {
+        const r = await this.api('POST', `/email/send-drawer-report/${id}`, { to });
+        this.alert(r.message || `Drawer report sent to ${to}`);
+      } catch(e) { this.alert(e.message, 'error'); }
+    });
+  },
 
-    // Load denominations for the session currency
-    const currency = this.activeCurrency || this.settings?.currency || 'USD';
-    const denoms = await this.api('GET', `/denominations?currency=${currency}`);
+  async voidDrawerPayout(payoutId, sessionId) {
+    const reason = prompt('Reason for voiding this petty cash payout?');
+    if (reason == null) return;
+    if (!reason.trim()) { this.alert('Enter a reason', 'error'); return; }
+    try {
+      await this.api('PATCH', `/drawers/payouts/${payoutId}/void`, { reason: reason.trim() });
+      this.alert('Payout voided');
+      this.viewDrawerReport(sessionId);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // Reconciliation: hand back the float first (its own line), then count
+  // the takings — base currency notes plus any alternate currency's notes
+  // (e.g. USD), valued in base at Settings' rate — against cash sales and
+  // account payments less petty cash.
+  async showReconcileModal(id) {
+    const [s, allDenoms] = await Promise.all([
+      this.api('GET', `/drawers/sessions/${id}`),
+      this.api('GET', '/denominations'),
+    ]);
+    const r = s.report, rec = s.reconciliation || {};
+    const base = r.base_currency;
+    const cashRow = r.tenders.find(t => t.key === 'cash');
+    const expectedCash = r.float.included_in_cash ? cashRow.expected : Math.round((r.cash_sales - r.payouts_total) * 100) / 100;
+    const rates = { [base]: 1 };
+    (this.altCurrencies || []).forEach(c => { if (c.code && Number(c.rate) > 0) rates[c.code] = Number(c.rate); });
+    const currencies = Object.keys(rates).filter(c => allDenoms.some(d => d.currency === c));
+    const denoms = allDenoms.filter(d => currencies.includes(d.currency));
     this._reconcileExpectedCash = expectedCash;
     this._reconcileDenoms = denoms;
-
-    // Pre-fill counts from saved reconciliation if available
+    this._reconcileRates = rates;
+    this._reconcileBase = base;
     const savedCounts = {};
     (rec.note_counts || []).forEach(nc => { savedCounts[nc.denomination_id] = nc.quantity; });
+    const m = n => this._drawerMoney(n);
+    const inputStyle = 'width:110px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;font-size:13px';
+    const floatReturned = rec.float_returned != null ? rec.float_returned : r.float.opening;
 
-    // Credit and debit both settle as one lump "Card" batch from the
-    // terminal — combine them so debit sales aren't silently missing from
-    // the expected card total here.
-    const cardExpected = parseFloat(tenderMap['credit_card']?.total||0) + parseFloat(tenderMap['debit_card']?.total||0);
-    const nonCashRows = [
-      { key:'card',           label:'Card',           expected: cardExpected,                                       counted: rec.card_counted },
-      { key:'check',          label:'Check',          expected: parseFloat(tenderMap['check']?.total||0),           counted: rec.check_counted },
-      { key:'gift_card',      label:'Gift Card',      expected: parseFloat(tenderMap['gift_card']?.total||0),       counted: rec.gift_card_counted },
-      { key:'credit',         label:'Charge Account', expected: parseFloat(tenderMap['credit']?.total||0),          counted: rec.credit_counted },
-      { key:'direct_deposit', label:'Direct Deposit', expected: parseFloat(tenderMap['direct_deposit']?.total||0),  counted: rec.direct_deposit_counted },
-    ];
+    const denomTables = currencies.map(cur => {
+      const foreign = cur !== base;
+      const list = denoms.filter(d => d.currency === cur);
+      return `
+        <div style="flex:1;min-width:230px">
+          <div style="font-size:12px;font-weight:600;margin-bottom:4px">${this.escapeAttr(cur)}${foreign ? ` <span style="font-weight:400;color:var(--text-muted)">(1 ${this.escapeAttr(base)} = ${rates[cur]} ${this.escapeAttr(cur)})</span>` : ''}</div>
+          <table style="width:100%;font-size:12px;border-collapse:collapse">
+            <thead><tr style="background:var(--bg-alt)"><th style="padding:4px 6px;text-align:left">Note / Coin</th><th style="padding:4px 6px;text-align:center">Qty</th><th style="padding:4px 6px;text-align:right">Amount</th></tr></thead>
+            <tbody>${list.map(d => `<tr>
+              <td style="padding:3px 6px">${this.escapeAttr(d.label)}</td>
+              <td style="padding:3px 6px;text-align:center"><input type="number" id="dn-${d.id}" min="0" step="1" value="${savedCounts[d.id] || 0}" oninput="App._updateDenomTotal()" style="width:64px;padding:2px 4px;border:1px solid var(--border);border-radius:4px;text-align:center;font-size:12px"></td>
+              <td style="padding:3px 6px;text-align:right" id="dna-${d.id}"></td>
+            </tr>`).join('')}</tbody>
+            <tfoot><tr style="font-weight:600;border-top:2px solid var(--border)">
+              <td style="padding:5px 6px" colspan="2">Total ${this.escapeAttr(cur)}</td>
+              <td style="padding:5px 6px;text-align:right"><span id="rc-denom-total-${cur}"></span>${foreign ? `<div style="font-weight:400;color:var(--text-muted)" id="rc-denom-base-${cur}"></div>` : ''}</td>
+            </tr></tfoot>
+          </table>
+        </div>`;
+    }).join('');
+    const denomsHtml = currencies.length ? `
+      <details id="rc-denom-details" open style="margin:8px 0 4px">
+        <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--primary);user-select:none;margin-bottom:6px">Count the takings by denomination</summary>
+        <div style="display:flex;gap:14px;flex-wrap:wrap">${denomTables}</div>
+        <div style="display:flex;align-items:center;gap:10px;margin:8px 0 6px;flex-wrap:wrap">
+          <strong style="font-size:13px">Count total: <span id="rc-denom-grand"></span> ${this.escapeAttr(base)}</strong>
+          <button class="btn btn-secondary btn-sm" onclick="App._applyDenomTotal(${expectedCash})">Apply total to Cash counted</button>
+        </div>
+      </details>` : `<p style="font-size:11px;color:var(--text-muted);margin:4px 0 8px">No denominations configured for ${this.escapeAttr(base)}. Set them up in Settings.</p>`;
 
-    const denomsHtml = denoms.length ? `
-      <details id="rc-denom-details" style="margin:8px 0 4px" ${denoms.length ? 'open' : ''}>
-        <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--primary);user-select:none;margin-bottom:6px">Count by denomination</summary>
-        <table style="width:100%;font-size:12px;border-collapse:collapse;margin-bottom:6px">
-          <thead><tr style="background:var(--bg-alt)">
-            <th style="padding:4px 8px;text-align:left">Note / Coin</th>
-            <th style="padding:4px 8px;text-align:center">Qty</th>
-            <th style="padding:4px 8px;text-align:right">Amount</th>
-          </tr></thead>
-          <tbody>${denoms.map(d => {
-            const qty = savedCounts[d.id] || 0;
-            const amt = (qty * d.value).toFixed(2);
-            return `<tr>
-              <td style="padding:3px 8px">${d.label}</td>
-              <td style="padding:3px 8px;text-align:center">
-                <input type="number" id="dn-${d.id}" min="0" step="1" value="${qty}"
-                  data-val="${d.value}"
-                  oninput="App._updateDenomTotal()"
-                  style="width:70px;padding:2px 4px;border:1px solid var(--border);border-radius:4px;text-align:center;font-size:12px">
-              </td>
-              <td style="padding:3px 8px;text-align:right" id="dna-${d.id}">$${amt}</td>
-            </tr>`;
-          }).join('')}</tbody>
-          <tfoot><tr style="font-weight:600;border-top:2px solid var(--border)">
-            <td style="padding:5px 8px" colspan="2">Denomination Total</td>
-            <td style="padding:5px 8px;text-align:right" id="rc-denom-total">$0.00</td>
-          </tfoot>
-        </table>
-        <button class="btn btn-secondary btn-sm" onclick="App._applyDenomTotal(${expectedCash})" style="margin-bottom:6px">Apply total to Cash counted</button>
-      </details>` : `<p style="font-size:11px;color:var(--text-muted);margin:4px 0 8px">No denominations configured for ${currency}. Set them up in Settings.</p>`;
-
+    const nonCash = r.tenders.filter(t => t.key !== 'cash' && !t.uncounted);
     this.showModal(`
-      <div class="modal" style="max-width:600px">
+      <div class="modal" style="max-width:720px">
         <div class="modal-header">
-          <span class="modal-title">Reconcile — ${s.drawer_name||'Session #'+id}</span>
+          <span class="modal-title">Reconcile — ${this.escapeAttr(s.drawer_name||'Session #'+id)}</span>
           <button class="modal-close">✕</button>
         </div>
         <div class="modal-body" style="max-height:80vh;overflow-y:auto">
-          <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px">
-            Cashier: <strong>${s.employee_name}</strong> &nbsp;|&nbsp; Float: <strong>$${parseFloat(s.opening_float||0).toFixed(2)}</strong>
-          </p>
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:10px">Cashier: <strong>${this.escapeAttr(s.employee_name)}</strong></p>
+          <h3 style="font-size:13px;margin:0 0 6px">1. Return the float</h3>
+          <p style="font-size:12px;color:var(--text-muted);margin:0 0 6px">Count out the opening float and hand it back first — it's kept separate from the takings.</p>
+          <table class="table" style="margin-bottom:12px">
+            <thead><tr><th>Opening Float</th><th>Float Returned</th><th>Variance</th></tr></thead>
+            <tbody><tr>
+              <td>${m(r.float.opening)}</td>
+              <td><input type="number" id="rc-float" step="0.01" min="0" value="${Number(floatReturned).toFixed(2)}" oninput="App._updateFloatVariance(${r.float.opening})" style="${inputStyle}"></td>
+              <td id="rcv-float" style="font-weight:600">${this._calcVariance(Number(floatReturned), r.float.opening)}</td>
+            </tr></tbody>
+          </table>
+          <h3 style="font-size:13px;margin:0 0 6px">2. Count the cash takings</h3>
+          <p style="font-size:12px;color:var(--text-muted);margin:0 0 6px">Cash sales &amp; account payments ${m(r.cash_sales)}${r.payouts_total ? ` − petty cash paid out ${m(r.payouts_total)} (${r.payouts_count})` : ''} = expected <strong>${m(expectedCash)}</strong></p>
           <table class="table" style="margin-bottom:4px">
             <thead><tr><th>Tender</th><th>Expected</th><th>Amount Counted</th><th>Variance</th></tr></thead>
-            <tbody>
-              <tr>
-                <td>Cash</td>
-                <td>$${expectedCash.toFixed(2)}</td>
-                <td><input type="number" id="rc-cash" step="0.01" min="0" value="${parseFloat(rec.cash_counted != null ? rec.cash_counted : expectedCash).toFixed(2)}"
-                  oninput="App.updateReconcileVariance('cash', ${expectedCash})"
-                  style="width:110px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;font-size:13px"></td>
-                <td id="rcv-cash" style="font-weight:600">${this._calcVariance(parseFloat(rec.cash_counted != null ? rec.cash_counted : expectedCash), expectedCash)}</td>
-              </tr>
-            </tbody>
+            <tbody><tr>
+              <td>Cash</td>
+              <td>${m(expectedCash)}</td>
+              <td><input type="number" id="rc-cash" step="0.01" min="0" value="${Number(rec.cash_counted != null ? rec.cash_counted : expectedCash).toFixed(2)}" oninput="App.updateReconcileVariance('cash', ${expectedCash})" style="${inputStyle}"></td>
+              <td id="rcv-cash" style="font-weight:600">${this._calcVariance(Number(rec.cash_counted != null ? rec.cash_counted : expectedCash), expectedCash)}</td>
+            </tr></tbody>
           </table>
           ${denomsHtml}
-          <table class="table" style="margin-top:8px;margin-bottom:12px">
+          <h3 style="font-size:13px;margin:12px 0 6px">3. Other tenders</h3>
+          <table class="table" style="margin-bottom:12px">
             <thead><tr><th>Tender</th><th>Expected</th><th>Amount Received</th><th>Variance</th></tr></thead>
-            <tbody>${nonCashRows.map(r => `
+            <tbody>${nonCash.map(t => `
               <tr>
-                <td>${r.label}</td>
-                <td>$${r.expected.toFixed(2)}</td>
-                <td><input type="number" id="rc-${r.key}" step="0.01" min="0" value="${parseFloat(r.counted != null ? r.counted : r.expected).toFixed(2)}"
-                  oninput="App.updateReconcileVariance('${r.key}', ${r.expected})"
-                  style="width:110px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;font-size:13px"></td>
-                <td id="rcv-${r.key}" style="font-weight:600">${this._calcVariance(parseFloat(r.counted != null ? r.counted : r.expected), r.expected)}</td>
+                <td>${this.escapeAttr(t.label)}</td>
+                <td>${m(t.expected)}</td>
+                <td><input type="number" id="rc-${t.key}" step="0.01" min="0" value="${Number(rec[`${t.key}_counted`] != null ? rec[`${t.key}_counted`] : t.expected).toFixed(2)}" oninput="App.updateReconcileVariance('${t.key}', ${t.expected})" style="${inputStyle}"></td>
+                <td id="rcv-${t.key}" style="font-weight:600">${this._calcVariance(Number(rec[`${t.key}_counted`] != null ? rec[`${t.key}_counted`] : t.expected), t.expected)}</td>
               </tr>`).join('')}
             </tbody>
           </table>
+          ${(() => { const ac = r.tenders.find(t => t.key === 'available_credit'); return ac && ac.sales ? `<p style="font-size:12px;color:var(--text-muted);margin:-6px 0 10px">Available Credit ${m(ac.sales)} was paid from customers' store credit — no money in the drawer, nothing to count.</p>` : ''; })()}
           <div class="form-group"><label>Notes</label>
-            <textarea id="rc-notes" rows="2" placeholder="Optional notes…">${rec.notes||''}</textarea>
+            <textarea id="rc-notes" rows="2" placeholder="Optional notes…">${this.escapeAttr(rec.notes||'')}</textarea>
           </div>
         </div>
         <div class="modal-footer">
@@ -26532,30 +26611,48 @@ const App = {
           <button class="btn btn-primary" onclick="App.submitReconcile(${id})">Save Reconciliation</button>
         </div>
       </div>`);
-    // Calculate initial denom total from any pre-filled counts
     this._updateDenomTotal();
   },
 
-  _updateDenomTotal() {
-    const denoms = this._reconcileDenoms || [];
-    let total = 0;
-    denoms.forEach(d => {
+  _updateFloatVariance(opening) {
+    const val = parseFloat(document.getElementById('rc-float')?.value) || 0;
+    const el = document.getElementById('rcv-float');
+    if (el) el.innerHTML = this._calcVariance(val, opening);
+  },
+
+  // Per-currency totals of the denomination count, and their sum in the
+  // base currency (foreign amount ÷ rate) — what "Apply" puts in Cash.
+  _denomCountTotals() {
+    const rates = this._reconcileRates || {}, totals = {};
+    let grand = 0;
+    (this._reconcileDenoms || []).forEach(d => {
       const qty = parseInt(document.getElementById(`dn-${d.id}`)?.value) || 0;
       const amt = qty * d.value;
-      total += amt;
+      totals[d.currency] = (totals[d.currency] || 0) + amt;
       const amtEl = document.getElementById(`dna-${d.id}`);
-      if (amtEl) amtEl.textContent = '$' + amt.toFixed(2);
+      if (amtEl) amtEl.textContent = this._drawerMoney(amt, d.currency === this._reconcileBase ? null : d.currency);
     });
-    const totEl = document.getElementById('rc-denom-total');
-    if (totEl) totEl.textContent = '$' + total.toFixed(2);
+    for (const [cur, t] of Object.entries(totals)) grand += t / (rates[cur] || 1);
+    return { totals, grand: Math.round(grand * 100) / 100 };
+  },
+
+  _updateDenomTotal() {
+    const { totals, grand } = this._denomCountTotals();
+    const base = this._reconcileBase, rates = this._reconcileRates || {};
+    for (const [cur, t] of Object.entries(totals)) {
+      const el = document.getElementById(`rc-denom-total-${cur}`);
+      if (el) el.textContent = this._drawerMoney(t, cur === base ? null : cur);
+      const baseEl = document.getElementById(`rc-denom-base-${cur}`);
+      if (baseEl) baseEl.textContent = `= ${this._drawerMoney(t / (rates[cur] || 1))} ${base}`;
+    }
+    const g = document.getElementById('rc-denom-grand');
+    if (g) g.textContent = this._drawerMoney(grand);
   },
 
   _applyDenomTotal(expectedCash) {
-    const denoms = this._reconcileDenoms || [];
-    let total = 0;
-    denoms.forEach(d => { total += (parseInt(document.getElementById(`dn-${d.id}`)?.value) || 0) * d.value; });
+    const { grand } = this._denomCountTotals();
     const input = document.getElementById('rc-cash');
-    if (input) { input.value = total.toFixed(2); this.updateReconcileVariance('cash', expectedCash); }
+    if (input) { input.value = grand.toFixed(2); this.updateReconcileVariance('cash', expectedCash); }
   },
 
   _calcVariance(counted, expected) {
@@ -26576,8 +26673,11 @@ const App = {
       denomination_id: d.id,
       quantity: parseInt(document.getElementById(`dn-${d.id}`)?.value) || 0,
     })).filter(nc => nc.quantity > 0);
+    const floatVal = document.getElementById('rc-float')?.value;
+    if (floatVal === '' || floatVal == null) { this.alert('Enter the float returned (0 if none)', 'error'); return; }
 
     const data = {
+      float_returned:         parseFloat(floatVal) || 0,
       cash_counted:           parseFloat(document.getElementById('rc-cash')?.value)           || 0,
       card_counted:           parseFloat(document.getElementById('rc-card')?.value)           || 0,
       check_counted:          parseFloat(document.getElementById('rc-check')?.value)          || 0,
@@ -26598,53 +26698,65 @@ const App = {
 
   async printDrawerReport(id) {
     const s = await this.api('GET', `/drawers/sessions/${id}`);
-    const tenderMap = {};
-    (s.tenders || []).forEach(t => { tenderMap[t.payment_method] = t; });
     const rec = s.reconciliation;
-    const expectedCash = parseFloat(s.opening_float||0) + parseFloat(tenderMap['cash']?.total||0);
-    // Credit and debit both settle as one lump "Card" batch from the
-    // terminal — combine them so debit sales aren't silently missing.
-    const cardSales = parseFloat(tenderMap['credit_card']?.total||0) + parseFloat(tenderMap['debit_card']?.total||0);
-    const rows = [
-      { label:'Cash',             expected: expectedCash,                                         sales: parseFloat(tenderMap['cash']?.total||0),            cnt: rec?.cash_counted },
-      { label:'Card',             expected: cardSales,                                             sales: cardSales,                                          cnt: rec?.card_counted },
-      { label:'Check',            expected: parseFloat(tenderMap['check']?.total||0),            sales: parseFloat(tenderMap['check']?.total||0),           cnt: rec?.check_counted },
-      { label:'Gift Card',        expected: parseFloat(tenderMap['gift_card']?.total||0),        sales: parseFloat(tenderMap['gift_card']?.total||0),       cnt: rec?.gift_card_counted },
-      { label:'Charge Account',   expected: parseFloat(tenderMap['credit']?.total||0),           sales: parseFloat(tenderMap['credit']?.total||0),          cnt: rec?.credit_counted },
-      { label:'Direct Deposit',   expected: parseFloat(tenderMap['direct_deposit']?.total||0),   sales: parseFloat(tenderMap['direct_deposit']?.total||0),  cnt: rec?.direct_deposit_counted },
-      { label:'Available Credit', expected: parseFloat(tenderMap['available_credit']?.total||0), sales: parseFloat(tenderMap['available_credit']?.total||0), cnt: null },
-    ];
-    const tableRows = rows.map(r => {
-      const v = r.cnt != null ? (r.cnt - r.expected).toFixed(2) : '—';
-      const vStyle = r.cnt != null ? (r.cnt - r.expected < 0 ? 'color:#c00' : r.cnt - r.expected > 0 ? 'color:#090' : 'color:#999') : '';
-      return `<tr><td>${r.label}</td><td>$${r.sales.toFixed(2)}</td><td>$${r.expected.toFixed(2)}</td><td>${r.cnt != null ? '$'+parseFloat(r.cnt).toFixed(2) : '—'}</td><td style="${vStyle}">${r.cnt != null ? (r.cnt-r.expected>=0?'+':'')+v : '—'}</td></tr>`;
-    }).join('');
-
-    const noteCounts = rec?.note_counts || [];
-    const denomBreakdown = noteCounts.length ? `
-      <h3 style="margin:18px 0 6px;font-size:13px">Cash Denomination Breakdown</h3>
-      <table><thead><tr><th>Denomination</th><th>Quantity</th><th>Amount</th></tr></thead>
-      <tbody>${noteCounts.map(nc => `<tr><td>${nc.label}</td><td style="text-align:center">${nc.quantity}</td><td>$${(nc.quantity * nc.value).toFixed(2)}</td></tr>`).join('')}
-      <tr style="font-weight:700;border-top:2px solid #ccc"><td colspan="2">Total</td><td>$${noteCounts.reduce((sum, nc) => sum + nc.quantity * nc.value, 0).toFixed(2)}</td></tr>
-      </tbody></table>` : '';
-
     const store = this.settings || {};
-    const win = window.open('', '_blank', 'width=700,height=500');
+    const esc = v => this.escapeAttr(v ?? '');
+    const win = window.open('', '_blank', 'width=800,height=600');
     win.document.write(`<!DOCTYPE html><html><head><title>Drawer Report</title>
-    <style>body{font-family:Arial,sans-serif;font-size:13px;margin:28px;color:#111}h2{margin:0 0 4px}h3{margin:0}p{margin:2px 0;font-size:12px;color:#555}table{width:100%;border-collapse:collapse;margin-top:14px}th{background:#eee;text-align:left;padding:6px 8px;font-size:11px;text-transform:uppercase;border:1px solid #ccc}td{padding:6px 8px;border:1px solid #ddd}tr:nth-child(even) td{background:#fafafa}.footer{margin-top:16px;font-size:11px;color:#999;border-top:1px solid #ddd;padding-top:8px}@media print{body{margin:12px}}</style>
+    <style>body{font-family:Arial,sans-serif;font-size:13px;margin:28px;color:#111}h2{margin:0 0 4px}h3{margin:0}p{margin:2px 0;font-size:12px;color:#555}table{width:100%;border-collapse:collapse;margin-top:4px}th{background:#eee;text-align:left;padding:6px 8px;font-size:11px;text-transform:uppercase;border:1px solid #ccc}td{padding:6px 8px;border:1px solid #ddd}tr:nth-child(even) td{background:#fafafa}button{display:none}.footer{margin-top:16px;font-size:11px;color:#999;border-top:1px solid #ddd;padding-top:8px}@media print{body{margin:12px}}</style>
     </head><body>
     ${this._printLogoTag(40)}
-    <h2>${store.store_name||'Drawer Report'}</h2>
-    <p><strong>Drawer:</strong> ${s.drawer_name||'—'} &nbsp; <strong>Branch:</strong> ${s.branch_name||'—'}</p>
-    <p><strong>Cashier:</strong> ${s.employee_name||'—'} &nbsp; <strong>Opening Float:</strong> $${parseFloat(s.opening_float||0).toFixed(2)}</p>
-    <p><strong>Opened:</strong> ${s.opened_at ? new Date(s.opened_at).toLocaleString() : '—'} &nbsp; <strong>Status:</strong> ${s.status}</p>
-    <table><thead><tr><th>Tender</th><th>Sales</th><th>Expected</th><th>Counted</th><th>Variance</th></tr></thead>
-    <tbody>${tableRows}</tbody></table>
-    ${denomBreakdown}
-    ${rec?.notes ? `<p style="margin-top:10px"><strong>Notes:</strong> ${rec.notes}</p>` : ''}
-    <div class="footer">Printed: ${new Date().toLocaleString()}${rec ? ` | Reconciled by ${rec.reconciled_by_name||'—'}` : ''}</div>
+    <h2>${esc(store.store_name||'Drawer Report')} — Drawer Report</h2>
+    <p><strong>Drawer:</strong> ${esc(s.drawer_name||'—')} (#${s.id}) &nbsp; <strong>Branch:</strong> ${esc(s.branch_name||'—')} &nbsp; <strong>Cashier:</strong> ${esc(s.employee_name||'—')}</p>
+    <p><strong>Opened:</strong> ${s.opened_at ? this.fmtDateTime(s.opened_at) : '—'} &nbsp; <strong>Closed:</strong> ${s.closed_at ? this.fmtDateTime(s.closed_at) : '—'} &nbsp; <strong>Status:</strong> ${s.status}</p>
+    ${this._drawerReportBodyHtml(s)}
+    <div class="footer">Printed: ${new Date().toLocaleString()}${rec ? ` | Reconciled by ${esc(rec.reconciled_by_name||'—')} at ${this.fmtDateTime(rec.reconciled_at)}` : ''}</div>
     <script>window.onload=()=>window.print()<\/script></body></html>`);
     win.document.close();
+  },
+
+  // POS "Petty Cash" — pay cash out of the cashier's open drawer against a
+  // numbered petty cash request slip (permission pos_petty_cash). It comes
+  // off the drawer's expected cash at reconciliation.
+  showPettyCashModal() {
+    const session = this.currentDrawerSession;
+    if (!session?.id) { this.alert('Open a cash drawer first — petty cash is paid from your open drawer', 'warning'); return; }
+    this.showModal(`
+      <div class="modal" style="max-width:420px">
+        <div class="modal-header"><span class="modal-title">Petty Cash Payout</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div class="form-group"><label>Voucher # *</label><input type="text" id="pc-voucher" placeholder="Petty cash request slip number" autocomplete="off"></div>
+          <div class="form-group"><label>Amount *</label><input type="number" id="pc-amount" step="0.01" min="0.01" placeholder="0.00"></div>
+          <div class="form-group"><label>Paid To</label><input type="text" id="pc-paid-to" placeholder="Who received the cash"></div>
+          <div class="form-group"><label>Reason *</label><input type="text" id="pc-reason" placeholder="What it's for"></div>
+          <p style="font-size:12px;color:var(--text-muted);margin:0">Paid from ${this.escapeAttr(session.drawer_name || 'your open drawer')}. It's deducted from the drawer's expected cash at reconciliation.</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" id="pc-submit" onclick="App.submitPettyCash()">Pay Out</button>
+        </div>
+      </div>`);
+    document.getElementById('pc-voucher')?.focus();
+  },
+
+  async submitPettyCash() {
+    const session = this.currentDrawerSession;
+    const data = {
+      voucher_number: document.getElementById('pc-voucher')?.value.trim(),
+      amount: parseFloat(document.getElementById('pc-amount')?.value),
+      paid_to: document.getElementById('pc-paid-to')?.value.trim(),
+      reason: document.getElementById('pc-reason')?.value.trim(),
+    };
+    if (!data.voucher_number) { this.alert('Enter the voucher number', 'error'); return; }
+    if (!(data.amount > 0)) { this.alert('Enter an amount above 0', 'error'); return; }
+    if (!data.reason) { this.alert("Enter what it's for", 'error'); return; }
+    const btn = document.getElementById('pc-submit');
+    if (btn) btn.disabled = true;
+    try {
+      const p = await this.api('POST', `/drawers/sessions/${session.id}/payouts`, data);
+      this.closeModal();
+      this.alert(`Petty cash ${this._drawerMoney(p.amount)} paid out — voucher ${p.voucher_number}`);
+    } catch(e) { if (btn) btn.disabled = false; this.alert(e.message, 'error'); }
   },
 
   // ─── CYCLE COUNTS ─────────────────────────────────────────────────────────

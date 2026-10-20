@@ -7,6 +7,7 @@ const { inlineProtectedImages } = require('../lib/protectedUploads');
 const { rentalQuoteSummary, attachRentalRates, attachRateBasis, rentalWindow, rateBasisLabel } = require('../lib/rentals');
 const { renderDocumentPdf } = require('../lib/documentPdf');
 const { paymentAllocations } = require('../lib/legacyInvoices');
+const { loadDrawerSession } = require('../lib/drawerReport');
 
 // Brand palette for every email sent out (receipts, quotes, invoices,
 // statements, notices): green header with a yellow accent stripe, black
@@ -2090,6 +2091,88 @@ function buildPdfCoverHtml(model, s) {
 </td></tr></table>
 </body></html>`;
 }
+
+// Drawer report (lib/drawerReport.js) as a PDF model: float handed back,
+// takings by tender, petty cash paid out, account payments and the cash
+// count by denomination (foreign notes with their base value).
+function drawerReportPdfModel(sess, s) {
+  const r = sess.report, rec = sess.reconciliation;
+  const money = n => n == null ? '-' : fmt(n);
+  const signed = n => n == null ? '-' : `${n >= 0 ? '+' : '-'}${fmt(Math.abs(n))}`;
+  const tables = [];
+  tables.push({ heading: 'Float', columns: [{ label: 'Opening Float', width: 2 }, { label: 'Returned', width: 2, align: 'right' }, { label: 'Variance', width: 2, align: 'right' }],
+    rows: [{ cells: [money(r.float.opening), r.float.included_in_cash ? 'Counted with cash' : money(r.float.returned), signed(r.float.variance)] }] });
+  tables.push({ heading: 'Takings by Tender', mainCol: 0, columns: [{ label: 'Tender', width: 2.2 }, { label: 'Txns', width: 0.7, align: 'center' }, { label: 'Sales', width: 1.3, align: 'right' }, { label: 'Expected', width: 1.3, align: 'right' }, { label: 'Counted', width: 1.3, align: 'right' }, { label: 'Variance', width: 1.2, align: 'right' }],
+    rows: r.tenders.filter(t => t.sales || t.counted || t.key === 'cash').map(t => ({
+      cells: [t.label, t.tx_count, money(t.sales), t.uncounted ? '-' : money(t.expected), t.uncounted ? 'n/a' : money(t.counted), signed(t.variance)],
+      sub: t.key === 'cash' ? [r.payouts_total ? `less petty cash ${fmt(r.payouts_total)}` : '', r.float.included_in_cash ? `incl. ${fmt(r.float.opening)} float` : 'float returned separately'].filter(Boolean).join(' · ')
+        : t.key === 'available_credit' ? 'store credit from customer accounts - no money in the drawer' : '',
+    })) });
+  if ((sess.payouts || []).length) {
+    tables.push({ heading: 'Petty Cash Paid Out', mainCol: 2, columns: [{ label: 'Voucher #', width: 1.3 }, { label: 'Paid To', width: 1.8 }, { label: 'Reason', width: 2.6 }, { label: 'Amount', width: 1.2, align: 'right' }],
+      rows: sess.payouts.map(p => ({ cells: [p.voucher_number, p.paid_to || '', p.reason || '', p.voided_at ? 'VOID' : fmt(p.amount)],
+        sub: [pdfDateTime(p.created_at), p.employee_name, p.voided_at ? `voided by ${p.voided_by_name || '-'}: ${p.void_reason || ''}` : ''].filter(Boolean).join(' · ') })) });
+  }
+  if ((sess.account_payments || []).length) {
+    tables.push({ heading: 'Customer Account Payments', mainCol: 1, columns: [{ label: 'Payment #', width: 1.4 }, { label: 'Customer', width: 3 }, { label: 'Tender', width: 1.3 }, { label: 'Amount', width: 1.3, align: 'right' }],
+      rows: sess.account_payments.map(p => ({ cells: [p.payment_number, p.customer_name || '', String(p.payment_method || '').replace(/_/g, ' '), fmt(p.amount)] })) });
+  }
+  for (const g of r.denominations) {
+    const foreign = g.currency !== r.base_currency;
+    const cur = n => foreign ? `${g.currency} ${Number(n).toFixed(2)}` : fmt(n);
+    tables.push({ heading: `Cash Count - ${g.currency}${foreign && g.rate ? ` (1 ${r.base_currency} = ${g.rate} ${g.currency})` : ''}`, columns: [{ label: 'Denomination', width: 3 }, { label: 'Qty', width: 1, align: 'center' }, { label: 'Amount', width: 2, align: 'right' }],
+      rows: [...g.lines.map(l => ({ cells: [l.label, l.quantity, cur(l.amount)] })),
+        { cells: [`Total ${g.currency}`, '', cur(g.total)], sub: foreign && g.base_equivalent != null ? `= ${fmt(g.base_equivalent)} ${r.base_currency}` : '' }] });
+  }
+  const cash = r.tenders.find(t => t.key === 'cash');
+  return {
+    store: pdfStore(s, {}),
+    title: 'DRAWER REPORT', number: String(sess.id),
+    meta: [['Drawer', sess.drawer_name], ['Opened', pdfDateTime(sess.opened_at)], ['Closed', pdfDateTime(sess.closed_at)], ['Status', sess.status]],
+    party: { label: 'Cashier', lines: [sess.employee_name || '-'] },
+    info: [['Branch', sess.branch_name], ['Reconciled by', rec ? `${rec.reconciled_by_name || '-'} ${pdfDateTime(rec.reconciled_at)}` : 'Not reconciled yet']],
+    tables,
+    totals: [
+      { label: 'Float', style: 'heading' },
+      { label: 'Opening float', value: fmt(r.float.opening) },
+      ...(r.float.included_in_cash ? [] : [{ label: 'Float returned', value: money(r.float.returned) }, { label: 'Float variance', value: signed(r.float.variance), style: 'muted' }]),
+      { label: 'Cash takings', style: 'heading' },
+      { label: 'Cash sales & payments', value: fmt(r.cash_sales) },
+      r.payouts_total ? { label: `Petty cash (${r.payouts_count})`, value: `-${fmt(r.payouts_total)}` } : null,
+      { label: 'Expected cash', value: fmt(cash.expected) },
+      { label: 'Cash counted', value: money(cash.counted) },
+      { label: 'Cash variance', value: signed(cash.variance), style: 'grand' },
+    ].filter(Boolean),
+    notes: rec?.notes ? [rec.notes] : [],
+    footer: `Printed ${new Date().toLocaleString()}`,
+  };
+}
+
+// Email a drawer report as a PDF attachment.
+router.post('/send-drawer-report/:id', requirePermission('drawers'), async (req, res) => {
+  const { to } = req.body;
+  if (!to) return res.status(400).json({ error: 'Recipient email is required' });
+  try {
+    const sess = await loadDrawerSession(db, req.params.id);
+    if (!sess) return res.status(404).json({ error: 'Drawer session not found' });
+    const s = await getSettings();
+    const model = drawerReportPdfModel(sess, s);
+    try {
+      const transporter = createTransporter(s);
+      const fromName = s.email_from_name || s.store_name || 'POS System';
+      const fromAddr = s.email_smtp_user || s.store_email || '';
+      await transporter.sendMail({
+        from: `"${fromName}" <${fromAddr}>`,
+        to,
+        subject: `Drawer Report #${sess.id} - ${sess.drawer_name || 'Drawer'}${sess.branch_name ? ` (${sess.branch_name})` : ''} - ${s.store_name || 'Our Store'}`,
+        ...(await documentEmailContent(true, s, model, '')),
+      });
+      res.json({ success: true, message: `Drawer report sent to ${to}` });
+    } catch (e) {
+      res.status(500).json({ error: `Failed to send email: ${e.message}` });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 // Mail content for one document: the PDF + cover note when `asPdf`, else
 // the regular HTML email (`htmlContent` — a string, or the {html,

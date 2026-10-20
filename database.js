@@ -1132,6 +1132,23 @@ async function _init() {
       quantity INTEGER NOT NULL DEFAULT 0,
       UNIQUE(reconciliation_id, denomination_id)
     )` },
+    // Petty cash paid out of an open drawer at the POS (permission
+    // pos_petty_cash), against a numbered petty cash request slip
+    // (voucher_number, unique among payouts not voided). Payouts come off
+    // the drawer's expected cash at reconciliation (lib/drawerReport.js).
+    { sql: `CREATE TABLE IF NOT EXISTS drawer_payouts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id INTEGER NOT NULL REFERENCES drawer_sessions(id),
+      amount REAL NOT NULL,
+      voucher_number TEXT NOT NULL,
+      paid_to TEXT,
+      reason TEXT,
+      employee_id INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      voided_at DATETIME,
+      voided_by INTEGER REFERENCES employees(id),
+      void_reason TEXT
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS returns (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       return_number TEXT UNIQUE NOT NULL,
@@ -1447,6 +1464,13 @@ async function _init() {
     'ALTER TABLE transactions ADD COLUMN tax_exemption_number TEXT',
     'ALTER TABLE transactions ADD COLUMN approval_code TEXT',
     'ALTER TABLE drawer_reconciliations ADD COLUMN direct_deposit_counted REAL DEFAULT 0',
+    // The opening float, counted out and handed back before the cash count —
+    // so cash_counted is takings only. NULL on older reconciliations, whose
+    // cash_counted still includes the float (lib/drawerReport.js).
+    'ALTER TABLE drawer_reconciliations ADD COLUMN float_returned REAL',
+    // Exchange rates ({"USD":0.0064} — units per 1 base) used to value the
+    // foreign notes counted, so the report keeps the rate of that day.
+    'ALTER TABLE drawer_reconciliations ADD COLUMN fx_rates TEXT',
     'ALTER TABLE products ADD COLUMN online_available INTEGER DEFAULT 0',
     'ALTER TABLE products ADD COLUMN web_allotment INTEGER',
     "ALTER TABLE transactions ADD COLUMN source TEXT DEFAULT 'pos'",
@@ -2714,6 +2738,12 @@ async function _init() {
         perms.pos_receive_payment = /^(senior )?cashiers?$/i.test(String(g.name || '').trim());
         changed = true;
       }
+      // Petty cash payouts from the drawer — standalone like Receive Payment
+      // and, by the owner's choice (2026-10-20), starting on the cashier groups.
+      if (!('pos_petty_cash' in perms)) {
+        perms.pos_petty_cash = /^(senior )?cashiers?$/i.test(String(g.name || '').trim());
+        changed = true;
+      }
       if (!('customers_credit_block' in perms)) {
         perms.customers_credit_block = /^(administrator|manager|accounts? receivables?)$/i.test(String(g.name || '').trim());
         changed = true;
@@ -2978,6 +3008,7 @@ async function _init() {
   // any index created on them earlier in this function.
   const indexes = [
     'CREATE INDEX IF NOT EXISTS idx_transactions_customer_id ON transactions(customer_id)',
+    'CREATE INDEX IF NOT EXISTS idx_drawer_payouts_session ON drawer_payouts(session_id)',
     'CREATE INDEX IF NOT EXISTS idx_transactions_branch_id ON transactions(branch_id)',
     'CREATE INDEX IF NOT EXISTS idx_transactions_status ON transactions(status)',
     'CREATE INDEX IF NOT EXISTS idx_transactions_created_at ON transactions(created_at)',

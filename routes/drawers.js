@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
-const { requireAuth, requirePermission } = require('../lib/permissions');
+const { requireAuth, requirePermission, can } = require('../lib/permissions');
+const { loadDrawerSession, currencySettings, round2 } = require('../lib/drawerReport');
 
 // ── Cash Drawers (configuration) ─────────────────────────────────────────────
 
@@ -94,66 +95,12 @@ router.get('/sessions', requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// The session with its tenders, account payments, petty cash payouts,
+// reconciliation and the computed report (lib/drawerReport.js).
 router.get('/sessions/:id', requireAuth, async (req, res) => {
   try {
-    const { rows: [session] } = await db.execute({ sql: `
-      SELECT ds.*,
-        d.name as drawer_name,
-        b.name as branch_name,
-        e.first_name || ' ' || e.last_name as employee_name
-      FROM drawer_sessions ds
-      LEFT JOIN cash_drawers d ON ds.drawer_id = d.id
-      LEFT JOIN branches b ON ds.branch_id = b.id
-      LEFT JOIN employees e ON ds.employee_id = e.id
-      WHERE ds.id = ?`, args: [req.params.id] });
+    const session = await loadDrawerSession(db, req.params.id);
     if (!session) return res.status(404).json({ error: 'Not found' });
-
-    // Sums per-leg amounts from transaction_payments (so a split-tender sale's
-    // cash portion and card portion land in separate buckets), falling back
-    // to the whole transaction total for any transaction with no
-    // transaction_payments rows (e.g. rentals/layaway/quotation-hold sales
-    // that insert into transactions directly, bypassing POST /transactions).
-    const { rows: tenders } = await db.execute({ sql: `
-      SELECT payment_method,
-        COUNT(DISTINCT transaction_id) as tx_count,
-        COALESCE(SUM(amount), 0) as total
-      FROM (
-        SELECT tp.transaction_id, tp.payment_method, tp.amount
-        FROM transaction_payments tp JOIN transactions t ON t.id = tp.transaction_id
-        WHERE t.drawer_session_id = ?
-        UNION ALL
-        SELECT t.id as transaction_id, t.payment_method, t.total as amount
-        FROM transactions t
-        WHERE t.drawer_session_id = ? AND NOT EXISTS (SELECT 1 FROM transaction_payments tp2 WHERE tp2.transaction_id = t.id)
-        UNION ALL
-        -- Customer account payments received into this drawer at the POS
-        -- (lib/customerPayments.js), counted with the sales by tender.
-        -- Negative ids keep them distinct from transaction ids in the count.
-        SELECT -ap.id as transaction_id, ap.payment_method, ap.amount
-        FROM account_payments ap
-        WHERE ap.drawer_session_id = ?
-      )
-      GROUP BY payment_method`, args: [req.params.id, req.params.id, req.params.id] });
-    // The same payments listed on their own, for the drawer report.
-    const { rows: accountPayments } = await db.execute({ sql: `SELECT ap.payment_number, ap.payment_method, ap.amount, ap.payment_mode, ap.created_at, c.first_name || ' ' || c.last_name AS customer_name
-      FROM account_payments ap LEFT JOIN customers c ON c.id = ap.customer_id WHERE ap.drawer_session_id = ? ORDER BY ap.created_at`, args: [req.params.id] });
-    session.account_payments = accountPayments;
-    session.tenders = tenders;
-
-    const { rows: [reconciliation] } = await db.execute({ sql: `SELECT dr.*, e.first_name || ' ' || e.last_name as reconciled_by_name FROM drawer_reconciliations dr LEFT JOIN employees e ON e.id = dr.reconciled_by WHERE dr.session_id = ?`, args: [req.params.id] });
-    session.reconciliation = reconciliation || null;
-
-    if (session.reconciliation) {
-      const { rows: note_counts } = await db.execute({ sql: `
-        SELECT rnc.denomination_id, rnc.quantity, cd.value, cd.label, cd.currency, cd.sort_order
-        FROM reconciliation_note_counts rnc
-        JOIN currency_denominations cd ON cd.id = rnc.denomination_id
-        WHERE rnc.reconciliation_id = ?
-        ORDER BY cd.sort_order, cd.value DESC
-      `, args: [session.reconciliation.id] });
-      session.reconciliation.note_counts = note_counts;
-    }
-
     res.json(session);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -184,9 +131,14 @@ router.patch('/sessions/:id/close', requireAuth, async (req, res) => {
 router.post('/sessions/:id/reconcile', requireAuth, async (req, res) => {
   try {
     const { cash_counted, card_counted, check_counted, gift_card_counted, credit_counted, direct_deposit_counted, notes, reconciled_by, note_counts } = req.body;
+    // The float is handed back before the cash count (lib/drawerReport.js);
+    // the rates valuing any foreign notes are kept with the count.
+    const floatReturned = req.body.float_returned == null || req.body.float_returned === '' ? null : round2(req.body.float_returned);
+    if (floatReturned == null) return res.status(400).json({ error: 'Enter the float returned (0 if none)' });
+    const { rates } = await currencySettings(db);
     const tx = await db.transaction('write');
     try {
-      await tx.execute({ sql: 'INSERT OR REPLACE INTO drawer_reconciliations (session_id, cash_counted, card_counted, check_counted, gift_card_counted, credit_counted, direct_deposit_counted, notes, reconciled_by) VALUES (?,?,?,?,?,?,?,?,?)', args: [req.params.id, cash_counted || 0, card_counted || 0, check_counted || 0, gift_card_counted || 0, credit_counted || 0, direct_deposit_counted || 0, notes || null, reconciled_by || null] });
+      await tx.execute({ sql: 'INSERT OR REPLACE INTO drawer_reconciliations (session_id, cash_counted, card_counted, check_counted, gift_card_counted, credit_counted, direct_deposit_counted, notes, reconciled_by, float_returned, fx_rates) VALUES (?,?,?,?,?,?,?,?,?,?,?)', args: [req.params.id, cash_counted || 0, card_counted || 0, check_counted || 0, gift_card_counted || 0, credit_counted || 0, direct_deposit_counted || 0, notes || null, reconciled_by || null, floatReturned, JSON.stringify(rates)] });
       const { rows: [rec] } = await tx.execute({ sql: 'SELECT id FROM drawer_reconciliations WHERE session_id = ?', args: [req.params.id] });
       if (rec && Array.isArray(note_counts) && note_counts.length > 0) {
         for (const { denomination_id, quantity } of note_counts) {
@@ -203,6 +155,54 @@ router.post('/sessions/:id/reconcile', requireAuth, async (req, res) => {
     }
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM drawer_sessions WHERE id = ?', args: [req.params.id] });
     res.json(row);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Petty Cash Payouts ────────────────────────────────────────────────────────
+
+// Pay petty cash out of an open drawer against a numbered petty cash
+// request slip. A cashier pays from their own open session; drawers_manage
+// can record one on any open session. Never more than the cash in the
+// drawer (float + cash takings − payouts so far).
+router.post('/sessions/:id/payouts', requirePermission('pos_petty_cash'), async (req, res) => {
+  try {
+    const amount = round2(req.body.amount);
+    const voucher = String(req.body.voucher_number || '').trim();
+    const paidTo = String(req.body.paid_to || '').trim() || null;
+    const reason = String(req.body.reason || '').trim() || null;
+    if (!(amount > 0)) return res.status(400).json({ error: 'Enter an amount above 0' });
+    if (!voucher) return res.status(400).json({ error: 'Enter the petty cash voucher number' });
+    if (!reason) return res.status(400).json({ error: 'Enter what the petty cash is for' });
+
+    const session = await loadDrawerSession(db, req.params.id);
+    if (!session) return res.status(404).json({ error: 'Drawer session not found' });
+    if (session.status !== 'open') return res.status(400).json({ error: 'Petty cash can only be paid from an open drawer' });
+    if (session.employee_id !== req.employee?.id && !can(req.employee?.permissions, 'drawers_manage')) {
+      return res.status(403).json({ error: 'You can only pay petty cash from your own open drawer' });
+    }
+    const { rows: [dupe] } = await db.execute({ sql: 'SELECT p.id, p.voucher_number, ds.id as session_id FROM drawer_payouts p JOIN drawer_sessions ds ON ds.id = p.session_id WHERE LOWER(TRIM(p.voucher_number)) = LOWER(?) AND p.voided_at IS NULL', args: [voucher] });
+    if (dupe) return res.status(400).json({ error: `Voucher ${dupe.voucher_number} has already been paid out (drawer session #${dupe.session_id})` });
+    const inDrawer = round2(session.report.float.opening + session.report.cash_sales - session.report.payouts_total);
+    if (amount > inDrawer + 0.001) return res.status(400).json({ error: `Only ${inDrawer.toFixed(2)} cash is in this drawer` });
+
+    const result = await db.execute({ sql: 'INSERT INTO drawer_payouts (session_id, amount, voucher_number, paid_to, reason, employee_id) VALUES (?,?,?,?,?,?)', args: [session.id, amount, voucher, paidTo, reason, req.employee?.id || null] });
+    const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM drawer_payouts WHERE id = ?', args: [Number(result.lastInsertRowid)] });
+    res.status(201).json(row);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Void a payout entered in error (drawers_manage), until the drawer is
+// reconciled. The voucher number can then be used again.
+router.patch('/payouts/:id/void', requirePermission('drawers_manage'), async (req, res) => {
+  try {
+    const { rows: [p] } = await db.execute({ sql: 'SELECT p.*, ds.status as session_status FROM drawer_payouts p JOIN drawer_sessions ds ON ds.id = p.session_id WHERE p.id = ?', args: [req.params.id] });
+    if (!p) return res.status(404).json({ error: 'Payout not found' });
+    if (p.voided_at) return res.status(400).json({ error: 'Already voided' });
+    if (p.session_status === 'reconciled') return res.status(400).json({ error: 'This drawer is already reconciled' });
+    const reason = String(req.body.reason || '').trim();
+    if (!reason) return res.status(400).json({ error: 'Enter a reason for voiding' });
+    await db.execute({ sql: 'UPDATE drawer_payouts SET voided_at = CURRENT_TIMESTAMP, voided_by = ?, void_reason = ? WHERE id = ?', args: [req.employee?.id || null, reason, p.id] });
+    res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

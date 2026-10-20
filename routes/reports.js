@@ -767,13 +767,12 @@ router.get('/rental-utilization', requirePermission('reports'), async (req, res)
 
 // ─── Accounts reports ───────────────────────────────────────────────────────
 
-// Cash drawer variance trend — counted cash vs. expected cash (opening
-// float + cash sales that hit the drawer) on every reconciled session in
-// range. Expected cash is computed with the exact same per-session cash
-// tender subquery GET /drawers/sessions/:id already uses (split-tender
-// legs from transaction_payments, falling back to the whole transaction
-// for anything with no payment legs) — so this never disagrees with what
-// staff saw on the reconciliation screen itself.
+// Cash drawer variance trend — counted cash vs. expected cash on every
+// reconciled session in range, worked out the way lib/drawerReport.js does
+// for the reconciliation screen: cash sales (split-tender legs from
+// transaction_payments, else the whole transaction) plus cash account
+// payments, less petty cash paid out — plus the opening float only for
+// older reconciliations that counted it with the cash (float_returned NULL).
 router.get('/cash-variance', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
@@ -785,7 +784,8 @@ router.get('/cash-variance', requirePermission('reports'), async (req, res) => {
     const { rows: sessions } = await db.execute({
       sql: `SELECT dr.id as reconciliation_id, ds.id as session_id, dr.reconciled_at,
               ds.employee_id, e.first_name || ' ' || e.last_name as employee_name,
-              ds.branch_id, b.name as branch_name, ds.opening_float, dr.cash_counted,
+              ds.branch_id, b.name as branch_name, ds.opening_float, dr.cash_counted, dr.float_returned,
+              (SELECT COALESCE(SUM(p.amount), 0) FROM drawer_payouts p WHERE p.session_id = ds.id AND p.voided_at IS NULL) as payouts,
               (
                 SELECT COALESCE(SUM(amount), 0) FROM (
                   SELECT tp.amount FROM transaction_payments tp JOIN transactions t ON t.id = tp.transaction_id
@@ -794,6 +794,8 @@ router.get('/cash-variance', requirePermission('reports'), async (req, res) => {
                   SELECT t.total FROM transactions t
                   WHERE t.drawer_session_id = ds.id AND t.payment_method = 'cash'
                     AND NOT EXISTS (SELECT 1 FROM transaction_payments tp2 WHERE tp2.transaction_id = t.id)
+                  UNION ALL
+                  SELECT ap.amount FROM account_payments ap WHERE ap.drawer_session_id = ds.id AND ap.payment_method = 'cash'
                 )
               ) as cash_sales
             FROM drawer_reconciliations dr
@@ -805,7 +807,9 @@ router.get('/cash-variance', requirePermission('reports'), async (req, res) => {
       args: [s, e, ...bp],
     });
     for (const row of sessions) {
-      row.expected_cash = parseFloat((row.opening_float + row.cash_sales).toFixed(2));
+      const floatInCash = row.float_returned == null;
+      row.expected_cash = parseFloat(((floatInCash ? row.opening_float : 0) + row.cash_sales - row.payouts).toFixed(2));
+      row.float_variance = floatInCash ? null : parseFloat((row.float_returned - row.opening_float).toFixed(2));
       row.variance = parseFloat((row.cash_counted - row.expected_cash).toFixed(2));
     }
 
