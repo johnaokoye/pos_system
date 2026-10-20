@@ -102,6 +102,7 @@ app.use('/api/products',         require('./routes/products'));
 app.use('/api/product-imports',  require('./routes/product-imports'));
 app.use('/api/categories',       require('./routes/categories'));
 app.use('/api/brands',           require('./routes/brands'));
+app.use('/api/units',            require('./routes/units'));
 app.use('/api/catalogues',       require('./routes/catalogues'));
 app.use('/api/customers',        require('./routes/customers'));
 app.use('/api/customer-imports', require('./routes/customer-imports'));

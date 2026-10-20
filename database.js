@@ -1926,6 +1926,35 @@ async function _init() {
     'ALTER TABLE layaway_plan_items ADD COLUMN units_per INTEGER NOT NULL DEFAULT 1',
     'ALTER TABLE purchase_order_items ADD COLUMN purchase_unit TEXT',
     'ALTER TABLE purchase_order_items ADD COLUMN units_per INTEGER NOT NULL DEFAULT 1',
+    // Units of measure (lib/units.js) — generalises selling by the case: a
+    // product has one stock unit (base_unit_id; NULL = Each) and any number
+    // of alternate units (product_units), each worth `factor` stock units at
+    // its own price/barcode. Lines record the unit they were sold/ordered in
+    // (uom_id) alongside sell_unit/purchase_unit (its name) and units_per.
+    // The case_* columns above are folded into product_units at startup.
+    `CREATE TABLE IF NOT EXISTS units_of_measure (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      abbreviation TEXT,
+      allow_decimal INTEGER NOT NULL DEFAULT 0,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`,
+    `CREATE TABLE IF NOT EXISTS product_units (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      unit_id INTEGER NOT NULL REFERENCES units_of_measure(id),
+      factor REAL NOT NULL,
+      price REAL,
+      barcode TEXT,
+      UNIQUE(product_id, unit_id)
+    )`,
+    'CREATE INDEX IF NOT EXISTS idx_product_units_barcode ON product_units(barcode)',
+    'ALTER TABLE products ADD COLUMN base_unit_id INTEGER REFERENCES units_of_measure(id)',
+    'ALTER TABLE transaction_items ADD COLUMN uom_id INTEGER',
+    'ALTER TABLE quotation_items ADD COLUMN uom_id INTEGER',
+    'ALTER TABLE layaway_plan_items ADD COLUMN uom_id INTEGER',
+    'ALTER TABLE purchase_order_items ADD COLUMN uom_id INTEGER',
     // Customer payments taken at the POS (lib/customerPayments.js): the
     // drawer session the money went into, 'open' (on account, applied to
     // invoices later) or 'invoices' (applied to chosen invoices), and the
@@ -2229,6 +2258,28 @@ async function _init() {
   for (const sql of migrations.filter(m => /^ALTER TABLE (purchase_order_items|purchase_request_items) ADD COLUMN/.test(m))) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
   }
+
+  // Units of measure: starter list on first run, then fold any product
+  // still set up the old way (products.case_*) into a "Case" product unit.
+  // Clearing case_* afterwards keeps this one-shot, so a Case unit later
+  // removed on the product form isn't re-created on the next start.
+  try {
+    const { rows: [{ n }] } = await db.execute({ sql: 'SELECT COUNT(*) as n FROM units_of_measure', args: [] });
+    if (!n) {
+      for (const [name, abbr, dec] of [['Each', 'ea', 0], ['Case', 'cs', 0], ['Box', 'bx', 0], ['Pack', 'pk', 0], ['Dozen', 'dz', 0], ['Yard', 'yd', 1], ['Foot', 'ft', 1], ['Metre', 'm', 1], ['Kilogram', 'kg', 1], ['Pound', 'lb', 1], ['Litre', 'L', 1], ['Gallon', 'gal', 1]]) {
+        await db.execute({ sql: 'INSERT OR IGNORE INTO units_of_measure (name, abbreviation, allow_decimal) VALUES (?,?,?)', args: [name, abbr, dec] });
+      }
+    }
+    const { rows: caseProducts } = await db.execute({ sql: 'SELECT id, case_qty, case_price, case_barcode FROM products WHERE case_qty > 1', args: [] });
+    if (caseProducts.length) {
+      await db.execute({ sql: "INSERT OR IGNORE INTO units_of_measure (name, abbreviation, allow_decimal) VALUES ('Case', 'cs', 0)", args: [] });
+      const { rows: [caseUnit] } = await db.execute({ sql: "SELECT id FROM units_of_measure WHERE name = 'Case'", args: [] });
+      for (const p of caseProducts) {
+        await db.execute({ sql: 'INSERT OR IGNORE INTO product_units (product_id, unit_id, factor, price, barcode) VALUES (?,?,?,?,?)', args: [p.id, caseUnit.id, p.case_qty, p.case_price, p.case_barcode || null] });
+        await db.execute({ sql: 'UPDATE products SET case_qty = NULL, case_price = NULL, case_barcode = NULL WHERE id = ?', args: [p.id] });
+      }
+    }
+  } catch(e) { console.error('Units of measure setup failed:', e.message); }
 
   // Backfill source for WooCommerce-imported transactions
   try {
@@ -2649,6 +2700,9 @@ async function _init() {
       // Merge Duplicate Customers — the same power as deleting a customer
       // (the duplicates are deactivated), so it starts wherever that is.
       if (!('customers_merge' in perms)) { perms.customers_merge = can(perms, 'customers_delete'); changed = true; }
+      // Managing the units of measure list (lib/units.js) starts wherever
+      // managing categories does.
+      if (!('inventory_units' in perms)) { perms.inventory_units = can(perms, 'inventory_categories'); changed = true; }
       // Receiving customer account payments at the POS — standalone (not a
       // `pos` sub, which every full-POS group would inherit) and, by the
       // owner's choice (2026-10-19), only for the cashier groups.

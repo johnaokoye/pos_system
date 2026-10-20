@@ -7,7 +7,7 @@ const { syncBinQty } = require('../lib/binSync');
 const { requireAuth, requirePermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { blockedMessage, creditLimitError } = require('../lib/creditBlock');
-const { resolveUnit, lineName, stockUnits } = require('../lib/caseUnits');
+const { resolveUnit, lineName, parseQty, stockUnits } = require('../lib/units');
 const { isSerialNumberProduct, serialNumberLabel, serialNumberOf } = require('../lib/serialNumber');
 const { checkDiscountEligibility } = require('./promotions');
 
@@ -58,15 +58,16 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
         const lineTotal = parseFloat((parseFloat(item.unit_price) * item.quantity).toFixed(2));
         const lineTax = parseFloat((lineTotal * (parseFloat(item.tax_rate) || 0) / 100).toFixed(2));
         const serial = item.serial_number ? String(item.serial_number).trim() : null;
-        // A held case line keeps its unit (and the case size at hold time).
-        let sellUnit = null, unitsPer = 1;
-        if (item.sell_unit === 'case' && item.product_id && !item.variation_id) {
+        // A held line keeps its unit of measure (and its size at hold time).
+        let sellUnit = null, unitsPer = 1, uomId = null;
+        const requested = item.uom_id ?? item.sell_unit;
+        if (requested != null && requested !== '' && item.product_id && !item.variation_id) {
           const { rows: [prod] } = await txn.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] });
-          if (prod) ({ sell_unit: sellUnit, units_per: unitsPer } = resolveUnit(prod, 'case'));
+          if (prod) ({ sell_unit: sellUnit, units_per: unitsPer, uom_id: uomId } = await resolveUnit(txn, prod, requested));
         }
         await txn.execute({
-          sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,serial_number,sell_unit,units_per) VALUES (?,?,?,?,?,?,0,?,?,?,?,?,?,?)`,
-          args: [txId, item.product_id, serial ? serialNumberLabel(serial) : item.product_name, item.sku || '', item.quantity, parseFloat(item.unit_price), lineTax, lineTotal, item.variation_id || null, item.variation_name || null, serial || null, sellUnit, unitsPer]
+          sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,serial_number,sell_unit,units_per,uom_id) VALUES (?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)`,
+          args: [txId, item.product_id, serial ? serialNumberLabel(serial) : item.product_name, item.sku || '', item.quantity, parseFloat(item.unit_price), lineTax, lineTotal, item.variation_id || null, item.variation_name || null, serial || null, sellUnit, unitsPer, uomId]
         });
       }
       await txn.commit();
@@ -240,11 +241,13 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         processedItems.push({ product, variation: null, serialNumber, quantity: 1, unit_price, lineTotal: unit_price, lineTax, discount: 0, discountPercent: 0, discountOverrideBy: null });
         continue;
       }
-      let variation = null, unit_price = product.price;
-      // Sold by the case (lib/caseUnits.js): case price, and quantity × case
-      // size singles off stock. Never on a variation.
-      const unit = resolveUnit(product, item.variation_id ? null : item.sell_unit);
-      if (unit.sell_unit) unit_price = unit.price;
+      // Unit of measure (lib/units.js): the unit's price, and quantity × its
+      // size in stock units off stock. Never on a variation.
+      const unit = await resolveUnit(db, product, item.variation_id ? null : (item.uom_id ?? item.sell_unit));
+      let variation = null, unit_price = unit.price;
+      const lineQty = parseQty(item.quantity, unit.allow_decimal);
+      if (Number.isNaN(lineQty)) throw new Error(unit.allow_decimal ? `Enter a quantity above 0 for ${product.name}` : `${product.name} is sold in whole ${unit.sell_unit || 'unit'}s — the quantity can't be ${item.quantity}`);
+      item.quantity = lineQty;
       if (item.variation_id) {
         const { rows: [v] } = await db.execute({ sql: 'SELECT * FROM product_variations WHERE id = ? AND product_id = ?', args: [item.variation_id, item.product_id] });
         if (!v) throw new Error(`Variation ${item.variation_id} not found`);
@@ -355,11 +358,11 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         const itemName = customName || (serialNumber ? serialNumberLabel(serialNumber) : variation ? `${product.name} — ${variation.name}` : lineName(product.name, unit));
         const itemSku = customName ? '' : (variation ? variation.sku : product.sku);
         const unitsPer = unit?.units_per || 1;
-        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,discount_percent,discount_override_by,serial_number,sell_unit,units_per) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [txId, product ? product.id : null, itemName, itemSku, lineQty, unit_price, discount, lineTax, lineTotal, variation?.id||null, variation?.name||null, discountPercent || 0, discountOverrideBy || null, serialNumber || null, unit?.sell_unit || null, unitsPer] });
+        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,discount_percent,discount_override_by,serial_number,sell_unit,units_per,uom_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [txId, product ? product.id : null, itemName, itemSku, lineQty, unit_price, discount, lineTax, lineTotal, variation?.id||null, variation?.name||null, discountPercent || 0, discountOverrideBy || null, serialNumber || null, variation ? null : unit?.sell_unit || null, variation ? 1 : unitsPer, variation ? null : unit?.uom_id ?? null] });
         // A custom/temp line has no catalog product — nothing to deduct; an
         // SN line is a stockless placeholder for the serial.
         if (!product || serialNumber) continue;
-        // Stock is in singles: a case line moves quantity × case size.
+        // Stock is in the stock unit: a line moves quantity × its unit's size.
         const quantity = stockUnits(lineQty, unitsPer);
         if (variation) {
           await tx.execute({ sql: 'UPDATE product_variations SET stock_qty = stock_qty - ? WHERE id = ?', args: [quantity, variation.id] });
@@ -602,8 +605,10 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
       if (!txItem) return res.status(400).json({ error: `Item ${item.transaction_item_id} not found in transaction` });
       if (isSpRentalLine(txItem)) return res.status(400).json({ error: `"${txItem.product_name}" is a rental — it's checked back in from the Rentals screen, not returned here.` });
       const alreadyRet = returnedMap[item.transaction_item_id] || 0;
-      const maxQty = txItem.quantity - alreadyRet;
-      if (item.quantity <= 0 || item.quantity > maxQty) return res.status(400).json({ error: `Invalid quantity for "${txItem.product_name}". Max returnable: ${maxQty}` });
+      // Lines in a decimal unit (lib/units.js) can be part-returned, e.g. 1.5 of 2.5 yd.
+      const maxQty = Math.round((txItem.quantity - alreadyRet) * 1000) / 1000;
+      item.quantity = Math.round(Number(item.quantity) * 1000) / 1000;
+      if (!(item.quantity > 0) || item.quantity > maxQty) return res.status(400).json({ error: `Invalid quantity for "${txItem.product_name}". Max returnable: ${maxQty}` });
       const proportion = item.quantity / txItem.quantity;
       const lineTotal = parseFloat((txItem.total * proportion).toFixed(2));
       const lineTax = parseFloat((txItem.tax_amount * proportion).toFixed(2));
@@ -702,7 +707,7 @@ router.patch('/:id/void', requireAuth, async (req, res) => {
       await voidTxn.execute({ sql: "UPDATE transactions SET status='voided', voided_by=?, voided_at=CURRENT_TIMESTAMP, void_reason=? WHERE id=?", args: [authorizer.id, reason || null, req.params.id] });
       const { rows: items } = await voidTxn.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [req.params.id] });
       for (const item of items) {
-        const restock = stockUnits(item.quantity, item.units_per); // case lines restock their singles
+        const restock = stockUnits(item.quantity, item.units_per); // in stock units
         await voidTxn.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [restock, item.product_id] });
         if (tx.branch_id) {
           await voidTxn.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, tx.branch_id, restock, item.product_id, restock] });

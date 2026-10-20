@@ -6,7 +6,7 @@ const { nextNumber } = require('../lib/nextNumber');
 const { isSerialNumberProduct, serialNumberLabel, serialNumberOf } = require('../lib/serialNumber');
 const { createTransfer } = require('../lib/transfers');
 const { getOutstandingQty, getOutOfServiceQty } = require('../lib/rentalAvailability');
-const { resolveUnit, lineName } = require('../lib/caseUnits');
+const { resolveUnit, lineName, parseQty } = require('../lib/units');
 const { feeFor, getBranchStock, buildRentalLines, revalidateQuoteLines, insertPendingAgreement, assertRentalCustomerEligible, assertNoUnpaidRentalReturns, rentalQuoteSummary, attachRentalRates, attachRateBasis, rentalWindow, rateLineOf } = require('../lib/rentals');
 const { ratePlanError } = require('../lib/rentalPricing');
 const multer = require('multer');
@@ -75,7 +75,7 @@ router.get('/', async (req, res) => {
 async function insertQuoteLines(tx, quoteId, processedItems) {
   for (const item of processedItems) {
     const { product_id, product_name, sku, is_temp_item, is_q_item, purchase_request_id, sources, qty, unit_price, unit_cost, lineTotal, lineTax, lineDisc, serial_number } = item;
-    const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,unit_cost,discount_amount,tax_amount,total,is_temp_item,is_q_item,purchase_request_id,serial_number,is_rental_line,rental_start,rental_end,is_mandatory,rate_plan,sell_unit,units_per) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [quoteId, product_id, product_name, sku, qty, unit_price, unit_cost, lineDisc, lineTax, lineTotal, is_temp_item, is_q_item, purchase_request_id, serial_number || null, item.is_rental_line ? 1 : 0, item.rental_start || null, item.rental_end || null, item.is_mandatory ? 1 : 0, item.rate_plan || null, item.sell_unit || null, item.units_per || 1] });
+    const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,unit_cost,discount_amount,tax_amount,total,is_temp_item,is_q_item,purchase_request_id,serial_number,is_rental_line,rental_start,rental_end,is_mandatory,rate_plan,sell_unit,units_per,uom_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [quoteId, product_id, product_name, sku, qty, unit_price, unit_cost, lineDisc, lineTax, lineTotal, is_temp_item, is_q_item, purchase_request_id, serial_number || null, item.is_rental_line ? 1 : 0, item.rental_start || null, item.rental_end || null, item.is_mandatory ? 1 : 0, item.rate_plan || null, item.sell_unit || null, item.units_per || 1, item.uom_id ?? null] });
     item.id = Number(itemResult.lastInsertRowid);
     if (sources) {
       for (const src of sources) {
@@ -276,11 +276,12 @@ async function processQuoteItems(items, { allowRental = false } = {}) {
     const isSN = isSerialNumberProduct(product);
     const serial_number = isSN ? serialNumberOf(item) : null;
     if (isSN && !serial_number) continue;
-    const qty = serial_number ? 1 : parseInt(item.quantity || 1);
-    // Quoted by the case (lib/caseUnits.js): case price by default, cost of a
-    // case of singles.
-    const unit = product && !serial_number ? resolveUnit(product, item.sell_unit) : { sell_unit: null, units_per: 1 };
-    const unit_price = parseFloat(item.unit_price ?? (unit.sell_unit ? unit.price : product ? product.price : 0));
+    // Unit of measure (lib/units.js): the unit's price by default, cost of
+    // that many stock units, and part quantities for a decimal unit.
+    const unit = product && !serial_number ? await resolveUnit(db, product, item.uom_id ?? item.sell_unit) : { uom_id: null, sell_unit: null, units_per: 1, allow_decimal: 0 };
+    const qty = serial_number ? 1 : product ? parseQty(item.quantity || 1, unit.allow_decimal) : (parseInt(item.quantity) || 1);
+    if (Number.isNaN(qty)) throw new Error(`${product.name} is quoted in whole ${unit.sell_unit || 'unit'}s — the quantity can't be ${item.quantity}`);
+    const unit_price = parseFloat(item.unit_price ?? (product ? unit.price : 0));
     const lineTotal = parseFloat((unit_price * qty).toFixed(2));
     const lineTax = parseFloat((lineTotal * (product ? product.tax_rate : defaultTaxRate) / 100).toFixed(2));
     const lineDisc = parseFloat(item.discount || 0);
@@ -290,17 +291,18 @@ async function processQuoteItems(items, { allowRental = false } = {}) {
     // Projects lines) — explicit unit_cost wins, else defaults to the
     // catalog product's cost, else null for a custom line with no cost
     // entered. Never affects subtotal/tax/total.
-    const unit_cost = item.unit_cost != null && item.unit_cost !== '' ? parseFloat(item.unit_cost) : (product ? (product.cost || 0) * unit.units_per : null);
+    const unit_cost = item.unit_cost != null && item.unit_cost !== '' ? parseFloat(item.unit_cost) : (product ? Math.round((product.cost || 0) * unit.units_per * 10000) / 10000 : null);
     let sources = null;
     if (product && !serial_number && Array.isArray(item.sources) && item.sources.length) {
-      const sourcesSum = item.sources.reduce((s, src) => s + (parseInt(src.quantity) || 0), 0);
+      const srcQty = q => Math.round((Number(q) || 0) * 1000) / 1000;
+      const sourcesSum = srcQty(item.sources.reduce((s, src) => s + srcQty(src.quantity), 0));
       if (sourcesSum !== qty) throw new Error(`Branch sourcing for ${product.name} (${sourcesSum}) doesn't match quantity (${qty})`);
-      sources = item.sources.map(src => ({ branch_id: src.branch_id || null, quantity: parseInt(src.quantity) || 0 })).filter(src => src.quantity > 0);
+      sources = item.sources.map(src => ({ branch_id: src.branch_id || null, quantity: srcQty(src.quantity) })).filter(src => src.quantity > 0);
     }
     processedItems.push({
       product_id: product ? product.id : null,
       product_name: serial_number ? serialNumberLabel(serial_number) : product ? lineName(product.name, unit) : String(item.description).trim(),
-      sell_unit: unit.sell_unit, units_per: unit.units_per,
+      sell_unit: unit.sell_unit, units_per: unit.units_per, uom_id: unit.uom_id ?? null,
       serial_number,
       sku: product ? product.sku : null,
       is_temp_item: product ? 0 : 1,
@@ -965,7 +967,7 @@ router.post('/:id/convert', async (req, res) => {
         // goes out through its rental agreement.
         const isRental = !!item.is_rental_line;
         const name = isRental && !item.is_mandatory ? `${item.product_name} — ${holdNumbers[item.id]}` : item.product_name;
-        await convTx.execute({ sql: 'INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,serial_number,sell_unit,units_per) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', args: [txId, isRental ? null : item.product_id, name, isRental ? 'RENTAL' : (item.sku || ''), item.quantity, item.unit_price, item.discount_amount, item.tax_amount, item.total, item.serial_number || null, isRental ? null : (item.sell_unit || null), isRental ? 1 : (item.units_per || 1)] });
+        await convTx.execute({ sql: 'INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,serial_number,sell_unit,units_per,uom_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [txId, isRental ? null : item.product_id, name, isRental ? 'RENTAL' : (item.sku || ''), item.quantity, item.unit_price, item.discount_amount, item.tax_amount, item.total, item.serial_number || null, isRental ? null : (item.sell_unit || null), isRental ? 1 : (item.units_per || 1), isRental ? null : (item.uom_id ?? null)] });
       }
 
       await convTx.execute({ sql: 'UPDATE quotations SET status = ?, converted_to_tx = ? WHERE id = ?', args: ['converted', txId, quote.id] });

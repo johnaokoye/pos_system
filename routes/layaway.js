@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
-const { resolveUnit, lineName, stockUnits } = require('../lib/caseUnits');
+const { resolveUnit, lineName, parseQty, stockUnits } = require('../lib/units');
 const { syncBinQty } = require('../lib/binSync');
 const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
@@ -81,18 +81,18 @@ router.post('/plans', requirePermission('layaway_create'), async (req, res) => {
     const lines = [];
     let subtotal = 0, taxAmount = 0;
     for (const item of items) {
-      const qty = parseInt(item.quantity) || 0;
-      if (qty <= 0) return res.status(400).json({ error: 'Item quantity must be positive' });
       const { rows: [product] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] });
       if (!product) return res.status(400).json({ error: `Product ${item.product_id} not found` });
       if (!product.is_layaway_eligible) return res.status(400).json({ error: `${product.name} is not eligible for layaway` });
-      // By the case (lib/caseUnits.js): case price, and stock checked/held in singles.
+      // Unit of measure (lib/units.js): the unit's price, and stock checked/held in stock units.
       let unit;
-      try { unit = resolveUnit(product, item.sell_unit); } catch (e) { return res.status(400).json({ error: e.message }); }
+      try { unit = await resolveUnit(db, product, item.uom_id ?? item.sell_unit); } catch (e) { return res.status(400).json({ error: e.message }); }
+      const qty = parseQty(item.quantity, unit.allow_decimal);
+      if (Number.isNaN(qty)) return res.status(400).json({ error: `Enter a valid quantity for ${product.name}` });
       const { rows: [bi] } = await db.execute({ sql: 'SELECT stock_qty FROM branch_inventory WHERE product_id = ? AND branch_id = ?', args: [product.id, branch_id] });
       const availableQty = bi ? bi.stock_qty : product.stock_qty;
       if (availableQty < stockUnits(qty, unit.units_per)) {
-        return res.status(400).json({ error: unit.sell_unit ? `Not enough stock for ${qty} case(s) of ${product.name} — ${availableQty} singles available` : `Not enough stock for ${product.name} — ${availableQty} available` });
+        return res.status(400).json({ error: unit.units_per !== 1 ? `Not enough stock for ${qty} × ${unit.label} of ${product.name} — ${availableQty} in stock` : `Not enough stock for ${product.name} — ${availableQty} available` });
       }
       const unitPrice = parseFloat((unit.price * (1 + markupPercent / 100)).toFixed(2));
       const lineTotal = parseFloat((unitPrice * qty).toFixed(2));
@@ -127,9 +127,9 @@ router.post('/plans', requirePermission('layaway_create'), async (req, res) => {
       const planId = Number(planResult.lastInsertRowid);
 
       for (const line of lines) {
-        await tx.execute({ sql: `INSERT INTO layaway_plan_items (plan_id,product_id,product_name,sku,quantity,unit_price,tax_rate,line_total,base_unit_price,sell_unit,units_per) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, args: [planId, line.product.id, lineName(line.product.name, line.unit), line.product.sku, line.quantity, line.unit_price, line.tax_rate, line.lineTotal, line.base_unit_price, line.unit.sell_unit, line.unit.units_per] });
+        await tx.execute({ sql: `INSERT INTO layaway_plan_items (plan_id,product_id,product_name,sku,quantity,unit_price,tax_rate,line_total,base_unit_price,sell_unit,units_per,uom_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, args: [planId, line.product.id, lineName(line.product.name, line.unit), line.product.sku, line.quantity, line.unit_price, line.tax_rate, line.lineTotal, line.base_unit_price, line.unit.sell_unit, line.unit.units_per, line.unit.uom_id ?? null] });
 
-        const singles = stockUnits(line.quantity, line.unit.units_per);
+        const singles = stockUnits(line.quantity, line.unit.units_per); // in stock units
         await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty - ? WHERE id = ?', args: [singles, line.product.id] });
         await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = MAX(0, stock_qty - ?), updated_at = CURRENT_TIMESTAMP`, args: [line.product.id, branch_id, Math.max(0, line.product.stock_qty - singles), line.product.min_stock, singles] });
         await syncBinQty(tx, line.product.id, branch_id, -singles);

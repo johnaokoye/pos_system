@@ -11,6 +11,7 @@ const { getOutstandingQty, getOutOfServiceQty } = require('../lib/rentalAvailabi
 const { mergeProducts } = require('../lib/productMerge');
 const { HAS_ISSUE_SQL, ISSUE_LABEL_SQL, rowsToCsv } = require('../lib/productIssues');
 const { getSetting } = require('../lib/settings');
+const { EACH, unitsByProduct, unitLabel } = require('../lib/units');
 
 // CSV cells for money/quantity fields often carry currency symbols, thousands
 // separators, or stray whitespace (e.g. "$15.00", "1,000") — bare parseFloat/
@@ -186,7 +187,7 @@ router.get('/', requireAuth, async (req, res) => {
       // the untouched base price, kept for anywhere that wants it.
       sql = `SELECT p.id, p.sku, p.barcode, p.name, p.description, p.category_id, p.price as list_price,
         MAX(0, ROUND(p.price * (1 + COALESCE(b.price_tier_percent,0)/100.0), 2)) as price,
-        p.case_qty, p.case_barcode, CASE WHEN p.case_price IS NULL THEN NULL ELSE MAX(0, ROUND(p.case_price * (1 + COALESCE(b.price_tier_percent,0)/100.0), 2)) END as case_price,
+        p.base_unit_id, COALESCE(b.price_tier_percent, 0) as price_tier_percent,
         p.cost, p.tax_rate, p.active, p.created_at, p.supplier_id, p.image_path, p.is_service, p.unit,
         p.is_rental, p.rental_rate_type, p.rental_rate, p.rental_deposit, p.rental_late_fee_rate, p.replacement_value,
         p.rental_classification, p.rental_weekly_rate, p.rental_monthly_rate, p.rental_hourly_rate, p.rental_allow_sale, p.is_accessory, p.is_layaway_eligible, p.is_non_inventory,
@@ -246,6 +247,7 @@ router.get('/', requireAuth, async (req, res) => {
 
     const { rows } = await db.execute({ sql, args: params });
     for (const r of rows) if (typeof r.branch_stock === 'string') r.branch_stock = JSON.parse(r.branch_stock).sort((a, b) => a.branch_name.localeCompare(b.branch_name));
+    await attachUnits(rows);
     res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -1025,31 +1027,73 @@ router.get('/:id', requireAuth, async (req, res) => {
       product.branch_min_stock = bi ? bi.min_stock : product.min_stock;
     }
     if (product.is_rental && product.is_accessory) product.branch_stock = await accessoryBranchStock(db, product.id);
+    await attachUnits([product]);
     res.json(product);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Case setup (lib/caseUnits.js) — saved only when the caller sends case_qty,
-// so older callers that don't know about cases (imports, API clients) never
-// clear it. case_qty blank/0/1 turns selling by the case off. Returns an
-// error message or null.
-async function saveCaseSetup(productId, body) {
-  if (!('case_qty' in body)) return null;
-  const qty = parseInt(body.case_qty) || 0;
-  if (qty <= 1) {
-    await db.execute({ sql: 'UPDATE products SET case_qty = NULL, case_price = NULL, case_barcode = NULL WHERE id = ?', args: [productId] });
-    return null;
+// Adds each product's stock unit (base_unit_name / base_unit_decimal) and
+// alternate units (`units`: [{ unit_id, name, abbreviation, allow_decimal,
+// factor, price, barcode }]) — lib/units.js. On the branch-scoped list,
+// unit prices get the branch's price tier, same as `price`.
+async function attachUnits(rows) {
+  if (!rows.length) return;
+  const [byProduct, { rows: uoms }] = await Promise.all([unitsByProduct(db), db.execute({ sql: 'SELECT id, name, abbreviation, allow_decimal FROM units_of_measure', args: [] })]);
+  const uomById = new Map(uoms.map(u => [u.id, u]));
+  for (const r of rows) {
+    const base = uomById.get(r.base_unit_id) || EACH;
+    r.base_unit_name = base.name;
+    r.base_unit_abbr = base.abbreviation;
+    r.base_unit_decimal = base.allow_decimal ? 1 : 0;
+    const tier = Number(r.price_tier_percent) || 0;
+    r.units = (r.is_service || r.is_rental ? [] : byProduct.get(r.id) || []).map(u => ({
+      unit_id: u.unit_id, name: u.name, abbreviation: u.abbreviation, allow_decimal: u.allow_decimal ? 1 : 0, factor: u.factor, barcode: u.barcode,
+      label: unitLabel(u), price: u.price == null ? null : Math.max(0, Math.round(u.price * (1 + tier / 100) * 100) / 100),
+    }));
   }
-  const price = parseFloat(body.case_price);
-  if (!(price > 0)) return 'Enter the case price';
-  const barcode = String(body.case_barcode || '').trim() || null;
-  if (barcode) {
-    const { rows: [clash] } = await db.execute({ sql: 'SELECT name FROM products WHERE id != ? AND (barcode = ? OR sku = ? OR case_barcode = ?) LIMIT 1', args: [productId, barcode, barcode, barcode] });
-    if (clash) return `Case barcode ${barcode} is already used by ${clash.name}`;
-    const { rows: [self] } = await db.execute({ sql: 'SELECT 1 FROM products WHERE id = ? AND (barcode = ? OR sku = ?)', args: [productId, barcode, barcode] });
-    if (self) return "The case barcode can't be the same as the single item's barcode or SKU";
+}
+
+// Stock unit and alternate units (lib/units.js) — saved only when the
+// caller sends `units`, so older callers that don't know about units
+// (imports, API clients, full-row PUTs from before) never clear them.
+// Replaces the product's whole unit list. Returns an error message or null.
+async function saveProductUnits(productId, body) {
+  if (!Array.isArray(body.units)) return null;
+  const baseId = body.base_unit_id ? Number(body.base_unit_id) : null;
+  const { rows: uoms } = await db.execute({ sql: 'SELECT id, name, active FROM units_of_measure', args: [] });
+  const uomById = new Map(uoms.map(u => [u.id, u]));
+  if (baseId && !uomById.has(baseId)) return 'Unknown stock unit';
+  const { rows: [self] } = await db.execute({ sql: 'SELECT barcode, sku FROM products WHERE id = ?', args: [productId] });
+  const lines = [], seenUnits = new Set(), seenBarcodes = new Set();
+  for (const u of body.units) {
+    const unitId = Number(u.unit_id);
+    const uom = uomById.get(unitId);
+    if (!uom) return 'Choose a unit for every alternate unit row';
+    if (unitId === baseId) return `${uom.name} is already the stock unit — it can't also be an alternate unit`;
+    if (seenUnits.has(unitId)) return `${uom.name} is listed twice`;
+    seenUnits.add(unitId);
+    const factor = Number(u.factor);
+    if (!(factor > 0)) return `Enter how many stock units are in one ${uom.name}`;
+    const price = u.price === '' || u.price == null ? null : Number(u.price);
+    if (price != null && !(price >= 0)) return `Enter a valid ${uom.name} price`;
+    const barcode = String(u.barcode || '').trim() || null;
+    if (barcode) {
+      if (seenBarcodes.has(barcode)) return `Barcode ${barcode} is used on two units`;
+      seenBarcodes.add(barcode);
+      if (self && (self.barcode === barcode || self.sku === barcode)) return `The ${uom.name} barcode can't be the same as the item's own barcode or SKU`;
+      const { rows: [clash] } = await db.execute({ sql: `SELECT name FROM products WHERE id != ? AND (barcode = ? OR sku = ?)
+        UNION ALL SELECT p.name FROM product_units pu JOIN products p ON p.id = pu.product_id WHERE pu.product_id != ? AND pu.barcode = ? LIMIT 1`, args: [productId, barcode, barcode, productId, barcode] });
+      if (clash) return `Barcode ${barcode} is already used by ${clash.name}`;
+    }
+    lines.push([productId, unitId, Math.round(factor * 10000) / 10000, price == null ? null : Math.round(price * 100) / 100, barcode]);
   }
-  await db.execute({ sql: 'UPDATE products SET case_qty = ?, case_price = ?, case_barcode = ? WHERE id = ?', args: [qty, parseFloat(price.toFixed(2)), barcode, productId] });
+  const tx = await db.transaction('write');
+  try {
+    await tx.execute({ sql: 'UPDATE products SET base_unit_id = ? WHERE id = ?', args: [baseId, productId] });
+    await tx.execute({ sql: 'DELETE FROM product_units WHERE product_id = ?', args: [productId] });
+    for (const args of lines) await tx.execute({ sql: 'INSERT INTO product_units (product_id, unit_id, factor, price, barcode) VALUES (?,?,?,?,?)', args });
+    await tx.commit();
+  } catch (e) { await tx.rollback(); throw e; }
   return null;
 }
 
@@ -1084,9 +1128,9 @@ router.post('/', (req, res, next) => requireProductPermission(!!req.body.is_rent
     } else if (!svc && branch_id && (parseInt(stock_qty) || 0) > 0) {
       await db.execute({ sql: 'INSERT OR IGNORE INTO branch_inventory (product_id, branch_id, stock_qty, min_stock) VALUES (?, ?, ?, ?)', args: [productId, branch_id, parseInt(stock_qty) || 0, parseInt(min_stock) || 5] });
     }
-    const caseError = await saveCaseSetup(productId, req.body);
+    const unitsError = await saveProductUnits(productId, req.body);
     const { rows: [prod] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [productId] });
-    res.status(201).json(caseError ? { ...prod, warning: caseError } : prod);
+    res.status(201).json(unitsError ? { ...prod, warning: unitsError } : prod);
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -1167,8 +1211,8 @@ router.put('/:id', async (req, res, next) => {
     if ('long_description' in req.body) {
       await db.execute({ sql: 'UPDATE products SET long_description = ? WHERE id = ?', args: [req.body.long_description || null, req.params.id] });
     }
-    const caseError = await saveCaseSetup(req.params.id, req.body);
-    if (caseError) return res.status(400).json({ error: caseError });
+    const unitsError = await saveProductUnits(req.params.id, req.body);
+    if (unitsError) return res.status(400).json({ error: unitsError });
     if (accBranchStock) {
       for (const [bid, qty] of accBranchStock) await setAccessoryBranchQty(db, req.params.id, bid, qty, min_stock || 0);
       await syncAccessoryTotal(db, req.params.id);
