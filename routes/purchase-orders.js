@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { resolvePurchaseUnit, caseLabel, stockUnits } = require('../lib/caseUnits');
 const { syncBinQty } = require('../lib/binSync');
 const multer = require('multer');
 const path = require('path');
@@ -93,13 +94,15 @@ router.post('/', async (req, res) => {
     try {
       for (const item of items) {
         const product = item.product_id ? (await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] })).rows[0] : null;
-        const product_name = item.product_name || (product ? product.name : 'Unknown');
+        // Ordered by the case (lib/caseUnits.js): quantity and cost are per case.
+        const unit = resolvePurchaseUnit(product, item.purchase_unit);
+        const product_name = item.product_name || (product ? (unit.purchase_unit ? `${product.name} (${caseLabel(unit.units_per)})` : product.name) : 'Unknown');
         const priced = priceLine({
           name: product_name, quantity: item.quantity_ordered || item.quantity || 1,
-          unit_cost: item.unit_cost || (product ? product.cost : 0),
+          unit_cost: item.unit_cost || (product ? (product.cost || 0) * unit.units_per : 0),
           vendor_discount: item.vendor_discount, vendor_discount_percent: item.vendor_discount_percent, tax_option: item.tax_option || defaultTaxOption(supplier),
         }, taxRate);
-        processedItems.push({ product_id: item.product_id || null, product_name, sku: item.sku || (product ? product.sku : ''), ...priced });
+        processedItems.push({ product_id: item.product_id || null, product_name, sku: item.sku || (product ? product.sku : ''), ...priced, purchase_unit: unit.purchase_unit, units_per: unit.units_per });
       }
     } catch(e) { return res.status(400).json({ error: e.message }); }
     const { subtotal, tax_amount, total } = poTotals(processedItems);
@@ -111,7 +114,7 @@ router.post('/', async (req, res) => {
       const result = await tx.execute({ sql: 'INSERT INTO purchase_orders (po_number,supplier_id,branch_id,employee_id,subtotal,tax_amount,total,notes,expected_date,vendor_order_number) VALUES (?,?,?,?,?,?,?,?,?,?)', args: [po_number, supplier_id||null, branch_id||null, employee_id||null, subtotal, tax_amount, total, notes||null, expected_date||null, vendor_order_number||null] });
       const poId = Number(result.lastInsertRowid);
       for (const item of processedItems) {
-        await tx.execute({ sql: 'INSERT INTO purchase_order_items (po_id,product_id,product_name,sku,quantity_ordered,unit_cost,total,vendor_discount,vendor_discount_percent,tax_option,tax_rate,tax_amount) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', args: [poId, item.product_id, item.product_name, item.sku, item.quantity_ordered, item.unit_cost, item.total, item.vendor_discount, item.vendor_discount_percent, item.tax_option, item.tax_rate, item.tax_amount] });
+        await tx.execute({ sql: 'INSERT INTO purchase_order_items (po_id,product_id,product_name,sku,quantity_ordered,unit_cost,total,vendor_discount,vendor_discount_percent,tax_option,tax_rate,tax_amount,purchase_unit,units_per) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [poId, item.product_id, item.product_name, item.sku, item.quantity_ordered, item.unit_cost, item.total, item.vendor_discount, item.vendor_discount_percent, item.tax_option, item.tax_rate, item.tax_amount, item.purchase_unit || null, item.units_per || 1] });
       }
       await tx.commit();
       committed = true;
@@ -239,7 +242,9 @@ router.put('/:id', async (req, res) => {
           await tx.execute({ sql: 'UPDATE purchase_order_items SET quantity_ordered = ?, unit_cost = ?, total = ?, vendor_discount = ?, vendor_discount_percent = ?, tax_option = ?, tax_rate = ?, tax_amount = ? WHERE id = ?', args: [line.quantity_ordered, line.unit_cost, line.total, line.vendor_discount, line.vendor_discount_percent, line.tax_option, line.tax_rate, line.tax_amount, existingId] });
           keepIds.add(existingId);
         } else {
-          const result = await tx.execute({ sql: 'INSERT INTO purchase_order_items (po_id,product_id,product_name,sku,quantity_ordered,unit_cost,total,vendor_discount,vendor_discount_percent,tax_option,tax_rate,tax_amount) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', args: [req.params.id, product.id, product.name, product.sku, line.quantity_ordered, line.unit_cost, line.total, line.vendor_discount, line.vendor_discount_percent, line.tax_option, line.tax_rate, line.tax_amount] });
+          const unit = resolvePurchaseUnit(product, item.purchase_unit);
+          const name = unit.purchase_unit ? `${product.name} (${caseLabel(unit.units_per)})` : product.name;
+          const result = await tx.execute({ sql: 'INSERT INTO purchase_order_items (po_id,product_id,product_name,sku,quantity_ordered,unit_cost,total,vendor_discount,vendor_discount_percent,tax_option,tax_rate,tax_amount,purchase_unit,units_per) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [req.params.id, product.id, name, product.sku, line.quantity_ordered, line.unit_cost, line.total, line.vendor_discount, line.vendor_discount_percent, line.tax_option, line.tax_rate, line.tax_amount, unit.purchase_unit, unit.units_per] });
           keepIds.add(Number(result.lastInsertRowid));
         }
       }
@@ -327,13 +332,16 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
         const newReceived = (item.quantity_received || 0) + qty;
         await tx.execute({ sql: 'UPDATE purchase_order_items SET quantity_received = ? WHERE id = ?', args: [newReceived, item_id] });
         if (item.product_id) {
-          await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [qty, item.product_id] });
+          // A case line receives its singles; stock and cost are per single.
+          const per = Number(item.units_per) || 1;
+          const singles = stockUnits(qty, per);
+          await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [singles, item.product_id] });
           if (netUnitCost > 0) {
-            await tx.execute({ sql: 'UPDATE products SET cost = ? WHERE id = ?', args: [parseFloat(netUnitCost.toFixed(4)), item.product_id] });
+            await tx.execute({ sql: 'UPDATE products SET cost = ? WHERE id = ?', args: [parseFloat((netUnitCost / per).toFixed(4)), item.product_id] });
           }
           if (po.branch_id) {
-            await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, po.branch_id, qty, item.product_id, qty] });
-            await syncBinQty(tx, item.product_id, po.branch_id, qty);
+            await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, po.branch_id, singles, item.product_id, singles] });
+            await syncBinQty(tx, item.product_id, po.branch_id, singles);
           }
         }
       }
@@ -507,12 +515,13 @@ router.patch('/:id/damage', requirePermission('purchasing_receive'), async (req,
         await tx.execute({ sql: 'UPDATE purchase_order_items SET quantity_damaged = ?, damage_notes = ? WHERE id = ?', args: [newDamaged, notes || null, item_id] });
 
         if (item.product_id) {
-          await tx.execute({ sql: 'UPDATE products SET stock_qty = MAX(0, stock_qty - ?) WHERE id = ?', args: [qty, item.product_id] });
+          const singles = stockUnits(qty, item.units_per); // damaged cases come off as singles
+          await tx.execute({ sql: 'UPDATE products SET stock_qty = MAX(0, stock_qty - ?) WHERE id = ?', args: [singles, item.product_id] });
           if (po.branch_id) {
-            await tx.execute({ sql: 'UPDATE branch_inventory SET stock_qty = MAX(0, stock_qty - ?), updated_at = CURRENT_TIMESTAMP WHERE product_id = ? AND branch_id = ?', args: [qty, item.product_id, po.branch_id] });
-            await syncBinQty(tx, item.product_id, po.branch_id, -qty);
+            await tx.execute({ sql: 'UPDATE branch_inventory SET stock_qty = MAX(0, stock_qty - ?), updated_at = CURRENT_TIMESTAMP WHERE product_id = ? AND branch_id = ?', args: [singles, item.product_id, po.branch_id] });
+            await syncBinQty(tx, item.product_id, po.branch_id, -singles);
           }
-          await tx.execute({ sql: 'INSERT INTO stock_movements (product_id, branch_id, quantity_change, type, reference, reason) VALUES (?,?,?,?,?,?)', args: [item.product_id, po.branch_id || null, -qty, 'damaged', po.po_number, reason || 'Received damaged from supplier'] });
+          await tx.execute({ sql: 'INSERT INTO stock_movements (product_id, branch_id, quantity_change, type, reference, reason) VALUES (?,?,?,?,?,?)', args: [item.product_id, po.branch_id || null, -singles, 'damaged', po.po_number, reason || 'Received damaged from supplier'] });
         }
       }
       await tx.commit();

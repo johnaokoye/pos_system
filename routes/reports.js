@@ -51,7 +51,7 @@ router.get('/top-products', requirePermission('reports'), async (req, res) => {
     const cf = category_id ? ' AND p.category_id = ?' : '';
     const cp = category_id ? [category_id] : [];
 
-    const { rows: products } = await db.execute({ sql: `SELECT ti.product_name, ti.sku, SUM(ti.quantity) as units_sold, SUM(ti.total) as revenue, COUNT(DISTINCT ti.transaction_id) as transactions FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id JOIN products p ON ti.product_id = p.id WHERE t.status='completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}${cf} GROUP BY ti.product_id ORDER BY units_sold DESC LIMIT ?`, args: [s, e, ...bp, ...cp, parseInt(limit)] });
+    const { rows: products } = await db.execute({ sql: `SELECT ti.product_name, ti.sku, SUM(ti.quantity * COALESCE(ti.units_per, 1)) as units_sold, SUM(ti.total) as revenue, COUNT(DISTINCT ti.transaction_id) as transactions FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id JOIN products p ON ti.product_id = p.id WHERE t.status='completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}${cf} GROUP BY ti.product_id ORDER BY units_sold DESC LIMIT ?`, args: [s, e, ...bp, ...cp, parseInt(limit)] });
     res.json(products);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -65,7 +65,7 @@ router.get('/by-category', requirePermission('reports'), async (req, res) => {
     const bf = branch_id ? ' AND t.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
 
-    const { rows: data } = await db.execute({ sql: `SELECT c.name as category, SUM(ti.quantity) as units_sold, SUM(ti.total) as revenue FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id JOIN products p ON ti.product_id = p.id JOIN categories c ON p.category_id = c.id WHERE t.status='completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf} GROUP BY c.id ORDER BY revenue DESC`, args: [s, e, ...bp] });
+    const { rows: data } = await db.execute({ sql: `SELECT c.name as category, SUM(ti.quantity * COALESCE(ti.units_per, 1)) as units_sold, SUM(ti.total) as revenue FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id JOIN products p ON ti.product_id = p.id JOIN categories c ON p.category_id = c.id WHERE t.status='completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf} GROUP BY c.id ORDER BY revenue DESC`, args: [s, e, ...bp] });
     res.json(data);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -361,7 +361,7 @@ router.get('/customer-segments', requirePermission('reports'), async (req, res) 
       args: [s, e, ...bp],
     });
     const { rows: costRows } = await db.execute({
-      sql: `SELECT cc.id as category_id, COALESCE(SUM(ti.quantity * COALESCE(p.cost, 0)), 0) as cost
+      sql: `SELECT cc.id as category_id, COALESCE(SUM(ti.quantity * COALESCE(ti.units_per, 1) * COALESCE(p.cost, 0)), 0) as cost
             FROM customer_categories cc
             LEFT JOIN customers c ON c.customer_category_id = cc.id
             LEFT JOIN transactions t ON t.customer_id = c.id AND t.status='completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}
@@ -380,7 +380,7 @@ router.get('/customer-segments', requirePermission('reports'), async (req, res) 
       args: [s, e, ...bp],
     });
     const { rows: [uncategorizedCost] } = await db.execute({
-      sql: `SELECT COALESCE(SUM(ti.quantity * COALESCE(p.cost, 0)), 0) as cost
+      sql: `SELECT COALESCE(SUM(ti.quantity * COALESCE(ti.units_per, 1) * COALESCE(p.cost, 0)), 0) as cost
             FROM transactions t JOIN customers c ON t.customer_id = c.id
             JOIN transaction_items ti ON ti.transaction_id = t.id
             LEFT JOIN products p ON ti.product_id = p.id
@@ -974,7 +974,7 @@ router.get('/gross-margin', requirePermission('reports'), async (req, res) => {
     const bp = branch_id ? [branch_id] : [];
 
     const { rows: [summary] } = await db.execute({
-      sql: `SELECT COALESCE(SUM(ti.total), 0) as revenue, COALESCE(SUM(ti.quantity * COALESCE(p.cost, 0)), 0) as cost
+      sql: `SELECT COALESCE(SUM(ti.total), 0) as revenue, COALESCE(SUM(ti.quantity * COALESCE(ti.units_per, 1) * COALESCE(p.cost, 0)), 0) as cost
             FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id LEFT JOIN products p ON ti.product_id = p.id
             WHERE t.status = 'completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}`,
       args: [s, e, ...bp],
@@ -984,7 +984,7 @@ router.get('/gross-margin', requirePermission('reports'), async (req, res) => {
 
     const { rows: byCategory } = await db.execute({
       sql: `SELECT c.id as category_id, COALESCE(c.name, 'Uncategorized') as category_name,
-              COALESCE(SUM(ti.total), 0) as revenue, COALESCE(SUM(ti.quantity * COALESCE(p.cost, 0)), 0) as cost
+              COALESCE(SUM(ti.total), 0) as revenue, COALESCE(SUM(ti.quantity * COALESCE(ti.units_per, 1) * COALESCE(p.cost, 0)), 0) as cost
             FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id
             LEFT JOIN products p ON ti.product_id = p.id LEFT JOIN categories c ON p.category_id = c.id
             WHERE t.status = 'completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}
@@ -993,7 +993,7 @@ router.get('/gross-margin', requirePermission('reports'), async (req, res) => {
     });
     const { rows: byBranch } = await db.execute({
       sql: `SELECT t.branch_id, b.name as branch_name,
-              COALESCE(SUM(ti.total), 0) as revenue, COALESCE(SUM(ti.quantity * COALESCE(p.cost, 0)), 0) as cost
+              COALESCE(SUM(ti.total), 0) as revenue, COALESCE(SUM(ti.quantity * COALESCE(ti.units_per, 1) * COALESCE(p.cost, 0)), 0) as cost
             FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id
             LEFT JOIN products p ON ti.product_id = p.id LEFT JOIN branches b ON t.branch_id = b.id
             WHERE t.status = 'completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}

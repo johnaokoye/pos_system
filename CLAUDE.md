@@ -53,6 +53,9 @@ New columns must be appended to the `migrations` array in `database.js:_init()` 
 ### Stock tracking duality
 `products.stock_qty` is the global stock level. `branch_inventory (product_id, branch_id)` tracks per-branch stock separately. When `GET /api/products` is called with `?branch_id=`, the query joins `branch_inventory` and returns branch-level `stock_qty`; without that param it returns the global value. Always update both tables when stock changes.
 
+### Selling by the case
+`products.case_qty` / `case_price` / `case_barcode` let a retail product also sell as a case (one case size). Stock stays in singles. Sale-side lines (`transaction_items`, `quotation_items`, `layaway_plan_items`) carry `sell_unit` ('case' or NULL) and a snapshotted `units_per`; `purchase_order_items` carries `purchase_unit` / `units_per` (ordering by the case only needs `case_qty`). Line `quantity` and `unit_price`/`unit_cost` are per that unit — every stock move is `quantity × units_per` (`stockUnits()`), and reports multiply by `COALESCE(ti.units_per, 1)` for units sold and COGS. Shared helpers in `lib/caseUnits.js` (`resolveUnit`, `resolvePurchaseUnit`, `lineName`, `stockUnits`); variation lines are never cases.
+
 ### Product variations
 `product_variation_types` defines attribute axes per product (e.g. Size, Color); `product_variations` holds individual SKU-level variants with their own price/cost/stock. `transaction_items.variation_id` links a sold item to its specific variant.
 

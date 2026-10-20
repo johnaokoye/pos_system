@@ -186,6 +186,7 @@ router.get('/', requireAuth, async (req, res) => {
       // the untouched base price, kept for anywhere that wants it.
       sql = `SELECT p.id, p.sku, p.barcode, p.name, p.description, p.category_id, p.price as list_price,
         MAX(0, ROUND(p.price * (1 + COALESCE(b.price_tier_percent,0)/100.0), 2)) as price,
+        p.case_qty, p.case_barcode, CASE WHEN p.case_price IS NULL THEN NULL ELSE MAX(0, ROUND(p.case_price * (1 + COALESCE(b.price_tier_percent,0)/100.0), 2)) END as case_price,
         p.cost, p.tax_rate, p.active, p.created_at, p.supplier_id, p.image_path, p.is_service, p.unit,
         p.is_rental, p.rental_rate_type, p.rental_rate, p.rental_deposit, p.rental_late_fee_rate, p.replacement_value,
         p.rental_classification, p.rental_weekly_rate, p.rental_monthly_rate, p.rental_hourly_rate, p.rental_allow_sale, p.is_accessory, p.is_layaway_eligible, p.is_non_inventory,
@@ -1028,6 +1029,30 @@ router.get('/:id', requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Case setup (lib/caseUnits.js) — saved only when the caller sends case_qty,
+// so older callers that don't know about cases (imports, API clients) never
+// clear it. case_qty blank/0/1 turns selling by the case off. Returns an
+// error message or null.
+async function saveCaseSetup(productId, body) {
+  if (!('case_qty' in body)) return null;
+  const qty = parseInt(body.case_qty) || 0;
+  if (qty <= 1) {
+    await db.execute({ sql: 'UPDATE products SET case_qty = NULL, case_price = NULL, case_barcode = NULL WHERE id = ?', args: [productId] });
+    return null;
+  }
+  const price = parseFloat(body.case_price);
+  if (!(price > 0)) return 'Enter the case price';
+  const barcode = String(body.case_barcode || '').trim() || null;
+  if (barcode) {
+    const { rows: [clash] } = await db.execute({ sql: 'SELECT name FROM products WHERE id != ? AND (barcode = ? OR sku = ? OR case_barcode = ?) LIMIT 1', args: [productId, barcode, barcode, barcode] });
+    if (clash) return `Case barcode ${barcode} is already used by ${clash.name}`;
+    const { rows: [self] } = await db.execute({ sql: 'SELECT 1 FROM products WHERE id = ? AND (barcode = ? OR sku = ?)', args: [productId, barcode, barcode] });
+    if (self) return "The case barcode can't be the same as the single item's barcode or SKU";
+  }
+  await db.execute({ sql: 'UPDATE products SET case_qty = ?, case_price = ?, case_barcode = ? WHERE id = ?', args: [qty, parseFloat(price.toFixed(2)), barcode, productId] });
+  return null;
+}
+
 // POST create product
 // Create/edit/delete are shared by three different frontend forms — Inventory,
 // Services, and Rentals items all go through this same endpoint — so the
@@ -1059,8 +1084,9 @@ router.post('/', (req, res, next) => requireProductPermission(!!req.body.is_rent
     } else if (!svc && branch_id && (parseInt(stock_qty) || 0) > 0) {
       await db.execute({ sql: 'INSERT OR IGNORE INTO branch_inventory (product_id, branch_id, stock_qty, min_stock) VALUES (?, ?, ?, ?)', args: [productId, branch_id, parseInt(stock_qty) || 0, parseInt(min_stock) || 5] });
     }
+    const caseError = await saveCaseSetup(productId, req.body);
     const { rows: [prod] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [productId] });
-    res.status(201).json(prod);
+    res.status(201).json(caseError ? { ...prod, warning: caseError } : prod);
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -1141,6 +1167,8 @@ router.put('/:id', async (req, res, next) => {
     if ('long_description' in req.body) {
       await db.execute({ sql: 'UPDATE products SET long_description = ? WHERE id = ?', args: [req.body.long_description || null, req.params.id] });
     }
+    const caseError = await saveCaseSetup(req.params.id, req.body);
+    if (caseError) return res.status(400).json({ error: caseError });
     if (accBranchStock) {
       for (const [bid, qty] of accBranchStock) await setAccessoryBranchQty(db, req.params.id, bid, qty, min_stock || 0);
       await syncAccessoryTotal(db, req.params.id);

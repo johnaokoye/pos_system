@@ -7,6 +7,7 @@ const { syncBinQty } = require('../lib/binSync');
 const { requireAuth, requirePermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { blockedMessage, creditLimitError } = require('../lib/creditBlock');
+const { resolveUnit, lineName, stockUnits } = require('../lib/caseUnits');
 const { isSerialNumberProduct, serialNumberLabel, serialNumberOf } = require('../lib/serialNumber');
 const { checkDiscountEligibility } = require('./promotions');
 
@@ -57,9 +58,15 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
         const lineTotal = parseFloat((parseFloat(item.unit_price) * item.quantity).toFixed(2));
         const lineTax = parseFloat((lineTotal * (parseFloat(item.tax_rate) || 0) / 100).toFixed(2));
         const serial = item.serial_number ? String(item.serial_number).trim() : null;
+        // A held case line keeps its unit (and the case size at hold time).
+        let sellUnit = null, unitsPer = 1;
+        if (item.sell_unit === 'case' && item.product_id && !item.variation_id) {
+          const { rows: [prod] } = await txn.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] });
+          if (prod) ({ sell_unit: sellUnit, units_per: unitsPer } = resolveUnit(prod, 'case'));
+        }
         await txn.execute({
-          sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,serial_number) VALUES (?,?,?,?,?,?,0,?,?,?,?,?)`,
-          args: [txId, item.product_id, serial ? serialNumberLabel(serial) : item.product_name, item.sku || '', item.quantity, parseFloat(item.unit_price), lineTax, lineTotal, item.variation_id || null, item.variation_name || null, serial || null]
+          sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,serial_number,sell_unit,units_per) VALUES (?,?,?,?,?,?,0,?,?,?,?,?,?,?)`,
+          args: [txId, item.product_id, serial ? serialNumberLabel(serial) : item.product_name, item.sku || '', item.quantity, parseFloat(item.unit_price), lineTax, lineTotal, item.variation_id || null, item.variation_name || null, serial || null, sellUnit, unitsPer]
         });
       }
       await txn.commit();
@@ -234,6 +241,10 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         continue;
       }
       let variation = null, unit_price = product.price;
+      // Sold by the case (lib/caseUnits.js): case price, and quantity × case
+      // size singles off stock. Never on a variation.
+      const unit = resolveUnit(product, item.variation_id ? null : item.sell_unit);
+      if (unit.sell_unit) unit_price = unit.price;
       if (item.variation_id) {
         const { rows: [v] } = await db.execute({ sql: 'SELECT * FROM product_variations WHERE id = ? AND product_id = ?', args: [item.variation_id, item.product_id] });
         if (!v) throw new Error(`Variation ${item.variation_id} not found`);
@@ -272,7 +283,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       const lineTax = isTaxExempt ? 0 : parseFloat((lineTotal * product.tax_rate / 100).toFixed(2));
       subtotal += lineTotal;
       tax_amount += lineTax;
-      processedItems.push({ product, variation, quantity: item.quantity, unit_price, lineTotal, lineTax, discount: discountAmount, discountPercent, discountOverrideBy });
+      processedItems.push({ product, variation, unit, quantity: item.quantity, unit_price, lineTotal, lineTax, discount: discountAmount, discountPercent, discountOverrideBy });
     }
 
     if (!processedItems.length) return res.status(400).json({ error: 'No items in transaction' });
@@ -340,13 +351,16 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         await tx.execute({ sql: 'INSERT INTO transaction_payments (transaction_id, payment_method, amount, approval_code) VALUES (?,?,?,?)', args: [txId, leg.payment_method, leg.amount, leg.approval_code || null] });
       }
 
-      for (const { product, variation, customName, serialNumber, quantity, unit_price, lineTotal, lineTax, discount, discountPercent, discountOverrideBy } of processedItems) {
-        const itemName = customName || (serialNumber ? serialNumberLabel(serialNumber) : variation ? `${product.name} — ${variation.name}` : product.name);
+      for (const { product, variation, unit, customName, serialNumber, quantity: lineQty, unit_price, lineTotal, lineTax, discount, discountPercent, discountOverrideBy } of processedItems) {
+        const itemName = customName || (serialNumber ? serialNumberLabel(serialNumber) : variation ? `${product.name} — ${variation.name}` : lineName(product.name, unit));
         const itemSku = customName ? '' : (variation ? variation.sku : product.sku);
-        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,discount_percent,discount_override_by,serial_number) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [txId, product ? product.id : null, itemName, itemSku, quantity, unit_price, discount, lineTax, lineTotal, variation?.id||null, variation?.name||null, discountPercent || 0, discountOverrideBy || null, serialNumber || null] });
+        const unitsPer = unit?.units_per || 1;
+        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,discount_percent,discount_override_by,serial_number,sell_unit,units_per) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [txId, product ? product.id : null, itemName, itemSku, lineQty, unit_price, discount, lineTax, lineTotal, variation?.id||null, variation?.name||null, discountPercent || 0, discountOverrideBy || null, serialNumber || null, unit?.sell_unit || null, unitsPer] });
         // A custom/temp line has no catalog product — nothing to deduct; an
         // SN line is a stockless placeholder for the serial.
         if (!product || serialNumber) continue;
+        // Stock is in singles: a case line moves quantity × case size.
+        const quantity = stockUnits(lineQty, unitsPer);
         if (variation) {
           await tx.execute({ sql: 'UPDATE product_variations SET stock_qty = stock_qty - ? WHERE id = ?', args: [quantity, variation.id] });
         } else {
@@ -612,10 +626,12 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
 
       for (const { txItem, quantity, lineTotal, lineTax } of processedItems) {
         await retTx.execute({ sql: `INSERT INTO return_items (return_id,transaction_item_id,product_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?,?,?)`, args: [retId, txItem.id, txItem.product_id, txItem.product_name, txItem.sku, quantity, txItem.unit_price, lineTax, lineTotal] });
-        await retTx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [quantity, txItem.product_id] });
+        // Returned quantity is in the line's unit; stock is in singles.
+        const restock = stockUnits(quantity, txItem.units_per);
+        await retTx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [restock, txItem.product_id] });
         if (tx.branch_id) {
-          await retTx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [txItem.product_id, tx.branch_id, quantity, txItem.product_id, quantity] });
-          await syncBinQty(retTx, txItem.product_id, tx.branch_id, quantity);
+          await retTx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [txItem.product_id, tx.branch_id, restock, txItem.product_id, restock] });
+          await syncBinQty(retTx, txItem.product_id, tx.branch_id, restock);
         }
       }
 
@@ -686,10 +702,11 @@ router.patch('/:id/void', requireAuth, async (req, res) => {
       await voidTxn.execute({ sql: "UPDATE transactions SET status='voided', voided_by=?, voided_at=CURRENT_TIMESTAMP, void_reason=? WHERE id=?", args: [authorizer.id, reason || null, req.params.id] });
       const { rows: items } = await voidTxn.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [req.params.id] });
       for (const item of items) {
-        await voidTxn.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [item.quantity, item.product_id] });
+        const restock = stockUnits(item.quantity, item.units_per); // case lines restock their singles
+        await voidTxn.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [restock, item.product_id] });
         if (tx.branch_id) {
-          await voidTxn.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, tx.branch_id, item.quantity, item.product_id, item.quantity] });
-          await syncBinQty(voidTxn, item.product_id, tx.branch_id, item.quantity);
+          await voidTxn.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, tx.branch_id, restock, item.product_id, restock] });
+          await syncBinQty(voidTxn, item.product_id, tx.branch_id, restock);
         }
       }
       if (tx.customer_id) {

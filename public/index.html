@@ -2672,6 +2672,9 @@ const App = {
     const q = (input?.value || '').trim();
     if (!q) return;
     const ql = q.toLowerCase();
+    // A case barcode rings up the case (lib/caseUnits.js).
+    const caseProduct = this.allProducts.find(p => this._sellsByCase(p) && (p.case_barcode || '').toLowerCase() === ql);
+    if (caseProduct) { this.addToCart(caseProduct.id, 'case'); if (input) { input.value = ''; input.focus(); } return; }
     let product = this.allProducts.find(p => (p.sku || '').toLowerCase() === ql || (p.barcode || '').toLowerCase() === ql);
     if (!product) product = this.allProducts.find(p => (p.name || '').toLowerCase().includes(ql) || (p.sku || '').toLowerCase().includes(ql));
     if (!product) { this.alert(`No item found matching "${q}"`, 'warning'); return; }
@@ -3051,7 +3054,7 @@ const App = {
           // collapsing the line to the base product.
           this.addQuoteCustomItem({ product_name: `${item.name} (${item.variation_name})`, quantity: item.quantity, unit_price: item.price });
         } else {
-          this.addQuoteItem({ product_id: item.product_id, product_name: item.name, serial_number: item.serial_number || null, quantity: item.quantity, unit_price: item.price });
+          this.addQuoteItem({ product_id: item.product_id, product_name: item.name, serial_number: item.serial_number || null, quantity: item.quantity, unit_price: item.price, sell_unit: item.sell_unit || null });
         }
       }
     }
@@ -3137,6 +3140,7 @@ const App = {
         // Sets the line's price/tax/stock data and label too — setting the
         // hidden input's value alone left the totals and deposit at $0.
         this._selectLayawayLineOption(idx, item.product_id);
+        if (item.sell_unit === 'case') { const u = document.getElementById(`ll-unit-${idx}`); if (u) { u.value = 'case'; this._recalcLayawayTotals(); } }
       }
       this._recalcLayawayTotals();
     }
@@ -3206,6 +3210,7 @@ const App = {
         ${thumb}
         <div class="product-name">${p.name}${p.is_rental ? ' <span style="font-size:9px;background:#fff3e0;color:#e65100;padding:1px 5px;border-radius:3px;vertical-align:middle">RENTAL ITEM</span>' : ''}</div>
         <div class="product-price">${this.fmt(p.price)}</div>
+        ${this._sellsByCase(p) && !oos ? `<div onclick="event.stopPropagation();App.addToCart(${p.id},'case')" title="Add a case of ${p.case_qty}" style="margin:4px auto 2px;font-size:11px;font-weight:600;padding:2px 6px;border:1px solid var(--primary);color:var(--primary);border-radius:10px;display:inline-block">+ Case of ${p.case_qty} · ${this.fmt(p.case_price)}</div>` : ''}
         <div class="product-stock">${stockLabel}</div>
       </div>`;
     }).join('');
@@ -3225,9 +3230,29 @@ const App = {
     return input.trim() || null;
   },
 
-  addToCart(productId) {
+  // Mirrors lib/caseUnits.js sellsByCase().
+  _sellsByCase(p) {
+    return !!p && !p.is_service && !p.is_rental && Number(p.case_qty) > 1 && Number(p.case_price) > 0;
+  },
+
+  // Singles of a product already on the ticket, across single and case lines.
+  _cartSingles(productId, exceptIdx = -1) {
+    return this.cart.reduce((n, i, idx) => n + (idx !== exceptIdx && i.product_id === productId && !i.variation_id ? i.quantity * (i.units_per || 1) : 0), 0);
+  },
+
+  addToCart(productId, unit = null) {
     const product = this.allProducts.find(p => p.id === productId);
     if (!product) return;
+    if (unit === 'case') {
+      if (!this._sellsByCase(product)) { this.alert(`${product.name} isn't sold by the case`, 'warning'); return; }
+      const per = Number(product.case_qty);
+      if (this._cartSingles(product.id) + per > product.stock_qty) { this.alert(`Not enough stock for a case of ${per}`, 'warning'); return; }
+      const line = this.cart.find(i => i.product_id === productId && !i.variation_id && i.sell_unit === 'case');
+      if (line) line.quantity++;
+      else this.cart.push({ product_id: product.id, category_id: product.category_id || null, name: `${product.name} (Case of ${per})`, price: Number(product.case_price), cost: (product.cost || 0) * per, tax_rate: product.tax_rate, quantity: 1, is_service: 0, sell_unit: 'case', units_per: per });
+      this._checkAutoPromos();
+      return;
+    }
     if (this._isSerialNumberProduct(product)) {
       // Each serial is its own qty-1 line (never merged), placed after
       // whatever was just rung up so it reads as that item's serial.
@@ -3240,11 +3265,9 @@ const App = {
     if (product.has_variations > 0) { this.showVariationPicker(product); return; }
     if (!product.is_service) {
       if (product.stock_qty <= 0) return;
-      const existing = this.cart.find(i => i.product_id === productId && !i.variation_id);
-      const totalInCart = existing ? existing.quantity : 0;
-      if (totalInCart >= product.stock_qty) { this.alert('Not enough stock', 'warning'); return; }
+      if (this._cartSingles(product.id) >= product.stock_qty) { this.alert('Not enough stock', 'warning'); return; }
     }
-    const existing = this.cart.find(i => i.product_id === productId && !i.variation_id);
+    const existing = this.cart.find(i => i.product_id === productId && !i.variation_id && !i.sell_unit);
     if (existing) {
       existing.quantity++;
     } else {
@@ -3266,7 +3289,9 @@ const App = {
     if (newQty <= 0) { this.cart.splice(idx, 1); }
     else {
       const stockLimit = item.variation_id ? (item.stock_qty ?? Infinity) : (this.allProducts.find(p => p.id === item.product_id)?.stock_qty ?? Infinity);
-      if (newQty > stockLimit) { this.alert('Not enough stock', 'warning'); return; }
+      // Stock is in singles — count every line of this product (cases × case size).
+      const needed = item.variation_id ? newQty : this._cartSingles(item.product_id, idx) + newQty * (item.units_per || 1);
+      if (needed > stockLimit) { this.alert('Not enough stock', 'warning'); return; }
       item.quantity = newQty;
     }
     this._checkAutoPromos();
@@ -3721,7 +3746,7 @@ const App = {
         // directly for that case only; a real product_id line still has its
         // price/tax authoritatively re-derived server-side, never trusted
         // from the client.
-        items: this.cart.map(i => ({ product_id: i.product_id, variation_id: i.variation_id||null, serial_number: i.serial_number||null, quantity: i.quantity, discount_percent: i.discountPercent||0, discount_override_employee_id: i.discountOverrideEmployeeId||null, ...(i.product_id ? {} : { product_name: i.name, unit_price: i.price, tax_rate: i.tax_rate||0 }) })),
+        items: this.cart.map(i => ({ product_id: i.product_id, variation_id: i.variation_id||null, serial_number: i.serial_number||null, sell_unit: i.sell_unit || null, quantity: i.quantity, discount_percent: i.discountPercent||0, discount_override_employee_id: i.discountOverrideEmployeeId||null, ...(i.product_id ? {} : { product_name: i.name, unit_price: i.price, tax_rate: i.tax_rate||0 }) })),
         discount_amount: discount,
         promotion_code: this.appliedDiscountCard ? (this.appliedDiscountCard.card_number || null) : (this.appliedPromoCode?.code || null),
         promotion_name: this.appliedDiscountCard ? `${this.appliedDiscountCard.type_name} ${this.appliedDiscountCard.label || 'Discount Card'}` : (this.appliedPromoCode?.promo_name || this.autoAppliedPromo?.name || null),
@@ -3748,7 +3773,7 @@ const App = {
           item.stock_qty = Math.max(0, (item.stock_qty || 0) - item.quantity);
         } else {
           const p = this.allProducts.find(p => p.id === item.product_id);
-          if (p) p.stock_qty -= item.quantity;
+          if (p) p.stock_qty -= item.quantity * (item.units_per || 1);
         }
       });
 
@@ -3779,6 +3804,7 @@ const App = {
           tax_rate: i.tax_rate || 0,
           variation_name: i.variation_name || null,
           serial_number: i.serial_number || null,
+          sell_unit: i.sell_unit || null,
         };
       });
       await this.api('POST', '/transactions/hold', {
@@ -3924,6 +3950,8 @@ const App = {
           serial_number: item.serial_number || null,
           is_service: product?.product_type === 'service' ? 1 : 0,
           stock_qty: product?.stock_qty ?? 999,
+          sell_unit: item.sell_unit || null,
+          units_per: item.units_per || 1,
         };
       });
       this.cartDiscount = parseFloat(held.discount_amount || 0);
@@ -4095,6 +4123,8 @@ const App = {
           quantity: item.quantity,
           is_service: product?.product_type === 'service' ? 1 : 0,
           stock_qty: product?.stock_qty ?? 999,
+          sell_unit: item.sell_unit || null,
+          units_per: item.units_per || 1,
         };
       });
       this.cartDiscount = parseFloat(quote.discount_amount || 0);
@@ -5440,6 +5470,18 @@ const App = {
         <div class="form-group"><label>Cost</label><input type="number" id="pf-cost" value="${p.cost||0}" min="0" step="0.01"></div>
         <div class="form-group"><label>Tax Rate %</label><input type="number" id="pf-tax" value="${defaultTax}" min="0" step="0.1"></div>
       </div>
+      <div class="form-group" style="border:1px solid var(--border);border-radius:6px;padding:10px 12px">
+        <label style="display:flex;align-items:center;gap:8px;margin:0;cursor:pointer;font-weight:600">
+          <input type="checkbox" id="pf-case-on" ${p.case_qty > 1 ? 'checked' : ''} onchange="document.getElementById('pf-case-fields').style.display=this.checked?'':'none'" style="width:auto;margin:0">
+          Also sell by the case
+        </label>
+        <p style="font-size:11px;color:var(--text-muted);margin:4px 0 0">Stock stays counted in singles — selling, quoting, ordering or putting a case on layaway moves the number of singles in a case.</p>
+        <div id="pf-case-fields" class="input-row-3" style="margin-top:8px;${p.case_qty > 1 ? '' : 'display:none'}">
+          <div class="form-group" style="margin:0"><label>Singles per Case *</label><input type="number" id="pf-case-qty" value="${p.case_qty || ''}" min="2" step="1" placeholder="e.g. 12"></div>
+          <div class="form-group" style="margin:0"><label>Case Price *</label><input type="number" id="pf-case-price" value="${p.case_price ?? ''}" min="0" step="0.01"></div>
+          <div class="form-group" style="margin:0"><label>Case Barcode</label><input id="pf-case-barcode" value="${this.escapeAttr(p.case_barcode || '')}" placeholder="Scans as a case"></div>
+        </div>
+      </div>
       <div class="input-row">
         <div class="form-group"><label>Stock Qty</label><input type="number" id="pf-stock" value="${p.stock_qty||0}" min="0" oninput="App._updatePfBinSplitSummary()"></div>
         <div class="form-group"><label>Min Stock</label><input type="number" id="pf-minstock" value="${p.min_stock||5}" min="0"></div>
@@ -5589,6 +5631,13 @@ const App = {
       web_allotment: document.getElementById('pf-web-allotment').value !== '' ? parseInt(document.getElementById('pf-web-allotment').value) : null,
       is_layaway_eligible: document.getElementById('pf-layaway').checked ? 1 : 0,
     };
+    // Selling by the case (blank case_qty turns it off).
+    const caseOn = document.getElementById('pf-case-on')?.checked;
+    data.case_qty = caseOn ? (parseInt(document.getElementById('pf-case-qty').value) || 0) : 0;
+    data.case_price = caseOn ? parseFloat(document.getElementById('pf-case-price').value) : null;
+    data.case_barcode = caseOn ? (document.getElementById('pf-case-barcode').value.trim() || null) : null;
+    if (caseOn && !(data.case_qty > 1)) { this.alert('Enter how many singles are in a case (2 or more)', 'error'); return; }
+    if (caseOn && !(data.case_price > 0)) { this.alert('Enter the case price', 'error'); return; }
     let binRows = [];
     if (!id) {
       const branchEl = document.getElementById('pf-branch');
@@ -5604,6 +5653,7 @@ const App = {
       let prod;
       if (id) prod = await this.api('PUT', `/products/${id}`, data);
       else prod = await this.api('POST', '/products', data);
+      if (prod?.warning) this.alert(prod.warning, 'warning');
       if (!id && data.branch_id && binRows.length) {
         for (let i = 0; i < binRows.length; i++) {
           const row = binRows[i];
@@ -11131,6 +11181,7 @@ const App = {
         <input type="hidden" id="ll-prod-${idx}" value="">
         <div id="ll-prod-dd-${idx}" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
       </span>
+      <select id="ll-unit-${idx}" style="width:120px;padding:6px;display:none" onchange="App._recalcLayawayTotals()" title="Single items or by the case"><option value="">Single</option></select>
       <input type="number" id="ll-qty-${idx}" value="1" min="1" style="width:70px;padding:6px;border:1px solid var(--border);border-radius:4px" onchange="App._recalcLayawayTotals()">
       <span id="ll-warn-${idx}" style="font-size:11px;color:var(--danger);align-self:center"></span>
       <button class="btn btn-sm btn-outline" onclick="document.getElementById('layaway-line-${idx}').remove();App._recalcLayawayTotals()">✕</button>`;
@@ -11168,9 +11219,15 @@ const App = {
     const hidden = document.getElementById(`ll-prod-${idx}`);
     const searchEl = document.getElementById(`ll-prod-search-${idx}`);
     const dd = document.getElementById(`ll-prod-dd-${idx}`);
-    if (hidden) { hidden.value = productId; hidden.dataset.price = p.price; hidden.dataset.tax = p.tax_rate||0; hidden.dataset.avail = p.stock_qty; }
+    if (hidden) { hidden.value = productId; hidden.dataset.price = p.price; hidden.dataset.tax = p.tax_rate||0; hidden.dataset.avail = p.stock_qty; hidden.dataset.casePrice = p.case_price ?? ''; hidden.dataset.caseQty = p.case_qty ?? ''; }
     if (searchEl) searchEl.value = `${p.name} (${p.stock_qty} available)`;
     if (dd) dd.style.display = 'none';
+    // By the case (lib/caseUnits.js) — only for a product sold by the case.
+    const unitSel = document.getElementById(`ll-unit-${idx}`);
+    if (unitSel) {
+      unitSel.innerHTML = `<option value="">Single</option>${this._sellsByCase(p) ? `<option value="case">Case of ${p.case_qty}</option>` : ''}`;
+      unitSel.style.display = this._sellsByCase(p) ? '' : 'none';
+    }
     this._recalcLayawayTotals();
   },
 
@@ -11211,11 +11268,14 @@ const App = {
       const qtyEl = document.getElementById(`ll-qty-${idx}`);
       const warnEl = document.getElementById(`ll-warn-${idx}`);
       if (!hidden || !qtyEl) return;
-      const avail = parseInt(hidden.dataset.avail) || 0;
+      // A case line: case price, availability in whole cases.
+      const isCase = document.getElementById(`ll-unit-${idx}`)?.value === 'case';
+      const per = isCase ? (parseInt(hidden.dataset.caseQty) || 1) : 1;
+      const avail = Math.floor((parseInt(hidden.dataset.avail) || 0) / per);
       const qty = parseInt(qtyEl.value) || 0;
-      if (warnEl) warnEl.textContent = (hidden.value && qty > avail) ? `Only ${avail} available` : '';
+      if (warnEl) warnEl.textContent = (hidden.value && qty > avail) ? `Only ${avail} ${isCase ? 'case(s)' : ''} available` : '';
       if (!hidden.value) return;
-      const price = this._layawayUnitPrice(hidden.dataset.price);
+      const price = this._layawayUnitPrice(isCase ? hidden.dataset.casePrice : hidden.dataset.price);
       const taxRate = parseFloat(hidden.dataset.tax) || 0;
       const lineTotal = price * qty;
       subtotal += lineTotal;
@@ -11249,7 +11309,8 @@ const App = {
       const idx = line.id.replace('layaway-line-','');
       const product_id = document.getElementById(`ll-prod-${idx}`)?.value;
       const quantity = parseInt(document.getElementById(`ll-qty-${idx}`)?.value) || 0;
-      if (product_id && quantity > 0) items.push({ product_id, quantity });
+      const sell_unit = document.getElementById(`ll-unit-${idx}`)?.value === 'case' ? 'case' : null;
+      if (product_id && quantity > 0) items.push({ product_id, quantity, sell_unit });
     });
     if (!items.length) { this.alert('Add at least one item', 'error'); return; }
     try {
@@ -18252,6 +18313,9 @@ const App = {
         <input type="hidden" id="poi-prod-${idx}" value="${preselectedProduct?preselectedProduct.id:''}" data-cost="${preselectedProduct?(preselectedProduct.cost||0):''}" data-name="${preselectedProduct?preselectedProduct.name:''}" data-sku="${preselectedProduct?(preselectedProduct.sku||''):''}">
         <div id="poi-prod-dd-${idx}" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
       </span>
+      <select id="poi-unit-${idx}" style="width:120px;${preselectedProduct && Number(preselectedProduct.case_qty) > 1 ? '' : 'display:none'}" onchange="App._onPOUnitChange(${idx})" title="Order singles or by the case">
+        <option value="">Single</option>${preselectedProduct && Number(preselectedProduct.case_qty) > 1 ? `<option value="case">Case of ${preselectedProduct.case_qty}</option>` : ''}
+      </select>
       <input id="poi-qty-${idx}" type="number" min="1" value="1" style="width:70px" placeholder="Qty" oninput="App.calcPOTotal()">
       <input id="poi-cost-${idx}" type="number" step="0.01" value="${preselectedProduct?(preselectedProduct.cost||''):''}" style="width:90px" placeholder="Unit Cost" oninput="App.calcPOTotal()">
       ${this._poLineExtrasHtml('poi-new', 0, this._poSupplierTaxDefault(), true)}
@@ -18288,6 +18352,23 @@ const App = {
     if (searchEl) searchEl.value = `${p.name} (${p.sku||''})`;
     if (dd) dd.style.display = 'none';
     document.getElementById(`poi-cost-${idx}`).value = p.cost || '';
+    // Order by the case when the product has a case size (lib/caseUnits.js).
+    const unitSel = document.getElementById(`poi-unit-${idx}`);
+    if (unitSel) {
+      const hasCase = Number(p.case_qty) > 1;
+      unitSel.innerHTML = `<option value="">Single</option>${hasCase ? `<option value="case">Case of ${p.case_qty}</option>` : ''}`;
+      unitSel.style.display = hasCase ? '' : 'none';
+    }
+    this.calcPOTotal();
+  },
+
+  // Switching a PO line between single and case re-defaults its cost (a case
+  // costs case size × the single's cost); quantity is then in cases.
+  _onPOUnitChange(idx) {
+    const hidden = document.getElementById(`poi-prod-${idx}`);
+    const p = (this._poProducts || []).find(x => String(x.id) === hidden?.value);
+    const unit = document.getElementById(`poi-unit-${idx}`)?.value;
+    if (p) document.getElementById(`poi-cost-${idx}`).value = ((p.cost || 0) * (unit === 'case' ? Number(p.case_qty) : 1)).toFixed(2);
     this.calcPOTotal();
   },
 
@@ -18432,7 +18513,8 @@ const App = {
       const disc = this._parsePODiscount(line.querySelector('.poi-new-disc').value);
       if (disc.error) discountError = true;
       const tax_option = line.querySelector('.poi-new-tax').value;
-      items.push({ product_id, quantity_ordered: qty, unit_cost, vendor_discount: disc.vendor_discount, vendor_discount_percent: disc.vendor_discount_percent, tax_option });
+      const purchase_unit = document.getElementById(`poi-unit-${idx}`)?.value === 'case' ? 'case' : null;
+      items.push({ product_id, quantity_ordered: qty, unit_cost, vendor_discount: disc.vendor_discount, vendor_discount_percent: disc.vendor_discount_percent, tax_option, purchase_unit });
     });
     if (!supplier_id) { this.alert('Please select a supplier', 'error'); return; }
     if (!items.length) { this.alert('Add at least one item', 'error'); return; }
@@ -20049,6 +20131,7 @@ const App = {
         <div id="qti-prod-dd-${idx}" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
       </span>
       <input id="qti-sn-${idx}" type="text" placeholder="Serial #" value="${this.escapeAttr(prefill&&prefill.serial_number||'')}" style="width:130px;${prefill&&prefill.serial_number?'':'display:none'}" title="Serial number recorded on this SN line">
+      ${this._quoteUnitSelectHtml(idx, prefill)}
       <input id="qti-qty-${idx}" type="number" min="1" value="${prefill?prefill.quantity:1}" style="width:70px" placeholder="Qty" ${prefill&&prefill.serial_number?'readonly':''} oninput="App.calcQuoteTotal();App.checkQuoteItemStock(${idx})">
       ${isSP ? `<input id="qti-cost-${idx}" type="number" step="0.01" value="${prefill&&prefill.unit_cost!=null?prefill.unit_cost:''}" style="width:90px" placeholder="Cost" title="Informational only — doesn't affect the total" oninput="App._updateQuoteItemMargin(${idx})">` : ''}
       <input id="qti-price-${idx}" type="number" step="0.01" value="${prefill?prefill.unit_price:''}" style="width:90px" placeholder="Price" oninput="App.calcQuoteTotal();App._updateQuoteItemMargin(${idx})">
@@ -20112,6 +20195,7 @@ const App = {
     }
     const priceInp = document.getElementById(`qti-price-${idx}`);
     if (priceInp) priceInp.value = price;
+    this._refreshQuoteUnitSelect(idx, p, price);
     this.calcQuoteTotal();
     this.checkQuoteItemStock(idx);
     if (this._quoteType === 'special_project') {
@@ -20489,6 +20573,55 @@ const App = {
   // this row's product. If short, renders an allocator panel listing every
   // other branch's available qty so the shortfall can be split across them,
   // with any unallocated remainder auto-labeled for Purchasing.
+  // Single / Case chooser on a retail quote line (lib/caseUnits.js). Shown
+  // only for a product sold by the case; a case line is priced at the case
+  // price and its stock is checked in whole cases.
+  _quoteUnitSelectHtml(idx, prefill) {
+    const p = prefill?.product_id ? (this._quoteProducts || []).find(x => String(x.id) === String(prefill.product_id)) : null;
+    const show = p && this._sellsByCase(p);
+    return `<select id="qti-unit-${idx}" style="width:120px;${show ? '' : 'display:none'}" onchange="App._onQuoteUnitChange(${idx})" title="Sell as single items or by the case">
+      ${show ? `<option value="">Single</option><option value="case" ${prefill.sell_unit === 'case' ? 'selected' : ''}>Case of ${p.case_qty}</option>` : '<option value="">Single</option>'}
+    </select>`;
+  },
+
+  _refreshQuoteUnitSelect(idx, p, singlePrice) {
+    const sel = document.getElementById(`qti-unit-${idx}`);
+    if (!sel) return;
+    sel.dataset.singlePrice = singlePrice;
+    if (this._sellsByCase(p)) {
+      sel.innerHTML = `<option value="">Single</option><option value="case">Case of ${p.case_qty}</option>`;
+      sel.style.display = '';
+    } else {
+      sel.innerHTML = '<option value="">Single</option>';
+      sel.style.display = 'none';
+    }
+  },
+
+  _onQuoteUnitChange(idx) {
+    const sel = document.getElementById(`qti-unit-${idx}`);
+    const p = (this._quoteProducts || []).find(x => String(x.id) === document.getElementById(`qti-prod-${idx}`)?.value);
+    const priceInp = document.getElementById(`qti-price-${idx}`);
+    if (!sel || !p || !priceInp) return;
+    priceInp.value = sel.value === 'case' ? p.case_price : (sel.dataset.singlePrice ?? p.price);
+    const costInp = document.getElementById(`qti-cost-${idx}`);
+    if (costInp) costInp.value = ((p.cost || 0) * (sel.value === 'case' ? Number(p.case_qty) : 1)).toFixed(2);
+    this.calcQuoteTotal();
+    this.checkQuoteItemStock(idx);
+    if (this._quoteType === 'special_project') this._updateQuoteItemMargin(idx);
+  },
+
+  // Singles per unit on a quote line (case size for a case line, else 1).
+  _quoteUnitsPer(idx) {
+    if (document.getElementById(`qti-unit-${idx}`)?.value !== 'case') return 1;
+    const p = (this._quoteProducts || []).find(x => String(x.id) === document.getElementById(`qti-prod-${idx}`)?.value);
+    return Number(p?.case_qty) || 1;
+  },
+
+  // Stock available for a quote line, in the line's unit (whole cases for a case line).
+  _quoteAvail(idx, stockEntry) {
+    return Math.floor((stockEntry?.stock_qty || 0) / this._quoteUnitsPer(idx));
+  },
+
   async checkQuoteItemStock(idx) {
     const prodSel = document.getElementById(`qti-prod-${idx}`);
     const allocDiv = document.getElementById(`qt-alloc-${idx}`);
@@ -20511,7 +20644,7 @@ const App = {
 
     const stockMap = await this.getBranchStock(branchId);
     if (!stillCurrent()) return;
-    const available = stockMap[productId]?.stock_qty || 0;
+    const available = this._quoteAvail(idx, stockMap[productId]);
     if (qty <= available) { allocDiv.innerHTML = ''; delete allocDiv.dataset.productId; delete allocDiv.dataset.branchId; return; }
 
     const shortfall = qty - available;
@@ -20530,7 +20663,7 @@ const App = {
     await Promise.all(otherBranches.map(b => this.getBranchStock(b.id)));
     if (!stillCurrent()) return;
     const rowsHtml = otherBranches.map(b => {
-      const avail = (this._quoteStockCache[b.id] || {})[productId]?.stock_qty || 0;
+      const avail = this._quoteAvail(idx, (this._quoteStockCache[b.id] || {})[productId]);
       return `<div style="display:flex;align-items:center;gap:8px;font-size:12px;margin-top:4px">
         <span style="flex:1">${b.name} <span style="color:var(--text-muted)">(avail: ${avail})</span></span>
         <input type="number" min="0" max="${avail}" value="0" style="width:70px" id="qt-alloc-${idx}-b${b.id}" data-branch="${b.id}" data-max="${avail}" oninput="App.recalcQuoteAllocation(${idx})">
@@ -20552,7 +20685,7 @@ const App = {
     const productId = parseInt(prodSel?.value);
     const qty = parseInt(document.getElementById(`qti-qty-${idx}`)?.value) || 0;
     const stockMap = (this._quoteStockCache || {})[branchId] || {};
-    const available = stockMap[productId]?.stock_qty || 0;
+    const available = this._quoteAvail(idx, stockMap[productId]);
     const shortfall = Math.max(0, qty - available);
     let allocated = 0;
     document.querySelectorAll(`[id^="qt-alloc-${idx}-b"]`).forEach(inp => {
@@ -20697,6 +20830,7 @@ const App = {
       if (prodSel) {
         if (!prodSel.value) return;
         const item = { product_id: prodSel.value, quantity, unit_price, unit_cost, discount };
+        if (document.getElementById(`qti-unit-${idx}`)?.value === 'case') item.sell_unit = 'case';
         const snInp = document.getElementById(`qti-sn-${idx}`);
         if (snInp && snInp.style.display !== 'none') {
           item.serial_number = snInp.value.trim();
@@ -20711,7 +20845,7 @@ const App = {
           // branch's input (capped at what's actually left to cover), then
           // whatever's still unassigned goes to Purchasing (branch_id: null).
           const stockMap = (this._quoteStockCache || {})[branch_id] || {};
-          const available = stockMap[prodSel.value]?.stock_qty || 0;
+          const available = this._quoteAvail(idx, stockMap[prodSel.value]);
           const homeQty = Math.min(quantity, available);
           let remaining = quantity - homeQty;
           const sources = [];

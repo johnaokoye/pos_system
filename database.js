@@ -1909,6 +1909,23 @@ async function _init() {
     'ALTER TABLE customers ADD COLUMN block_override_reason TEXT',
     'ALTER TABLE customers ADD COLUMN business_name TEXT',
     'ALTER TABLE customers ADD COLUMN phone_keys_src TEXT',
+    // Sell by the case (lib/caseUnits.js): a retail item can also be sold,
+    // quoted, ordered and put on layaway as a case of case_qty singles at
+    // case_price, scanned by case_barcode. Stock is always counted in
+    // singles. Each line records its unit and how many singles it stood for
+    // at the time (units_per), so later edits to case_qty don't change
+    // history, returns or receiving.
+    'ALTER TABLE products ADD COLUMN case_qty INTEGER',
+    'ALTER TABLE products ADD COLUMN case_price REAL',
+    'ALTER TABLE products ADD COLUMN case_barcode TEXT',
+    'ALTER TABLE transaction_items ADD COLUMN sell_unit TEXT',
+    'ALTER TABLE transaction_items ADD COLUMN units_per INTEGER NOT NULL DEFAULT 1',
+    'ALTER TABLE quotation_items ADD COLUMN sell_unit TEXT',
+    'ALTER TABLE quotation_items ADD COLUMN units_per INTEGER NOT NULL DEFAULT 1',
+    'ALTER TABLE layaway_plan_items ADD COLUMN sell_unit TEXT',
+    'ALTER TABLE layaway_plan_items ADD COLUMN units_per INTEGER NOT NULL DEFAULT 1',
+    'ALTER TABLE purchase_order_items ADD COLUMN purchase_unit TEXT',
+    'ALTER TABLE purchase_order_items ADD COLUMN units_per INTEGER NOT NULL DEFAULT 1',
     // Customer payments taken at the POS (lib/customerPayments.js): the
     // drawer session the money went into, 'open' (on account, applied to
     // invoices later) or 'invoices' (applied to chosen invoices), and the
@@ -2202,6 +2219,16 @@ async function _init() {
       } catch(e) { await tx.rollback(); throw e; }
     }
   } catch(e) {}
+
+  // The two rebuilds above recreate their table with only the columns it had
+  // when they were written. On a brand-new database they run AFTER the
+  // migrations loop has added later columns (vendor discount, tax option,
+  // case units…), so those would be dropped — re-apply this table's ADD
+  // COLUMNs now. A no-op on any database rebuilt before those columns
+  // existed (duplicate-column errors are swallowed, as in the main loop).
+  for (const sql of migrations.filter(m => /^ALTER TABLE (purchase_order_items|purchase_request_items) ADD COLUMN/.test(m))) {
+    try { await db.execute({ sql, args: [] }); } catch(e) {}
+  }
 
   // Backfill source for WooCommerce-imported transactions
   try {
