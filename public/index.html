@@ -2599,7 +2599,7 @@ const App = {
           </button>
           <div id="pos-branch-bar" style="display:flex;align-items:center;gap:10px"></div>
           <div class="pos-item-input-wrap">
-            <input type="text" id="pos-item-input" placeholder="ITEM NUMBER" autocomplete="off">
+            <input type="text" id="pos-item-input" placeholder="ITEM NUMBER  (or qty*item)" title="Scan or type an item number. To ring up several at once, type the quantity, a *, then the item — e.g. 250*HAMMER-16" autocomplete="off">
             <button class="btn btn-sm btn-primary" onclick="App.posSubmitItemInput()">
               <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
             </button>
@@ -2667,22 +2667,33 @@ const App = {
   // than the old always-visible product grid. An exact SKU/barcode match
   // wins; otherwise the first name/SKU substring match, mirroring what the
   // Item Lookup grid (renderProductGrid's search) already does.
+  // A quantity can go in front of the item as quantity*item (e.g.
+  // 250*HAMMER-16, or 12.5*ROPE for a measured unit) to ring up that many
+  // at once instead of scanning each one.
   posSubmitItemInput() {
     const input = document.getElementById('pos-item-input');
-    const q = (input?.value || '').trim();
+    let q = (input?.value || '').trim();
     if (!q) return;
+    let qty = 1;
+    const m = q.match(/^(\d+(?:\.\d+)?)\s*\*\s*(.+)$/);
+    if (m) {
+      qty = Number(m[1]);
+      q = m[2].trim();
+      if (!(qty > 0)) { this.alert('Enter a quantity above 0, e.g. 25*ITEM', 'warning'); return; }
+      if (qty !== 1 && !this.can('pos_change_quantity')) { this.alert("You don't have permission to change quantities", 'error'); return; }
+    }
     const ql = q.toLowerCase();
     // An alternate unit's own barcode (e.g. the case) rings up that unit
     // without asking (lib/units.js).
     for (const p of this.allProducts) {
       const choice = this._unitChoices(p).find(c => !c.isBase && (c.barcode || '').toLowerCase() === ql);
-      if (choice) { this.addToCart(p.id, choice); if (input) { input.value = ''; input.focus(); } return; }
+      if (choice) { if (input) { input.value = ''; input.focus(); } this.addToCart(p.id, choice, qty); return; }
     }
     let product = this.allProducts.find(p => (p.sku || '').toLowerCase() === ql || (p.barcode || '').toLowerCase() === ql);
     if (!product) product = this.allProducts.find(p => (p.name || '').toLowerCase().includes(ql) || (p.sku || '').toLowerCase().includes(ql));
     if (!product) { this.alert(`No item found matching "${q}"`, 'warning'); return; }
-    this.addToCart(product.id);
     if (input) { input.value = ''; input.focus(); }
+    this.addToCart(product.id, null, qty);
   },
 
   // "Item Lookup" grid button — today's clickable product grid (search +
@@ -3297,20 +3308,27 @@ const App = {
 
   // unit: a _unitChoices() entry (e.g. from a scanned unit barcode); when
   // left out, a product with alternate units asks which one.
-  async addToCart(productId, unit = null) {
+  // qty: how many to add (typed as quantity*item in the item box) — whole
+  // numbers unless the unit is a measured one (yards, kg…) or a service.
+  async addToCart(productId, unit = null, qty = 1) {
     const product = this.allProducts.find(p => p.id === productId);
     if (!product) return;
     if (!unit && !this._isSerialNumberProduct(product) && !(product.has_variations > 0)) {
       unit = await this._pickUnit(product);
       if (!unit) return;
     }
+    qty = Math.round(qty * 1000) / 1000;
+    if (!Number.isInteger(qty) && !(product.is_service || unit?.allow_decimal)) { this.alert(`${product.name} is sold in whole units — enter a whole quantity`, 'warning'); return; }
+    if (qty !== 1 && (this._isSerialNumberProduct(product) || product.has_variations > 0)) { this.alert(product.has_variations > 0 ? 'Pick the variant first, then use Quantity to change how many' : 'Each serial number is its own line', 'warning'); return; }
+    const fmtQty = n => Math.round(n * 1000) / 1000;
     // A plain Each line takes the usual path below; anything with a named
     // unit (an alternate, or a stock unit like Foot) is its own line per unit.
     if (unit && (!unit.isBase || unit.label)) {
-      if (!product.is_service && this._cartStockUnits(product.id) + unit.factor > product.stock_qty) { this.alert(`Not enough stock for 1 ${unit.label || unit.name}`, 'warning'); return; }
+      const stockLeft = product.stock_qty - this._cartStockUnits(product.id);
+      if (!product.is_service && unit.factor * qty > stockLeft) { this.alert(qty === 1 ? `Not enough stock for 1 ${unit.label || unit.name}` : `Not enough stock for ${qty} × ${unit.label || unit.name} — only ${fmtQty(stockLeft / unit.factor)} available`, 'warning'); return; }
       const line = this.cart.find(i => i.product_id === productId && !i.variation_id && (i.uom_id ?? null) === (unit.uom_id ?? null));
-      if (line) line.quantity++;
-      else this.cart.push({ product_id: product.id, category_id: product.category_id || null, name: this._unitLineName(product.name, unit), price: unit.price, cost: (product.cost || 0) * unit.factor, tax_rate: product.tax_rate, quantity: 1, is_service: 0, uom_id: unit.uom_id, sell_unit: unit.name, units_per: unit.factor, allow_decimal: unit.allow_decimal });
+      if (line) line.quantity = fmtQty(line.quantity + qty);
+      else this.cart.push({ product_id: product.id, category_id: product.category_id || null, name: this._unitLineName(product.name, unit), price: unit.price, cost: (product.cost || 0) * unit.factor, tax_rate: product.tax_rate, quantity: qty, is_service: 0, uom_id: unit.uom_id, sell_unit: unit.name, units_per: unit.factor, allow_decimal: unit.allow_decimal });
       this._checkAutoPromos();
       return;
     }
@@ -3326,13 +3344,14 @@ const App = {
     if (product.has_variations > 0) { this.showVariationPicker(product); return; }
     if (!product.is_service) {
       if (product.stock_qty <= 0) return;
-      if (this._cartStockUnits(product.id) >= product.stock_qty) { this.alert('Not enough stock', 'warning'); return; }
+      const stockLeft = product.stock_qty - this._cartStockUnits(product.id);
+      if (qty > stockLeft) { this.alert(qty === 1 ? 'Not enough stock' : `Not enough stock for ${qty} — only ${fmtQty(Math.max(0, stockLeft))} available`, 'warning'); return; }
     }
     const existing = this.cart.find(i => i.product_id === productId && !i.variation_id && !i.sell_unit && !i.uom_id);
     if (existing) {
-      existing.quantity++;
+      existing.quantity = fmtQty(existing.quantity + qty);
     } else {
-      this.cart.push({ product_id: product.id, category_id: product.category_id || null, name: product.name, price: product.price, cost: product.cost, tax_rate: product.tax_rate, quantity: 1, is_service: product.is_service || 0 });
+      this.cart.push({ product_id: product.id, category_id: product.category_id || null, name: product.name, price: product.price, cost: product.cost, tax_rate: product.tax_rate, quantity: qty, is_service: product.is_service || 0, ...(product.is_service ? { allow_decimal: 1 } : {}) });
     }
     this._checkAutoPromos();
   },
