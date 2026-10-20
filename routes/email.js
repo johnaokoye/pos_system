@@ -86,7 +86,7 @@ function buildReceiptHtml(tx, s) {
     const disc = pct > 0 ? ` <span style="color:${BRAND.green}">less ${pct}% (-${fmt(i.discount_amount)})</span>` : '';
     return `
     <tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku}${i.quantity > 1 || pct > 0 ? ` × ${i.quantity} @ ${fmt(i.unit_price)}` : ''}${disc}</span></td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku || ''}${i.quantity > 1 || pct > 0 ? ` × ${i.quantity} @ ${fmt(i.unit_price)}` : ''}${disc}</span></td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(i.total)}</td>
     </tr>`;
   }).join('');
@@ -163,7 +163,7 @@ function buildVoidReceiptHtml(tx, s) {
     : s.store_address || '';
   const rows = (tx.items || []).filter(i => i.product_id).map(i => `
     <tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku}${i.quantity > 1 ? ` × ${i.quantity} @ ${fmt(i.unit_price)}` : ''}</span></td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku || ''}${i.quantity > 1 ? ` × ${i.quantity} @ ${fmt(i.unit_price)}` : ''}</span></td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(i.total)}</td>
     </tr>`).join('');
 
@@ -207,7 +207,7 @@ function buildReturnReceiptHtml(ret, s) {
   const resolutionLabel = { refund: 'Refund', credit_note: 'Credit Note', replacement: 'Replacement / Exchange' }[ret.resolution] || ret.resolution;
   const rows = (ret.items || []).map(i => `
     <tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku}${i.quantity > 1 ? ` × ${i.quantity} @ ${fmt(i.unit_price)}` : ''}</span></td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku || ''}${i.quantity > 1 ? ` × ${i.quantity} @ ${fmt(i.unit_price)}` : ''}</span></td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(i.total)}</td>
     </tr>`).join('');
 
@@ -251,7 +251,7 @@ function buildCancellationReceiptHtml(agreement, s) {
   const items = (agreement.items || []).filter(i => !i.parent_item_id);
   const rows = items.map(i => `
     <tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku} × ${i.quantity}</span></td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku ? `${i.sku} ` : ''}× ${i.quantity}</span></td>
     </tr>`).join('');
 
   return `<!DOCTYPE html>
@@ -326,7 +326,7 @@ function buildRentalInvoiceHtml(agreement, tx, s, origin) {
 
   const rows = (tx.items || []).map(i => `
     <tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku}${i.quantity > 1 ? ` × ${i.quantity} @ ${fmt(i.unit_price)}` : ''}</span></td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku || ''}${i.quantity > 1 ? ` × ${i.quantity} @ ${fmt(i.unit_price)}` : ''}</span></td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(i.total)}</td>
     </tr>`).join('');
 

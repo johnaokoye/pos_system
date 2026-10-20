@@ -8529,7 +8529,7 @@ const App = {
             ${agreement.cancelled_by_name ? `<div class="receipt-row"><span>Cancelled By:</span><span>${agreement.cancelled_by_name}</span></div>` : ''}
             ${agreement.cancellation_reason ? `<div class="receipt-row"><span>Reason:</span><span>${agreement.cancellation_reason}</span></div>` : ''}
             <hr>
-            ${items.map(i => `<div class="receipt-row"><span>${i.product_name}</span><span>x${i.quantity}</span></div>`).join('')}
+            ${items.map(i => `<div class="receipt-row"><span>${i.sku ? `<span style="font-size:11px;color:#555">${i.sku}</span> ` : ''}${i.product_name}</span><span>x${i.quantity}</span></div>`).join('')}
             <hr>
             ${wasBilled ? `
             <div class="receipt-row"><span>Original Payment</span><span>${(agreement.checkout_payment_method||'').replace('_',' ').toUpperCase()}</span></div>
@@ -14400,7 +14400,7 @@ const App = {
           </div>
           <table style="margin-bottom:12px">
             <thead><tr><th>Item</th><th>SKU</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
-            <tbody>${(tx.items||[]).map(i=>`<tr><td>${i.product_name}</td><td style="font-family:monospace;font-size:12px">${i.sku}</td><td style="text-align:center">${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}</tbody>
+            <tbody>${(tx.items||[]).map(i=>`<tr><td>${i.product_name}</td><td style="font-family:monospace;font-size:12px">${i.sku||''}</td><td style="text-align:center">${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}</tbody>
           </table>
           <div style="text-align:right;border-top:1px solid var(--border);padding-top:10px">
             <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span>Subtotal</span><span>${this.fmt(tx.subtotal)}</span></div>
@@ -14602,7 +14602,7 @@ const App = {
           </div>` : ''}
           <table style="margin-bottom:12px">
             <thead><tr><th>Item</th><th>SKU</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
-            <tbody>${tx.items.map(i => `<tr><td>${i.product_name}</td><td style="font-family:monospace;font-size:12px">${i.sku}</td><td style="text-align:center">${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}</tbody>
+            <tbody>${tx.items.map(i => `<tr><td>${i.product_name}</td><td style="font-family:monospace;font-size:12px">${i.sku||''}</td><td style="text-align:center">${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}</tbody>
           </table>
           <div style="text-align:right;border-top:1px solid var(--border);padding-top:10px">
             <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span>Subtotal</span><span>${this.fmt(tx.subtotal)}</span></div>
@@ -14665,11 +14665,11 @@ const App = {
       const alreadyRet = returnedQtyMap[item.id] || 0;
       const maxQty = item.quantity - alreadyRet;
       if (item.is_sp_rental) return `<tr style="opacity:0.5"><td><input type="checkbox" disabled></td><td>${item.product_name}</td><td style="font-family:monospace;font-size:12px">${item.sku||''}</td><td style="text-align:center">${item.quantity}</td><td colspan="3" style="font-size:12px;color:var(--text-muted)">Rental — check it back in from the Rentals screen</td></tr>`;
-      if (maxQty <= 0) return `<tr style="opacity:0.4"><td><input type="checkbox" disabled></td><td>${item.product_name}</td><td style="font-family:monospace;font-size:12px">${item.sku}</td><td style="text-align:center">${item.quantity}</td><td style="text-align:center;color:var(--danger)">All returned</td><td>${this.fmt(item.unit_price)}</td><td>—</td></tr>`;
+      if (maxQty <= 0) return `<tr style="opacity:0.4"><td><input type="checkbox" disabled></td><td>${item.product_name}</td><td style="font-family:monospace;font-size:12px">${item.sku||''}</td><td style="text-align:center">${item.quantity}</td><td style="text-align:center;color:var(--danger)">All returned</td><td>${this.fmt(item.unit_price)}</td><td>—</td></tr>`;
       return `<tr>
         <td><input type="checkbox" class="ret-chk" data-item-id="${item.id}" data-max="${maxQty}" data-price="${item.unit_price}" data-tax-rate="${item.tax_amount > 0 ? (item.tax_amount / item.total * 100) : 0}" data-total="${item.total}" data-tax="${item.tax_amount}" onchange="App._retCalcTotal()"></td>
         <td>${item.product_name}</td>
-        <td style="font-family:monospace;font-size:12px">${item.sku}</td>
+        <td style="font-family:monospace;font-size:12px">${item.sku||''}</td>
         <td style="text-align:center">${item.quantity}${alreadyRet > 0 ? ` <span style="font-size:10px;color:var(--warning)">(${alreadyRet} returned)</span>` : ''}</td>
         <td style="text-align:center"><input type="number" class="ret-qty" data-item-id="${item.id}" min="1" max="${maxQty}" value="1" style="width:56px;text-align:center" onchange="App._retCalcTotal()" oninput="App._retCalcTotal()"></td>
         <td>${this.fmt(item.unit_price)}</td>
