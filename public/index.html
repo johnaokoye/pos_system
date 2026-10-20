@@ -2719,9 +2719,11 @@ const App = {
         </div>
       </div>`);
     this.renderProductGrid();
+    let searchTimer = null;
     document.getElementById('pos-search').addEventListener('input', e => {
       this.posSearch = e.target.value;
-      this.renderProductGrid();
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => this.renderProductGrid(), 150);
     });
     document.getElementById('cat-bar').addEventListener('click', e => {
       const btn = e.target.closest('.cat-btn');
@@ -3207,12 +3209,17 @@ const App = {
     if (this.posCategory !== 'all') products = products.filter(p => String(p.category_id) === String(this.posCategory));
     if (this.posSearch) {
       const q = this.posSearch.toLowerCase();
-      products = products.filter(p => p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q) || (p.barcode && p.barcode.includes(q)));
+      products = products.filter(p => (p.name || '').toLowerCase().includes(q) || (p.sku || '').toLowerCase().includes(q) || (p.barcode && p.barcode.toLowerCase().includes(q)));
     }
 
     const grid = document.getElementById('product-grid');
     if (!grid) return;
     if (!products.length) { grid.innerHTML = '<div class="empty-state" style="grid-column:1/-1"><p>No products found</p></div>'; return; }
+    // Drawing thousands of cards (with images) on every keystroke is what
+    // made the lookup crawl — show the first matches and ask to narrow.
+    const GRID_LIMIT = 120;
+    const more = products.length - GRID_LIMIT;
+    if (more > 0) products = products.slice(0, GRID_LIMIT);
 
     grid.innerHTML = products.map(p => {
       const hasVars = p.has_variations > 0;
@@ -3230,7 +3237,7 @@ const App = {
         ${altUnits.length && !oos ? `<div title="You'll be asked which unit" style="margin:4px auto 2px;font-size:11px;font-weight:600;padding:2px 6px;border:1px solid var(--primary);color:var(--primary);border-radius:10px;display:inline-block">Also by ${altUnits.map(c => this.escapeAttr(c.label)).join(', ')}</div>` : ''}
         <div class="product-stock">${stockLabel}</div>
       </div>`;
-    }).join('');
+    }).join('') + (more > 0 ? `<div style="grid-column:1/-1;padding:8px;text-align:center;font-size:12px;color:var(--text-muted)">${more} more — search or pick a category to narrow it down</div>` : '');
   },
 
   // The "SN" item (seeded server-side, see lib/serialNumber.js) exists only
@@ -3459,6 +3466,7 @@ const App = {
   },
 
   async _checkAutoPromos() {
+    const seq = this._autoPromoSeq = (this._autoPromoSeq || 0) + 1;
     if (this.appliedDiscountCard) { this._updateDiscountCardUI(); this.renderCart(); return; }
     if (this.appliedPromoCode) { this.renderCart(); return; }
     if (!this.cart.length) {
@@ -3470,8 +3478,13 @@ const App = {
     }
     const subtotal = this.cart.reduce((s, i) => s + i.price * i.quantity, 0);
     const cartItems = this.cart.map(i => ({ product_id: i.product_id, category_id: i.category_id, price: i.price, quantity: i.quantity, discount_percent: i.discountPercent || 0 }));
+    // Show the line straight away; the promo lookup is a server round trip
+    // and only adjusts the discount. When items go in faster than it
+    // answers, only the latest cart's answer is applied.
+    this.renderCart();
     try {
       const promos = await this.api('POST', '/promotions/auto-apply', { cart_items: cartItems, subtotal });
+      if (seq !== this._autoPromoSeq) return;
       this._availablePromos = promos || [];
       if (this._availablePromos.length > 0) {
         const best = this._availablePromos[0];
@@ -4591,51 +4604,71 @@ const App = {
     win.document.close();
   },
 
+  // Searches the server as the cashier types (first 50 matches) rather than
+  // loading every customer on file into the modal. Rows are picked by index
+  // into the current results, so names with quotes (O'Brien) can't break
+  // the click handler.
   selectCustomer() {
-    this.api('GET', '/customers?active=1').then(customers => {
-      const overlay = this.showModal(`
-        <div class="modal">
-          <div class="modal-header">
-            <span class="modal-title">Select Customer</span>
-            <button class="modal-close">✕</button>
+    const overlay = this.showModal(`
+      <div class="modal">
+        <div class="modal-header">
+          <span class="modal-title">Select Customer</span>
+          <button class="modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <div style="display:flex;gap:8px;margin-bottom:12px">
+            <input type="text" id="cust-search-modal" placeholder="Search by name, phone, email or customer #..." style="flex:1;margin:0" autocomplete="off">
+            ${this.can('customers_add') ? `<button class="btn btn-primary" style="white-space:nowrap" onclick="App._addCustomerFromLookup('pos')">+ Add New Customer</button>` : ''}
           </div>
-          <div class="modal-body">
-            <div style="display:flex;gap:8px;margin-bottom:12px">
-              <input type="text" id="cust-search-modal" placeholder="Search customers..." style="flex:1;margin:0">
-              ${this.can('customers_add') ? `<button class="btn btn-primary" style="white-space:nowrap" onclick="App._addCustomerFromLookup('pos')">+ Add New Customer</button>` : ''}
-            </div>
-            <div style="max-height:320px;overflow-y:auto" id="cust-list">
-              ${customers.map(c => {
-                const blocked = c.customer_type === 'credit' && c.account_blocked;
-                const typeTag = c.customer_type === 'credit'
-                  ? `<span style="font-size:10px;padding:1px 5px;border-radius:4px;background:#e3f2fd;color:#1565c0;margin-left:4px">Credit</span>`
-                  : '';
-                const blockedTag = blocked
-                  ? `<span style="font-size:10px;padding:1px 5px;border-radius:4px;background:#ffebee;color:#c62828;margin-left:4px">BLOCKED</span>`
-                  : '';
-                const taxExemptTag = c.tax_exempt
-                  ? `<span style="font-size:10px;padding:1px 5px;border-radius:4px;background:#e8f5e9;color:#2e7d32;margin-left:4px">Tax Exempt</span>`
-                  : '';
-                const clickHandler = blocked
-                  ? `App.alert('Account blocked: overdue balance must be settled before making purchases.','error')`
-                  : `App.setCartCustomer(${c.id},'${c.first_name} ${c.last_name}')`;
-                return `<div class="nav-item" style="color:var(--text);border-radius:6px;${blocked?'opacity:0.6':''}" onclick="${clickHandler}">
-                  <div><strong>${c.first_name} ${c.last_name}</strong><span style="color:var(--text-muted);font-size:12px;margin-left:4px">${c.customer_number}</span>${typeTag}${blockedTag}${taxExemptTag}</div>
-                  <div style="font-size:12px;color:var(--text-muted)">${c.phone || ''} &bull; ${c.loyalty_points} pts</div>
-                </div>`;
-              }).join('')}
-            </div>
-          </div>
-        </div>`);
-
-      overlay.querySelector('#cust-search-modal').addEventListener('input', e => {
-        const q = e.target.value.toLowerCase();
-        const list = overlay.querySelector('#cust-list');
-        list.querySelectorAll('.nav-item').forEach(el => {
-          el.style.display = el.textContent.toLowerCase().includes(q) ? '' : 'none';
-        });
-      });
+          <div style="max-height:320px;overflow-y:auto" id="cust-list"><div style="padding:10px;color:var(--text-muted)">Loading…</div></div>
+        </div>
+      </div>`);
+    const input = overlay.querySelector('#cust-search-modal');
+    const list = overlay.querySelector('#cust-list');
+    const LIMIT = 50;
+    let results = [], seq = 0, timer = null;
+    const esc = v => this.escapeAttr(v ?? '');
+    const load = async () => {
+      const q = input.value.trim();
+      const mine = ++seq;
+      try {
+        const rows = await this.api('GET', `/customers?active=1&limit=${LIMIT}${q ? `&search=${encodeURIComponent(q)}` : ''}`);
+        if (mine !== seq || !overlay.isConnected) return;
+        results = rows;
+        if (!rows.length) { list.innerHTML = `<div style="padding:10px;color:var(--text-muted)">No customers found</div>`; return; }
+        list.innerHTML = rows.map((c, i) => {
+          const blocked = c.customer_type === 'credit' && c.account_blocked;
+          const typeTag = c.customer_type === 'credit'
+            ? `<span style="font-size:10px;padding:1px 5px;border-radius:4px;background:#e3f2fd;color:#1565c0;margin-left:4px">Credit</span>`
+            : '';
+          const blockedTag = blocked
+            ? `<span style="font-size:10px;padding:1px 5px;border-radius:4px;background:#ffebee;color:#c62828;margin-left:4px">BLOCKED</span>`
+            : '';
+          const taxExemptTag = c.tax_exempt
+            ? `<span style="font-size:10px;padding:1px 5px;border-radius:4px;background:#e8f5e9;color:#2e7d32;margin-left:4px">Tax Exempt</span>`
+            : '';
+          return `<div class="nav-item" data-idx="${i}" style="color:var(--text);border-radius:6px;${blocked?'opacity:0.6':''}">
+            <div><strong>${esc(c.first_name)} ${esc(c.last_name)}</strong><span style="color:var(--text-muted);font-size:12px;margin-left:4px">${esc(c.customer_number)}</span>${typeTag}${blockedTag}${taxExemptTag}</div>
+            <div style="font-size:12px;color:var(--text-muted)">${esc(c.phone)} &bull; ${c.loyalty_points || 0} pts</div>
+          </div>`;
+        }).join('') + (rows.length >= LIMIT ? `<div style="padding:8px 10px;font-size:12px;color:var(--text-muted)">Showing the first ${LIMIT} — keep typing to narrow it down</div>` : '');
+      } catch (e) {
+        if (mine === seq) list.innerHTML = `<div style="padding:10px;color:var(--danger)">${esc(e.message)}</div>`;
+      }
+    };
+    input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(load, 250); });
+    list.addEventListener('click', e => {
+      const c = results[e.target.closest('[data-idx]')?.dataset.idx];
+      if (!c) return;
+      if (c.customer_type === 'credit' && c.account_blocked) {
+        this.alert('Account blocked: overdue balance must be settled before making purchases.', 'error');
+        return;
+      }
+      overlay.remove();
+      this.setCartCustomer(c.id, `${c.first_name} ${c.last_name}`);
     });
+    input.focus();
+    load();
   },
 
   // "+ Add New Customer" from any customer lookup. What was typed in the
@@ -4817,7 +4850,6 @@ const App = {
       this._updateDiscountCardUI();
       await this._checkAutoPromos();
       this.renderCart();
-      this.closeModal();
       if (this.can('pos_hold')) {
         try {
           const held = await this.api('GET', `/transactions?status=hold&customer_id=${id}`);
@@ -4826,7 +4858,7 @@ const App = {
           }
         } catch(e) {}
       }
-    });
+    }).catch(e => this.alert(e.message, 'error'));
   },
 
   applyStoreCredit() {

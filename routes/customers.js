@@ -220,17 +220,23 @@ async function runCreditCheckBatch(customerIds) {
 // not just the Customers management screen itself.
 router.get('/', requireAuth, async (req, res) => {
   try {
-    // Auto-block any overdue credit customers before returning list
-    const { rows: overdue } = await db.execute({ sql: "SELECT id FROM customers WHERE customer_type = 'credit' AND active = 1 AND account_balance > 0", args: [] });
-    await runCreditCheckBatch(overdue.map(c => c.id));
-
     const { search, active, type } = req.query;
+    // ?limit= (the POS customer lookup) returns just the first matches, and
+    // credit-checks only those, instead of every customer on file.
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 0, 0), 500);
+
+    // Auto-block any overdue credit customers before returning list
+    if (!limit) {
+      const { rows: overdue } = await db.execute({ sql: "SELECT id FROM customers WHERE customer_type = 'credit' AND active = 1 AND account_balance > 0", args: [] });
+      await runCreditCheckBatch(overdue.map(c => c.id));
+    }
+
     let sql = 'SELECT * FROM customers WHERE 1=1';
     const params = [];
     if (search) {
-      sql += ` AND (first_name LIKE ? OR last_name LIKE ? OR email LIKE ? OR phone LIKE ? OR customer_number LIKE ?)`;
+      sql += ` AND (first_name LIKE ? OR last_name LIKE ? OR (first_name || ' ' || last_name) LIKE ? OR business_name LIKE ? OR email LIKE ? OR phone LIKE ? OR customer_number LIKE ?)`;
       const s = `%${search}%`;
-      params.push(s, s, s, s, s);
+      params.push(s, s, s, s, s, s, s);
     }
     if (active !== undefined) { sql += ' AND active = ?'; params.push(active); }
     // Customers list filter: credit / cash, or rental approved (can rent
@@ -240,7 +246,17 @@ router.get('/', requireAuth, async (req, res) => {
     // Only customers with something owing on account (POS Receive Payment).
     if (req.query.owing) sql += ' AND account_balance > 0.005';
     sql += ' ORDER BY last_name, first_name';
+    if (limit) { sql += ' LIMIT ?'; params.push(limit); }
     const { rows } = await db.execute({ sql, args: params });
+    if (limit) {
+      const owing = rows.filter(c => c.customer_type === 'credit' && c.active && c.account_balance > 0).map(c => c.id);
+      if (owing.length) {
+        await runCreditCheckBatch(owing);
+        const { rows: fresh } = await db.execute({ sql: `SELECT id, account_blocked FROM customers WHERE id IN (${owing.map(() => '?').join(',')})`, args: owing });
+        const blocked = new Map(fresh.map(r => [r.id, r.account_blocked]));
+        for (const c of rows) if (blocked.has(c.id)) c.account_blocked = blocked.get(c.id);
+      }
+    }
     if (type === 'rental_approved' || type === 'other') {
       const approved = c => !!c.is_rental_customer && (!!c.rental_preapproved || getMissingRentalFields(c).length === 0);
       return res.json(rows.filter(c => approved(c) === (type === 'rental_approved')));
