@@ -4195,10 +4195,11 @@ const App = {
   _txDocTitle(tx) {
     // A rental's checkout invoice is the Rental Agreement (the Full Summary
     // is the Rental Tax Invoice). A Special Project invoice that includes a
-    // rental is still the project's own Retail Tax Invoice.
+    // rental is still the project's own Retail Tax Invoice, as is every
+    // other retail sale on the letter-size copy.
     if (tx.rental_role === 'settlement') return 'Rental Settlement';
     if (tx.rental_role === 'checkout' && !tx.rental_quotation_id) return 'Rental Agreement';
-    return tx.source_quote_id ? 'Retail Tax Invoice' : 'Retail Tax Receipt';
+    return 'Retail Tax Invoice';
   },
 
   printReceiptOrInvoice(tx, change = 0, cashResult = null, splitForeignCash = null) {

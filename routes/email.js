@@ -49,15 +49,15 @@ function logoImgTag(s, origin, maxHeight = 40) {
   return `<img src="${src}" alt="${alt}" style="display:block;max-height:${maxHeight}px;max-width:200px;object-fit:contain;margin-bottom:8px">`;
 }
 
-// A sale that came from a quotation converted to an invoice (sent to a
-// cashier and cashed out) goes out as a tax invoice, not a receipt — same
-// rule as App._txDocTitle() in public/index.html for the printed copy.
+// A retail sale goes out as a Retail Tax Invoice (email subject, body and
+// PDF attachment) — same rule as App._txDocTitle() in public/index.html for
+// the letter-size printed copy.
 function receiptDocTitle(tx) {
   // A rental's checkout sale is the Rental Agreement (unless it's a Special
   // Project's own invoice), the sale settling its return the Rental Settlement.
   if (tx.rental_role === 'settlement') return 'Rental Settlement';
   if (tx.rental_role === 'checkout' && !tx.rental_quotation_id) return 'Rental Agreement';
-  return tx.source_quote_id ? 'Retail Tax Invoice' : 'Receipt';
+  return 'Retail Tax Invoice';
 }
 
 function buildReceiptHtml(tx, s) {
