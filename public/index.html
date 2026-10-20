@@ -16816,14 +16816,70 @@ const App = {
       wrap.innerHTML = `<p style="font-size:12px;color:var(--text-muted);margin:0">No denominations defined for ${cur}. Add some below.</p>`;
       return;
     }
-    wrap.innerHTML = `<table class="table" style="font-size:13px">
-      <thead><tr><th>Label</th><th>Value</th><th style="text-align:right">Actions</th></tr></thead>
-      <tbody>${denoms.map(d => `<tr>
-        <td><strong>${d.label}</strong></td>
+    const arrow = (dir, label) => `<button class="btn btn-secondary btn-sm" style="padding:2px 8px" title="Move ${label}" onclick="App._moveDenomination(this, ${dir})">${dir < 0 ? '↑' : '↓'}</button>`;
+    wrap.innerHTML = `<p style="font-size:12px;color:var(--text-muted);margin:0 0 6px">Drag <strong>⠿</strong> (or use ↑ ↓) to set the order notes and coins are listed in when counting a drawer.</p>
+    <table class="table" style="font-size:13px">
+      <thead><tr><th style="width:34px"></th><th>Label</th><th>Value</th><th style="text-align:right">Actions</th></tr></thead>
+      <tbody id="denom-sort-body" data-currency="${this.escapeAttr(cur)}">${denoms.map(d => `<tr data-id="${d.id}">
+        <td class="denom-drag" title="Drag to reorder" style="cursor:grab;touch-action:none;user-select:none;color:var(--text-muted);font-size:18px;line-height:1">⠿</td>
+        <td><strong>${this.escapeAttr(d.label)}</strong></td>
         <td>${d.value % 1 === 0 ? d.value.toFixed(0) : d.value.toFixed(2)}</td>
-        <td style="text-align:right"><button class="btn btn-secondary btn-sm" onclick="App.deleteDenomination(${d.id})">Remove</button></td>
+        <td style="text-align:right;white-space:nowrap">${arrow(-1, 'up')} ${arrow(1, 'down')} <button class="btn btn-secondary btn-sm" onclick="App.deleteDenomination(${d.id})">Remove</button></td>
       </tr>`).join('')}</tbody>
     </table>`;
+    this._bindDenominationDrag(document.getElementById('denom-sort-body'));
+  },
+
+  // Drag a denomination row by its ⠿ handle (pointer events, so mouse and
+  // touch screens both work); dropping saves the new order. Moves are
+  // followed on the document, not the handle — moving the row in the DOM
+  // drops any pointer capture on it.
+  _bindDenominationDrag(body) {
+    if (!body) return;
+    body.addEventListener('pointerdown', e => {
+      const handle = e.target.closest('.denom-drag');
+      if (!handle || e.button > 0) return;
+      e.preventDefault();
+      const row = handle.closest('tr');
+      const before = [...body.children].map(r => r.dataset.id).join(',');
+      row.style.background = 'var(--bg-alt)';
+      row.style.boxShadow = '0 2px 10px rgba(0,0,0,.15)';
+      document.body.style.cursor = 'grabbing';
+      const move = ev => {
+        if (ev.pointerId !== e.pointerId) return;
+        ev.preventDefault();
+        const others = [...body.children].filter(r => r !== row);
+        const next = others.find(r => { const b = r.getBoundingClientRect(); return ev.clientY < b.top + b.height / 2; });
+        if (next) { if (row.nextElementSibling !== next) body.insertBefore(row, next); }
+        else if (body.lastElementChild !== row) body.appendChild(row);
+      };
+      const up = ev => {
+        if (ev.pointerId !== e.pointerId) return;
+        document.removeEventListener('pointermove', move);
+        document.removeEventListener('pointerup', up);
+        document.removeEventListener('pointercancel', up);
+        row.style.background = ''; row.style.boxShadow = ''; document.body.style.cursor = '';
+        if ([...body.children].map(r => r.dataset.id).join(',') !== before) this._saveDenominationOrder(body);
+      };
+      document.addEventListener('pointermove', move, { passive: false });
+      document.addEventListener('pointerup', up);
+      document.addEventListener('pointercancel', up);
+    });
+  },
+
+  _moveDenomination(btn, dir) {
+    const row = btn.closest('tr'), body = row?.parentElement;
+    if (!body) return;
+    const sib = dir < 0 ? row.previousElementSibling : row.nextElementSibling;
+    if (!sib) return;
+    if (dir < 0) body.insertBefore(row, sib); else body.insertBefore(sib, row);
+    this._saveDenominationOrder(body);
+  },
+
+  async _saveDenominationOrder(body) {
+    try {
+      await this.api('PUT', '/denominations/order', { currency: body.dataset.currency, ids: [...body.children].map(r => Number(r.dataset.id)) });
+    } catch (e) { this.alert(e.message, 'error'); this.loadDenominations(); }
   },
 
   async addDenomination() {
@@ -26588,6 +26644,20 @@ const App = {
               <td id="rcv-cash" style="font-weight:600">${this._calcVariance(Number(rec.cash_counted != null ? rec.cash_counted : expectedCash), expectedCash)}</td>
             </tr></tbody>
           </table>
+          ${(s.payouts || []).length ? `
+          <div style="margin:8px 0 4px">
+            <div style="font-size:12px;font-weight:600;margin-bottom:4px">Petty cash paid out of this drawer</div>
+            <table style="width:100%;font-size:12px;border-collapse:collapse">
+              <thead><tr style="background:var(--bg-alt)"><th style="padding:4px 6px;text-align:left">Voucher #</th><th style="padding:4px 6px;text-align:left">Paid To</th><th style="padding:4px 6px;text-align:left">Reason</th><th style="padding:4px 6px;text-align:right">Amount</th></tr></thead>
+              <tbody>${s.payouts.map(p => `<tr style="${p.voided_at ? 'opacity:0.55' : ''}">
+                <td style="padding:3px 6px"><strong>${this.escapeAttr(p.voucher_number)}</strong></td>
+                <td style="padding:3px 6px">${this.escapeAttr(p.paid_to || '—')}</td>
+                <td style="padding:3px 6px">${this.escapeAttr(p.reason || '')}</td>
+                <td style="padding:3px 6px;text-align:right">${p.voided_at ? `<s>${m(p.amount)}</s> VOID` : m(p.amount)}</td>
+              </tr>`).join('')}
+              <tr style="font-weight:600;border-top:2px solid var(--border)"><td style="padding:5px 6px" colspan="3">Total paid out (taken off expected cash)</td><td style="padding:5px 6px;text-align:right">${m(r.payouts_total)}</td></tr></tbody>
+            </table>
+          </div>` : ''}
           ${denomsHtml}
           <h3 style="font-size:13px;margin:12px 0 6px">3. Other tenders</h3>
           <table class="table" style="margin-bottom:12px">

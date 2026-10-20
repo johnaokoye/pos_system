@@ -38,6 +38,24 @@ router.post('/', requirePermission('settings'), async (req, res) => {
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
 
+// Settings drag-to-reorder: one currency's denominations in their new order
+// (ids top to bottom) — sort_order becomes 1..n, the order the drawer count
+// and reports list them in. Registered before PUT /:id.
+router.put('/order', requirePermission('settings'), async (req, res) => {
+  try {
+    const { currency } = req.body;
+    const ids = (Array.isArray(req.body.ids) ? req.body.ids : []).map(Number).filter(Number.isInteger);
+    if (!currency || !ids.length) return res.status(400).json({ error: 'currency and ids required' });
+    const { rows } = await db.execute({ sql: 'SELECT id FROM currency_denominations WHERE currency = ? AND active = 1', args: [currency] });
+    const known = new Set(rows.map(r => Number(r.id)));
+    if (ids.length !== known.size || new Set(ids).size !== ids.length || ids.some(id => !known.has(id))) {
+      return res.status(400).json({ error: `The list doesn't match ${currency}'s denominations — reload and try again` });
+    }
+    await db.batch(ids.map((id, i) => ({ sql: 'UPDATE currency_denominations SET sort_order = ? WHERE id = ?', args: [i + 1, id] })), 'write');
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.put('/:id', requirePermission('settings'), async (req, res) => {
   try {
     const { label, sort_order, active } = req.body;
