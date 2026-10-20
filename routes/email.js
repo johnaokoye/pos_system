@@ -42,6 +42,16 @@ function fmt(n) {
 // /uploads/... path won't resolve in an email client, and origin isn't
 // reliably known once the HTML leaves this request. `origin` is derived by
 // each caller from its own req (`${req.protocol}://${req.get('host')}`).
+// Settings → Receipt Footer Message for an HTML document: escaped, with
+// its line breaks kept (opening hours, contact details, refund policy on
+// their own lines) — plain newlines would otherwise run together. The PDF
+// models pass the raw text, which keeps its breaks on its own.
+function footerHtml(s) {
+  return String(s.receipt_footer || 'Thank you for your business!')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/\r?\n/g, '<br>');
+}
+
 function logoImgTag(s, origin, maxHeight = 40) {
   if (!s.company_logo_url) return '';
   const src = /^https?:\/\//.test(s.company_logo_url) ? s.company_logo_url : `${origin}${s.company_logo_url}`;
@@ -66,7 +76,7 @@ function buildReceiptHtml(tx, s) {
     ? `${tx.branch_address}${tx.branch_city ? ', ' + tx.branch_city : ''}${tx.branch_state ? ' ' + tx.branch_state : ''}${tx.branch_zip ? ' ' + tx.branch_zip : ''}`
     : s.store_address || '';
   const storePhone = tx.branch_phone || s.store_phone || '';
-  const footer = s.receipt_footer || 'Thank you for your business!';
+  const footer = footerHtml(s);
 
   const rows = (tx.items || []).map(i => {
     // Manual line-item discount (POS "%" button), shown between the unit
@@ -307,7 +317,7 @@ function buildRentalInvoiceHtml(agreement, tx, s, origin) {
     ? `${tx.branch_address}${tx.branch_city ? ', ' + tx.branch_city : ''}${tx.branch_state ? ' ' + tx.branch_state : ''}${tx.branch_zip ? ' ' + tx.branch_zip : ''}`
     : s.store_address || '';
   const storePhone = tx.branch_phone || s.store_phone || '';
-  const footer = s.receipt_footer || 'Thank you for your business!';
+  const footer = footerHtml(s);
   const absUrl = (path) => !path ? null : (/^https?:\/\//.test(path) ? path : `${origin}${path}`);
   const rentedItemsLabel = (agreement.items || []).filter(i => !i.parent_item_id).map(i => `${i.product_name} x${i.quantity}`).join(', ');
   const rentedLabel = agreement.checkout_datetime ? new Date(agreement.checkout_datetime).toLocaleString() : '—';
@@ -551,7 +561,7 @@ function buildRentalSummaryHtml(agreement, s) {
       </table>
       ${dispositionLine ? `<div style="margin-top:8px;padding:8px 12px;background:#f5f5f5;border-left:3px solid #555;font-size:12px;border-radius:4px">${dispositionLine}</div>` : ''}` : ''}
       ${sigRow}
-      <div style="text-align:center;margin-top:20px;font-size:13px;color:#666;font-style:italic">${s.receipt_footer || 'Thank you for your business!'}</div>
+      <div style="text-align:center;margin-top:20px;font-size:13px;color:#666;font-style:italic">${footerHtml(s)}</div>
     </td></tr>
   </table>
 </td></tr>
@@ -577,7 +587,7 @@ function buildQuoteHtml(q, s, { print = false } = {}) {
   const storeName = s.store_name || 'My Store';
   const storeAddr = s.store_address || '';
   const storePhone = s.store_phone || '';
-  const footer = s.receipt_footer || 'Thank you for your business!';
+  const footer = footerHtml(s);
 
   const rows = (q.items || []).map(i => `
     <tr>
@@ -666,7 +676,7 @@ function buildRentalQuoteHtml(q, s, { print = false } = {}) {
   const storeName = s.store_name || 'My Store';
   const storeAddr = s.store_address || '';
   const storePhone = s.store_phone || '';
-  const footer = s.receipt_footer || 'Thank you for your business!';
+  const footer = footerHtml(s);
   const sum = rentalQuoteSummary(q);
   const period = q.due_date ? rentalQuotePeriod(q) : null;
   const cell = 'padding:6px 8px;border-bottom:1px solid #f0f0f0';
@@ -1617,7 +1627,7 @@ function buildWorkOrderInvoiceHtml(wo, s, { print = false } = {}) {
   const storeName = s.store_name || 'My Store';
   const storeAddr = s.store_address || '';
   const storePhone = s.store_phone || '';
-  const footer = s.receipt_footer || 'Thank you for your business!';
+  const footer = footerHtml(s);
 
   // Same balance-due math as the frontend's viewWorkOrder()/
   // showWOFinalPaymentModal() — kept in sync manually since there's no
@@ -2070,7 +2080,7 @@ function buildPdfCoverHtml(model, s) {
     <tr><td style="${BRAND_HEADER_STYLE}"><div style="color:#fff;font-size:22px;font-weight:700">${s.store_name || 'My Store'}</div></td></tr>
     <tr><td style="padding:20px 24px;font-size:14px;color:#333;line-height:1.5">
       <p style="margin:0 0 12px">Please find your <strong>${docName} ${model.number}</strong> attached as a PDF.</p>
-      <p style="margin:0;color:#666">${s.receipt_footer || 'Thank you for your business!'}</p>
+      <p style="margin:0;color:#666">${footerHtml(s)}</p>
     </td></tr>
   </table>
 </td></tr></table>

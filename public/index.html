@@ -4252,6 +4252,14 @@ const App = {
   // is a tax invoice, not a receipt — source_quote_id is joined by both
   // POST /transactions and GET /transactions/:id. Mirrors receiptDocTitle()
   // in routes/email.js.
+  // Settings → Receipt Footer Message as HTML, keeping its line breaks
+  // (mirrors footerHtml() in routes/email.js).
+  _receiptFooterHtml(fallback) {
+    return String(this.settings?.receipt_footer || fallback)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/\r?\n/g, '<br>');
+  },
+
   _txDocTitle(tx) {
     // A rental's checkout invoice is the Rental Agreement (the Full Summary
     // is the Rental Tax Invoice). A Special Project invoice that includes a
@@ -4289,7 +4297,7 @@ const App = {
   showReceipt(tx, change = 0, cashResult = null, splitForeignCash = null) {
     const items = tx.items || [];
     const storeName = this.settings.store_name || 'My Store';
-    const footer = this.settings.receipt_footer || 'Thank you!';
+    const footer = this._receiptFooterHtml('Thank you!');
     // Stashed for printReceiptLetter(), which can't take these as onclick
     // arguments (tx/cashResult are objects) — same pattern as App._viewTx
     // used elsewhere to hand a full record across an onclick boundary.
@@ -4389,7 +4397,7 @@ const App = {
     const splitForeignCash = this._lastReceiptSplitForeign;
     const items = tx.items || [];
     const storeName = this.settings.store_name || 'My Store';
-    const footer = this.settings.receipt_footer || 'Thank you!';
+    const footer = this._receiptFooterHtml('Thank you!');
     const addressLine = tx.branch_address || this.settings.store_address || '';
     const cityLine = tx.branch_address ? `${tx.branch_city ? ', ' + tx.branch_city : ''}${tx.branch_state ? ' ' + tx.branch_state : ''}${tx.branch_zip ? ' ' + tx.branch_zip : ''}` : '';
     const phoneLine = tx.branch_phone || this.settings.store_phone || '';
@@ -7521,7 +7529,7 @@ const App = {
     const addressLine = a.branch_address || this.settings.store_address || '';
     const cityLine = a.branch_address ? `${a.branch_city ? ', ' + a.branch_city : ''}${a.branch_state ? ' ' + a.branch_state : ''}${a.branch_zip ? ' ' + a.branch_zip : ''}` : '';
     const phoneLine = a.branch_phone || this.settings.store_phone || '';
-    const footer = this.settings.receipt_footer || 'Thank you for your business!';
+    const footer = this._receiptFooterHtml('Thank you for your business!');
     const isReturned = a.status === 'returned';
 
     const itemRows = (a.items || []).map(i => {
@@ -8363,7 +8371,7 @@ const App = {
       <div style="flex:1;text-align:center"><div style="border-top:1px solid #333;padding-top:6px;font-size:11px;color:#555">Signature</div></div>
       <div style="flex:1;text-align:center"><div style="border-top:1px solid #333;padding-top:6px;font-size:11px;color:#555">Date</div></div>
     </div>
-    <div class="footer">${this.settings.receipt_footer || 'Thank you!'}</div>
+    <div class="footer">${this._receiptFooterHtml('Thank you!')}</div>
     <script>window.onload=()=>{window.print()}<\/script>
     </body></html>`);
     win.document.close();
@@ -16401,7 +16409,7 @@ const App = {
               <div class="form-group"><label>Phone</label><input id="s-phone" value="${s.store_phone||''}"></div>
               <div class="form-group"><label>Email</label><input id="s-email" value="${s.store_email||''}"></div>
             </div>
-            <div class="form-group"><label>Receipt Footer Message</label><textarea id="s-footer" rows="2">${s.receipt_footer||''}</textarea></div>
+            <div class="form-group"><label>Receipt Footer Message</label><textarea id="s-footer" rows="8">${this.escapeAttr(s.receipt_footer||'')}</textarea><p style="font-size:11px;color:var(--text-muted);margin:4px 0 0">Shown at the bottom of receipts, Retail Tax Invoices and quotes, on screen, printed, emailed and in PDFs. Each line you type here stays on its own line.</p></div>
           </div>
           <div class="card" style="margin-bottom:16px">
             <div class="card-header"><span class="card-title">Tax & Loyalty</span></div>
