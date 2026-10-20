@@ -442,7 +442,7 @@ function rentalSummaryFigures(agreement) {
     // The blocks the fee is actually billed in over the rental period, when known.
     if (i.rate_basis && i.rate_basis.length) rateParts.splice(0, rateParts.length, rateBasisLabel(i.rate_basis, fmt));
     return {
-      name: `${i.product_name}${tag}`, child: !!i.parent_item_id, quantity: i.quantity,
+      name: `${i.product_name}${tag}`, sku: i.sku || '', child: !!i.parent_item_id, quantity: i.quantity,
       rate: i.is_mandatory ? 'No charge' : rateParts.join(' · '),
       originalFee: fmt(i.rental_fee),
       finalFee: i.quantity_returned > 0 ? fmt(i.final_rental_fee) : '—',
@@ -508,7 +508,7 @@ function buildRentalSummaryHtml(agreement, s) {
 
   const { items, checkoutRows, settlementRows, balanceLabel, balanceDisplay, dispositionLine, signatures: issueSignatures } = rentalSummaryFigures(agreement);
   const itemRows = items.map(i => `<tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.name}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.name}${i.sku ? `<br><span style="color:#888;font-size:11px">${i.sku}</span>` : ''}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${i.quantity}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center;font-size:11px;color:#666">${i.rate}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${i.originalFee}</td>
@@ -2059,7 +2059,7 @@ function rentalSummaryPdfModel(agreement, s) {
     party: { label: 'Customer', lines: [agreement.customer_name] },
     tables: [{ heading: 'Items Rented',
       columns: [{ label: 'Item', width: 3 }, { label: 'Qty', width: 0.6, align: 'center' }, { label: 'Rate', width: 2, align: 'center' }, { label: 'Original Fee', width: 1.2, align: 'right' }, { label: 'Final Fee', width: 1.2, align: 'right' }, { label: 'Damage Fee', width: 1.2, align: 'right' }],
-      rows: f.items.map(i => ({ indent: i.child, cells: [i.name, i.quantity, i.rate, i.originalFee, i.finalFee, i.damageFee] })) }],
+      rows: f.items.map(i => ({ indent: i.child, cells: [i.name, i.quantity, i.rate, i.originalFee, i.finalFee, i.damageFee], sub: i.sku })) }],
     totals: [
       ...(f.checkoutRows.length ? [{ label: 'Checkout Charges', style: 'heading' }, ...f.checkoutRows.map(([label, value]) => ({ label, value }))] : []),
       ...(f.settlementRows.length ? [{ label: 'Return Settlement', style: 'heading' }, ...f.settlementRows.map(([label, value]) => ({ label, value })), { label: f.balanceLabel, value: f.balanceDisplay, style: 'grand' }] : []),
