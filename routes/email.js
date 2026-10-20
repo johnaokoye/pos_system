@@ -591,7 +591,8 @@ function buildQuoteHtml(q, s, { print = false } = {}) {
 
   const rows = (q.items || []).map(i => `
     <tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku || ''}${parseFloat(i.discount_amount) > 0 ? `${i.sku ? ' · ' : ''}<span style="color:${BRAND.green}">Price includes ${fmt(i.discount_amount)} discount</span>` : ''}</span></td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;white-space:nowrap;color:#555">${i.sku || ''}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}${parseFloat(i.discount_amount) > 0 ? `<br><span style="color:${BRAND.green};font-size:11px">Price includes ${fmt(i.discount_amount)} discount</span>` : ''}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${i.quantity}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${fmt(i.unit_price)}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(i.total)}</td>
@@ -628,6 +629,7 @@ ${print ? PRINT_PAGE_STYLE : ''}
       </div>` : ''}
       <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px">
         <thead><tr style="background:#f9fafb">
+          <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">SKU</th>
           <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Item</th>
           <th style="padding:8px;text-align:center;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Qty</th>
           <th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Unit Price</th>
@@ -688,9 +690,10 @@ function buildRentalQuoteHtml(q, s, { print = false } = {}) {
     const isChild = !!i.parent_item_id;
     const tag = isChild ? (i.is_mandatory ? 'Included accessory' : 'Optional accessory') : '';
     const rates = rentalRateCard(i);
-    const meta = [i.sku, rates, i.condition_out ? `Condition out: ${i.condition_out}` : ''].filter(Boolean).join(' · ');
+    const meta = [rates, i.condition_out ? `Condition out: ${i.condition_out}` : ''].filter(Boolean).join(' · ');
     return `
     <tr>
+      <td style="${cell};white-space:nowrap;color:#555">${i.sku || ''}</td>
       <td style="${cell}${isChild ? ';padding-left:22px' : ''}">${isChild ? '↳ ' : ''}${i.product_name}${tag ? ` <span style="font-size:10px;color:${BRAND.green};font-weight:700">${tag.toUpperCase()}</span>` : ''}${meta ? `<br><span style="color:#888;font-size:11px">${meta}</span>` : ''}</td>
       <td style="${cell};text-align:center">${i.quantity}</td>
       <td style="${cell};text-align:right">${i.is_mandatory ? 'Included' : fmt(i.total)}</td>
@@ -758,6 +761,7 @@ ${print ? PRINT_PAGE_STYLE : ''}
       ${section('Rental Items')}
       <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px">
         <thead><tr style="background:#f9fafb">
+          <th style="${th};text-align:left">SKU</th>
           <th style="${th};text-align:left">Item</th>
           <th style="${th};text-align:center">Qty</th>
           <th style="${th};text-align:right">Est. Rental Fee</th>
@@ -1891,9 +1895,9 @@ function quotePdfModel(q, s) {
     title: 'QUOTATION', number: q.quote_number,
     meta: [['Date', pdfDate(q.created_at)], ['Valid Until', q.valid_until ? pdfDate(String(q.valid_until).slice(0, 10)) : ''], ['Branch', q.branch_name]],
     party: { label: 'Bill To', lines: [q.customer_name, q.customer_phone, q.customer_email] },
-    tables: [{ columns: ITEM_COLUMNS, rows: (q.items || []).map(i => ({
-      cells: [i.product_name, i.quantity, fmt(i.unit_price), fmt(i.total)],
-      sub: [i.sku, parseFloat(i.discount_amount) > 0 ? `Price includes ${fmt(i.discount_amount)} discount` : ''].filter(Boolean).join(' · '),
+    tables: [{ mainCol: 1, columns: [{ label: 'SKU', width: 1.4 }, { label: 'Item', width: 3.4 }, ...ITEM_COLUMNS.slice(1)], rows: (q.items || []).map(i => ({
+      cells: [i.sku || '', i.product_name, i.quantity, fmt(i.unit_price), fmt(i.total)],
+      sub: parseFloat(i.discount_amount) > 0 ? `Price includes ${fmt(i.discount_amount)} discount` : '',
     })) }],
     totals: [
       { label: 'Subtotal', value: fmt(q.subtotal) },
@@ -1923,11 +1927,11 @@ function rentalQuotePdfModel(q, s) {
     party: { label: 'Customer', lines: [q.customer_name ? `${q.customer_name}${q.customer_number ? ` (${q.customer_number})` : ''}` : '', customerAddr, q.customer_phone, q.customer_email] },
     info: period ? [['Rental Period', `${utc(period.start)} - ${utc(period.due)} (${period.days} day${period.days === 1 ? '' : 's'})`], ['Return Due', utc(period.due)]] : [],
     tables: [
-      { heading: 'Rental Items', columns: [{ label: 'Item', width: 5 }, { label: 'Qty', width: 0.8, align: 'center' }, { label: 'Est. Rental Fee', width: 1.8, align: 'right' }],
+      { heading: 'Rental Items', mainCol: 1, columns: [{ label: 'SKU', width: 1.4 }, { label: 'Item', width: 4 }, { label: 'Qty', width: 0.8, align: 'center' }, { label: 'Est. Rental Fee', width: 1.8, align: 'right' }],
         rows: (q.items || []).map(i => {
           const tag = i.parent_item_id ? (i.is_mandatory ? 'Included accessory' : 'Optional accessory') : '';
-          return { indent: !!i.parent_item_id, cells: [i.product_name, i.quantity, i.is_mandatory ? 'Included' : fmt(i.total)],
-            sub: [tag, i.sku, rentalRateCard(i), i.condition_out ? `Condition out: ${i.condition_out}` : ''].filter(Boolean).join(' · ') };
+          return { indent: !!i.parent_item_id, cells: [i.sku || '', i.product_name, i.quantity, i.is_mandatory ? 'Included' : fmt(i.total)],
+            sub: [tag, rentalRateCard(i), i.condition_out ? `Condition out: ${i.condition_out}` : ''].filter(Boolean).join(' · ') };
         }) },
       { heading: 'Additional Services', columns: [{ label: 'Service', width: 6 }, { label: 'Amount', width: 1.8, align: 'right' }], rows: services },
     ],
