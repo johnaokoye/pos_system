@@ -1411,6 +1411,10 @@ const App = {
     if (this.settings.store_name) document.title = this.settings.store_name + ' - POS';
     this.applyBranding(this.settings.company_logo_url, this.settings.store_name);
     try { this.altCurrencies = this.settings.alt_currencies ? JSON.parse(this.settings.alt_currencies) : []; } catch(e) { this.altCurrencies = []; }
+    // Settings stores each rate as "1 <alt> = base_per_unit <base>" (1 USD =
+    // 155 JMD); `rate` (alt per 1 base) is derived from it for the POS
+    // conversions. Older entries only have `rate`.
+    this.altCurrencies.forEach(c => { const per = this._altBasePerUnit(c); if (per) { c.base_per_unit = per; c.rate = 1 / per; } });
   },
 
   async checkLowStock() {
@@ -1511,7 +1515,7 @@ const App = {
       overlay.className = 'modal-overlay';
       const currencyOpts = [
         `<option value="${base}" data-rate="1">${base} — base currency</option>`,
-        ...alts.map(c => `<option value="${c.code}" data-rate="${c.rate}">${c.code} &nbsp;(1 ${base} = ${c.rate} ${c.code})</option>`)
+        ...alts.map(c => `<option value="${c.code}" data-rate="${c.rate}">${c.code} &nbsp;(${this._altRateLabel(c, base)})</option>`)
       ].join('');
       overlay.innerHTML = `
         <div class="modal" style="max-width:380px">
@@ -1834,7 +1838,7 @@ const App = {
     const base = this.activeCurrency || this.settings.currency || 'USD';
     return [
       `<option value="${base}" data-rate="1">${base} — base currency</option>`,
-      ...(this.altCurrencies || []).map(c => `<option value="${c.code}" data-rate="${c.rate}">${c.code} (1 ${base} = ${c.rate} ${c.code})</option>`),
+      ...(this.altCurrencies || []).map(c => `<option value="${c.code}" data-rate="${c.rate}">${c.code} (${this._altRateLabel(c, base)})</option>`),
     ].join('');
   },
 
@@ -1913,20 +1917,36 @@ const App = {
   },
 
   // ─── Alternate Currency Helpers ───────────────────────────
+  // How many base-currency units one unit of an alternate currency is worth
+  // (1 USD = 155 JMD → 155) — what Settings asks for. Older entries only
+  // stored `rate` (alt per 1 base, e.g. 0.0064), so it's derived from that.
+  _altBasePerUnit(c) {
+    const per = Number(c?.base_per_unit);
+    if (per > 0) return per;
+    const rate = Number(c?.rate);
+    return rate > 0 ? Math.round((1 / rate) * 10000) / 10000 : null;
+  },
+
+  // "1 USD = 155 JMD" for labels.
+  _altRateLabel(c, base) {
+    const per = this._altBasePerUnit(c);
+    return per ? `1 ${c.code} = ${per.toLocaleString('en-US', { maximumFractionDigits: 4 })} ${base}` : '';
+  },
+
   _renderAltCurrenciesTable() {
     const base = this.activeCurrency || this.settings.currency || 'USD';
     if (!this.altCurrencies || !this.altCurrencies.length) {
       return '<p style="color:var(--text-muted);font-size:13px;margin:0">No alternate currencies configured. Use the form below to add one.</p>';
     }
-    return `<table><thead><tr><th>Code</th><th>Currency</th><th>Rate (1 ${base} = ?)</th><th></th></tr></thead><tbody>
+    return `<table><thead><tr><th>Code</th><th>Currency</th><th>Exchange Rate</th><th></th></tr></thead><tbody>
       ${this.altCurrencies.map(c => {
         const label = this.CURRENCIES.find(([cd]) => cd === c.code)?.[1] || c.code;
         return `<tr>
           <td><span class="badge-pill badge-purple">${c.code}</span></td>
           <td style="font-size:13px;color:var(--text-muted)">${label}</td>
-          <td><input type="number" value="${c.rate}" min="0.000001" step="any"
+          <td style="white-space:nowrap;font-size:13px">1 ${c.code} = <input type="number" value="${this._altBasePerUnit(c) ?? ''}" min="0.0001" step="any"
             style="width:110px;padding:4px 8px;font-size:13px;border:1px solid var(--border);border-radius:4px"
-            onchange="App.updateAltCurrencyRate('${c.code}',this.value)"></td>
+            onchange="App.updateAltCurrencyRate('${c.code}',this.value)"> ${base}</td>
           <td><button class="btn btn-danger btn-sm" onclick="App.removeAltCurrency('${c.code}')">Remove</button></td>
         </tr>`;
       }).join('')}
@@ -1935,13 +1955,13 @@ const App = {
 
   addAltCurrency() {
     const code = document.getElementById('alt-cur-code')?.value;
-    const rate = parseFloat(document.getElementById('alt-cur-rate')?.value);
+    const per = parseFloat(document.getElementById('alt-cur-rate')?.value);
     const base = this.activeCurrency || this.settings.currency || 'USD';
     if (!code) { this.alert('Select a currency', 'error'); return; }
     if (code === base) { this.alert('Cannot add the base currency as an alternate', 'error'); return; }
-    if (!rate || rate <= 0) { this.alert('Enter a valid positive exchange rate', 'error'); return; }
+    if (!per || per <= 0) { this.alert(`Enter what 1 ${code} is worth in ${base}, e.g. 155`, 'error'); return; }
     if (this.altCurrencies.find(c => c.code === code)) { this.alert(`${code} is already in the list`, 'error'); return; }
-    this.altCurrencies.push({ code, rate });
+    this.altCurrencies.push({ code, base_per_unit: per, rate: 1 / per });
     const el = document.getElementById('alt-currencies-table');
     if (el) el.innerHTML = this._renderAltCurrenciesTable();
     document.getElementById('alt-cur-rate').value = '';
@@ -1954,10 +1974,10 @@ const App = {
   },
 
   updateAltCurrencyRate(code, val) {
-    const rate = parseFloat(val);
-    if (!rate || rate <= 0) return;
+    const per = parseFloat(val);
+    if (!per || per <= 0) return;
     const c = this.altCurrencies.find(c => c.code === code);
-    if (c) c.rate = rate;
+    if (c) { c.base_per_unit = per; c.rate = 1 / per; }
   },
 
   categoryEmoji(name = '') {
@@ -4402,7 +4422,7 @@ const App = {
             <hr>
             <div class="receipt-row receipt-total"><span>TOTAL</span><span>${this.fmt(tx.total)}</span></div>
             ${tx.payment_method === 'split' ? this._splitPaymentReceiptRows(tx, splitForeignCash) : `<div class="receipt-row"><span>Payment</span><span>${tx.payment_method.replace('_',' ').toUpperCase()}</span></div>
-            ${tx.amount_tendered > tx.total ? (cashResult?.rate > 1 ? `<div class="receipt-row"><span>Tendered (${cashResult.currency})</span><span>${cashResult.currency} ${cashResult.tenderedAlt.toFixed(2)}</span></div><div class="receipt-row" style="font-size:10px;color:#666"><span>Equivalent</span><span>${this.fmt(tx.amount_tendered)}</span></div><div class="receipt-row"><span>Change</span><span>${this._changeDisplay(cashResult, change)}</span></div>` : `<div class="receipt-row"><span>Tendered</span><span>${this.fmt(tx.amount_tendered)}</span></div><div class="receipt-row"><span>Change</span><span>${this._changeDisplay(cashResult, change)}</span></div>`) : ''}
+            ${tx.amount_tendered > tx.total ? (cashResult?.rate && cashResult.rate !== 1 ? `<div class="receipt-row"><span>Tendered (${cashResult.currency})</span><span>${cashResult.currency} ${cashResult.tenderedAlt.toFixed(2)}</span></div><div class="receipt-row" style="font-size:10px;color:#666"><span>Equivalent</span><span>${this.fmt(tx.amount_tendered)}</span></div><div class="receipt-row"><span>Change</span><span>${this._changeDisplay(cashResult, change)}</span></div>` : `<div class="receipt-row"><span>Tendered</span><span>${this.fmt(tx.amount_tendered)}</span></div><div class="receipt-row"><span>Change</span><span>${this._changeDisplay(cashResult, change)}</span></div>`) : ''}
             ${tx.approval_code ? `<div class="receipt-row"><span>${tx.payment_method === 'direct_deposit' ? 'Deposit Ref #' : tx.payment_method === 'gift_card' ? 'Gift Card #' : 'Approval Code'}</span><span style="font-family:monospace;font-weight:600">${tx.approval_code}</span></div>` : ''}`}
             <hr>
             <div style="text-align:center;margin-top:4px">${footer}</div>
@@ -4548,7 +4568,7 @@ const App = {
       });
     } else {
       if (tx.amount_tendered > tx.total) {
-        if (cashResult?.rate > 1) {
+        if (cashResult?.rate && cashResult.rate !== 1) {
           tenderRows.push([`Tendered (${cashResult.currency})`, `${cashResult.currency} ${cashResult.tenderedAlt.toFixed(2)}`], ['Equivalent', this.fmt(tx.amount_tendered)], ['Change', this._changeDisplay(cashResult, change)]);
         } else {
           tenderRows.push(['Tendered', this.fmt(tx.amount_tendered)], ['Change', this._changeDisplay(cashResult, change)]);
@@ -16618,11 +16638,11 @@ const App = {
           </div>
           <div class="card" style="margin-bottom:16px">
             <div class="card-header"><span class="card-title">Alternate Currencies</span></div>
-            <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">Define currencies accepted at the POS with their exchange rate relative to <strong>${s.currency||'USD'}</strong>. Cashiers can select these when processing cash payments.</p>
+            <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">Define currencies accepted at the POS and what <strong>1 unit</strong> of each is worth in <strong>${s.currency||'USD'}</strong> — e.g. 1 USD = 155 ${s.currency||'USD'}. Cashiers can select these when processing cash payments, and drawer reconciliation multiplies counted foreign notes by this rate.</p>
             <div id="alt-currencies-table">${this._renderAltCurrenciesTable()}</div>
             <div class="input-row" style="margin-top:12px;align-items:flex-end">
               <div class="form-group" style="flex:2"><label>Currency</label><select id="alt-cur-code">${this.currencyOptions('')}</select></div>
-              <div class="form-group" style="flex:1"><label>Rate (1 ${s.currency||'USD'} = ?)</label><input type="number" id="alt-cur-rate" min="0.000001" step="any" placeholder="e.g. 1600"></div>
+              <div class="form-group" style="flex:1"><label>1 unit = ? ${s.currency||'USD'}</label><input type="number" id="alt-cur-rate" min="0.0001" step="any" placeholder="e.g. 155"></div>
               <div style="padding-bottom:4px"><button class="btn btn-secondary" onclick="App.addAltCurrency()">+ Add</button></div>
             </div>
             <button class="btn btn-primary" style="margin-top:12px" onclick="App.saveSettings()">Save Settings</button>
@@ -16634,6 +16654,9 @@ const App = {
               <div class="form-group" style="flex:2"><label>Show denominations for</label><select id="denom-filter-currency" onchange="App.loadDenominations()">${this.currencyOptions(s.currency||'USD')}</select></div>
             </div>
             <div id="denom-table-wrap"></div>
+            <div class="form-group" style="margin-top:12px"><label>Email drawer reconciliation reports to</label>
+              <div style="display:flex;gap:8px"><input id="s-drawer-email" type="email" value="${this.escapeAttr(s.drawer_report_email||'')}" placeholder="e.g. accounts@yourstore.com — several can be separated by commas" style="flex:1"><button class="btn btn-secondary" onclick="App.saveSettings()">Save</button></div>
+              <small style="color:var(--text-muted)">Filled in on the Reconcile screen and the drawer report's Email PDF, so the PDF goes to this address unless changed.</small></div>
             <div class="input-row" style="margin-top:12px;align-items:flex-end">
               <div class="form-group" style="flex:1.5"><label>Value</label><input type="number" id="denom-new-value" step="any" min="0.01" placeholder="e.g. 50"></div>
               <div class="form-group" style="flex:1.5"><label>Label</label><input type="text" id="denom-new-label" placeholder="e.g. $50"></div>
@@ -17029,6 +17052,7 @@ const App = {
       store_address: document.getElementById('s-addr').value,
       store_phone: document.getElementById('s-phone').value,
       store_email: document.getElementById('s-email').value,
+      ...(document.getElementById('s-drawer-email') ? { drawer_report_email: document.getElementById('s-drawer-email').value.trim() } : {}),
       receipt_footer: document.getElementById('s-footer').value,
       tax_rate: document.getElementById('s-tax').value,
       currency: document.getElementById('s-currency').value,
@@ -26238,6 +26262,7 @@ const App = {
             <td><span class="badge ${sc[s.status]||'badge-secondary'}">${s.status === 'closed' ? 'unreconciled' : s.status}</span></td>
             <td style="text-align:right;white-space:nowrap">
               <button class="btn btn-sm btn-outline" onclick="App.viewDrawerReport(${s.id})">Report</button>
+              ${s.status === 'reconciled' ? `<button class="btn btn-sm btn-outline" title="Email the reconciliation report as a PDF" onclick="App.emailDrawerReport(${s.id})">✉ Email</button>` : ''}
               ${canReconcile && s.status !== 'reconciled' ? `<button class="btn btn-sm btn-primary" onclick="App.showReconcileModal(${s.id})">Reconcile</button>` : ''}
               ${canReconcile && s.status === 'open' ? `<button class="btn btn-sm btn-secondary" onclick="App.closeDrawerSession(${s.id})">Close</button>` : ''}
             </td>
@@ -26486,7 +26511,7 @@ const App = {
       const foreign = g.currency !== r.base_currency;
       const gm = n => this._drawerMoney(n, foreign ? g.currency : null);
       return `
-      <h3 style="font-size:13px;margin:14px 0 6px">Cash Count — ${esc(g.currency)}${foreign && g.rate ? ` <small style="font-weight:400;color:var(--text-muted,#777)">(1 ${esc(r.base_currency)} = ${g.rate} ${esc(g.currency)})</small>` : ''}</h3>
+      <h3 style="font-size:13px;margin:14px 0 6px">Cash Count — ${esc(g.currency)}${foreign && g.base_per_unit ? ` <small style="font-weight:400;color:var(--text-muted,#777)">(1 ${esc(g.currency)} = ${Number(g.base_per_unit).toLocaleString('en-US', { maximumFractionDigits: 4 })} ${esc(r.base_currency)})</small>` : ''}</h3>
       <table class="table" style="margin-bottom:0"><thead><tr><th>Denomination</th><th style="text-align:center">Qty</th><th style="text-align:right">Amount</th></tr></thead>
         <tbody>${g.lines.map(l => `<tr><td>${esc(l.label)}</td><td style="text-align:center">${l.quantity}</td><td style="text-align:right">${gm(l.amount)}</td></tr>`).join('')}
         <tr style="font-weight:600"><td colspan="2">Total ${esc(g.currency)}</td><td style="text-align:right">${gm(g.total)}${foreign && g.base_equivalent != null ? `<div style="font-weight:400;font-size:12px;color:var(--text-muted,#777)">= ${m(g.base_equivalent)} ${esc(r.base_currency)}</div>` : ''}</td></tr></tbody></table>`;
@@ -26537,7 +26562,7 @@ const App = {
   },
 
   emailDrawerReport(id) {
-    this.showEmailModal('Email Drawer Report (PDF)', this.settings?.store_email || '', async to => {
+    this.showEmailModal('Email Drawer Report (PDF)', this.settings?.drawer_report_email || this.settings?.store_email || '', async to => {
       this.closeModal();
       try {
         const r = await this.api('POST', `/email/send-drawer-report/${id}`, { to });
@@ -26570,8 +26595,9 @@ const App = {
     const base = r.base_currency;
     const cashRow = r.tenders.find(t => t.key === 'cash');
     const expectedCash = r.float.included_in_cash ? cashRow.expected : Math.round((r.cash_sales - r.payouts_total) * 100) / 100;
+    // Base value of 1 unit of each currency counted (1 USD = 155 JMD → 155).
     const rates = { [base]: 1 };
-    (this.altCurrencies || []).forEach(c => { if (c.code && Number(c.rate) > 0) rates[c.code] = Number(c.rate); });
+    (this.altCurrencies || []).forEach(c => { const per = this._altBasePerUnit(c); if (c.code && per) rates[c.code] = per; });
     const currencies = Object.keys(rates).filter(c => allDenoms.some(d => d.currency === c));
     const denoms = allDenoms.filter(d => currencies.includes(d.currency));
     this._reconcileExpectedCash = expectedCash;
@@ -26589,7 +26615,7 @@ const App = {
       const list = denoms.filter(d => d.currency === cur);
       return `
         <div style="flex:1;min-width:230px">
-          <div style="font-size:12px;font-weight:600;margin-bottom:4px">${this.escapeAttr(cur)}${foreign ? ` <span style="font-weight:400;color:var(--text-muted)">(1 ${this.escapeAttr(base)} = ${rates[cur]} ${this.escapeAttr(cur)})</span>` : ''}</div>
+          <div style="font-size:12px;font-weight:600;margin-bottom:4px">${this.escapeAttr(cur)}${foreign ? ` <span style="font-weight:400;color:var(--text-muted)">(1 ${this.escapeAttr(cur)} = ${rates[cur].toLocaleString('en-US', { maximumFractionDigits: 4 })} ${this.escapeAttr(base)})</span>` : ''}</div>
           <table style="width:100%;font-size:12px;border-collapse:collapse">
             <thead><tr style="background:var(--bg-alt)"><th style="padding:4px 6px;text-align:left">Note / Coin</th><th style="padding:4px 6px;text-align:center">Qty</th><th style="padding:4px 6px;text-align:right">Amount</th></tr></thead>
             <tbody>${list.map(d => `<tr>
@@ -26675,6 +26701,10 @@ const App = {
           <div class="form-group"><label>Notes</label>
             <textarea id="rc-notes" rows="2" placeholder="Optional notes…">${this.escapeAttr(rec.notes||'')}</textarea>
           </div>
+          <div class="form-group" style="margin-bottom:0">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:600"><input type="checkbox" id="rc-email-on" ${this.settings?.drawer_report_email ? 'checked' : ''} style="width:auto;margin:0"> Email the reconciliation report (PDF) when saved</label>
+            <input type="text" id="rc-email-to" value="${this.escapeAttr(this.settings?.drawer_report_email || '')}" placeholder="Email address(es), comma-separated" style="margin-top:6px">
+          </div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
@@ -26691,7 +26721,7 @@ const App = {
   },
 
   // Per-currency totals of the denomination count, and their sum in the
-  // base currency (foreign amount ÷ rate) — what "Apply" puts in Cash.
+  // base currency (foreign amount × its rate) — what "Apply" puts in Cash.
   _denomCountTotals() {
     const rates = this._reconcileRates || {}, totals = {};
     let grand = 0;
@@ -26702,7 +26732,7 @@ const App = {
       const amtEl = document.getElementById(`dna-${d.id}`);
       if (amtEl) amtEl.textContent = this._drawerMoney(amt, d.currency === this._reconcileBase ? null : d.currency);
     });
-    for (const [cur, t] of Object.entries(totals)) grand += t / (rates[cur] || 1);
+    for (const [cur, t] of Object.entries(totals)) grand += t * (rates[cur] || 1);
     return { totals, grand: Math.round(grand * 100) / 100 };
   },
 
@@ -26713,7 +26743,7 @@ const App = {
       const el = document.getElementById(`rc-denom-total-${cur}`);
       if (el) el.textContent = this._drawerMoney(t, cur === base ? null : cur);
       const baseEl = document.getElementById(`rc-denom-base-${cur}`);
-      if (baseEl) baseEl.textContent = `= ${this._drawerMoney(t / (rates[cur] || 1))} ${base}`;
+      if (baseEl) baseEl.textContent = `= ${this._drawerMoney(t * (rates[cur] || 1))} ${base}`;
     }
     const g = document.getElementById('rc-denom-grand');
     if (g) g.textContent = this._drawerMoney(grand);
@@ -26758,11 +26788,18 @@ const App = {
       reconciled_by:     this.currentUser?.id,
       note_counts,
     };
+    const emailTo = document.getElementById('rc-email-on')?.checked ? (document.getElementById('rc-email-to')?.value || '').trim() : '';
+    if (document.getElementById('rc-email-on')?.checked && !emailTo) { this.alert('Enter an email address for the report, or untick Email', 'error'); return; }
     try {
       await this.api('POST', `/drawers/sessions/${id}/reconcile`, data);
-      this.alert('Drawer reconciled successfully');
       this.closeModal();
       this.renderDrawerSessions();
+      if (!emailTo) { this.alert('Drawer reconciled successfully'); return; }
+      this.alert(`Drawer reconciled — emailing the report to ${emailTo}…`, 'info');
+      try {
+        const r = await this.api('POST', `/email/send-drawer-report/${id}`, { to: emailTo });
+        this.alert(r.message || `Drawer report sent to ${emailTo}`);
+      } catch (e) { this.alert(`Reconciled, but the email failed: ${e.message} — use Email on the drawer report to retry`, 'error'); }
     } catch(e) { this.alert(e.message,'error'); }
   },
 
