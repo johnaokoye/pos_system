@@ -10,6 +10,7 @@ const { blockedMessage, creditLimitError } = require('../lib/creditBlock');
 const { resolveUnit, lineName, parseQty, stockUnits } = require('../lib/units');
 const { isSerialNumberProduct, serialNumberLabel, serialNumberOf } = require('../lib/serialNumber');
 const { checkDiscountEligibility } = require('./promotions');
+const { allocateTicketDiscount, returnedDiscountShare } = require('../lib/ticketDiscount');
 
 // Mirrors availableCashBack() in public/index.html — the frontend uses this
 // same formula to decide whether to show the Cash Back bar; this copy is the
@@ -92,17 +93,13 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
     try { salespersonId = await ticketSalesperson(created_by || employee_id, req.body.salesperson_id); } catch (e) { return res.status(400).json({ error: e.message }); }
 
     const hold_number = 'HOLD-' + Date.now();
-    let subtotal = 0, tax_amount = 0;
-    for (const item of items) {
-      const lineTotal = parseFloat((parseFloat(item.unit_price) * item.quantity).toFixed(2));
-      const lineTax = parseFloat((lineTotal * (parseFloat(item.tax_rate) || 0) / 100).toFixed(2));
-      subtotal += lineTotal;
-      tax_amount += lineTax;
-    }
-    subtotal = parseFloat(subtotal.toFixed(2));
-    tax_amount = parseFloat(tax_amount.toFixed(2));
-    const disc = parseFloat(discount_amount || 0);
-    const total = parseFloat((subtotal + tax_amount - disc).toFixed(2));
+    // Same before-tax ticket discount as checkout (lib/ticketDiscount.js).
+    const lineTotals = items.map(item => parseFloat((parseFloat(item.unit_price) * item.quantity).toFixed(2)));
+    const { discount: disc, shares } = allocateTicketDiscount(lineTotals, discount_amount);
+    const lineTaxes = items.map((item, i) => parseFloat(((lineTotals[i] - shares[i]) * (parseFloat(item.tax_rate) || 0) / 100).toFixed(2)));
+    const subtotal = parseFloat(lineTotals.reduce((s, t) => s + t, 0).toFixed(2));
+    const tax_amount = parseFloat(lineTaxes.reduce((s, t) => s + t, 0).toFixed(2));
+    const total = parseFloat((subtotal - disc + tax_amount).toFixed(2));
 
     const txn = await db.transaction('write');
     let committed = false;
@@ -112,9 +109,8 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
         args: [hold_number, customer_id || null, employee_id || 1, created_by || employee_id || 1, salespersonId, branch_id || null, subtotal, tax_amount, disc, total, 'hold', 'hold', notes || null]
       });
       const txId = Number(result.lastInsertRowid);
-      for (const item of items) {
-        const lineTotal = parseFloat((parseFloat(item.unit_price) * item.quantity).toFixed(2));
-        const lineTax = parseFloat((lineTotal * (parseFloat(item.tax_rate) || 0) / 100).toFixed(2));
+      for (const [i, item] of items.entries()) {
+        const lineTotal = lineTotals[i], lineTax = lineTaxes[i];
         const serial = item.serial_number ? String(item.serial_number).trim() : null;
         // A held line keeps its unit of measure (and its size at hold time).
         let sellUnit = null, unitsPer = 1, uomId = null;
@@ -235,6 +231,9 @@ router.get('/:id', requireAuth, async (req, res) => {
     tx.payments = payments;
     const isSpRentalLine = await spRentalLineMatcher(req.params.id);
     for (const item of items) if (isSpRentalLine(item)) item.is_sp_rental = 1;
+    // Each line's share of the ticket discount — the return screen takes it
+    // off the refund the same way POST /:id/return does.
+    for (const item of items) item.discount_share = returnedDiscountShare(tx, item, items, 1);
     // Pause history is agreement-level, not tied to which transaction (checkout
     // vs settlement) this is — shown on either printed invoice for the same rental.
     if (tx.rental_agreement_id) {
@@ -334,7 +333,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         const lineTax = isTaxExempt ? 0 : parseFloat((grossLineTotal * (parseFloat(item.tax_rate) || 0) / 100).toFixed(2));
         subtotal += grossLineTotal;
         tax_amount += lineTax;
-        processedItems.push({ product: null, variation: null, customName: product_name, quantity, unit_price, lineTotal: grossLineTotal, lineTax, discount: 0, discountPercent: 0, discountOverrideBy: null });
+        processedItems.push({ product: null, variation: null, customName: product_name, quantity, unit_price, lineTotal: grossLineTotal, lineTax, taxRate: parseFloat(item.tax_rate) || 0, discount: 0, discountPercent: 0, discountOverrideBy: null });
         continue;
       }
       const { rows: [product] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] });
@@ -348,7 +347,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         const lineTax = isTaxExempt ? 0 : parseFloat((unit_price * product.tax_rate / 100).toFixed(2));
         subtotal += unit_price;
         tax_amount += lineTax;
-        processedItems.push({ product, variation: null, serialNumber, quantity: 1, unit_price, lineTotal: unit_price, lineTax, discount: 0, discountPercent: 0, discountOverrideBy: null });
+        processedItems.push({ product, variation: null, serialNumber, quantity: 1, unit_price, lineTotal: unit_price, lineTax, taxRate: product.tax_rate || 0, discount: 0, discountPercent: 0, discountOverrideBy: null });
         continue;
       }
       // Unit of measure (lib/units.js): the unit's price, and quantity × its
@@ -396,13 +395,27 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       const lineTax = isTaxExempt ? 0 : parseFloat((lineTotal * product.tax_rate / 100).toFixed(2));
       subtotal += lineTotal;
       tax_amount += lineTax;
-      processedItems.push({ product, variation, unit, quantity: item.quantity, unit_price, lineTotal, lineTax, discount: discountAmount, discountPercent, discountOverrideBy });
+      processedItems.push({ product, variation, unit, quantity: item.quantity, unit_price, lineTotal, lineTax, taxRate: product.tax_rate || 0, discount: discountAmount, discountPercent, discountOverrideBy });
     }
 
     if (!processedItems.length) return res.status(400).json({ error: 'No items in transaction' });
     subtotal = parseFloat(subtotal.toFixed(2));
+    // The ticket discount comes off before tax (lib/ticketDiscount.js) —
+    // each line is re-taxed on its net less its share. A return credit on an
+    // exchange is money already paid, tax included, so it stays after tax.
+    const discountPreTax = source_return_id ? 0 : 1;
+    let disc = parseFloat(discount_amount || 0);
+    if (discountPreTax) {
+      const split = allocateTicketDiscount(processedItems.map(p => p.lineTotal), disc);
+      disc = split.discount;
+      tax_amount = 0;
+      processedItems.forEach((p, i) => {
+        p.ticketDiscount = split.shares[i];
+        p.lineTax = isTaxExempt ? 0 : parseFloat(((p.lineTotal - p.ticketDiscount) * p.taxRate / 100).toFixed(2));
+        tax_amount += p.lineTax;
+      });
+    }
     tax_amount = parseFloat(tax_amount.toFixed(2));
-    const disc = parseFloat(discount_amount || 0);
     const storeCredit = parseFloat(store_credit_applied || 0);
 
     // Server-side clamp against the customer's actual eligibility right now
@@ -421,7 +434,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       cashBack = 0;
     }
 
-    const total = parseFloat((subtotal + tax_amount - disc - storeCredit - cashBack).toFixed(2));
+    const total = parseFloat((subtotal - disc + tax_amount - storeCredit - cashBack).toFixed(2));
 
     // Split tender: an optional array of {method, amount, approval_code} legs
     // that together cover the total, instead of a single payment_method.
@@ -456,7 +469,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
     let committed = false;
     try {
       const txSource = req.apiKey ? 'online' : 'pos';
-      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,created_by,salesperson_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,promotion_code,promotion_name,total,payment_method,amount_tendered,change_amount,is_credit,notes,source_return_id,store_credit_applied,cash_back_applied,tax_exempt,tax_exemption_number,approval_code,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id || null, employee_id || 1, createdBy, salespersonId, branch_id || null, drawer_session_id || null, subtotal, tax_amount, disc, promotion_code || null, promotion_name || null, total, method, tendered, change > 0 ? change : 0, isCredit ? 1 : 0, notes || null, source_return_id || null, storeCredit > 0 ? storeCredit : 0, cashBack > 0 ? cashBack : 0, isTaxExempt, tax_exemption_number || null, finalApprovalCode, txSource] });
+      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,created_by,salesperson_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,promotion_code,promotion_name,total,payment_method,amount_tendered,change_amount,is_credit,notes,source_return_id,store_credit_applied,cash_back_applied,tax_exempt,tax_exemption_number,approval_code,source,discount_pre_tax) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id || null, employee_id || 1, createdBy, salespersonId, branch_id || null, drawer_session_id || null, subtotal, tax_amount, disc, promotion_code || null, promotion_name || null, total, method, tendered, change > 0 ? change : 0, isCredit ? 1 : 0, notes || null, source_return_id || null, storeCredit > 0 ? storeCredit : 0, cashBack > 0 ? cashBack : 0, isTaxExempt, tax_exemption_number || null, finalApprovalCode, txSource, discountPreTax] });
       const txId = Number(txResult.lastInsertRowid);
 
       const paymentLegs = tenderLegs || [{ payment_method: method, amount: total, approval_code: finalApprovalCode }];
@@ -464,11 +477,11 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         await tx.execute({ sql: 'INSERT INTO transaction_payments (transaction_id, payment_method, amount, approval_code) VALUES (?,?,?,?)', args: [txId, leg.payment_method, leg.amount, leg.approval_code || null] });
       }
 
-      for (const { product, variation, unit, customName, serialNumber, quantity: lineQty, unit_price, lineTotal, lineTax, discount, discountPercent, discountOverrideBy } of processedItems) {
+      for (const { product, variation, unit, customName, serialNumber, quantity: lineQty, unit_price, lineTotal, lineTax, ticketDiscount, discount, discountPercent, discountOverrideBy } of processedItems) {
         const itemName = customName || (serialNumber ? serialNumberLabel(serialNumber) : variation ? `${product.name} — ${variation.name}` : lineName(product.name, unit));
         const itemSku = customName ? '' : (variation ? variation.sku : product.sku);
         const unitsPer = unit?.units_per || 1;
-        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,discount_percent,discount_override_by,serial_number,sell_unit,units_per,uom_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [txId, product ? product.id : null, itemName, itemSku, lineQty, unit_price, discount, lineTax, lineTotal, variation?.id||null, variation?.name||null, discountPercent || 0, discountOverrideBy || null, serialNumber || null, variation ? null : unit?.sell_unit || null, variation ? 1 : unitsPer, variation ? null : unit?.uom_id ?? null] });
+        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,discount_percent,discount_override_by,serial_number,sell_unit,units_per,uom_id,ticket_discount) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [txId, product ? product.id : null, itemName, itemSku, lineQty, unit_price, discount, lineTax, lineTotal, variation?.id||null, variation?.name||null, discountPercent || 0, discountOverrideBy || null, serialNumber || null, variation ? null : unit?.sell_unit || null, variation ? 1 : unitsPer, variation ? null : unit?.uom_id ?? null, ticketDiscount ?? null] });
         // A custom/temp line has no catalog product — nothing to deduct; an
         // SN line is a stockless placeholder for the serial.
         if (!product || serialNumber) continue;
@@ -715,7 +728,9 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
       item.quantity = Math.round(Number(item.quantity) * 1000) / 1000;
       if (!(item.quantity > 0) || item.quantity > maxQty) return res.status(400).json({ error: `Invalid quantity for "${txItem.product_name}". Max returnable: ${maxQty}` });
       const proportion = item.quantity / txItem.quantity;
-      const lineTotal = parseFloat((txItem.total * proportion).toFixed(2));
+      // Refund what was paid for the line: its net less its share of the
+      // ticket discount (lib/ticketDiscount.js), plus the tax charged on it.
+      const lineTotal = parseFloat((txItem.total * proportion - returnedDiscountShare(tx, txItem, txItems, proportion)).toFixed(2));
       const lineTax = parseFloat((txItem.tax_amount * proportion).toFixed(2));
       returnSubtotal += lineTotal;
       returnTax += lineTax;

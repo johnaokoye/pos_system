@@ -9,6 +9,7 @@ const { getOutstandingQty, getOutOfServiceQty } = require('../lib/rentalAvailabi
 const { resolveUnit, lineName, parseQty } = require('../lib/units');
 const { feeFor, getBranchStock, buildRentalLines, revalidateQuoteLines, insertPendingAgreement, assertRentalCustomerEligible, assertNoUnpaidRentalReturns, rentalQuoteSummary, attachRentalRates, attachRateBasis, rentalWindow, rateLineOf } = require('../lib/rentals');
 const { ratePlanError } = require('../lib/rentalPricing');
+const { allocateTicketDiscount } = require('../lib/ticketDiscount');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -194,7 +195,7 @@ async function processRentalLine(item, product, parentIndex) {
     product_id: product.id, product_name: rentalLineLabel(product.name, period), serial_number: null, sku: product.sku,
     is_temp_item: 0, is_q_item: 0, purchase_request_id: null, sources: null,
     qty, unit_price, unit_cost: item.unit_cost != null && item.unit_cost !== '' ? parseFloat(item.unit_cost) : null,
-    lineTotal, lineTax: parseFloat((lineTotal * (product.tax_rate || 0) / 100).toFixed(2)), lineDisc: parseFloat(item.discount || 0),
+    lineTotal, lineTax: parseFloat((lineTotal * (product.tax_rate || 0) / 100).toFixed(2)), taxRate: product.tax_rate || 0, lineDisc: parseFloat(item.discount || 0),
     is_rental_line: 1, rental_start: item.rental_start, rental_end: item.rental_end, is_mandatory: 0, parentIndex: null, rate_plan,
   }];
   const { rows: accessories } = await db.execute({ sql: 'SELECT pa.*, p.name, p.sku, p.is_rental FROM product_accessories pa JOIN products p ON p.id = pa.accessory_product_id WHERE pa.product_id = ? AND pa.is_mandatory = 1', args: [product.id] });
@@ -203,7 +204,7 @@ async function processRentalLine(item, product, parentIndex) {
     lines.push({
       product_id: acc.accessory_product_id, product_name: `${acc.name} (included with ${product.name})`, serial_number: null, sku: acc.sku,
       is_temp_item: 0, is_q_item: 0, purchase_request_id: null, sources: null,
-      qty, unit_price: 0, unit_cost: null, lineTotal: 0, lineTax: 0, lineDisc: 0,
+      qty, unit_price: 0, unit_cost: null, lineTotal: 0, lineTax: 0, taxRate: 0, lineDisc: 0,
       is_rental_line: 1, rental_start: item.rental_start, rental_end: item.rental_end, is_mandatory: 1, parentIndex, rate_plan,
     });
   }
@@ -249,6 +250,19 @@ async function attachSpecialProjectRentals(items) {
 // sourcing across other branches (branch_id null = "no branch has enough,
 // purchase it"). Only set when a split was actually needed — omitted entirely
 // for the common case where the quote's own branch has enough stock.
+// The quote's Discount comes off before tax, the same way the POS does it at
+// checkout (lib/ticketDiscount.js): spread over the lines by amount, and
+// each line re-taxed on what's left. Updates the lines' lineTax in place.
+function applyQuoteDiscount(processedItems, discount) {
+  const split = allocateTicketDiscount(processedItems.map(l => l.lineTotal), discount);
+  let tax_amount = 0;
+  processedItems.forEach((l, i) => {
+    l.lineTax = parseFloat(((l.lineTotal - split.shares[i]) * (l.taxRate || 0) / 100).toFixed(2));
+    tax_amount += l.lineTax;
+  });
+  return { discount: split.discount, tax_amount: parseFloat(tax_amount.toFixed(2)) };
+}
+
 async function processQuoteItems(items, { allowRental = false } = {}) {
   const { rows: [taxSetting] } = await db.execute({ sql: "SELECT value FROM settings WHERE key='tax_rate'", args: [] });
   const defaultTaxRate = parseFloat(taxSetting?.value) || 0;
@@ -283,7 +297,8 @@ async function processQuoteItems(items, { allowRental = false } = {}) {
     if (Number.isNaN(qty)) throw new Error(`${product.name} is quoted in whole ${unit.sell_unit || 'unit'}s — the quantity can't be ${item.quantity}`);
     const unit_price = parseFloat(item.unit_price ?? (product ? unit.price : 0));
     const lineTotal = parseFloat((unit_price * qty).toFixed(2));
-    const lineTax = parseFloat((lineTotal * (product ? product.tax_rate : defaultTaxRate) / 100).toFixed(2));
+    const taxRate = product ? product.tax_rate : defaultTaxRate;
+    const lineTax = parseFloat((lineTotal * taxRate / 100).toFixed(2));
     const lineDisc = parseFloat(item.discount || 0);
     subtotal += lineTotal;
     tax_amount += lineTax;
@@ -309,7 +324,7 @@ async function processQuoteItems(items, { allowRental = false } = {}) {
       is_q_item: !product && item.is_q_item ? 1 : 0,
       purchase_request_id: product ? null : (item.purchase_request_id || null),
       sources,
-      qty, unit_price, unit_cost, lineTotal, lineTax, lineDisc,
+      qty, unit_price, unit_cost, lineTotal, lineTax, taxRate, lineDisc,
     });
   }
   if (!processedItems.length) throw new Error('No items in quotation');
@@ -595,10 +610,11 @@ router.post('/', async (req, res) => {
         ? await processRentalQuoteItems(items, branch_id, due_date, ratePlan)
         : await processQuoteItems(items, { allowRental: isSpecialProject }));
     } catch(e) { return res.status(400).json({ error: e.message }); }
-    const disc = parseFloat(discount_amount || 0);
+    let disc = parseFloat(discount_amount || 0);
+    if (!isRental) ({ discount: disc, tax_amount } = applyQuoteDiscount(processedItems, disc));
     const total = isRental
       ? rentalQuoteSummary({ subtotal, tax_amount, discount_amount: disc, delivery_required, delivery_cost, pickup_required, pickup_cost, operator_required, operator_fee, customer_type: await customerTypeOf(customer_id) }).total
-      : parseFloat((subtotal + tax_amount - disc).toFixed(2));
+      : parseFloat((subtotal - disc + tax_amount).toFixed(2));
 
     const tx = await db.transaction('write');
     let committed = false;
@@ -682,10 +698,11 @@ router.put('/:id', async (req, res) => {
         ? await processRentalQuoteItems(items, branch_id, due_date || quote.due_date, ratePlan)
         : await processQuoteItems(items, { allowRental: quote.quote_type === 'special_project' }));
     } catch(e) { return res.status(400).json({ error: e.message }); }
-    const disc = parseFloat(discount_amount || 0);
+    let disc = parseFloat(discount_amount || 0);
+    if (!isRental) ({ discount: disc, tax_amount } = applyQuoteDiscount(processedItems, disc));
     const total = isRental
       ? rentalQuoteSummary({ subtotal, tax_amount, discount_amount: disc, delivery_required, delivery_cost, pickup_required, pickup_cost, operator_required, operator_fee, customer_type: await customerTypeOf(customer_id) }).total
-      : parseFloat((subtotal + tax_amount - disc).toFixed(2));
+      : parseFloat((subtotal - disc + tax_amount).toFixed(2));
 
     const tx = await db.transaction('write');
     let committed = false;

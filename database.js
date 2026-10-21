@@ -2178,6 +2178,11 @@ async function _init() {
     // time (default 8:00 AM) on the next open day without a late charge
     // (lib/closedDays.js).
     'ALTER TABLE branches ADD COLUMN closed_day_grace INTEGER NOT NULL DEFAULT 0',
+    // Ticket discounts come off before tax (lib/ticketDiscount.js): each
+    // line's share of the sale's discount_amount (NULL on older sales, which
+    // took it off after tax), and a flag on the sale for the tax report.
+    'ALTER TABLE transaction_items ADD COLUMN ticket_discount REAL',
+    'ALTER TABLE transactions ADD COLUMN discount_pre_tax INTEGER NOT NULL DEFAULT 0',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

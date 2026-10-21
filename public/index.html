@@ -3640,13 +3640,16 @@ const App = {
 
     const isExempt = this.isCartTaxExempt();
     const showMargin = !!this.currentUser?.permissions?.pos_view_margin;
+    const { lineTaxes, lineShares } = this.getCartTotals();
     list.innerHTML = this.cart.map((item, idx) => {
       const sku = item.sku || this.allProducts.find(p => p.id === item.product_id)?.sku || '—';
       const lineGross = item.price * item.quantity;
       const lineNet = this._cartLineNet(item);
-      // Same per-line tax the totals below add up (after any line discount;
-      // ticket-level discounts/promotions come off the total, not the tax).
-      const lineTax = isExempt ? 0 : parseFloat((lineNet * (item.tax_rate || 0) / 100).toFixed(2));
+      // Same per-line tax the totals below add up — after any line discount
+      // and the line's share of a ticket discount/promotion (see
+      // getCartTotals), and the line total shown is net of that share too.
+      const lineTax = lineTaxes[idx];
+      const lineShare = lineShares[idx];
       return `
       <tr class="pos-ticket-row${this._selectedCartLine === idx ? ' selected' : ''}" onclick="App.selectCartLine(event,${idx})">
         <td style="font-family:monospace;font-size:12px">${sku}</td>
@@ -3660,7 +3663,7 @@ const App = {
         </td>
         <td style="text-align:right">${this.fmt(item.price)}</td>
         <td style="text-align:right;color:var(--text-muted)">${isExempt ? '—' : this.fmt(lineTax)}</td>
-        <td style="text-align:right;font-weight:600">${item.discountPercent > 0 ? `<span style="text-decoration:line-through;color:var(--text-muted);font-weight:400;font-size:11px" title="Before line discount">${this.fmt(lineGross + (isExempt ? 0 : parseFloat((lineGross * (item.tax_rate || 0) / 100).toFixed(2))))}</span> ` : ''}${this.fmt(lineNet + lineTax)}</td>
+        <td style="text-align:right;font-weight:600">${item.discountPercent > 0 || lineShare > 0 ? `<span style="text-decoration:line-through;color:var(--text-muted);font-weight:400;font-size:11px" title="Before discount">${this.fmt(lineGross + (isExempt ? 0 : parseFloat((lineGross * (item.tax_rate || 0) / 100).toFixed(2))))}</span> ` : ''}${this.fmt(lineNet - lineShare + lineTax)}</td>
         <td style="white-space:nowrap">
           ${this.can('pos_discounts') ? `<button class="btn-secondary" style="padding:2px 8px;font-size:11px" title="Line Discount" onclick="event.stopPropagation();App.showLineDiscountModal(${idx})">%</button>` : ''}
           <button class="btn-remove" onclick="App.removeFromCart(${idx})">×</button>
@@ -3668,22 +3671,19 @@ const App = {
       </tr>`;
     }).join('');
 
-    let subtotal = this.cart.reduce((s, i) => s + this._cartLineNet(i), 0);
     const isTaxExempt = this.isCartTaxExempt();
-    let tax = isTaxExempt ? 0 : this.cart.reduce((s, i) => s + (this._cartLineNet(i) * i.tax_rate / 100), 0);
-    const discount = this.cartDiscount || 0;
-    // Must match getCartTotals()'s formula exactly (including the floor at
-    // 0) — this is what the "Amount Due" box below shows, and it needs to
-    // reflect applied Available Credit/Cash Back the same way checkout does.
-    const total = Math.max(0, subtotal + tax - discount - (this._storeCreditApplied || 0) - (this._cashBackApplied || 0));
+    // Straight from getCartTotals() — this is what the "Amount Due" box
+    // below shows, so it has to be exactly what checkout charges.
+    const { subtotal, tax, discount, total, discountPreTax } = this.getCartTotals();
     const discountLabel = this._returnCredit ? `↩ Return Credit ${this._returnCredit.return_number}` : this.autoAppliedPromo ? `🏷 ${this.autoAppliedPromo.name}` : 'Discount';
 
     totals.innerHTML = `
       <div class="pos-totals">
         <div class="pos-total-item"><label>Subtotal</label><span>${this.fmt(subtotal)}</span></div>
+        ${discount > 0 && discountPreTax ? `<div class="pos-total-item"><label>${discountLabel}</label><span style="color:var(--success)">-${this.fmt(discount)}</span></div>` : ''}
         <div class="pos-total-item"><label>${isTaxExempt ? 'Tax Exempt' : 'Tax'}</label><span>${isTaxExempt ? '—' : this.fmt(tax)}</span></div>
-        ${discount > 0 ? `<div class="pos-total-item"><label>Total incl. Tax</label><span>${this.fmt(subtotal + tax)}</span></div>` : ''}
-        ${discount > 0 ? `<div class="pos-total-item"><label>${discountLabel}</label><span style="color:var(--success)">-${this.fmt(discount)}</span></div>` : ''}
+        ${discount > 0 && !discountPreTax ? `<div class="pos-total-item"><label>Total incl. Tax</label><span>${this.fmt(subtotal + tax)}</span></div>` : ''}
+        ${discount > 0 && !discountPreTax ? `<div class="pos-total-item"><label>${discountLabel}</label><span style="color:var(--success)">-${this.fmt(discount)}</span></div>` : ''}
         ${this._storeCreditApplied > 0 ? `<div class="pos-total-item"><label>💳 Available Credit</label><span style="color:var(--success)">-${this.fmt(this._storeCreditApplied)}</span></div>` : ''}
         ${this._cashBackApplied > 0 ? `<div class="pos-total-item"><label>🎁 Cash Back</label><span style="color:var(--success)">-${this.fmt(this._cashBackApplied)}</span></div>` : ''}
       </div>
@@ -3716,15 +3716,46 @@ const App = {
     return parseFloat((item.price * item.quantity * (1 - pct / 100)).toFixed(2));
   },
 
+  // Spreads a ticket discount over lines by their net amount — the exact
+  // split lib/ticketDiscount.js makes at checkout, so the cart shows what
+  // the server will charge. Returns the discount (capped at the lines'
+  // total) and each line's share, last line taking the rounding remainder.
+  _allocateTicketDiscount(amounts, discount) {
+    const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
+    const nets = amounts.map(a => Math.max(0, Number(a) || 0));
+    const base = r2(nets.reduce((s, a) => s + a, 0));
+    const disc = r2(Math.min(Math.max(0, Number(discount) || 0), base));
+    const shares = nets.map(() => 0);
+    if (!(disc > 0)) return { discount: 0, shares };
+    let last = -1;
+    nets.forEach((a, i) => { if (a > 0) last = i; });
+    let given = 0;
+    nets.forEach((a, i) => {
+      if (!(a > 0) || i === last) return;
+      shares[i] = r2(disc * a / base);
+      given = r2(given + shares[i]);
+    });
+    shares[last] = r2(disc - given);
+    return { discount: disc, shares };
+  },
+
+  // Ticket discounts (Ticket Discount, promo, auto promotion, discount card)
+  // come off before tax — each line is taxed on its net less its share. A
+  // return credit on an exchange is money already paid, tax included, so it
+  // stays after tax like Available Credit and Cash Back.
   getCartTotals() {
-    const subtotal = this.cart.reduce((s, i) => s + this._cartLineNet(i), 0);
+    const nets = this.cart.map(i => this._cartLineNet(i));
+    const subtotal = nets.reduce((s, n) => s + n, 0);
     const isTaxExempt = this.isCartTaxExempt();
-    const tax = isTaxExempt ? 0 : this.cart.reduce((s, i) => s + (this._cartLineNet(i) * i.tax_rate / 100), 0);
-    const discount = this.cartDiscount || 0;
+    const discountPreTax = !this._returnCredit;
+    const split = discountPreTax ? this._allocateTicketDiscount(nets, this.cartDiscount || 0) : { discount: this.cartDiscount || 0, shares: nets.map(() => 0) };
+    const lineTaxes = this.cart.map((i, idx) => isTaxExempt ? 0 : parseFloat(((nets[idx] - split.shares[idx]) * (i.tax_rate || 0) / 100).toFixed(2)));
+    const tax = lineTaxes.reduce((s, t) => s + t, 0);
+    const discount = split.discount;
     const storeCredit = this._storeCreditApplied || 0;
     const cashBack = this._cashBackApplied || 0;
-    const total = Math.max(0, subtotal + tax - discount - storeCredit - cashBack);
-    return { subtotal: parseFloat(subtotal.toFixed(2)), tax: parseFloat(tax.toFixed(2)), discount: parseFloat(discount.toFixed(2)), storeCredit: parseFloat(storeCredit.toFixed(2)), cashBack: parseFloat(cashBack.toFixed(2)), total: parseFloat(total.toFixed(2)) };
+    const total = Math.max(0, subtotal - discount + tax - storeCredit - cashBack);
+    return { subtotal: parseFloat(subtotal.toFixed(2)), tax: parseFloat(tax.toFixed(2)), discount: parseFloat(discount.toFixed(2)), storeCredit: parseFloat(storeCredit.toFixed(2)), cashBack: parseFloat(cashBack.toFixed(2)), total: parseFloat(total.toFixed(2)), discountPreTax, lineTaxes, lineShares: split.shares };
   },
 
   // Manual per-line discount ("%" button on a cart row) — capped at the
@@ -4432,8 +4463,9 @@ const App = {
             </div>`; }).join('')}
             <hr>
             <div class="receipt-row"><span>Subtotal</span><span>${this.fmt(tx.subtotal)}</span></div>
+            ${tx.discount_amount > 0 && tx.discount_pre_tax ? `<div class="receipt-row"><span>Discount${tx.promotion_code ? ` (${tx.promotion_code})` : ''}</span><span>-${this.fmt(tx.discount_amount)}</span></div>${tx.promotion_name ? `<div style="color:#666;font-size:11px;padding-left:4px">${tx.promotion_name}</div>` : ''}` : ''}
             ${tx.tax_exempt ? `<div class="receipt-row" style="color:#2e7d32"><span>Tax Exempt${tx.tax_exemption_number ? ` — Ref: ${tx.tax_exemption_number}` : ''}</span><span>—</span></div>` : `<div class="receipt-row"><span>Tax</span><span>${this.fmt(tx.tax_amount)}</span></div>`}
-            ${tx.discount_amount > 0 ? `<div class="receipt-row"><span>Discount${tx.promotion_code ? ` (${tx.promotion_code})` : ''}</span><span>-${this.fmt(tx.discount_amount)}</span></div>${tx.promotion_name ? `<div style="color:#666;font-size:11px;padding-left:4px">${tx.promotion_name}</div>` : ''}` : ''}
+            ${tx.discount_amount > 0 && !tx.discount_pre_tax ? `<div class="receipt-row"><span>Discount${tx.promotion_code ? ` (${tx.promotion_code})` : ''}</span><span>-${this.fmt(tx.discount_amount)}</span></div>${tx.promotion_name ? `<div style="color:#666;font-size:11px;padding-left:4px">${tx.promotion_name}</div>` : ''}` : ''}
             <hr>
             <div class="receipt-row receipt-total"><span>TOTAL</span><span>${this.fmt(tx.total)}</span></div>
             ${tx.payment_method === 'split' ? this._splitPaymentReceiptRows(tx, splitForeignCash) : `<div class="receipt-row"><span>Payment</span><span>${tx.payment_method.replace('_',' ').toUpperCase()}</span></div>
@@ -4568,8 +4600,10 @@ const App = {
       tx.discount_amount > 0 ? ['Discount', `-${this.fmt(tx.discount_amount)}`] : null,
     ] : [
       ['Subtotal', this.fmt(tx.subtotal)],
+      // Discount above tax on sales where it came off before tax (discount_pre_tax), below it on older ones.
+      tx.discount_amount > 0 && tx.discount_pre_tax ? [`Discount${tx.promotion_code ? ` (${tx.promotion_code})` : ''}`, `-${this.fmt(tx.discount_amount)}`] : null,
       tx.tax_exempt ? [`Tax Exempt${tx.tax_exemption_number ? ` — Ref: ${tx.tax_exemption_number}` : ''}`, '—'] : ['Tax', this.fmt(tx.tax_amount)],
-      tx.discount_amount > 0 ? [`Discount${tx.promotion_code ? ` (${tx.promotion_code})` : ''}`, `-${this.fmt(tx.discount_amount)}`] : null,
+      tx.discount_amount > 0 && !tx.discount_pre_tax ? [`Discount${tx.promotion_code ? ` (${tx.promotion_code})` : ''}`, `-${this.fmt(tx.discount_amount)}`] : null,
     ]).filter(Boolean);
 
     const tenderRows = [];
@@ -4931,8 +4965,8 @@ const App = {
     const bal = parseFloat(this.cartCustomer?.account_balance || 0);
     if (bal >= 0) return;
     const available = Math.abs(bal);
-    const { subtotal, tax } = this.getCartTotals();
-    const maxApplicable = Math.max(0, parseFloat((subtotal + tax - this.cartDiscount).toFixed(2)));
+    const { subtotal, tax, discount } = this.getCartTotals();
+    const maxApplicable = Math.max(0, parseFloat((subtotal - discount + tax).toFixed(2)));
     this._storeCreditApplied = Math.min(available, maxApplicable);
     document.getElementById('remove-store-credit-btn').style.display = 'inline-flex';
     document.querySelector('#store-credit-bar button:not(#remove-store-credit-btn)').style.display = 'none';
@@ -4949,8 +4983,8 @@ const App = {
   applyCashBack() {
     const available = this.availableCashBack(this.cartCustomer || {});
     if (available <= 0) return;
-    const { subtotal, tax } = this.getCartTotals();
-    const maxApplicable = Math.max(0, parseFloat((subtotal + tax - this.cartDiscount - (this._storeCreditApplied || 0)).toFixed(2)));
+    const { subtotal, tax, discount } = this.getCartTotals();
+    const maxApplicable = Math.max(0, parseFloat((subtotal - discount + tax - (this._storeCreditApplied || 0)).toFixed(2)));
     this._cashBackApplied = Math.min(available, maxApplicable);
     document.getElementById('remove-cash-back-btn').style.display = 'inline-flex';
     document.querySelector('#cash-back-bar button:not(#remove-cash-back-btn)').style.display = 'none';
@@ -14801,7 +14835,7 @@ const App = {
       if (item.is_sp_rental) return `<tr style="opacity:0.5"><td><input type="checkbox" disabled></td><td>${item.product_name}</td><td style="font-family:monospace;font-size:12px">${item.sku||''}</td><td style="text-align:center">${item.quantity}</td><td colspan="3" style="font-size:12px;color:var(--text-muted)">Rental — check it back in from the Rentals screen</td></tr>`;
       if (maxQty <= 0) return `<tr style="opacity:0.4"><td><input type="checkbox" disabled></td><td>${item.product_name}</td><td style="font-family:monospace;font-size:12px">${item.sku||''}</td><td style="text-align:center">${item.quantity}</td><td style="text-align:center;color:var(--danger)">All returned</td><td>${this.fmt(item.unit_price)}</td><td>—</td></tr>`;
       return `<tr>
-        <td><input type="checkbox" class="ret-chk" data-item-id="${item.id}" data-max="${maxQty}" data-price="${item.unit_price}" data-tax-rate="${item.tax_amount > 0 ? (item.tax_amount / item.total * 100) : 0}" data-total="${item.total}" data-tax="${item.tax_amount}" onchange="App._retCalcTotal()"></td>
+        <td><input type="checkbox" class="ret-chk" data-item-id="${item.id}" data-max="${maxQty}" data-price="${item.unit_price}" data-tax-rate="${item.tax_amount > 0 ? (item.tax_amount / item.total * 100) : 0}" data-total="${item.total}" data-tax="${item.tax_amount}" data-disc="${item.discount_share || 0}" onchange="App._retCalcTotal()"></td>
         <td>${item.product_name}</td>
         <td style="font-family:monospace;font-size:12px">${item.sku||''}</td>
         <td style="text-align:center">${item.quantity}${alreadyRet > 0 ? ` <span style="font-size:10px;color:var(--warning)">(${alreadyRet} returned)</span>` : ''}</td>
@@ -14874,6 +14908,7 @@ const App = {
       const maxQty = parseInt(chk.dataset.max);
       const origTotal = parseFloat(chk.dataset.total);
       const origTax = parseFloat(chk.dataset.tax);
+      const origDisc = parseFloat(chk.dataset.disc) || 0;
       const origQtyEl = chk.closest('tr').querySelector('input[type="checkbox"]');
       const origQty = parseInt(this._retTx?.items.find(i => String(i.id) === itemId)?.quantity || 1);
       const qtyInput = document.querySelector(`.ret-qty[data-item-id="${itemId}"]`);
@@ -14883,7 +14918,9 @@ const App = {
         if (qty < 1) qty = 1;
         if (qty > maxQty) { qty = maxQty; qtyInput.value = qty; }
         const proportion = qty / origQty;
-        const lineRefund = parseFloat(((origTotal + origTax) * proportion).toFixed(2));
+        // Same as POST /:id/return: the line's net less its share of the
+        // ticket discount, plus its tax.
+        const lineRefund = parseFloat((parseFloat((origTotal * proportion - Math.round(origDisc * proportion * 100) / 100).toFixed(2)) + parseFloat((origTax * proportion).toFixed(2))).toFixed(2));
         total += lineRefund;
         if (lineDisplay) lineDisplay.textContent = this.fmt(lineRefund);
       } else {
@@ -21621,18 +21658,18 @@ const App = {
             const row = (l, v) => `<div style="display:flex;justify-content:space-between"><span>${l}</span><span>${v}</span></div>`;
             return `<div style="margin:10px 0 0 auto;max-width:340px;font-size:13px;line-height:2">
               ${row('Rental Fees (est.)', this.fmt(sm.rental_fees))}
+              ${sm.discount > 0 ? row('Discount', `-${this.fmt(sm.discount)}`) : ''}
               ${row('Sales Tax', this.fmt(sm.tax))}
               ${q.delivery_required ? row('Delivery', this.fmt(sm.delivery)) : ''}
               ${q.pickup_required ? row('Pickup', this.fmt(sm.pickup)) : ''}
               ${q.operator_required ? row('Operator', this.fmt(sm.operator)) : ''}
               ${row('Refundable Deposit', sm.deposit_waived ? (sm.deposit_waived_reason === 'credit' ? 'Not required (credit account)' : 'Waived (operator)') : this.fmt(sm.deposit))}
-              ${sm.discount > 0 ? row('Discount', `-${this.fmt(sm.discount)}`) : ''}
               <div style="display:flex;justify-content:space-between;border-top:2px solid var(--text);margin-top:4px;font-size:16px;font-weight:700"><span>Total Due at Checkout</span><span>${this.fmt(sm.total)}</span></div>
             </div>`;
           })() : `<div style="text-align:right;margin-top:10px;font-size:13px;line-height:2">
             <div>Subtotal: ${this.fmt(q.subtotal)}</div>
-            <div>Tax: ${this.fmt(q.tax_amount)}</div>
             ${q.discount_amount > 0 ? `<div>Discount: -${this.fmt(q.discount_amount)}</div>` : ''}
+            <div>Tax: ${this.fmt(q.tax_amount)}</div>
             <div style="font-size:16px;font-weight:700">Total: ${this.fmt(q.total)}</div>
           </div>`}
           <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:14px">

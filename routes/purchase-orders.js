@@ -13,6 +13,7 @@ const { autoBills, createBill, dueDateFor, today } = require('../lib/payables');
 const { uploadSignature } = require('../lib/signatures');
 const { getSetting } = require('../lib/settings');
 const { localTaxRate, defaultTaxOption, priceLine, poTotals, receivedValue } = require('../lib/poLines');
+const { allocateTicketDiscount } = require('../lib/ticketDiscount');
 
 // Items joined with the quotation/work order they trace back to (a PR's "Q"
 // line converted into this PO) — lets the PO detail view click straight
@@ -455,11 +456,16 @@ router.post('/:id/items/:itemId/link-product', async (req, res) => {
           // Once a quote is converted to an invoice its financials are frozen —
           // still re-point the item at the real product above, just don't reprice it.
           if (quote && quote.status !== 'converted') {
-            const newLineTax = parseFloat((qItem.total * product.tax_rate / 100).toFixed(2));
+            // Taxed on the line less its share of the quote's Discount, which
+            // comes off before tax (lib/ticketDiscount.js).
+            const { rows: quoteLines } = await tx.execute({ sql: 'SELECT id, total FROM quotation_items WHERE quote_id = ? ORDER BY id', args: [quote.id] });
+            const { shares } = allocateTicketDiscount(quoteLines.map(l => l.total), quote.discount_amount);
+            const lineShare = shares[quoteLines.findIndex(l => l.id === qItem.id)] || 0;
+            const newLineTax = parseFloat(((qItem.total - lineShare) * product.tax_rate / 100).toFixed(2));
             const taxDelta = parseFloat((newLineTax - qItem.tax_amount).toFixed(2));
             await tx.execute({ sql: 'UPDATE quotation_items SET tax_amount = ? WHERE id = ?', args: [newLineTax, qItem.id] });
             const newTaxTotal = parseFloat((quote.tax_amount + taxDelta).toFixed(2));
-            const newTotal = parseFloat((quote.subtotal + newTaxTotal - quote.discount_amount).toFixed(2));
+            const newTotal = parseFloat((quote.subtotal - quote.discount_amount + newTaxTotal).toFixed(2));
             await tx.execute({ sql: 'UPDATE quotations SET tax_amount=?, total=? WHERE id=?', args: [newTaxTotal, newTotal, quote.id] });
           }
           quotationUpdated = true;

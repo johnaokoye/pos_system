@@ -3,7 +3,8 @@ const router = express.Router();
 const { db } = require('../database');
 const { getOutstandingQty, getOutOfServiceQty } = require('../lib/rentalAvailability');
 const { blockedMessage, creditLimitError } = require('../lib/creditBlock');
-const { depositWaiver, isCreditCustomerType, getBranchStock, feeFor, blendedFeePerUnit, checkAvailability, parseDbTime, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, assertNoUnpaidRentalReturns, dueDateTime, requiredDepositReturnMethod, rentalDiscount, attachRateBasis, rentalWindow, rateLineOf } = require('../lib/rentals');
+const { depositWaiver, isCreditCustomerType, getBranchStock, feeFor, blendedFeePerUnit, checkAvailability, parseDbTime, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, assertNoUnpaidRentalReturns, dueDateTime, requiredDepositReturnMethod, rentalDiscount, rentalTaxAfterDiscount, attachRateBasis, rentalWindow, rateLineOf } = require('../lib/rentals');
+const { allocateTicketDiscount } = require('../lib/ticketDiscount');
 const { ratePlanError } = require('../lib/rentalPricing');
 const { requirePermission, requireAnyPermission, requireAuth, can, canManageRentals, requireRentalsManage } = require('../lib/permissions');
 const { runCreditCheck } = require('./customers');
@@ -297,7 +298,9 @@ router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
       agreement.estimated_tax = parseFloat(estTax.toFixed(2));
       agreement.estimated_deposit_total = agreement.deposit_waived_reason ? 0 : parseFloat((estRentalSubtotal + estTax).toFixed(2));
       agreement.estimated_discount = rentalDiscount(agreement.discount_amount, agreement.estimated_rental_subtotal, agreement.estimated_tax, deliveryCost + pickupCost + operatorFee);
-      agreement.estimated_total = parseFloat((estRentalSubtotal + estTax + agreement.estimated_deposit_total + deliveryCost + pickupCost + operatorFee - agreement.estimated_discount).toFixed(2));
+      // Discount comes off before tax; the deposit above stays fee + full tax.
+      agreement.estimated_tax = rentalTaxAfterDiscount(agreement.estimated_discount, agreement.estimated_rental_subtotal, agreement.estimated_tax, deliveryCost + pickupCost + operatorFee);
+      agreement.estimated_total = parseFloat((estRentalSubtotal - agreement.estimated_discount + agreement.estimated_tax + agreement.estimated_deposit_total + deliveryCost + pickupCost + operatorFee).toFixed(2));
     }
     const { rows: pauses } = await db.execute({ sql: `SELECT rp.*, pb.first_name || ' ' || pb.last_name as paused_by_name, ab.first_name || ' ' || ab.last_name as authorized_by_name, rb.first_name || ' ' || rb.last_name as resumed_by_name, cb.first_name || ' ' || cb.last_name as confirmed_by_name
       FROM rental_agreement_pauses rp
@@ -550,9 +553,22 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
     const operatorFee = agreement.operator_required ? parseFloat(agreement.operator_fee || 0) : 0;
     const serviceFeesTotal = parseFloat((deliveryCost + pickupCost + operatorFee).toFixed(2));
     // Discount agreed on the rental quote this agreement was converted from
-    // (0 for a direct rental). Comes off the charge, never the deposit —
-    // the deposit is still refunded in full on a clean return.
-    const discountAmount = rentalDiscount(agreement.discount_amount, rentalSubtotal, taxAmount, serviceFeesTotal);
+    // (0 for a direct rental). Comes off the charge before tax, never the
+    // deposit (computed above from the undiscounted fee + tax) — the deposit
+    // is still refunded in full on a clean return. Spread over the items'
+    // fees and the service fees by amount (lib/ticketDiscount.js), and each
+    // item re-taxed on its fee less its share.
+    const discountSplit = allocateTicketDiscount([...existingItems.map(i => i.rentalFee), serviceFeesTotal], agreement.discount_amount);
+    const discountAmount = discountSplit.discount;
+    if (discountAmount > 0) {
+      taxAmount = 0;
+      existingItems.forEach((item, i) => {
+        item.ticketDiscount = discountSplit.shares[i];
+        item.lineTax = parseFloat(((item.rentalFee - item.ticketDiscount) * (item.tax_rate || 0) / 100).toFixed(2));
+        taxAmount += item.lineTax;
+      });
+      taxAmount = parseFloat(taxAmount.toFixed(2));
+    }
 
     const total = parseFloat((rentalSubtotal + taxAmount + depositTotal + serviceFeesTotal - discountAmount).toFixed(2));
 
@@ -578,7 +594,7 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
     const tx = await db.transaction('write');
     let committed = false;
     try {
-      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,total,payment_method,amount_tendered,change_amount,notes,source,approval_code) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, agreement.customer_id, finalizeEmployeeId || null, agreement.branch_id, drawer_session_id || null, rentalSubtotal + depositTotal + serviceFeesTotal, taxAmount, discountAmount, total, method, tendered, changeAmt, `Rental checkout ${agreement.agreement_number}`, 'pos', approvalCode] });
+      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,total,payment_method,amount_tendered,change_amount,notes,source,approval_code,discount_pre_tax) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)`, args: [transaction_number, agreement.customer_id, finalizeEmployeeId || null, agreement.branch_id, drawer_session_id || null, rentalSubtotal + depositTotal + serviceFeesTotal, taxAmount, discountAmount, total, method, tendered, changeAmt, `Rental checkout ${agreement.agreement_number}`, 'pos', approvalCode] });
       const checkoutTxId = Number(txResult.lastInsertRowid);
       // Per-leg rows are what drawer reconciliation and the tender reports
       // sum for a split sale (single-method checkouts fall back to
@@ -592,7 +608,7 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
       for (const item of existingItems) {
         await tx.execute({ sql: 'UPDATE rental_agreement_items SET rental_fee = ?, deposit_amount = ? WHERE id = ?', args: [item.rentalFee, item.depositAmount, item.id] });
         const itemLabel = item.parent_item_id != null ? `${item.product_name}${item.is_mandatory ? ' (included)' : ' (accessory)'}` : item.product_name;
-        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?,?)`, args: [checkoutTxId, item.product_id, itemLabel, item.sku, item.quantity, item.is_mandatory ? 0 : (item.rentalFee / item.quantity), item.lineTax, item.rentalFee] });
+        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,tax_amount,total,ticket_discount) VALUES (?,?,?,?,?,?,?,?,?)`, args: [checkoutTxId, item.product_id, itemLabel, item.sku, item.quantity, item.is_mandatory ? 0 : (item.rentalFee / item.quantity), item.lineTax, item.rentalFee, item.ticketDiscount ?? null] });
       }
       if (depositTotal > 0) {
         await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?,?)`, args: [checkoutTxId, null, 'Refundable Deposit', 'DEPOSIT', 1, depositTotal, 0, depositTotal] });

@@ -120,8 +120,9 @@ function buildReceiptHtml(tx, s) {
       </table>
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-top:12px">
         <tr><td style="padding:3px 0">Subtotal</td><td style="text-align:right">${fmt(tx.subtotal)}</td></tr>
+        ${parseFloat(tx.discount_amount) > 0 && tx.discount_pre_tax ? `<tr><td style="padding:3px 0;color:${BRAND.green}">Discount</td><td style="text-align:right;color:${BRAND.green}">-${fmt(tx.discount_amount)}</td></tr>` : ''}
         <tr><td style="padding:3px 0">Tax</td><td style="text-align:right">${fmt(tx.tax_amount)}</td></tr>
-        ${parseFloat(tx.discount_amount) > 0 ? `<tr><td style="padding:3px 0;color:${BRAND.green}">Discount</td><td style="text-align:right;color:${BRAND.green}">-${fmt(tx.discount_amount)}</td></tr>` : ''}
+        ${parseFloat(tx.discount_amount) > 0 && !tx.discount_pre_tax ? `<tr><td style="padding:3px 0;color:${BRAND.green}">Discount</td><td style="text-align:right;color:${BRAND.green}">-${fmt(tx.discount_amount)}</td></tr>` : ''}
         <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
         <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">TOTAL</td><td style="font-size:16px;font-weight:700;color:${BRAND.black};text-align:right">${fmt(tx.total)}</td></tr>
         ${parseFloat(tx.change_amount) > 0 ? `<tr><td style="padding:3px 0;color:${BRAND.green}">Change</td><td style="text-align:right;color:${BRAND.green}">${fmt(tx.change_amount)}</td></tr>` : ''}
@@ -640,8 +641,8 @@ ${print ? PRINT_PAGE_STYLE : ''}
       </table>
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-top:12px">
         <tr><td style="padding:3px 0">Subtotal</td><td style="text-align:right">${fmt(q.subtotal)}</td></tr>
-        <tr><td style="padding:3px 0">Tax</td><td style="text-align:right">${fmt(q.tax_amount)}</td></tr>
         ${parseFloat(q.discount_amount) > 0 ? `<tr><td style="padding:3px 0;color:${BRAND.green}">Discount</td><td style="text-align:right;color:${BRAND.green}">-${fmt(q.discount_amount)}</td></tr>` : ''}
+        <tr><td style="padding:3px 0">Tax</td><td style="text-align:right">${fmt(q.tax_amount)}</td></tr>
         <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
         <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">TOTAL</td><td style="font-size:16px;font-weight:700;color:${BRAND.black};text-align:right">${fmt(q.total)}</td></tr>
       </table>
@@ -714,6 +715,7 @@ function buildRentalQuoteHtml(q, s, { print = false } = {}) {
   const line = (label, value, style = '') => `<tr><td style="padding:3px 0;${style}">${label}</td><td style="text-align:right;${style}">${value}</td></tr>`;
   const summaryRows = [
     line('Rental Fees (estimated)', fmt(sum.rental_fees)),
+    sum.discount > 0 ? line('Discount', `-${fmt(sum.discount)}`, `color:${BRAND.green}`) : '',
     line('Sales Tax', fmt(sum.tax)),
     q.delivery_required ? line('Delivery', fmt(sum.delivery)) : '',
     q.pickup_required ? line('Pickup', fmt(sum.pickup)) : '',
@@ -721,7 +723,6 @@ function buildRentalQuoteHtml(q, s, { print = false } = {}) {
     sum.deposit_waived
       ? line('Refundable Deposit', sum.deposit_waived_reason === 'credit' ? 'Not required — credit account' : 'Waived — operator provided')
       : line('Refundable Deposit', fmt(sum.deposit)),
-    sum.discount > 0 ? line('Discount', `-${fmt(sum.discount)}`, `color:${BRAND.green}`) : '',
   ].join('');
 
   return `<!DOCTYPE html>
@@ -1902,8 +1903,8 @@ function quotePdfModel(q, s) {
     })) }],
     totals: [
       { label: 'Subtotal', value: fmt(q.subtotal) },
-      { label: 'Tax', value: fmt(q.tax_amount) },
       parseFloat(q.discount_amount) > 0 ? { label: 'Discount', value: `-${fmt(q.discount_amount)}`, style: 'green' } : null,
+      { label: 'Tax', value: fmt(q.tax_amount) },
       { label: 'TOTAL', value: fmt(q.total), style: 'grand' },
     ],
     notes: [q.notes ? `Notes: ${q.notes}` : ''],
@@ -1938,12 +1939,12 @@ function rentalQuotePdfModel(q, s) {
     ],
     totals: [
       { label: 'Rental Fees (estimated)', value: fmt(sum.rental_fees) },
+      sum.discount > 0 ? { label: 'Discount', value: `-${fmt(sum.discount)}`, style: 'green' } : null,
       { label: 'Sales Tax', value: fmt(sum.tax) },
       q.delivery_required ? { label: 'Delivery', value: fmt(sum.delivery) } : null,
       q.pickup_required ? { label: 'Pickup', value: fmt(sum.pickup) } : null,
       q.operator_required ? { label: 'Operator', value: fmt(sum.operator) } : null,
       { label: 'Refundable Deposit', value: sum.deposit_waived ? (sum.deposit_waived_reason === 'credit' ? 'Not required (credit)' : 'Waived (operator)') : fmt(sum.deposit) },
-      sum.discount > 0 ? { label: 'Discount', value: `-${fmt(sum.discount)}`, style: 'green' } : null,
       { label: 'TOTAL DUE AT CHECKOUT', value: fmt(sum.total), style: 'grand' },
     ],
     notes: [
@@ -1969,8 +1970,9 @@ function receiptPdfModel(tx, s) {
     }) }],
     totals: [
       { label: 'Subtotal', value: fmt(tx.subtotal) },
+      parseFloat(tx.discount_amount) > 0 && tx.discount_pre_tax ? { label: 'Discount', value: `-${fmt(tx.discount_amount)}`, style: 'green' } : null,
       tx.tax_exempt ? { label: `Tax Exempt${tx.tax_exemption_number ? ` (Ref: ${tx.tax_exemption_number})` : ''}`, value: '-' } : { label: 'Tax', value: fmt(tx.tax_amount) },
-      parseFloat(tx.discount_amount) > 0 ? { label: 'Discount', value: `-${fmt(tx.discount_amount)}`, style: 'green' } : null,
+      parseFloat(tx.discount_amount) > 0 && !tx.discount_pre_tax ? { label: 'Discount', value: `-${fmt(tx.discount_amount)}`, style: 'green' } : null,
       { label: 'TOTAL', value: fmt(tx.total), style: 'grand' },
       parseFloat(tx.change_amount) > 0 ? { label: 'Change', value: fmt(tx.change_amount), style: 'muted' } : null,
     ],

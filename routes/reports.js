@@ -884,8 +884,10 @@ router.get('/credit-risk', requirePermission('reports'), async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Tax collected — sized for filing: taxable sales (subtotal) alongside tax
-// actually collected, by day and by branch.
+// Tax collected — sized for filing: taxable sales (subtotal, less the ticket
+// discount on sales where it came off before tax — discount_pre_tax, see
+// lib/ticketDiscount.js) alongside tax actually collected, by day and by branch.
+const TAXABLE_SQL = (t = '') => `COALESCE(SUM(${t}subtotal - CASE WHEN ${t}discount_pre_tax = 1 THEN ${t}discount_amount ELSE 0 END), 0)`;
 router.get('/tax-collected', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
@@ -895,18 +897,18 @@ router.get('/tax-collected', requirePermission('reports'), async (req, res) => {
     const bp = branch_id ? [branch_id] : [];
 
     const { rows: [summary] } = await db.execute({
-      sql: `SELECT COUNT(*) as tx_count, COALESCE(SUM(subtotal), 0) as taxable_sales, COALESCE(SUM(tax_amount), 0) as tax_collected
+      sql: `SELECT COUNT(*) as tx_count, ${TAXABLE_SQL()} as taxable_sales, COALESCE(SUM(tax_amount), 0) as tax_collected
             FROM transactions WHERE status = 'completed' AND date(created_at) BETWEEN date(?) AND date(?)${bf}`,
       args: [s, e, ...bp],
     });
     const { rows: byDay } = await db.execute({
-      sql: `SELECT date(created_at) as date, COALESCE(SUM(subtotal), 0) as taxable_sales, COALESCE(SUM(tax_amount), 0) as tax_collected
+      sql: `SELECT date(created_at) as date, ${TAXABLE_SQL()} as taxable_sales, COALESCE(SUM(tax_amount), 0) as tax_collected
             FROM transactions WHERE status = 'completed' AND date(created_at) BETWEEN date(?) AND date(?)${bf}
             GROUP BY date(created_at) ORDER BY date`,
       args: [s, e, ...bp],
     });
     const { rows: byBranch } = await db.execute({
-      sql: `SELECT t.branch_id, b.name as branch_name, COALESCE(SUM(t.subtotal), 0) as taxable_sales, COALESCE(SUM(t.tax_amount), 0) as tax_collected
+      sql: `SELECT t.branch_id, b.name as branch_name, ${TAXABLE_SQL('t.')} as taxable_sales, COALESCE(SUM(t.tax_amount), 0) as tax_collected
             FROM transactions t LEFT JOIN branches b ON t.branch_id = b.id
             WHERE t.status = 'completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}
             GROUP BY t.branch_id ORDER BY tax_collected DESC`,
