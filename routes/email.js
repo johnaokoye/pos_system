@@ -61,6 +61,14 @@ function commentRowHtml(text, colspan) {
     <tr><td colspan="${colspan}" style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-style:italic;color:#555">${safe}</td></tr>`;
 }
 
+// A serial-number (SN) line: a plain "Serial: X" note under the item it
+// belongs to, rather than a $0.00 item.
+function serialRowHtml(serial, colspan) {
+  const safe = String(serial || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return `
+    <tr><td colspan="${colspan}" style="padding:2px 8px 6px 18px;border-bottom:1px solid #f0f0f0;font-size:12px;color:#555">Serial: ${safe}</td></tr>`;
+}
+
 // The PDF version: the text in the item column, the other cells blank.
 function commentRowPdf(text, columnCount, mainCol = 0) {
   const cells = Array(columnCount).fill('');
@@ -96,6 +104,7 @@ function buildReceiptHtml(tx, s) {
 
   const rows = (tx.items || []).map(i => {
     if (i.is_comment) return commentRowHtml(i.product_name, 2);
+    if (i.serial_number) return serialRowHtml(i.serial_number, 2);
     // Manual line-item discount (POS "%" button), shown between the unit
     // price and the line total — e.g. "× 2 @ $10.00 less 5% (-$1.00)".
     const gross = (parseFloat(i.unit_price) || 0) * (parseFloat(i.quantity) || 0);
@@ -607,7 +616,7 @@ function buildQuoteHtml(q, s, { print = false } = {}) {
   const storePhone = s.store_phone || '';
   const footer = footerHtml(s);
 
-  const rows = (q.items || []).map(i => i.is_comment ? commentRowHtml(i.product_name, 5) : `
+  const rows = (q.items || []).map(i => i.is_comment ? commentRowHtml(i.product_name, 5) : i.serial_number ? serialRowHtml(i.serial_number, 5) : `
     <tr>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;white-space:nowrap;color:#555">${i.sku || ''}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}${parseFloat(i.discount_amount) > 0 ? `<br><span style="color:${BRAND.green};font-size:11px">Price includes ${fmt(i.discount_amount)} discount</span>` : ''}</td>
@@ -1913,7 +1922,7 @@ function quotePdfModel(q, s) {
     title: 'QUOTATION', number: q.quote_number,
     meta: [['Date', pdfDate(q.created_at)], ['Valid Until', q.valid_until ? pdfDate(String(q.valid_until).slice(0, 10)) : ''], ['Branch', q.branch_name]],
     party: { label: 'Bill To', lines: [q.customer_name, q.customer_phone, q.customer_email] },
-    tables: [{ mainCol: 1, columns: [{ label: 'SKU', width: 1.4 }, { label: 'Item', width: 3.4 }, ...ITEM_COLUMNS.slice(1)], rows: (q.items || []).map(i => i.is_comment ? commentRowPdf(i.product_name, 5, 1) : ({
+    tables: [{ mainCol: 1, columns: [{ label: 'SKU', width: 1.4 }, { label: 'Item', width: 3.4 }, ...ITEM_COLUMNS.slice(1)], rows: (q.items || []).map(i => i.is_comment ? commentRowPdf(i.product_name, 5, 1) : i.serial_number ? commentRowPdf(`Serial: ${i.serial_number}`, 5, 1) : ({
       cells: [i.sku || '', i.product_name, i.quantity, fmt(i.unit_price), fmt(i.total)],
       sub: parseFloat(i.discount_amount) > 0 ? `Price includes ${fmt(i.discount_amount)} discount` : '',
     })) }],
@@ -1981,6 +1990,7 @@ function receiptPdfModel(tx, s) {
     info: [['Created By', tx.created_by_name], ['Cashier', tx.employee_name], ['Payment', (tx.payment_method || '').replace('_', ' ').toUpperCase()]],
     tables: [{ columns: ITEM_COLUMNS, rows: (tx.items || []).map(i => {
       if (i.is_comment) return commentRowPdf(i.product_name, ITEM_COLUMNS.length);
+      if (i.serial_number) return commentRowPdf(`Serial: ${i.serial_number}`, ITEM_COLUMNS.length);
       const gross = (parseFloat(i.unit_price) || 0) * (parseFloat(i.quantity) || 0);
       const pct = parseFloat(i.discount_percent) || (parseFloat(i.discount_amount) > 0 && gross > 0 ? parseFloat((i.discount_amount / gross * 100).toFixed(2)) : 0);
       return { cells: [i.product_name, i.quantity, fmt(i.unit_price), fmt(i.total)], sub: [i.sku, pct > 0 ? `less ${pct}% (-${fmt(i.discount_amount)})` : ''].filter(Boolean).join(' · ') };

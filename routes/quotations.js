@@ -3,7 +3,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { requirePermission, requireAnyPermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
-const { isSerialNumberProduct, serialNumberLabel, serialNumberOf } = require('../lib/serialNumber');
+const { isSerialNumberProduct, serialNumberLabel, serialNumberOf, serialClashError } = require('../lib/serialNumber');
 const { createTransfer } = require('../lib/transfers');
 const { getOutstandingQty, getOutOfServiceQty } = require('../lib/rentalAvailability');
 const { resolveUnit, lineName, parseQty } = require('../lib/units');
@@ -302,6 +302,7 @@ async function processQuoteItems(items, { allowRental = false } = {}) {
     const isSN = isSerialNumberProduct(product);
     const serial_number = isSN ? serialNumberOf(item) : null;
     if (isSN && !serial_number) continue;
+    if (serial_number) { const clash = await serialClashError(db, serial_number); if (clash) throw new Error(clash); }
     // Unit of measure (lib/units.js): the unit's price by default, cost of
     // that many stock units, and part quantities for a decimal unit.
     const unit = product && !serial_number ? await resolveUnit(db, product, item.uom_id ?? item.sell_unit) : { uom_id: null, sell_unit: null, units_per: 1, allow_decimal: 0 };

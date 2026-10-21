@@ -3338,10 +3338,33 @@ const App = {
   },
 
   _promptSerialNumber(current = '') {
-    const input = prompt('Enter serial number:', current);
-    if (input == null) return null;
-    // Serials are optional — a blank entry just adds no SN line.
-    return input.trim() || null;
+    for (;;) {
+      const input = prompt('Enter serial number:', current);
+      if (input == null) return null;
+      // Serials are optional — a blank entry just adds no SN line.
+      const serial = input.trim();
+      if (!serial) return null;
+      // An item number keyed or scanned at the serial prompt records
+      // nothing useful — ask again (the server refuses it too).
+      const clash = this._serialItemClash(serial);
+      if (!clash) return serial;
+      alert(`"${serial}" is the item number for ${clash.name}, not a serial number.\n\nEnter the serial printed on the product, or leave it blank to skip.`);
+      current = '';
+    }
+  },
+
+  // The catalog product whose item number or barcode equals `serial`
+  // (other than the SN item itself), or null.
+  _serialItemClash(serial) {
+    const s = String(serial || '').trim().toLowerCase();
+    if (!s) return null;
+    return (this.allProducts || []).find(p => !this._isSerialNumberProduct(p) && ((p.sku || '').toLowerCase() === s || (p.barcode || '').toLowerCase() === s)) || null;
+  },
+
+  // Receipts/invoices/quotes show a serial-number line as a plain note under
+  // the item it belongs to ("Serial: X") rather than a $0.00 item.
+  _serialNote(i) {
+    return `Serial: ${this.escapeAttr(i.serial_number)}`;
   },
 
   // Units of measure (lib/units.js) a product can be sold in ('sell': its
@@ -4538,7 +4561,7 @@ const App = {
             ${tx.salesperson_name ? `<div class="receipt-row"><span>Salesperson:</span><span>${tx.salesperson_name}</span></div>` : ''}
             ${tx.employee_name ? `<div class="receipt-row"><span>Cashier:</span><span>${tx.employee_name}</span></div>` : ''}
             <hr>
-            ${items.map(i => { if (i.is_comment) return `<div class="receipt-item" style="font-style:italic;white-space:pre-wrap;padding-left:8px">${this.escapeAttr(i.product_name)}</div>`; const pct = this._lineDiscountPct(i); return `<div class="receipt-item">
+            ${items.map(i => { if (i.is_comment) return `<div class="receipt-item" style="font-style:italic;white-space:pre-wrap;padding-left:8px">${this.escapeAttr(i.product_name)}</div>`; if (i.serial_number) return `<div class="receipt-item" style="padding-left:8px;font-size:12px">${this._serialNote(i)}</div>`; const pct = this._lineDiscountPct(i); return `<div class="receipt-item">
               <div>${i.sku ? `<span style="font-size:11px;color:#555">${i.sku}</span> ` : ''}${i.product_name}</div>
               <div class="receipt-row"><span style="padding-left:8px">${i.quantity} x ${this.fmt(i.unit_price)}</span><span>${this.fmt(i.total)}</span></div>
               ${pct > 0 ? `<div style="color:#666;font-size:11px;padding-left:8px">less ${pct}% (-${this.fmt(i.discount_amount)})</div>` : ''}
@@ -4646,9 +4669,9 @@ const App = {
     const rentalDurationCellLabel = this.rentalDurationLabel(tx.rental_checkout_datetime, tx.rental_due_date, tx.rental_returned_at);
     const hasLineDiscount = items.some(i => this._lineDiscountPct(i) > 0);
     const itemCols = 5 + (isRental ? 3 : 0) + (hasLineDiscount ? 1 : 0);
-    const itemRows = items.map(i => i.is_comment ? `<tr>
+    const itemRows = items.map(i => i.is_comment || i.serial_number ? `<tr>
         <td style="padding:8px;border-bottom:1px solid #e8e8e8"></td>
-        <td colspan="${itemCols - 1}" style="padding:8px;border-bottom:1px solid #e8e8e8;font-style:italic;white-space:pre-wrap">${this.escapeAttr(i.product_name)}</td>
+        <td colspan="${itemCols - 1}" style="padding:8px;border-bottom:1px solid #e8e8e8;${i.is_comment ? 'font-style:italic;white-space:pre-wrap' : 'font-size:12px;color:#444'}">${i.is_comment ? this.escapeAttr(i.product_name) : this._serialNote(i)}</td>
       </tr>` : `<tr>
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;white-space:nowrap;color:#555">${i.sku || ''}</td>
         <td style="padding:8px;border-bottom:1px solid #e8e8e8">${i.product_name}</td>
@@ -21639,6 +21662,7 @@ const App = {
 
     const valid_until = document.getElementById('qt-valid').value;
     const items = [];
+    let snClash = null;
     document.querySelectorAll('#qt-items > [id^="qt-item-"]').forEach(row => {
       const idx = row.id.split('-').pop();
       if (row.dataset.comment === '1') {
@@ -21680,6 +21704,8 @@ const App = {
           item.serial_number = snInp.value.trim();
           // Optional — an SN line left blank is simply left off the quote.
           if (!item.serial_number) return;
+          const clash = this._serialItemClash(item.serial_number);
+          if (clash && !snClash) snClash = `"${item.serial_number}" is the item number for ${clash.name}, not a serial number — enter the serial printed on the product`;
         }
         const allocInputs = document.querySelectorAll(`[id^="qt-alloc-${idx}-b"]`);
         if (allocInputs.length && branch_id) {
@@ -21712,6 +21738,7 @@ const App = {
       const is_q_item = descInp.dataset.qItem === '1';
       items.push({ description, quantity, unit_price, unit_cost, discount, purchase_request_id, is_q_item });
     });
+    if (snClash) { this.alert(snClash, 'error'); return; }
     if (!items.length) { this.alert('Add at least one item', 'error'); return; }
     const isSpecialProject = this._quoteType === 'special_project';
     try {
@@ -21845,7 +21872,7 @@ const App = {
         <table>
           <thead><tr><th>Product</th><th>Qty</th><th>Price</th><th>Tax</th><th>Total</th></tr></thead>
           <tbody>
-            ${q.items.map(i => i.is_comment ? `<tr><td colspan="5" style="font-style:italic;white-space:pre-wrap;color:var(--text-muted)"><span class="badge-pill badge-info" style="font-size:10px;font-style:normal">C</span> ${this.escapeAttr(i.product_name)}</td></tr>` : `<tr><td>${i.product_name}${i.is_temp_item && (!isSpecialProject || i.is_q_item) ? ` <span class="badge-pill badge-warning" style="font-size:10px" title="Flagged for Purchasing to order">Q</span>${i.purchase_request_number ? ` <a href="#" style="font-size:11px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${i.purchase_request_id})">${i.purchase_request_number}</a>` : ''}` : ''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on this line">-${this.fmt(i.discount_amount)}</span>` : ''}${this.renderQuoteItemSources(i, q)}</td><td>${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td>${this.fmt(i.tax_amount)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}
+            ${q.items.map(i => !i.is_comment && i.serial_number ? `<tr><td colspan="5" style="font-size:12px;color:var(--text-muted);padding-left:24px">${this._serialNote(i)}</td></tr>` : i.is_comment ? `<tr><td colspan="5" style="font-style:italic;white-space:pre-wrap;color:var(--text-muted)"><span class="badge-pill badge-info" style="font-size:10px;font-style:normal">C</span> ${this.escapeAttr(i.product_name)}</td></tr>` : `<tr><td>${i.product_name}${i.is_temp_item && (!isSpecialProject || i.is_q_item) ? ` <span class="badge-pill badge-warning" style="font-size:10px" title="Flagged for Purchasing to order">Q</span>${i.purchase_request_number ? ` <a href="#" style="font-size:11px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${i.purchase_request_id})">${i.purchase_request_number}</a>` : ''}` : ''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on this line">-${this.fmt(i.discount_amount)}</span>` : ''}${this.renderQuoteItemSources(i, q)}</td><td>${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td>${this.fmt(i.tax_amount)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}
           </tbody>
         </table>
       </div>`;

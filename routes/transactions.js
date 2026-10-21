@@ -8,7 +8,7 @@ const { requireAuth, requirePermission, requireAnyPermission, can } = require('.
 const { nextNumber } = require('../lib/nextNumber');
 const { blockedMessage, creditLimitError } = require('../lib/creditBlock');
 const { resolveUnit, lineName, parseQty, stockUnits } = require('../lib/units');
-const { isSerialNumberProduct, serialNumberLabel, serialNumberOf } = require('../lib/serialNumber');
+const { isSerialNumberProduct, serialNumberLabel, serialNumberOf, serialClashError } = require('../lib/serialNumber');
 const { checkDiscountEligibility } = require('./promotions');
 const { allocateTicketDiscount, returnedDiscountShare } = require('../lib/ticketDiscount');
 
@@ -389,6 +389,8 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       if (isSerialNumberProduct(product)) {
         const serialNumber = serialNumberOf(item);
         if (!serialNumber) continue;
+        const clash = await serialClashError(db, serialNumber);
+        if (clash) throw new Error(clash);
         const unit_price = product.price || 0;
         const lineTax = isTaxExempt ? 0 : parseFloat((unit_price * product.tax_rate / 100).toFixed(2));
         subtotal += unit_price;
