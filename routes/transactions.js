@@ -52,6 +52,37 @@ async function ticketSalesperson(initiatorId, pickedId) {
 }
 const CREDITED_SQL = 'COALESCE(t.salesperson_id, t.created_by, t.employee_id)';
 
+// Commission follows a sale to its new salesperson (PATCH /salesperson):
+// the old person's unpaid commission on it (pending or approved) is removed
+// and worked out again for the new one — their plan as of the sale date,
+// counted in the sale's month, as a new pending record. Paid commission is
+// never touched — the sale is listed back so it can be settled by hand —
+// the same rule a void follows. Rental commission (source_type 'rental')
+// stays with the rental agreement.
+async function moveSaleCommissions(moved) {
+  const result = { commissions_moved: 0, commissions_paid: [] };
+  if (!moved.length) return result;
+  const ids = moved.map(m => m.id);
+  const { rows: recs } = await db.execute({ sql: `SELECT source_id, status, sale_amount FROM commission_records WHERE source_type = 'transaction' AND source_id IN (${ids.map(() => '?').join(',')})`, args: ids });
+  const { rows: txs } = await db.execute({ sql: `SELECT id, total, created_at FROM transactions WHERE id IN (${ids.map(() => '?').join(',')})`, args: ids });
+  const txById = Object.fromEntries(txs.map(t => [Number(t.id), t]));
+  // Only employees with a commission plan can earn one — skip the rest.
+  const { rows: planned } = await db.execute({ sql: 'SELECT DISTINCT employee_id FROM employee_commission_plans', args: [] });
+  const hasPlan = new Set(planned.map(p => Number(p.employee_id)));
+  for (const m of moved) {
+    const own = recs.filter(r => Number(r.source_id) === Number(m.id));
+    if (own.some(r => r.status === 'paid')) { result.commissions_paid.push(m.transaction_number); continue; }
+    try {
+      if (own.length) await db.execute({ sql: "DELETE FROM commission_records WHERE source_type = 'transaction' AND source_id = ? AND status != 'paid'", args: [m.id] });
+      const tx = txById[Number(m.id)];
+      const amount = own.length ? Number(own[0].sale_amount) : Number(tx?.total) || 0;
+      const rec = hasPlan.has(Number(m.after)) ? await calcCommission(m.after, amount, 'transaction', m.id, m.transaction_number, tx?.created_at) : null;
+      if (own.length || rec) result.commissions_moved++;
+    } catch (e) { console.error('[salesperson] commission move failed for', m.transaction_number, e.message); }
+  }
+  return result;
+}
+
 // Put order on hold (no stock updates, no payment processing)
 router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
   try {
@@ -236,15 +267,18 @@ router.patch('/salesperson', requirePermission('sales_manager'), async (req, res
     if (notSales.length) return res.status(400).json({ error: `Only completed sales can be credited — ${notSales.map(r => r.transaction_number).join(', ')} ${notSales.length === 1 ? 'is' : 'are'} held or voided` });
     const stmts = [];
     let changed = 0;
+    const moved = [];
     for (const r of rows) {
       const after = newId || r.fallback_id;
       if ((r.salesperson_id ?? null) === newId) continue;
       stmts.push({ sql: 'UPDATE transactions SET salesperson_id = ? WHERE id = ?', args: [newId, r.id] });
       stmts.push({ sql: 'INSERT INTO salesperson_changes (transaction_id, old_salesperson_id, new_salesperson_id, changed_by, reason) VALUES (?,?,?,?,?)', args: [r.id, r.credited_id, after, req.employee?.id || null, reason] });
+      if (Number(after) !== Number(r.credited_id)) moved.push({ ...r, after });
       changed++;
     }
     if (stmts.length) await db.batch(stmts, 'write');
-    res.json({ success: true, changed, unchanged: rows.length - changed });
+    const commission = await moveSaleCommissions(moved);
+    res.json({ success: true, changed, unchanged: rows.length - changed, ...commission });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -499,18 +533,13 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       savedTx.items = txItems;
       const { rows: txPayments } = await db.execute({ sql: 'SELECT * FROM transaction_payments WHERE transaction_id = ? ORDER BY id', args: [txId] });
       savedTx.payments = txPayments;
-      // Commission normally credits whoever rang up the sale — but a sale
-      // completed from a quote credits the quote's original_employee_id
-      // instead, so a quote reassigned to another salesperson for completion
-      // (see PATCH /quotations/:id/reassign) still pays the salesperson who
-      // originally brought in the deal, not whoever finished the paperwork.
-      let commissionEmployeeId = savedTx.employee_id;
-      if (quote_id) {
-        try {
-          const { rows: [q] } = await db.execute({ sql: 'SELECT employee_id, original_employee_id FROM quotations WHERE id = ?', args: [quote_id] });
-          if (q) commissionEmployeeId = q.original_employee_id || q.employee_id || commissionEmployeeId;
-        } catch(e) {}
-      }
+      // Commission goes to whoever the sale is credited to (CREDITED_SQL):
+      // the ticket's salesperson, else whoever started it, else the cashier.
+      // A sale completed from a quote was started by the quote's
+      // original_employee_id, so a quote reassigned to another salesperson
+      // for completion (see PATCH /quotations/:id/reassign) still pays the
+      // salesperson who originally brought in the deal.
+      const commissionEmployeeId = salespersonId || createdBy || savedTx.employee_id;
       // Auto-calculate commission (non-blocking, best-effort)
       try { await calcCommission(commissionEmployeeId, savedTx.total, 'transaction', txId, savedTx.transaction_number); } catch(e) {}
       // A credit sale can take the account over its limit — re-check so the

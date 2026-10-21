@@ -7,11 +7,8 @@ const { requireAuth, requirePermission, can } = require('../lib/permissions');
 // transactions.salesperson_id (the Salesperson who started the ticket, or the
 // one picked on it, or set afterwards by a sales manager — see
 // ticketSalesperson in routes/transactions.js), else whoever started the
-// ticket (created_by), else whoever rang it up (employee_id) — deliberately not the commission-credit chain
-// (quotations.original_employee_id) a reassigned quote's sale uses
-// elsewhere in this app. A target tracks a salesperson's own selling
-// activity, a different question from whose commission a sale counts
-// toward. Bounded to the last 31 days so the query never has to scan a
+// ticket (created_by), else whoever rang it up (employee_id) — the same
+// person the sale's commission goes to. Bounded to the last 31 days so the query never has to scan a
 // store's full transaction history just to answer "what happened this
 // hour/day/week/month" — 31 days safely covers the current month from
 // any day within it.

@@ -14640,7 +14640,7 @@ const App = {
       <div class="modal" style="max-width:440px">
         <div class="modal-header"><span class="modal-title">Change Salesperson</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
-          <p style="font-size:13px;color:var(--text-muted);margin:0 0 10px">${one ? 'This sale' : `These ${ids.length} sales`} will count toward the chosen salesperson's targets. The change is logged.</p>
+          <p style="font-size:13px;color:var(--text-muted);margin:0 0 10px">${one ? 'This sale' : `These ${ids.length} sales`} will count toward the chosen salesperson's targets, and unpaid commission moves to them (worked out on their plan). Commission already paid stays where it is. The change is logged.</p>
           <div class="form-group"><label>Salesperson</label>
             <select id="csp-person">
               <option value="">— Select —</option>
@@ -14667,7 +14667,8 @@ const App = {
     try {
       const r = await this.api('PATCH', '/transactions/salesperson', { ids, salesperson_id: person === 'none' ? null : Number(person), reason: document.getElementById('csp-reason')?.value || '' });
       this.closeModal();
-      this.alert(r.changed ? `${r.changed} sale${r.changed === 1 ? '' : 's'} updated${r.unchanged ? ` (${r.unchanged} already credited that way)` : ''}` : 'No change — already credited that way');
+      this.alert(r.changed ? `${r.changed} sale${r.changed === 1 ? '' : 's'} updated${r.unchanged ? ` (${r.unchanged} already credited that way)` : ''}${r.commissions_moved ? ` · commission moved on ${r.commissions_moved}` : ''}` : 'No change — already credited that way');
+      if (r.commissions_paid?.length) this.alert(`Commission on ${r.commissions_paid.join(', ')} was already paid, so it was left with the previous salesperson — adjust it by hand in Commissions if needed.`, 'warning');
       if (this.section === 'transactions' && document.getElementById('tx-table')) this.loadTransactions().catch(() => {});
       if (fromTxId) this.viewTransaction(fromTxId);
     } catch (e) {

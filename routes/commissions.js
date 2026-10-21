@@ -4,9 +4,12 @@ const { db } = require('../database');
 const { requirePermission } = require('../lib/permissions');
 
 // ── Shared calculation helper (also exported for use in other routes) ──
-async function calcCommission(employeeId, saleAmount, sourceType, sourceId, sourceRef) {
+// asOf (a sale's created_at) picks the plan in force and the period for a
+// commission worked out after the fact — a sale moved to another salesperson
+// (PATCH /transactions/salesperson). Defaults to today.
+async function calcCommission(employeeId, saleAmount, sourceType, sourceId, sourceRef, asOf = null) {
   if (!employeeId || saleAmount <= 0) return null;
-  const today = new Date().toISOString().split('T')[0];
+  const today = asOf ? String(asOf).slice(0, 10) : new Date().toISOString().split('T')[0];
   const period = today.slice(0, 7);
 
   const { rows: [asgn] } = await db.execute({ sql: `SELECT ecp.id as asgn_id, ecp.plan_id, cp.type, cp.rate, cp.tiers, cp.apply_to, cp.min_sale_amount FROM employee_commission_plans ecp JOIN commission_plans cp ON ecp.plan_id = cp.id WHERE ecp.employee_id = ? AND cp.active = 1 AND ecp.effective_from <= ? AND (ecp.effective_to IS NULL OR ecp.effective_to >= ?) ORDER BY ecp.effective_from DESC LIMIT 1`, args: [employeeId, today, today] });
