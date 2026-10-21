@@ -14150,12 +14150,7 @@ const App = {
   async viewCustomer(id) {
     const c = await this.api('GET', `/customers/${id}`);
     const isCredit = c.customer_type === 'credit';
-    const today = new Date().toISOString().slice(0,10);
-    const monthAgo = new Date(Date.now() - 30*86400000).toISOString().slice(0,10);
-    const [txs, pmts] = await Promise.all([
-      this.api('GET', `/customers/${id}/transactions?start=${monthAgo}&end=${today}`),
-      this.api('GET', `/accounts/payments?customer_id=${id}&start=${monthAgo}&end=${today}`)
-    ]);
+    const { txs, pmts, legacy } = await this._loadCustomerHistory(id, '');
     this.showModal(`
       <div class="modal" style="max-width:660px">
         <div class="modal-header">
@@ -14186,16 +14181,50 @@ const App = {
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">
             <h4 style="margin:0;flex:1">History</h4>
             <label style="font-size:12px">From</label>
-            <input type="date" id="ch-start" value="${monthAgo}" style="width:140px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;font-size:13px">
+            <input type="date" id="ch-start" value="" title="Leave blank for all dates" style="width:140px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;font-size:13px">
             <label style="font-size:12px">To</label>
-            <input type="date" id="ch-end" value="${today}" style="width:140px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;font-size:13px">
+            <input type="date" id="ch-end" value="" title="Leave blank for all dates" style="width:140px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;font-size:13px">
             <button class="btn btn-primary btn-sm" onclick="App.filterCustomerHistory(${c.id})">Filter</button>
             ${this.can('customers_print_history') ? `<button class="btn btn-secondary btn-sm" onclick="App.printCustomerHistory(${c.id},'${c.first_name} ${c.last_name}')">Print</button>` : ''}
           </div>
           <div id="ch-table">${this._buildCustomerTxHTML(txs)}</div>
           <div id="ch-payments" style="margin-top:16px">${this._buildCustomerPmtHTML(pmts)}</div>
+          <div id="ch-legacy" style="margin-top:16px">${this._buildCustomerLegacyHTML(legacy)}</div>
         </div>
       </div>`);
+  },
+
+  // Everything the History window (and its Print) shows for a customer —
+  // all dates unless a From/To is given. Payments and old-system invoices
+  // come from customer-scoped routes, so anyone who can open the customer
+  // sees them; a section that fails to load shows empty rather than
+  // stopping the window from opening.
+  async _loadCustomerHistory(id, qs) {
+    const q = qs ? '?' + qs : '';
+    const get = url => this.api('GET', url).catch(() => []);
+    const [txs, pmts, legacy] = await Promise.all([
+      this.api('GET', `/customers/${id}/transactions${q}`),
+      get(`/customers/${id}/payments${q}`),
+      get(`/customers/${id}/legacy-invoices${q}`),
+    ]);
+    return { txs, pmts, legacy };
+  },
+
+  // Old-system invoices (entered in RetailPOS Books) — only shown when the
+  // customer has any, e.g. accounts carried over from the old system.
+  _buildCustomerLegacyHTML(legacy) {
+    if (!legacy.length) return '';
+    return `<h5 style="margin:0 0 8px;font-size:13px;text-transform:uppercase;color:var(--text-muted)">Invoices from the Old System</h5>
+    <table>
+      <thead><tr><th>Invoice #</th><th>Date</th><th>Amount</th><th>Balance Due</th><th>Status</th></tr></thead>
+      <tbody>${legacy.map(li => `<tr>
+        <td class="fw-600">${this.escapeAttr(li.invoice_number)}</td>
+        <td>${this.fmtDate(li.invoice_date)}</td>
+        <td>${this.fmt(li.amount)}</td>
+        <td>${li.status === 'void' ? '—' : this.fmt(li.balance_due)}</td>
+        <td><span class="badge-pill ${li.status === 'void' ? 'badge-danger' : li.balance_due > 0.001 ? 'badge-warning' : 'badge-success'}">${li.status === 'void' ? 'void' : li.balance_due > 0.001 ? 'open' : 'paid'}</span></td>
+      </tr>`).join('')}</tbody>
+    </table>`;
   },
 
   _buildCustomerTxHTML(txs) {
@@ -14207,7 +14236,7 @@ const App = {
         <td class="fw-600">${tx.transaction_number}</td>
         <td>${this.fmtDateTime(tx.created_at)}</td>
         <td>${this.fmt(tx.total)}</td>
-        <td>${tx.payment_method.replace('_',' ')}</td>
+        <td>${(tx.payment_method||'').replace('_',' ')}</td>
         <td><span class="badge-pill ${tx.status==='completed'?'badge-success':'badge-danger'}">${tx.status}</span></td>
       </tr>`).join('')}</tbody>
     </table>`;
@@ -14232,22 +14261,17 @@ const App = {
     const start = document.getElementById('ch-start').value;
     const end = document.getElementById('ch-end').value;
     const qs = [start && `start=${start}`, end && `end=${end}`].filter(Boolean).join('&');
-    const [txs, pmts] = await Promise.all([
-      this.api('GET', `/customers/${id}/transactions${qs ? '?' + qs : ''}`),
-      this.api('GET', `/accounts/payments?customer_id=${id}${qs ? '&' + qs : ''}`)
-    ]);
+    const { txs, pmts, legacy } = await this._loadCustomerHistory(id, qs);
     document.getElementById('ch-table').innerHTML = this._buildCustomerTxHTML(txs);
     document.getElementById('ch-payments').innerHTML = this._buildCustomerPmtHTML(pmts);
+    document.getElementById('ch-legacy').innerHTML = this._buildCustomerLegacyHTML(legacy);
   },
 
   async printCustomerHistory(id, name) {
     const start = document.getElementById('ch-start').value;
     const end = document.getElementById('ch-end').value;
     const qs = [start && `start=${start}`, end && `end=${end}`].filter(Boolean).join('&');
-    const [txs, pmts] = await Promise.all([
-      this.api('GET', `/customers/${id}/transactions${qs ? '?' + qs : ''}`),
-      this.api('GET', `/accounts/payments?customer_id=${id}${qs ? '&' + qs : ''}`)
-    ]);
+    const { txs, pmts, legacy } = await this._loadCustomerHistory(id, qs);
     const store = this.settings || {};
     const txTotal = txs.filter(t => t.status === 'completed').reduce((s, t) => s + (t.total || 0), 0);
     const pmtTotal = pmts.reduce((s, p) => s + (p.amount || 0), 0);
@@ -14305,6 +14329,11 @@ const App = {
       <tbody>${pmtRows || '<tr><td colspan="5" style="text-align:center;color:#999">No payments found</td></tr>'}</tbody>
     </table>
     <div class="summary">Payments total: <strong>${this.fmt(pmtTotal)}</strong> &nbsp;|&nbsp; ${pmts.length} payment(s)</div>
+    ${legacy.length ? `<h2>Invoices from the Old System</h2>
+    <table>
+      <thead><tr><th>Invoice #</th><th>Date</th><th>Amount</th><th>Balance Due</th><th>Status</th></tr></thead>
+      <tbody>${legacy.map(li => `<tr><td>${this.escapeAttr(li.invoice_number)}</td><td>${this.fmtDate(li.invoice_date)}</td><td>${this.fmt(li.amount)}</td><td>${li.status === 'void' ? '—' : this.fmt(li.balance_due)}</td><td>${li.status === 'void' ? 'void' : li.balance_due > 0.001 ? 'open' : 'paid'}</td></tr>`).join('')}</tbody>
+    </table>` : ''}
     <div class="footer">Generated by ${store.store_name || 'POS System'} &nbsp;|&nbsp; ${new Date().toLocaleString()}</div>
     <script>window.onload=()=>{window.print()}<\/script>
     </body></html>`);
@@ -14849,7 +14878,12 @@ const App = {
     const paidByCard = tx.payment_method === 'credit_card' || (tx.payments || []).some(p => p.payment_method === 'credit_card');
     const saleAgeDays = (Date.now() - new Date(String(tx.created_at).replace(' ', 'T') + (/[zZ]|[+-]\d\d:?\d\d$/.test(tx.created_at) ? '' : 'Z')).getTime()) / 86400000;
     const cardRefundExpired = paidByCard && saleAgeDays > 90;
-    const refundAllowed = canRefund && !cardRefundExpired;
+    // A charge-account sale was never paid, so there's nothing to refund —
+    // its return goes back on the account as a credit note (enforced again
+    // in POST /transactions/:id/return).
+    const chargeSale = !!tx.is_credit || tx.payment_method === 'credit';
+    const refundBlocked = cardRefundExpired || chargeSale;
+    const refundAllowed = canRefund && !refundBlocked;
     const firstResolution = refundAllowed ? 'refund' : (canCreditNote ? 'credit_note' : 'replacement');
 
     const itemRows = tx.items.map(item => {
@@ -14892,9 +14926,9 @@ const App = {
           <div style="margin-bottom:14px">
             <p style="font-size:13px;font-weight:600;margin-bottom:8px">Resolution:</p>
             <div style="display:flex;flex-direction:column;gap:8px">
-              ${canRefund ? `<label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px${cardRefundExpired?';opacity:0.45':''}">
-                <input type="radio" name="ret-resolution" value="refund" ${cardRefundExpired?'disabled':(firstResolution==='refund'?'checked':'')} style="margin-top:2px">
-                <span><strong>Refund</strong> — return cash or reverse the original payment method${cardRefundExpired?' <em style="color:var(--danger)">(not available — paid by credit card more than 90 days ago)</em>':''}</span>
+              ${canRefund ? `<label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px${refundBlocked?';opacity:0.45':''}">
+                <input type="radio" name="ret-resolution" value="refund" ${refundBlocked?'disabled':(firstResolution==='refund'?'checked':'')} style="margin-top:2px">
+                <span><strong>Refund</strong> — return cash or reverse the original payment method${chargeSale?' <em style="color:var(--danger)">(not available — this sale was charged to the customer\'s account; use Credit Note to take it off their balance)</em>':cardRefundExpired?' <em style="color:var(--danger)">(not available — paid by credit card more than 90 days ago)</em>':''}</span>
               </label>` : ''}
               ${canIssueCreditNote ? `<label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px${hasCustomer?'':';opacity:0.45'}">
                 <input type="radio" name="ret-resolution" value="credit_note" ${hasCustomer?(firstResolution==='credit_note'?'checked':''):'disabled'} style="margin-top:2px">

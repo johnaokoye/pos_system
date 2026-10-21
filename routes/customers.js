@@ -3,7 +3,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { requireAuth, requirePermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
-const { oldestOpenLegacySql, oldestUnpaidSaleSql, earliestDate } = require('../lib/legacyInvoices');
+const { oldestOpenLegacySql, oldestUnpaidSaleSql, earliestDate, LEGACY_BALANCE_SQL } = require('../lib/legacyInvoices');
 const { resolveBlock } = require('../lib/creditBlock');
 const { UNAPPLIED_SQL, unappliedTotal, oldestOwingDate } = require('../lib/customerPayments');
 const { mergeCustomers, mergePreview } = require('../lib/customerMerge');
@@ -684,6 +684,36 @@ router.get('/:id/transactions', requireAuth, async (req, res) => {
     sql += ' ORDER BY created_at DESC';
     const { rows: transactions } = await db.execute({ sql, args });
     res.json(transactions);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// The customer's History window (and its Print) — payments on account and
+// old-system invoices for this one customer. Gated like /:id/transactions
+// above rather than behind /accounts, so anyone who can open a customer sees
+// their whole history, not just staff with the Accounts module.
+router.get('/:id/payments', requireAuth, async (req, res) => {
+  try {
+    const { start, end } = req.query;
+    let sql = 'SELECT id, payment_number, created_at, amount, payment_method, notes FROM account_payments WHERE customer_id = ?';
+    const args = [req.params.id];
+    if (start) { sql += ' AND date(created_at) >= ?'; args.push(start); }
+    if (end) { sql += ' AND date(created_at) <= ?'; args.push(end); }
+    sql += ' ORDER BY created_at DESC';
+    const { rows } = await db.execute({ sql, args });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/:id/legacy-invoices', requireAuth, async (req, res) => {
+  try {
+    const { start, end } = req.query;
+    let sql = `SELECT li.id, li.invoice_number, li.invoice_date, li.due_date, li.amount, li.memo, li.status, ${LEGACY_BALANCE_SQL} as balance_due FROM ar_legacy_invoices li WHERE li.customer_id = ?`;
+    const args = [req.params.id];
+    if (start) { sql += ' AND date(li.invoice_date) >= ?'; args.push(start); }
+    if (end) { sql += ' AND date(li.invoice_date) <= ?'; args.push(end); }
+    sql += ' ORDER BY li.invoice_date DESC';
+    const { rows } = await db.execute({ sql, args });
+    res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

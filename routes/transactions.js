@@ -685,6 +685,12 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
     if (!tx) return res.status(404).json({ error: 'Transaction not found' });
     if (tx.status !== 'completed') return res.status(400).json({ error: 'Only completed transactions can be returned' });
     if (resolution === 'credit_note' && !tx.customer_id) return res.status(400).json({ error: 'Credit note requires a customer on the original transaction' });
+    // A charge-account sale was never paid — refunding it would hand over
+    // money while the customer still owes the full amount. Its return goes
+    // back on the account as a credit note instead.
+    if (resolution === 'refund' && (tx.is_credit || tx.payment_method === 'credit')) {
+      return res.status(400).json({ error: "This sale was charged to the customer's account, so it can't be refunded. Issue a credit note to take the return off their balance." });
+    }
     if (resolution === 'refund' && daysSinceSale(tx.created_at) > CARD_REFUND_WINDOW_DAYS && await paidByCreditCard(tx)) {
       return res.status(400).json({ error: `This sale was paid by credit card more than ${CARD_REFUND_WINDOW_DAYS} days ago, so it can't be refunded. Issue a credit note or an exchange instead.` });
     }
