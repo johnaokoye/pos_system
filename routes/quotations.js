@@ -76,7 +76,7 @@ router.get('/', async (req, res) => {
 async function insertQuoteLines(tx, quoteId, processedItems) {
   for (const item of processedItems) {
     const { product_id, product_name, sku, is_temp_item, is_q_item, purchase_request_id, sources, qty, unit_price, unit_cost, lineTotal, lineTax, lineDisc, serial_number } = item;
-    const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,unit_cost,discount_amount,tax_amount,total,is_temp_item,is_q_item,purchase_request_id,serial_number,is_rental_line,rental_start,rental_end,is_mandatory,rate_plan,sell_unit,units_per,uom_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [quoteId, product_id, product_name, sku, qty, unit_price, unit_cost, lineDisc, lineTax, lineTotal, is_temp_item, is_q_item, purchase_request_id, serial_number || null, item.is_rental_line ? 1 : 0, item.rental_start || null, item.rental_end || null, item.is_mandatory ? 1 : 0, item.rate_plan || null, item.sell_unit || null, item.units_per || 1, item.uom_id ?? null] });
+    const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,unit_cost,discount_amount,tax_amount,total,is_temp_item,is_q_item,purchase_request_id,serial_number,is_rental_line,rental_start,rental_end,is_mandatory,rate_plan,sell_unit,units_per,uom_id,is_comment) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [quoteId, product_id, product_name, sku, qty, unit_price, unit_cost, lineDisc, lineTax, lineTotal, is_temp_item, is_q_item, purchase_request_id, serial_number || null, item.is_rental_line ? 1 : 0, item.rental_start || null, item.rental_end || null, item.is_mandatory ? 1 : 0, item.rate_plan || null, item.sell_unit || null, item.units_per || 1, item.uom_id ?? null, item.is_comment ? 1 : 0] });
     item.id = Number(itemResult.lastInsertRowid);
     if (sources) {
       for (const src of sources) {
@@ -278,6 +278,18 @@ async function processQuoteItems(items, { allowRental = false } = {}) {
       for (const line of lines) { subtotal += line.lineTotal; tax_amount += line.lineTax; processedItems.push(line); }
       continue;
     }
+    // "C" (comment) line — free text printed on the quote and carried onto
+    // the sale; no price or tax, not a Q item, never goes to Purchasing.
+    if (!item.product_id && item.is_comment) {
+      const text = String(item.description || item.product_name || '').trim();
+      if (!text) continue;
+      processedItems.push({
+        product_id: null, product_name: text, sell_unit: null, units_per: 1, uom_id: null, serial_number: null, sku: null,
+        is_temp_item: 0, is_q_item: 0, is_comment: 1, purchase_request_id: null, sources: null,
+        qty: 1, unit_price: 0, unit_cost: null, lineTotal: 0, lineTax: 0, taxRate: 0, lineDisc: 0,
+      });
+      continue;
+    }
     let product = null;
     if (item.product_id) {
       const { rows: [p] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] });
@@ -327,7 +339,7 @@ async function processQuoteItems(items, { allowRental = false } = {}) {
       qty, unit_price, unit_cost, lineTotal, lineTax, taxRate, lineDisc,
     });
   }
-  if (!processedItems.length) throw new Error('No items in quotation');
+  if (!processedItems.some(l => !l.is_comment)) throw new Error('No items in quotation');
   return {
     subtotal: parseFloat(subtotal.toFixed(2)),
     tax_amount: parseFloat(tax_amount.toFixed(2)),
@@ -984,7 +996,7 @@ router.post('/:id/convert', async (req, res) => {
         // goes out through its rental agreement.
         const isRental = !!item.is_rental_line;
         const name = isRental && !item.is_mandatory ? `${item.product_name} — ${holdNumbers[item.id]}` : item.product_name;
-        await convTx.execute({ sql: 'INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,serial_number,sell_unit,units_per,uom_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [txId, isRental ? null : item.product_id, name, isRental ? 'RENTAL' : (item.sku || ''), item.quantity, item.unit_price, item.discount_amount, item.tax_amount, item.total, item.serial_number || null, isRental ? null : (item.sell_unit || null), isRental ? 1 : (item.units_per || 1), isRental ? null : (item.uom_id ?? null)] });
+        await convTx.execute({ sql: 'INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,serial_number,sell_unit,units_per,uom_id,is_comment) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [txId, isRental ? null : item.product_id, name, isRental ? 'RENTAL' : (item.sku || ''), item.quantity, item.unit_price, item.discount_amount, item.tax_amount, item.total, item.serial_number || null, isRental ? null : (item.sell_unit || null), isRental ? 1 : (item.units_per || 1), isRental ? null : (item.uom_id ?? null), item.is_comment ? 1 : 0] });
       }
 
       await convTx.execute({ sql: 'UPDATE quotations SET status = ?, converted_to_tx = ? WHERE id = ?', args: ['converted', txId, quote.id] });

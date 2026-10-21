@@ -2183,6 +2183,10 @@ async function _init() {
     // took it off after tax), and a flag on the sale for the tax report.
     'ALTER TABLE transaction_items ADD COLUMN ticket_discount REAL',
     'ALTER TABLE transactions ADD COLUMN discount_pre_tax INTEGER NOT NULL DEFAULT 0',
+    // "C" (comment) lines on quotes and POS tickets: free text printed on the
+    // quote/receipt/invoice — no product, price, tax, stock or Purchasing.
+    'ALTER TABLE quotation_items ADD COLUMN is_comment INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE transaction_items ADD COLUMN is_comment INTEGER NOT NULL DEFAULT 0',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

@@ -2613,6 +2613,7 @@ const App = {
       this.currentUser?.permissions?.pos_receive_payment ? `<button class="pos-grid-btn pay-acct" onclick="App.showReceivePaymentModal()" title="Take a payment from a customer toward their account">Receive Payment</button>` : '',
       this.currentUser?.permissions?.pos_petty_cash ? `<button class="pos-grid-btn" onclick="App.showPettyCashModal()" title="Pay petty cash out of your drawer against a petty cash request slip">Petty Cash</button>` : '',
       this.can('pos_change_quantity') ? `<button class="pos-grid-btn" onclick="App.posQuantitySelectedLine()">Quantity</button>` : '',
+      `<button class="pos-grid-btn" onclick="App.showCommentItemModal()" title="Add a comment line — free text printed on the receipt/invoice, no price">C Item</button>`,
       this.can('pos_cancel_ticket') ? `<button class="pos-grid-btn void" onclick="App.posCancelTicket()">Cancel Ticket</button>` : '',
       this.can('pos_payment') ? `<button class="pos-grid-btn payment" style="grid-column:1 / -1" onclick="App.showPOSPaymentModal()">PAYMENT</button>` : '',
     ].filter(Boolean).join('');
@@ -3053,10 +3054,48 @@ const App = {
   // ─── Right-grid actions that act on the currently selected ticket row ────
   // (row selection itself is set by clicking a row — see renderCart()).
 
+  // "C Item" — a comment line on the ticket: free text that prints on the
+  // receipt/invoice (e.g. delivery instructions, a serial or colour note),
+  // with no price, tax or stock. Goes in under the selected line, so it
+  // reads as a note on that item; with nothing selected, at the end.
+  showCommentItemModal(editIdx = null) {
+    const editing = editIdx != null && this.cart[editIdx]?.is_comment;
+    this.showModal(`
+      <div class="modal" style="max-width:480px">
+        <div class="modal-header"><span class="modal-title">${editing ? 'Edit Comment' : 'Add Comment (C Item)'}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <textarea id="pos-comment-text" rows="4" style="width:100%" placeholder="e.g. Deliver to back gate — call 876-555-0100 on arrival">${editing ? this.escapeAttr(this.cart[editIdx].name) : ''}</textarea>
+          <p style="font-size:11px;color:var(--text-muted);margin:6px 0 0">Prints on the receipt and invoice as written. No price or tax.</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.saveCommentItem(${editing ? editIdx : 'null'})">${editing ? 'Save' : 'Add to Ticket'}</button>
+        </div>
+      </div>`);
+    setTimeout(() => document.getElementById('pos-comment-text')?.focus(), 50);
+  },
+
+  saveCommentItem(editIdx) {
+    const text = (document.getElementById('pos-comment-text')?.value || '').trim();
+    if (!text) { this.alert('Type the comment first', 'warning'); return; }
+    if (editIdx != null && this.cart[editIdx]?.is_comment) {
+      this.cart[editIdx].name = text;
+    } else {
+      const line = { product_id: null, is_comment: 1, name: text, price: 0, quantity: 1, tax_rate: 0, is_service: 0 };
+      const at = this._selectedCartLine != null && this.cart[this._selectedCartLine] ? this._selectedCartLine + 1 : this.cart.length;
+      this.cart.splice(at, 0, line);
+      this._selectedCartLine = null;
+    }
+    this.closeModal();
+    this.renderCart();
+    document.getElementById('pos-item-input')?.focus();
+  },
+
   posItemZoom() {
     const idx = this._selectedCartLine;
     if (idx == null || !this.cart[idx]) { this.alert('Click a ticket line first', 'warning'); return; }
     const item = this.cart[idx];
+    if (item.is_comment) { this.showCommentItemModal(idx); return; }
     if (!item.product_id) { this.alert('No catalog record for this line', 'warning'); return; }
     this.showProductForm(item.product_id);
   },
@@ -3082,6 +3121,7 @@ const App = {
   setCartQty(idx, input) {
     const item = this.cart[idx];
     if (!item) return;
+    if (item.is_comment) { this.alert('A comment line has no quantity', 'warning'); return; }
     if (!this.can('pos_change_quantity')) { this.alert("You don't have permission to change quantities", 'error'); this.renderCart(); return; }
     // Measured units (yards, kg… — lib/units.js) take part quantities.
     const newQty = item.allow_decimal ? Math.round(parseFloat(input) * 1000) / 1000 : Number(input);
@@ -3115,6 +3155,7 @@ const App = {
     if (this.cart.length) {
       document.getElementById('qt-item-0')?.remove();
       for (const item of this.cart) {
+        if (item.is_comment) { this.addQuoteCommentItem({ product_name: item.name }); continue; }
         if (item.variation_id) {
           // quotation_items has no variation_id/variation_name column —
           // encode the variant into the description instead of silently
@@ -3196,7 +3237,7 @@ const App = {
     }
     if (this.cartCustomer?.id) this._selectLayawayCustomer(this.cartCustomer.id);
     const eligible = this.cart.filter(item => (this._layawayProducts || []).some(p => p.id === item.product_id));
-    const skipped = this.cart.length - eligible.length;
+    const skipped = this.cart.filter(i => !i.is_comment).length - eligible.length;
     if (eligible.length) {
       document.getElementById('layaway-line-0')?.remove();
       for (const item of eligible) {
@@ -3665,6 +3706,12 @@ const App = {
     const { lineTaxes, lineShares } = this.getCartTotals();
     const canTypeQty = this.can('pos_change_quantity');
     list.innerHTML = this.cart.map((item, idx) => {
+      if (item.is_comment) return `
+      <tr class="pos-ticket-row${this._selectedCartLine === idx ? ' selected' : ''}" onclick="App.selectCartLine(event,${idx})" ondblclick="App.showCommentItemModal(${idx})" title="Comment line — double-click to edit">
+        <td><span class="badge-pill badge-info" style="font-size:10px">C</span></td>
+        <td colspan="5" style="font-style:italic;white-space:pre-wrap;color:var(--text-muted)">${this.escapeAttr(item.name)}</td>
+        <td style="white-space:nowrap"><button class="btn-remove" onclick="event.stopPropagation();App.removeFromCart(${idx})">×</button></td>
+      </tr>`;
       const sku = item.sku || this.allProducts.find(p => p.id === item.product_id)?.sku || '—';
       const lineGross = item.price * item.quantity;
       const lineNet = this._cartLineNet(item);
@@ -3952,7 +3999,7 @@ const App = {
         // directly for that case only; a real product_id line still has its
         // price/tax authoritatively re-derived server-side, never trusted
         // from the client.
-        items: this.cart.map(i => ({ product_id: i.product_id, variation_id: i.variation_id||null, serial_number: i.serial_number||null, uom_id: i.uom_id ?? null, sell_unit: i.sell_unit || null, quantity: i.quantity, discount_percent: i.discountPercent||0, discount_override_employee_id: i.discountOverrideEmployeeId||null, ...(i.product_id ? {} : { product_name: i.name, unit_price: i.price, tax_rate: i.tax_rate||0 }) })),
+        items: this.cart.map(i => ({ product_id: i.product_id, variation_id: i.variation_id||null, serial_number: i.serial_number||null, uom_id: i.uom_id ?? null, sell_unit: i.sell_unit || null, quantity: i.quantity, discount_percent: i.discountPercent||0, discount_override_employee_id: i.discountOverrideEmployeeId||null, ...(i.product_id ? {} : { product_name: i.name, unit_price: i.price, tax_rate: i.tax_rate||0, is_comment: i.is_comment ? 1 : 0 }) })),
         discount_amount: discount,
         promotion_code: this.appliedDiscountCard ? (this.appliedDiscountCard.card_number || null) : (this.appliedPromoCode?.code || null),
         promotion_name: this.appliedDiscountCard ? `${this.appliedDiscountCard.type_name} ${this.appliedDiscountCard.label || 'Discount Card'}` : (this.appliedPromoCode?.promo_name || this.autoAppliedPromo?.name || null),
@@ -4012,6 +4059,7 @@ const App = {
           serial_number: i.serial_number || null,
           uom_id: i.uom_id ?? null,
           sell_unit: i.sell_unit || null,
+          is_comment: i.is_comment ? 1 : 0,
         };
       });
       await this.api('POST', '/transactions/hold', {
@@ -4139,14 +4187,19 @@ const App = {
       if (this.cart.length) {
         if (!confirm('Loading this held order will replace your current cart. Continue?')) return;
       }
-      this.cart = held.items.map(item => {
+      // Each line's share of the held ticket discount — its tax was charged
+      // on its total less that share (discount before tax).
+      const heldShares = this._allocateTicketDiscount(held.items.map(i => i.total), held.discount_amount).shares;
+      this.cart = held.items.map((item, idx) => {
+        if (item.is_comment) return { product_id: null, is_comment: 1, name: item.product_name, price: 0, quantity: 1, tax_rate: 0, is_service: 0 };
         const product = this.allProducts?.find(p => p.id === item.product_id);
         // A custom/temp line (no product_id — e.g. a Special Project's
         // free-typed labour/equipment line) has no product to read a tax
         // rate from — reconstruct the rate that was actually already
-        // charged on this line, from its own stored tax_amount/total,
-        // instead of silently dropping to 0% tax.
-        const derivedTaxRate = item.total > 0 ? parseFloat((item.tax_amount / item.total * 100).toFixed(4)) : 0;
+        // charged on this line, from its own stored tax_amount over its
+        // total less its discount share, instead of silently dropping to 0% tax.
+        const taxedBase = item.total - heldShares[idx];
+        const derivedTaxRate = taxedBase > 0 ? parseFloat((item.tax_amount / taxedBase * 100).toFixed(4)) : 0;
         return {
           product_id: item.product_id,
           variation_id: item.variation_id || null,
@@ -4315,14 +4368,20 @@ const App = {
 
       if (this.cart.length && !confirm(`Loading ${quote.quote_number} will replace your current cart. Continue?`)) return;
 
-      this.cart = quote.items.map(item => {
+      // Each line's share of the quote's Discount — its tax was quoted on its
+      // total less that share (discount before tax).
+      const quoteShares = this._allocateTicketDiscount(quote.items.map(i => i.total), quote.discount_amount).shares;
+      this.cart = quote.items.map((item, idx) => {
+        if (item.is_comment) return { product_id: null, is_comment: 1, name: item.product_name, price: 0, quantity: 1, tax_rate: 0, is_service: 0 };
         const product = this.allProducts?.find(p => p.id === item.product_id);
         // A custom/temp line (no product_id — e.g. a Special Project's
         // free-typed labour/equipment line, or a retail quote's "Q" item)
         // has no product to read a tax rate from — reconstruct the rate
-        // that was actually already quoted, from its own stored
-        // tax_amount/total, instead of silently dropping to 0% tax.
-        const derivedTaxRate = item.total > 0 ? parseFloat((item.tax_amount / item.total * 100).toFixed(4)) : 0;
+        // that was actually already quoted, from its own stored tax_amount
+        // over its total less its discount share, instead of silently
+        // dropping to 0% tax.
+        const taxedBase = item.total - quoteShares[idx];
+        const derivedTaxRate = taxedBase > 0 ? parseFloat((item.tax_amount / taxedBase * 100).toFixed(4)) : 0;
         return {
           product_id: item.product_id,
           variation_id: null,
@@ -4479,7 +4538,7 @@ const App = {
             ${tx.salesperson_name ? `<div class="receipt-row"><span>Salesperson:</span><span>${tx.salesperson_name}</span></div>` : ''}
             ${tx.employee_name ? `<div class="receipt-row"><span>Cashier:</span><span>${tx.employee_name}</span></div>` : ''}
             <hr>
-            ${items.map(i => { const pct = this._lineDiscountPct(i); return `<div class="receipt-item">
+            ${items.map(i => { if (i.is_comment) return `<div class="receipt-item" style="font-style:italic;white-space:pre-wrap;padding-left:8px">${this.escapeAttr(i.product_name)}</div>`; const pct = this._lineDiscountPct(i); return `<div class="receipt-item">
               <div>${i.sku ? `<span style="font-size:11px;color:#555">${i.sku}</span> ` : ''}${i.product_name}</div>
               <div class="receipt-row"><span style="padding-left:8px">${i.quantity} x ${this.fmt(i.unit_price)}</span><span>${this.fmt(i.total)}</span></div>
               ${pct > 0 ? `<div style="color:#666;font-size:11px;padding-left:8px">less ${pct}% (-${this.fmt(i.discount_amount)})</div>` : ''}
@@ -4586,7 +4645,11 @@ const App = {
     const rentalReturnedLabel = tx.rental_returned_at ? this.fmtDateTime(tx.rental_returned_at) : 'Not yet returned';
     const rentalDurationCellLabel = this.rentalDurationLabel(tx.rental_checkout_datetime, tx.rental_due_date, tx.rental_returned_at);
     const hasLineDiscount = items.some(i => this._lineDiscountPct(i) > 0);
-    const itemRows = items.map(i => `<tr>
+    const itemCols = 5 + (isRental ? 3 : 0) + (hasLineDiscount ? 1 : 0);
+    const itemRows = items.map(i => i.is_comment ? `<tr>
+        <td style="padding:8px;border-bottom:1px solid #e8e8e8"></td>
+        <td colspan="${itemCols - 1}" style="padding:8px;border-bottom:1px solid #e8e8e8;font-style:italic;white-space:pre-wrap">${this.escapeAttr(i.product_name)}</td>
+      </tr>` : `<tr>
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;white-space:nowrap;color:#555">${i.sku || ''}</td>
         <td style="padding:8px;border-bottom:1px solid #e8e8e8">${i.product_name}</td>
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:center">${i.quantity}</td>
@@ -14536,7 +14599,7 @@ const App = {
           </div>
           <table style="margin-bottom:12px">
             <thead><tr><th>Item</th><th>SKU</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
-            <tbody>${(tx.items||[]).map(i=>`<tr><td>${i.product_name}</td><td style="font-family:monospace;font-size:12px">${i.sku||''}</td><td style="text-align:center">${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}</tbody>
+            <tbody>${(tx.items||[]).map(i=>i.is_comment ? `<tr><td colspan="5" style="font-style:italic;white-space:pre-wrap;color:var(--text-muted)"><span class="badge-pill badge-info" style="font-size:10px;font-style:normal">C</span> ${this.escapeAttr(i.product_name)}</td></tr>` : `<tr><td>${i.product_name}</td><td style="font-family:monospace;font-size:12px">${i.sku||''}</td><td style="text-align:center">${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}</tbody>
           </table>
           <div style="text-align:right;border-top:1px solid var(--border);padding-top:10px">
             <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span>Subtotal</span><span>${this.fmt(tx.subtotal)}</span></div>
@@ -14571,7 +14634,7 @@ const App = {
   async printLabel(txId, type) {
     const tx = await this.api('GET', `/transactions/${txId}`);
     const company = this._onlineCompanyName || 'Store';
-    const items = (tx.items||[]).map(i=>`${i.quantity}× ${i.product_name}`).join('<br>');
+    const items = (tx.items||[]).filter(i => !i.is_comment).map(i=>`${i.quantity}× ${i.product_name}`).join('<br>');
     const dt = this.fmtDateTime(tx.created_at);
     const addrLine = [tx.customer_address, tx.customer_city && (tx.customer_city+(tx.customer_state?' '+tx.customer_state:'')+(tx.customer_zip?' '+tx.customer_zip:''))].filter(Boolean).join('<br>');
 
@@ -14821,7 +14884,7 @@ const App = {
           </div>` : ''}
           <table style="margin-bottom:12px">
             <thead><tr><th>Item</th><th>SKU</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
-            <tbody>${tx.items.map(i => `<tr><td>${i.product_name}</td><td style="font-family:monospace;font-size:12px">${i.sku||''}</td><td style="text-align:center">${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}</tbody>
+            <tbody>${tx.items.map(i => i.is_comment ? `<tr><td colspan="5" style="font-style:italic;white-space:pre-wrap;color:var(--text-muted)"><span class="badge-pill badge-info" style="font-size:10px;font-style:normal">C</span> ${this.escapeAttr(i.product_name)}</td></tr>` : `<tr><td>${i.product_name}</td><td style="font-family:monospace;font-size:12px">${i.sku||''}</td><td style="text-align:center">${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}</tbody>
           </table>
           <div style="text-align:right;border-top:1px solid var(--border);padding-top:10px">
             <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span>Subtotal</span><span>${this.fmt(tx.subtotal)}</span></div>
@@ -14886,7 +14949,7 @@ const App = {
     const refundAllowed = canRefund && !refundBlocked;
     const firstResolution = refundAllowed ? 'refund' : (canCreditNote ? 'credit_note' : 'replacement');
 
-    const itemRows = tx.items.map(item => {
+    const itemRows = tx.items.filter(item => !item.is_comment).map(item => {
       const alreadyRet = returnedQtyMap[item.id] || 0;
       const maxQty = item.quantity - alreadyRet;
       if (item.is_sp_rental) return `<tr style="opacity:0.5"><td><input type="checkbox" disabled></td><td>${item.product_name}</td><td style="font-family:monospace;font-size:12px">${item.sku||''}</td><td style="text-align:center">${item.quantity}</td><td colspan="3" style="font-size:12px;color:var(--text-muted)">Rental — check it back in from the Rentals screen</td></tr>`;
@@ -20586,6 +20649,7 @@ const App = {
               <div style="display:flex;gap:6px">
                 <button class="btn btn-sm btn-outline" onclick="App.addQuoteItem()">+ Add Item</button>
                 <button class="btn btn-sm btn-outline" onclick="App.addQuoteCustomItem()">+ Custom Item</button>
+                <button class="btn btn-sm btn-outline" onclick="App.addQuoteCommentItem()" title="A comment line — free text printed on the quote and invoice, with no price and nothing sent to Purchasing">+ C Item</button>
                 <button class="btn btn-sm btn-outline" id="qt-add-q-item-btn" style="display:none" onclick="App.addQuoteCustomItem(null,{qItem:true})" title="Something not in inventory that Purchasing should order — a Purchase Request is auto-created when the project is accepted">+ Q Item</button>
                 <button class="btn btn-sm btn-outline" id="qt-add-rental-item-btn" style="display:none" onclick="App.addQuoteRentalItem()" title="A rental item for a set period — held when the project is approved, issued and checked back in through Rentals">+ Rental Item</button>
               </div>
@@ -20655,6 +20719,7 @@ const App = {
         q.items.forEach(item => {
           // A rental line's mandatory accessories are re-added by the server on save.
           if (item.is_rental_line) { if (!item.parent_item_id) this.addQuoteRentalItem(item); return; }
+          if (item.is_comment) { this.addQuoteCommentItem(item); return; }
           item.product_id ? this.addQuoteItem(item) : this.addQuoteCustomItem(item, { qItem: !!item.is_q_item });
         });
       } else {
@@ -21023,6 +21088,24 @@ const App = {
     container.appendChild(div);
     this.calcQuoteTotal();
     if (isSP) this._updateQuoteItemMargin(idx);
+  },
+
+  // "C" (comment) line: free text printed on the quote, carried onto the sale
+  // and its receipt/invoice. No quantity, price or tax, and unlike a Q item
+  // it never goes to Purchasing.
+  addQuoteCommentItem(prefill) {
+    this._quoteItems = this._quoteItems || [];
+    const idx = this._quoteItems.length;
+    this._quoteItems.push({ comment: true });
+    const div = document.createElement('div');
+    div.className = 'po-receive-row';
+    div.id = `qt-item-${idx}`;
+    div.dataset.comment = '1';
+    div.innerHTML = `
+      <span class="badge-pill badge-info" style="flex-shrink:0" title="Comment line — printed on the quote and invoice, no price">C</span>
+      <textarea id="qti-comment-${idx}" rows="2" style="flex:1" placeholder="Comment to print on the quote and invoice, e.g. Price includes installation; colour to be confirmed">${prefill ? this.escapeAttr(prefill.product_name) : ''}</textarea>
+      <button class="btn btn-sm btn-danger" onclick="document.getElementById('qt-item-${idx}').remove()">✕</button>`;
+    document.getElementById('qt-items').appendChild(div);
   },
 
   // Valid Until's 30/60/90-day dropdown. Counted from the quote's own date
@@ -21496,6 +21579,11 @@ const App = {
     const items = [];
     document.querySelectorAll('#qt-items > [id^="qt-item-"]').forEach(row => {
       const idx = row.id.split('-').pop();
+      if (row.dataset.comment === '1') {
+        const text = document.getElementById(`qti-comment-${idx}`)?.value.trim();
+        if (text) items.push({ is_comment: 1, description: text });
+        return;
+      }
       if (row.dataset.rental === '1') {
         const product_id = document.getElementById(`qti-rprod-${idx}`)?.value;
         if (!product_id) return;
@@ -21687,7 +21775,7 @@ const App = {
         <table>
           <thead><tr><th>Item</th><th>Qty</th><th>Cost</th><th>Price</th><th>Margin</th><th>Total</th></tr></thead>
           <tbody>
-            ${q.items.map(i => { const margin = (i.unit_cost != null && i.unit_price > 0) ? ((i.unit_price - i.unit_cost) / i.unit_price * 100) : null; return `<tr><td>${i.parent_item_id ? '↳ ' : ''}${i.is_rental_line && !i.parent_item_id ? '<span class="badge-pill badge-warning" style="font-size:10px">RENTAL</span> ' : ''}${i.product_name}${i.is_temp_item && i.is_q_item ? ` <span class="badge-pill badge-warning" style="font-size:10px" title="Flagged for Purchasing to order">Q</span>${i.purchase_request_number ? ` <a href="#" style="font-size:11px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${i.purchase_request_id})">${i.purchase_request_number}</a>` : ''}` : ''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on this line">-${this.fmt(i.discount_amount)}</span>` : ''}</td><td>${i.quantity}</td><td>${i.unit_cost != null ? this.fmt(i.unit_cost) : '<span style="color:var(--text-muted)">—</span>'}</td><td>${this.fmt(i.unit_price)}</td><td>${margin != null ? `<span style="color:${margin<0?'var(--danger)':'var(--text-muted)'}">${margin>=0?'+':''}${margin.toFixed(0)}%</span>` : '—'}</td><td class="fw-600">${i.is_mandatory ? 'Included' : this.fmt(i.total)}</td></tr>${this._spRentalDetailsHtml(i, q)}`; }).join('')}
+            ${q.items.map(i => { if (i.is_comment) return `<tr><td colspan="6" style="font-style:italic;white-space:pre-wrap;color:var(--text-muted)"><span class="badge-pill badge-info" style="font-size:10px;font-style:normal">C</span> ${this.escapeAttr(i.product_name)}</td></tr>`; const margin = (i.unit_cost != null && i.unit_price > 0) ? ((i.unit_price - i.unit_cost) / i.unit_price * 100) : null; return `<tr><td>${i.parent_item_id ? '↳ ' : ''}${i.is_rental_line && !i.parent_item_id ? '<span class="badge-pill badge-warning" style="font-size:10px">RENTAL</span> ' : ''}${i.product_name}${i.is_temp_item && i.is_q_item ? ` <span class="badge-pill badge-warning" style="font-size:10px" title="Flagged for Purchasing to order">Q</span>${i.purchase_request_number ? ` <a href="#" style="font-size:11px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${i.purchase_request_id})">${i.purchase_request_number}</a>` : ''}` : ''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on this line">-${this.fmt(i.discount_amount)}</span>` : ''}</td><td>${i.quantity}</td><td>${i.unit_cost != null ? this.fmt(i.unit_cost) : '<span style="color:var(--text-muted)">—</span>'}</td><td>${this.fmt(i.unit_price)}</td><td>${margin != null ? `<span style="color:${margin<0?'var(--danger)':'var(--text-muted)'}">${margin>=0?'+':''}${margin.toFixed(0)}%</span>` : '—'}</td><td class="fw-600">${i.is_mandatory ? 'Included' : this.fmt(i.total)}</td></tr>${this._spRentalDetailsHtml(i, q)}`; }).join('')}
           </tbody>
         </table>
       </div>` : `
@@ -21695,7 +21783,7 @@ const App = {
         <table>
           <thead><tr><th>Product</th><th>Qty</th><th>Price</th><th>Tax</th><th>Total</th></tr></thead>
           <tbody>
-            ${q.items.map(i => `<tr><td>${i.product_name}${i.is_temp_item && (!isSpecialProject || i.is_q_item) ? ` <span class="badge-pill badge-warning" style="font-size:10px" title="Flagged for Purchasing to order">Q</span>${i.purchase_request_number ? ` <a href="#" style="font-size:11px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${i.purchase_request_id})">${i.purchase_request_number}</a>` : ''}` : ''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on this line">-${this.fmt(i.discount_amount)}</span>` : ''}${this.renderQuoteItemSources(i, q)}</td><td>${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td>${this.fmt(i.tax_amount)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}
+            ${q.items.map(i => i.is_comment ? `<tr><td colspan="5" style="font-style:italic;white-space:pre-wrap;color:var(--text-muted)"><span class="badge-pill badge-info" style="font-size:10px;font-style:normal">C</span> ${this.escapeAttr(i.product_name)}</td></tr>` : `<tr><td>${i.product_name}${i.is_temp_item && (!isSpecialProject || i.is_q_item) ? ` <span class="badge-pill badge-warning" style="font-size:10px" title="Flagged for Purchasing to order">Q</span>${i.purchase_request_number ? ` <a href="#" style="font-size:11px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${i.purchase_request_id})">${i.purchase_request_number}</a>` : ''}` : ''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on this line">-${this.fmt(i.discount_amount)}</span>` : ''}${this.renderQuoteItemSources(i, q)}</td><td>${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td>${this.fmt(i.tax_amount)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}
           </tbody>
         </table>
       </div>`;

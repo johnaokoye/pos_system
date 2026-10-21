@@ -53,6 +53,21 @@ function footerHtml(s) {
     .replace(/\r?\n/g, '<br>');
 }
 
+// A "C" (comment) line on a quote or sale — free text with no price, shown
+// in italics across the item columns, its line breaks kept.
+function commentRowHtml(text, colspan) {
+  const safe = String(text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\r?\n/g, '<br>');
+  return `
+    <tr><td colspan="${colspan}" style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-style:italic;color:#555">${safe}</td></tr>`;
+}
+
+// The PDF version: the text in the item column, the other cells blank.
+function commentRowPdf(text, columnCount, mainCol = 0) {
+  const cells = Array(columnCount).fill('');
+  cells[mainCol] = String(text || '');
+  return { cells };
+}
+
 function logoImgTag(s, origin, maxHeight = 40) {
   if (!s.company_logo_url) return '';
   const src = /^https?:\/\//.test(s.company_logo_url) ? s.company_logo_url : `${origin}${s.company_logo_url}`;
@@ -80,6 +95,7 @@ function buildReceiptHtml(tx, s) {
   const footer = footerHtml(s);
 
   const rows = (tx.items || []).map(i => {
+    if (i.is_comment) return commentRowHtml(i.product_name, 2);
     // Manual line-item discount (POS "%" button), shown between the unit
     // price and the line total — e.g. "× 2 @ $10.00 less 5% (-$1.00)".
     const gross = (parseFloat(i.unit_price) || 0) * (parseFloat(i.quantity) || 0);
@@ -326,7 +342,7 @@ function buildRentalInvoiceHtml(agreement, tx, s, origin) {
   const returnedLabel = agreement.returned_at ? new Date(agreement.returned_at).toLocaleString() : 'Not yet returned';
   const durationLabel = rentalDurationText(agreement.checkout_datetime, agreement.due_date, agreement.returned_at);
 
-  const rows = (tx.items || []).map(i => `
+  const rows = (tx.items || []).map(i => i.is_comment ? commentRowHtml(i.product_name, 2) : `
     <tr>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku || ''}${i.quantity > 1 ? ` × ${i.quantity} @ ${fmt(i.unit_price)}` : ''}</span></td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(i.total)}</td>
@@ -591,7 +607,7 @@ function buildQuoteHtml(q, s, { print = false } = {}) {
   const storePhone = s.store_phone || '';
   const footer = footerHtml(s);
 
-  const rows = (q.items || []).map(i => `
+  const rows = (q.items || []).map(i => i.is_comment ? commentRowHtml(i.product_name, 5) : `
     <tr>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;white-space:nowrap;color:#555">${i.sku || ''}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}${parseFloat(i.discount_amount) > 0 ? `<br><span style="color:${BRAND.green};font-size:11px">Price includes ${fmt(i.discount_amount)} discount</span>` : ''}</td>
@@ -1897,7 +1913,7 @@ function quotePdfModel(q, s) {
     title: 'QUOTATION', number: q.quote_number,
     meta: [['Date', pdfDate(q.created_at)], ['Valid Until', q.valid_until ? pdfDate(String(q.valid_until).slice(0, 10)) : ''], ['Branch', q.branch_name]],
     party: { label: 'Bill To', lines: [q.customer_name, q.customer_phone, q.customer_email] },
-    tables: [{ mainCol: 1, columns: [{ label: 'SKU', width: 1.4 }, { label: 'Item', width: 3.4 }, ...ITEM_COLUMNS.slice(1)], rows: (q.items || []).map(i => ({
+    tables: [{ mainCol: 1, columns: [{ label: 'SKU', width: 1.4 }, { label: 'Item', width: 3.4 }, ...ITEM_COLUMNS.slice(1)], rows: (q.items || []).map(i => i.is_comment ? commentRowPdf(i.product_name, 5, 1) : ({
       cells: [i.sku || '', i.product_name, i.quantity, fmt(i.unit_price), fmt(i.total)],
       sub: parseFloat(i.discount_amount) > 0 ? `Price includes ${fmt(i.discount_amount)} discount` : '',
     })) }],
@@ -1964,6 +1980,7 @@ function receiptPdfModel(tx, s) {
     party: { label: 'Customer', lines: [tx.customer_name] },
     info: [['Created By', tx.created_by_name], ['Cashier', tx.employee_name], ['Payment', (tx.payment_method || '').replace('_', ' ').toUpperCase()]],
     tables: [{ columns: ITEM_COLUMNS, rows: (tx.items || []).map(i => {
+      if (i.is_comment) return commentRowPdf(i.product_name, ITEM_COLUMNS.length);
       const gross = (parseFloat(i.unit_price) || 0) * (parseFloat(i.quantity) || 0);
       const pct = parseFloat(i.discount_percent) || (parseFloat(i.discount_amount) > 0 && gross > 0 ? parseFloat((i.discount_amount / gross * 100).toFixed(2)) : 0);
       return { cells: [i.product_name, i.quantity, fmt(i.unit_price), fmt(i.total)], sub: [i.sku, pct > 0 ? `less ${pct}% (-${fmt(i.discount_amount)})` : ''].filter(Boolean).join(' · ') };
@@ -2001,7 +2018,7 @@ function rentalInvoicePdfModel(agreement, tx, s) {
       ['Returned', agreement.returned_at ? pdfDateTime(agreement.returned_at) : 'Not yet returned'],
       ['Duration', rentalDurationText(agreement.checkout_datetime, agreement.due_date, agreement.returned_at)],
     ],
-    tables: [{ columns: [{ label: 'Item', width: 6 }, { label: 'Amount', width: 1.8, align: 'right' }], rows: (tx.items || []).map(i => ({
+    tables: [{ columns: [{ label: 'Item', width: 6 }, { label: 'Amount', width: 1.8, align: 'right' }], rows: (tx.items || []).map(i => i.is_comment ? commentRowPdf(i.product_name, 2) : ({
       cells: [i.product_name, fmt(i.total)], sub: `${i.sku || ''}${i.quantity > 1 ? ` x ${i.quantity} @ ${fmt(i.unit_price)}` : ''}`,
     })) }],
     totals: breakdown ? [
