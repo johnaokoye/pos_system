@@ -3,9 +3,11 @@ const router = express.Router();
 const { db } = require('../database');
 const { requireAuth, requirePermission, can } = require('../lib/permissions');
 
-// "Current sales" per period goes to the Salesperson picked on the POS
-// ticket (transactions.salesperson_id), else whoever rang it up
-// (employee_id) — deliberately not the commission-credit chain
+// "Current sales" per period go to whoever the sale is credited to:
+// transactions.salesperson_id (the Salesperson who started the ticket, or the
+// one picked on it, or set afterwards by a sales manager — see
+// ticketSalesperson in routes/transactions.js), else whoever started the
+// ticket (created_by), else whoever rang it up (employee_id) — deliberately not the commission-credit chain
 // (quotations.original_employee_id) a reassigned quote's sale uses
 // elsewhere in this app. A target tracks a salesperson's own selling
 // activity, a different question from whose commission a sale counts
@@ -14,14 +16,14 @@ const { requireAuth, requirePermission, can } = require('../lib/permissions');
 // hour/day/week/month" — 31 days safely covers the current month from
 // any day within it.
 const CURRENT_SALES_SELECT = `
-  SELECT COALESCE(salesperson_id, employee_id) as employee_id,
+  SELECT COALESCE(salesperson_id, created_by, employee_id) as employee_id,
     COALESCE(SUM(CASE WHEN strftime('%Y-%m-%d %H', created_at) = strftime('%Y-%m-%d %H', 'now') THEN total ELSE 0 END), 0) as hourly_sales,
     COALESCE(SUM(CASE WHEN date(created_at) = date('now') THEN total ELSE 0 END), 0) as daily_sales,
     COALESCE(SUM(CASE WHEN strftime('%Y-%W', created_at) = strftime('%Y-%W', 'now') THEN total ELSE 0 END), 0) as weekly_sales,
     COALESCE(SUM(CASE WHEN strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now') THEN total ELSE 0 END), 0) as monthly_sales
   FROM transactions
-  WHERE status = 'completed' AND COALESCE(salesperson_id, employee_id) IS NOT NULL AND date(created_at) >= date('now', '-31 days')
-  GROUP BY COALESCE(salesperson_id, employee_id)`;
+  WHERE status = 'completed' AND COALESCE(salesperson_id, created_by, employee_id) IS NOT NULL AND date(created_at) >= date('now', '-31 days')
+  GROUP BY COALESCE(salesperson_id, created_by, employee_id)`;
 
 // A plain salesperson (no sales_manager/reports) only ever sees their own
 // numbers, regardless of what they ask for — same "mine" scoping pattern

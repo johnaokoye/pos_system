@@ -36,13 +36,29 @@ async function resolveSalesperson(salespersonId) {
   return sp.id;
 }
 
+// Who a sale is credited to for sales targets: the person who started the
+// ticket when they're a Salesperson (a hold they put up, their quote, a sale
+// they rang up themselves) — not the cashier who finishes it or whoever the
+// cashier picks; otherwise the Salesperson picked on the ticket. Stored in
+// salesperson_id; reads use CREDITED_SQL so a sale with none falls back to
+// whoever started it, then the cashier. A sales manager can change it after
+// the sale (PATCH /salesperson).
+async function ticketSalesperson(initiatorId, pickedId) {
+  if (initiatorId) {
+    const { rows: [sp] } = await db.execute({ sql: 'SELECT id FROM employees WHERE id = ? AND is_salesperson = 1 AND active = 1', args: [initiatorId] });
+    if (sp) return sp.id;
+  }
+  return resolveSalesperson(pickedId);
+}
+const CREDITED_SQL = 'COALESCE(t.salesperson_id, t.created_by, t.employee_id)';
+
 // Put order on hold (no stock updates, no payment processing)
 router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
   try {
     const { customer_id, employee_id, created_by, branch_id, items, discount_amount, notes } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in cart' });
     let salespersonId;
-    try { salespersonId = await resolveSalesperson(req.body.salesperson_id); } catch (e) { return res.status(400).json({ error: e.message }); }
+    try { salespersonId = await ticketSalesperson(created_by || employee_id, req.body.salesperson_id); } catch (e) { return res.status(400).json({ error: e.message }); }
 
     const hold_number = 'HOLD-' + Date.now();
     let subtotal = 0, tax_amount = 0;
@@ -121,13 +137,15 @@ const requireTransactionsList = (req, res, next) => req.query.status === 'hold'
 
 router.get('/', requireTransactionsList, async (req, res) => {
   try {
-    const { start, end, customer_id, customer_name, status, branch_id, payment_method, transaction_number, source, fulfillment_status, limit = 100 } = req.query;
+    const { start, end, customer_id, customer_name, status, branch_id, payment_method, transaction_number, source, fulfillment_status, employee_id, credited_id, limit = 100 } = req.query;
     let sql = `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name,
+      ${CREDITED_SQL} as credited_id, ce.first_name || ' ' || ce.last_name as credited_name,
       ra.agreement_number as rental_agreement_number, q.quote_number as source_quote_number,
       CASE WHEN ra.checkout_transaction_id = t.id THEN 'checkout' WHEN ra.settlement_transaction_id = t.id THEN 'settlement' END as rental_role,
       wo.wo_number as work_order_number,
       CASE WHEN wo.assessment_transaction_id = t.id THEN 'assessment' WHEN wo.deposit_transaction_id = t.id THEN 'deposit' WHEN wo.final_transaction_id = t.id THEN 'final' END as wo_role
       FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN branches b ON t.branch_id = b.id
+      LEFT JOIN employees ce ON ce.id = ${CREDITED_SQL}
       LEFT JOIN rental_agreements ra ON ra.checkout_transaction_id = t.id OR ra.settlement_transaction_id = t.id
       LEFT JOIN quotations q ON q.converted_to_tx = t.id
       LEFT JOIN work_orders wo ON wo.assessment_transaction_id = t.id OR wo.deposit_transaction_id = t.id OR wo.final_transaction_id = t.id
@@ -142,12 +160,15 @@ router.get('/', requireTransactionsList, async (req, res) => {
     if (branch_id) { sql += ' AND t.branch_id = ?'; params.push(branch_id); }
     if (payment_method) { sql += ' AND t.payment_method = ?'; params.push(payment_method); }
     if (fulfillment_status) { sql += ' AND t.fulfillment_status = ?'; params.push(fulfillment_status); }
+    if (employee_id) { sql += ' AND t.employee_id = ?'; params.push(Number(employee_id)); }
+    if (credited_id) { sql += ` AND ${CREDITED_SQL} = ?`; params.push(Number(credited_id)); }
     if (source === 'online') { sql += " AND t.source IN ('online','woocommerce')"; }
     else if (source) { sql += ' AND t.source = ?'; params.push(source); }
     // A salesperson-flagged employee only ever sees their own sales here,
     // regardless of what filters the client sent — see is_salesperson
-    // migration note in database.js.
-    if (req.employee?.is_salesperson) { sql += ' AND t.employee_id = ?'; params.push(req.employee.id); }
+    // migration note in database.js. That includes sales credited to them
+    // that someone else rang up.
+    if (req.employee?.is_salesperson) { sql += ` AND (t.employee_id = ? OR ${CREDITED_SQL} = ?)`; params.push(req.employee.id, req.employee.id); }
     sql += ' ORDER BY t.created_at DESC LIMIT ?';
     params.push(parseInt(limit));
     const { rows } = await db.execute({ sql, args: params });
@@ -159,7 +180,7 @@ router.get('/', requireTransactionsList, async (req, res) => {
 // returns flow, online orders), not just the Transactions detail view.
 router.get('/:id', requireAuth, async (req, res) => {
   try {
-    const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, c.phone as customer_phone, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip, e.first_name || ' ' || e.last_name as employee_name, cbe.first_name || ' ' || cbe.last_name as created_by_name, spe.first_name || ' ' || spe.last_name as salesperson_name, b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone, q.id as source_quote_id, q.quote_number as source_quote_number, qe.first_name || ' ' || qe.last_name as quote_created_by, r.return_number as source_return_number, sh.carrier as shipment_carrier, sh.tracking_number as shipment_tracking_number, sh.status as shipment_status, sh.ship_date as shipment_ship_date, sh.estimated_delivery as shipment_estimated_delivery,
+    const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, c.phone as customer_phone, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip, e.first_name || ' ' || e.last_name as employee_name, cbe.first_name || ' ' || cbe.last_name as created_by_name, spe.first_name || ' ' || spe.last_name as salesperson_name, ${CREDITED_SQL} as credited_id, ce.first_name || ' ' || ce.last_name as credited_name, b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone, q.id as source_quote_id, q.quote_number as source_quote_number, qe.first_name || ' ' || qe.last_name as quote_created_by, r.return_number as source_return_number, sh.carrier as shipment_carrier, sh.tracking_number as shipment_tracking_number, sh.status as shipment_status, sh.ship_date as shipment_ship_date, sh.estimated_delivery as shipment_estimated_delivery,
       ve.first_name || ' ' || ve.last_name as voided_by_name,
       ra.id as rental_agreement_id, ra.agreement_number as rental_agreement_number, ra.status as rental_status, ra.quotation_id as rental_quotation_id,
       ra.checkout_datetime as rental_checkout_datetime, ra.due_date as rental_due_date, ra.returned_at as rental_returned_at,
@@ -172,6 +193,7 @@ router.get('/:id', requireAuth, async (req, res) => {
       FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN branches b ON t.branch_id = b.id LEFT JOIN quotations q ON q.converted_to_tx = t.id LEFT JOIN employees qe ON q.employee_id = qe.id LEFT JOIN returns r ON t.source_return_id = r.id LEFT JOIN shipments sh ON sh.transaction_id = t.id
       LEFT JOIN employees ve ON t.voided_by = ve.id
       LEFT JOIN employees cbe ON cbe.id = COALESCE(t.created_by, t.employee_id) LEFT JOIN employees spe ON spe.id = t.salesperson_id
+      LEFT JOIN employees ce ON ce.id = ${CREDITED_SQL}
       LEFT JOIN rental_agreements ra ON ra.checkout_transaction_id = t.id OR ra.settlement_transaction_id = t.id
       LEFT JOIN work_orders wo ON wo.assessment_transaction_id = t.id OR wo.deposit_transaction_id = t.id OR wo.final_transaction_id = t.id
       WHERE t.id = ?`, args: [req.params.id] });
@@ -188,7 +210,41 @@ router.get('/:id', requireAuth, async (req, res) => {
       const { rows: pauses } = await db.execute({ sql: 'SELECT reason, notes, started_at, ended_at FROM rental_agreement_pauses WHERE agreement_id = ? ORDER BY id', args: [tx.rental_agreement_id] });
       tx.rental_pauses = pauses;
     }
+    const { rows: spChanges } = await db.execute({ sql: `SELECT sc.*, o.first_name || ' ' || o.last_name AS old_name, n.first_name || ' ' || n.last_name AS new_name, cb.first_name || ' ' || cb.last_name AS changed_by_name
+      FROM salesperson_changes sc LEFT JOIN employees o ON o.id = sc.old_salesperson_id LEFT JOIN employees n ON n.id = sc.new_salesperson_id LEFT JOIN employees cb ON cb.id = sc.changed_by
+      WHERE sc.transaction_id = ? ORDER BY sc.changed_at, sc.id`, args: [req.params.id] });
+    tx.salesperson_changes = spChanges;
     res.json(tx);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Change who one or more past sales are credited to (sales targets) — the
+// Transactions "Change Salesperson" action and its bulk version. salesperson_id
+// null clears the pick, so the sale goes back to whoever started it, else the
+// cashier. Every sale changed is logged in salesperson_changes.
+router.patch('/salesperson', requirePermission('sales_manager'), async (req, res) => {
+  try {
+    const ids = [...new Set((Array.isArray(req.body.ids) ? req.body.ids : []).map(Number).filter(Number.isInteger))];
+    if (!ids.length) return res.status(400).json({ error: 'Choose at least one sale' });
+    if (ids.length > 500) return res.status(400).json({ error: 'Change at most 500 sales at a time' });
+    let newId;
+    try { newId = await resolveSalesperson(req.body.salesperson_id); } catch (e) { return res.status(400).json({ error: e.message }); }
+    const reason = String(req.body.reason || '').trim().slice(0, 500) || null;
+    const { rows } = await db.execute({ sql: `SELECT t.id, t.transaction_number, t.status, t.salesperson_id, ${CREDITED_SQL} AS credited_id, COALESCE(t.created_by, t.employee_id) AS fallback_id FROM transactions t WHERE t.id IN (${ids.map(() => '?').join(',')})`, args: ids });
+    if (rows.length !== ids.length) return res.status(404).json({ error: 'Some of those sales were not found — reload and try again' });
+    const notSales = rows.filter(r => r.status === 'hold' || r.status === 'voided');
+    if (notSales.length) return res.status(400).json({ error: `Only completed sales can be credited — ${notSales.map(r => r.transaction_number).join(', ')} ${notSales.length === 1 ? 'is' : 'are'} held or voided` });
+    const stmts = [];
+    let changed = 0;
+    for (const r of rows) {
+      const after = newId || r.fallback_id;
+      if ((r.salesperson_id ?? null) === newId) continue;
+      stmts.push({ sql: 'UPDATE transactions SET salesperson_id = ? WHERE id = ?', args: [newId, r.id] });
+      stmts.push({ sql: 'INSERT INTO salesperson_changes (transaction_id, old_salesperson_id, new_salesperson_id, changed_by, reason) VALUES (?,?,?,?,?)', args: [r.id, r.credited_id, after, req.employee?.id || null, reason] });
+      changed++;
+    }
+    if (stmts.length) await db.batch(stmts, 'write');
+    res.json({ success: true, changed, unchanged: rows.length - changed });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -198,7 +254,6 @@ router.post('/', requirePermission('pos'), async (req, res) => {
     let { branch_id } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in transaction' });
     let salespersonId;
-    try { salespersonId = await resolveSalesperson(req.body.salesperson_id); } catch (e) { return res.status(400).json({ error: e.message }); }
 
     // For API-authenticated (online) orders with no branch, use the ecommerce sync branch
     if (!branch_id && req.apiKey) {
@@ -216,6 +271,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       createdBy = q?.original_employee_id || q?.employee_id || null;
     }
     createdBy = createdBy || employee_id || 1;
+    try { salespersonId = await ticketSalesperson(createdBy, req.body.salesperson_id); } catch (e) { return res.status(400).json({ error: e.message }); }
 
     // Store-wide cap for a manual per-line discount (see the POS "Discount"
     // action on a cart line) — the same Maximum Discount (max_discount_pct)

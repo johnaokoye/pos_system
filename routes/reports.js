@@ -135,7 +135,8 @@ router.get('/dashboard', requireAuth, async (req, res) => {
     // A salesperson's dashboard shows only their own sales, not the store's —
     // see is_salesperson migration note in database.js.
     const mine = !!req.employee?.is_salesperson;
-    const ef = mine ? ' AND t.employee_id = ?' : '';
+    // "Mine" = sales credited to them (see ticketSalesperson in routes/transactions.js).
+    const ef = mine ? ' AND COALESCE(t.salesperson_id, t.created_by, t.employee_id) = ?' : '';
     const ep = mine ? [req.employee.id] : [];
 
     const { rows: [todayStats] } = await db.execute({ sql: `SELECT COUNT(*) as transactions, COALESCE(SUM(total),0) as sales FROM transactions t WHERE t.status='completed' AND date(t.created_at) = date(?) ${warehouseExclude}${bf}${ef}`, args: [today, ...bp, ...ep] });

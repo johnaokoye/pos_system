@@ -2640,7 +2640,7 @@ const App = {
             <button class="btn btn-outline btn-sm" onclick="App.selectCustomer()">Select</button>
             <button class="btn btn-secondary btn-sm" id="remove-customer-btn" style="display:${this.cartCustomer ? 'inline-flex' : 'none'}" onclick="App.removeCustomer()">✕</button>
           </div>
-          <label style="color:var(--text-muted);display:flex;align-items:center;gap:6px;margin:0" title="Who made this sale — it counts toward their sales targets. Leave on the cashier when they made it.">Salesperson:
+          <label style="color:var(--text-muted);display:flex;align-items:center;gap:6px;margin:0" title="Who made this sale — it counts toward their sales targets. Leave on the cashier when they made it. A ticket a salesperson started is always theirs.">Salesperson:
             <select id="pos-salesperson" onchange="App._ticketSalesperson = this.value ? Number(this.value) : null" style="margin:0;padding:3px 6px;width:auto;min-width:160px">
               <option value="">${this.escapeAttr(cashierName)} (cashier)</option>
             </select>
@@ -3585,6 +3585,19 @@ const App = {
   _renderTicketSalesperson() {
     const sel = document.getElementById('pos-salesperson');
     if (!sel) return;
+    // A ticket started by a Salesperson — a hold they put up, their quote,
+    // or one they're ringing up themselves — is theirs; the cashier can't
+    // hand it to someone else (the server applies the same rule, see
+    // ticketSalesperson in routes/transactions.js).
+    const initiatorId = this._ticketCreatedBy || this.currentUser?.id;
+    const initiator = (this._posSalespeople || []).find(sp => sp.id === initiatorId);
+    sel.disabled = !!initiator;
+    sel.title = initiator ? `Started by ${`${initiator.first_name} ${initiator.last_name}`.trim()} — the sale is credited to them` : '';
+    if (initiator) {
+      sel.innerHTML = `<option value="${initiator.id}">${this.escapeAttr(`${initiator.first_name} ${initiator.last_name}`.trim())}</option>`;
+      sel.value = String(initiator.id);
+      return;
+    }
     const list = [...(this._posSalespeople || [])];
     // A recalled hold's salesperson stays shown even if no longer flagged.
     if (this._ticketSalesperson && !list.some(s => s.id === this._ticketSalesperson)) list.push({ id: this._ticketSalesperson, first_name: this._ticketSalespersonName || `Employee #${this._ticketSalesperson}`, last_name: '' });
@@ -4275,7 +4288,9 @@ const App = {
       this.appliedPromoCode = null;
       this._returnCredit = null;
       this._activeQuoteId = quote.id;
-      this._ticketCreatedBy = null;
+      // The quote's salesperson started this sale (credit and receipt).
+      this._ticketCreatedBy = quote.original_employee_id || quote.employee_id || null;
+      this._renderTicketSalesperson();
 
       if (quote.customer_id) {
         const customer = await this.api('GET', `/customers/${quote.customer_id}`);
@@ -14244,8 +14259,16 @@ const App = {
     const today = new Date().toISOString().slice(0,10);
     const weekAgo = new Date(Date.now() - 7*86400000).toISOString().slice(0,10);
     const branches = this.currentUser.branches || [];
-    const txs = await this.api('GET', `/transactions?start=${weekAgo}&end=${today}`);
+    // A sales manager can filter by who rang a sale up / who it's credited
+    // to and change the credit (one sale or a selection).
+    const spManager = this.can('sales_manager');
+    const [txs, employees] = await Promise.all([
+      this.api('GET', `/transactions?start=${weekAgo}&end=${today}`),
+      spManager ? this.api('GET', '/employees').catch(() => []) : [],
+    ]);
     if (this.section !== 'transactions') return;
+    this._txEmployees = employees;
+    const empOptions = employees.map(e => `<option value="${e.id}">${this.escapeAttr(`${e.first_name} ${e.last_name}`.trim())}${e.active ? '' : ' (inactive)'}</option>`).join('');
 
     document.getElementById('content').innerHTML = `
       <div class="section-header">
@@ -14271,6 +14294,12 @@ const App = {
           </select>
           <input type="text" id="tx-number" placeholder="Tx # search…" style="width:150px">
           <input type="text" id="tx-customer" placeholder="Customer name…" style="width:160px">
+          ${spManager ? `<select id="tx-cashier" style="width:160px" title="Who rang the sale up">
+            <option value="">Any Cashier</option>${empOptions}
+          </select>
+          <select id="tx-credited" style="width:170px" title="Who the sale counts for (sales targets)">
+            <option value="">Any Salesperson</option>${empOptions}
+          </select>` : ''}
           <button class="btn btn-primary" onclick="App.loadTransactions()">Search</button>
         </div>
       </div>
@@ -14527,10 +14556,19 @@ const App = {
   },
 
   buildTxTable(txs) {
+    this._txSelected = new Set();
     if (!txs.length) return '<div class="empty-state"><p>No transactions found</p></div>';
-    return `<table>
-      <thead><tr><th>Tx #</th><th>Date/Time</th><th>Customer</th><th>Branch</th><th>Type</th><th>Subtotal</th><th>Tax</th><th>Total</th><th>Method</th><th>Status</th><th>Actions</th></tr></thead>
+    // Sales managers tick sales to credit them to a salesperson in one go.
+    const pick = this.can('sales_manager');
+    const pickable = tx => tx.status !== 'voided' && tx.status !== 'hold';
+    return `${pick ? `<div id="tx-bulk-bar" style="display:flex;align-items:center;gap:10px;padding:8px 10px;flex-wrap:wrap;font-size:13px">
+        <span id="tx-bulk-count" style="color:var(--text-muted)">Tick sales to change who they're credited to</span>
+        <button class="btn btn-primary btn-sm" id="tx-bulk-btn" disabled onclick="App.showChangeSalespersonModal([...App._txSelected])">Change Salesperson…</button>
+        ${txs.length >= (this._txLimit || 100) ? `<span style="color:var(--text-muted);font-size:12px">Showing the latest ${txs.length} — narrow the dates to see more</span>` : ''}
+      </div>` : ''}<table>
+      <thead><tr>${pick ? `<th style="width:28px"><input type="checkbox" title="Select all" onchange="App._txSelectAll(this.checked)" style="width:auto;margin:0"></th>` : ''}<th>Tx #</th><th>Date/Time</th><th>Customer</th><th>Branch</th><th>Type</th><th>Subtotal</th><th>Tax</th><th>Total</th><th>Method</th><th>Salesperson</th><th>Status</th><th>Actions</th></tr></thead>
       <tbody>${txs.map(tx => `<tr>
+        ${pick ? `<td>${pickable(tx) ? `<input type="checkbox" class="tx-pick" value="${tx.id}" onchange="App._txToggle(${tx.id}, this.checked)" style="width:auto;margin:0">` : ''}</td>` : ''}
         <td class="fw-600" style="font-family:monospace">${tx.transaction_number}${(tx.source==='online'||tx.source==='woocommerce')?'<br><span style="font-size:10px;background:#6366f1;color:#fff;border-radius:3px;padding:1px 5px;font-family:sans-serif;font-weight:500;letter-spacing:.3px">ONLINE</span>':''}</td>
         <td style="white-space:nowrap">${this.fmtDateTime(tx.created_at)}</td>
         <td>${tx.customer_name || '<em style="color:#999">Walk-in</em>'}</td>
@@ -14542,6 +14580,7 @@ const App = {
         <td style="color:var(--text-muted)">${this.fmt(tx.tax_amount)}</td>
         <td class="fw-600">${this.fmt(tx.total)}</td>
         <td><span class="badge-pill badge-info">${tx.payment_method.replace('_',' ')}</span></td>
+        <td style="font-size:12px">${this.escapeAttr(tx.credited_name || '—')}</td>
         <td><span class="badge-pill ${tx.status==='completed'?'badge-success':'badge-danger'}">${tx.status}</span></td>
         <td style="white-space:nowrap">
           <button class="btn btn-secondary btn-sm" onclick="App.viewTransaction(${tx.id})">View</button>
@@ -14565,9 +14604,76 @@ const App = {
     if (source) url += `&source=${encodeURIComponent(source)}`;
     if (txNumber) url += `&transaction_number=${encodeURIComponent(txNumber)}`;
     if (customerName) url += `&customer_name=${encodeURIComponent(customerName)}`;
+    const cashier = document.getElementById('tx-cashier')?.value;
+    const credited = document.getElementById('tx-credited')?.value;
+    if (cashier) url += `&employee_id=${cashier}`;
+    if (credited) url += `&credited_id=${credited}`;
+    // Bigger pages for a sales manager sorting out who sales belong to.
+    this._txLimit = this.can('sales_manager') ? 500 : 100;
+    url += `&limit=${this._txLimit}`;
     const txs = await this.api('GET', url);
     const txTable = document.getElementById('tx-table');
     if (txTable) txTable.innerHTML = this.buildTxTable(txs);
+  },
+
+  _txToggle(id, on) {
+    if (on) this._txSelected.add(id); else this._txSelected.delete(id);
+    const n = this._txSelected.size;
+    const count = document.getElementById('tx-bulk-count');
+    if (count) count.textContent = n ? `${n} sale${n === 1 ? '' : 's'} selected` : "Tick sales to change who they're credited to";
+    const btn = document.getElementById('tx-bulk-btn');
+    if (btn) btn.disabled = !n;
+  },
+
+  _txSelectAll(on) {
+    document.querySelectorAll('#tx-table .tx-pick').forEach(cb => { cb.checked = on; this._txToggle(Number(cb.value), on); });
+  },
+
+  // Credit past sales to a salesperson (sales targets) — one sale from its
+  // detail view, or the sales ticked on the Transactions list.
+  async showChangeSalespersonModal(ids, fromTxId = null) {
+    if (!ids.length) return;
+    let people;
+    try { people = await this.api('GET', '/sales-targets/salespeople'); } catch (e) { this.alert(e.message, 'error'); return; }
+    const one = ids.length === 1;
+    this.showModal(`
+      <div class="modal" style="max-width:440px">
+        <div class="modal-header"><span class="modal-title">Change Salesperson</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin:0 0 10px">${one ? 'This sale' : `These ${ids.length} sales`} will count toward the chosen salesperson's targets. The change is logged.</p>
+          <div class="form-group"><label>Salesperson</label>
+            <select id="csp-person">
+              <option value="">— Select —</option>
+              ${people.map(p => `<option value="${p.id}">${this.escapeAttr(`${p.first_name} ${p.last_name}`.trim())}</option>`).join('')}
+              <option value="none">None — credit whoever started the ticket</option>
+            </select>
+          </div>
+          <div class="form-group" style="margin-bottom:0"><label>Reason (optional)</label>
+            <input type="text" id="csp-reason" maxlength="500" placeholder="e.g. Sold before the Salesperson field was turned on">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" id="csp-save" onclick="App.submitChangeSalesperson(${JSON.stringify(ids)}, ${fromTxId || 'null'})">Save</button>
+        </div>
+      </div>`);
+  },
+
+  async submitChangeSalesperson(ids, fromTxId) {
+    const person = document.getElementById('csp-person')?.value;
+    if (!person) { this.alert('Choose a salesperson', 'error'); return; }
+    const btn = document.getElementById('csp-save');
+    if (btn) btn.disabled = true;
+    try {
+      const r = await this.api('PATCH', '/transactions/salesperson', { ids, salesperson_id: person === 'none' ? null : Number(person), reason: document.getElementById('csp-reason')?.value || '' });
+      this.closeModal();
+      this.alert(r.changed ? `${r.changed} sale${r.changed === 1 ? '' : 's'} updated${r.unchanged ? ` (${r.unchanged} already credited that way)` : ''}` : 'No change — already credited that way');
+      if (this.section === 'transactions' && document.getElementById('tx-table')) this.loadTransactions().catch(() => {});
+      if (fromTxId) this.viewTransaction(fromTxId);
+    } catch (e) {
+      if (btn) btn.disabled = false;
+      this.alert(e.message, 'error');
+    }
   },
 
   async viewTransaction(id) {
@@ -14614,12 +14720,17 @@ const App = {
             <div><span style="color:var(--text-muted)">Status:</span> <span class="badge-pill ${tx.status==='completed'?'badge-success':'badge-danger'}">${tx.status}</span></div>
             <div><span style="color:var(--text-muted)">Customer:</span> ${tx.customer_name || 'Walk-in'}</div>
             <div><span style="color:var(--text-muted)">Employee:</span> ${tx.employee_name || '—'}</div>
+            <div><span style="color:var(--text-muted)">Salesperson:</span> ${this.escapeAttr(tx.credited_name || '—')}</div>
             <div><span style="color:var(--text-muted)">Branch:</span> ${tx.branch_name || '—'}</div>
             <div><span style="color:var(--text-muted)">Payment:</span> ${tx.payment_method === 'split' ? 'SPLIT' : tx.payment_method.replace('_',' ')}</div>
             <div><span style="color:var(--text-muted)">Tendered:</span> ${this.fmt(tx.amount_tendered)}</div>
           </div>
           ${tx.payment_method === 'split' ? `<div style="margin-bottom:14px;font-size:13px;border:1px solid var(--border);border-radius:6px;padding:8px 12px">
             ${(tx.payments||[]).map(p => `<div style="display:flex;justify-content:space-between;padding:2px 0"><span>${p.payment_method.replace('_',' ')}${p.approval_code ? ` <span style="color:var(--text-muted);font-size:11px">(${p.approval_code})</span>` : ''}</span><span>${this.fmt(p.amount)}</span></div>`).join('')}
+          </div>` : ''}
+          ${(tx.salesperson_changes || []).length ? `<div style="margin-bottom:14px;font-size:12px;border:1px solid var(--border);border-radius:6px;padding:8px 12px">
+            <div style="font-weight:600;margin-bottom:4px">Salesperson changes</div>
+            ${tx.salesperson_changes.map(c => `<div style="padding:2px 0">${this.fmtDateTime(c.changed_at)} — ${this.escapeAttr(c.old_name || '—')} → <strong>${this.escapeAttr(c.new_name || '—')}</strong> by ${this.escapeAttr(c.changed_by_name || '—')}${c.reason ? ` <span style="color:var(--text-muted)">(${this.escapeAttr(c.reason)})</span>` : ''}</div>`).join('')}
           </div>` : ''}
           <table style="margin-bottom:12px">
             <thead><tr><th>Item</th><th>SKU</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
@@ -14637,6 +14748,7 @@ const App = {
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+          ${tx.status!=='voided'&&tx.status!=='hold'&&this.can('sales_manager')?`<button class="btn btn-secondary" onclick="App.showChangeSalespersonModal([${tx.id}], ${tx.id})">Change Salesperson</button>`:''}
           ${tx.status==='completed'&&!tx.rental_agreement_number&&!tx.work_order_number&&this.can('transactions_returns')?`<button class="btn btn-sm" style="background:#f59e0b;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer" onclick="App.closeModal();App.processReturn(${tx.id})">↩ Return</button>`:''}
           <button class="btn btn-secondary" onclick="App.emailReceipt(${tx.id},'${(tx.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email Receipt</button>
           <button class="btn btn-primary" onclick="App.closeModal();App.printReceiptOrInvoice(App._viewTx,App._viewTx.change_amount||0)">🖨️ Print Receipt</button>

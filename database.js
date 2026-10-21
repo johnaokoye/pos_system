@@ -1149,6 +1149,19 @@ async function _init() {
       voided_by INTEGER REFERENCES employees(id),
       void_reason TEXT
     )` },
+    // Sales credit changed after the sale by a sales manager (PATCH
+    // /transactions/salesperson) — one row per sale changed, old and new
+    // being who the sale was credited to (COALESCE(salesperson_id,
+    // created_by, employee_id)) before and after.
+    { sql: `CREATE TABLE IF NOT EXISTS salesperson_changes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      transaction_id INTEGER NOT NULL REFERENCES transactions(id),
+      old_salesperson_id INTEGER REFERENCES employees(id),
+      new_salesperson_id INTEGER REFERENCES employees(id),
+      changed_by INTEGER REFERENCES employees(id),
+      reason TEXT,
+      changed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS returns (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       return_number TEXT UNIQUE NOT NULL,
@@ -3009,6 +3022,7 @@ async function _init() {
   const indexes = [
     'CREATE INDEX IF NOT EXISTS idx_transactions_customer_id ON transactions(customer_id)',
     'CREATE INDEX IF NOT EXISTS idx_drawer_payouts_session ON drawer_payouts(session_id)',
+    'CREATE INDEX IF NOT EXISTS idx_salesperson_changes_tx ON salesperson_changes(transaction_id)',
     'CREATE INDEX IF NOT EXISTS idx_transactions_branch_id ON transactions(branch_id)',
     'CREATE INDEX IF NOT EXISTS idx_transactions_status ON transactions(status)',
     'CREATE INDEX IF NOT EXISTS idx_transactions_created_at ON transactions(created_at)',
