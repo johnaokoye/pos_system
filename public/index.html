@@ -14423,6 +14423,10 @@ const App = {
       <div class="section-header">
         <h2>Transactions ${this.currentUser.is_salesperson ? '<span style="font-size:12px;font-weight:normal;color:var(--text-muted);border:1px solid var(--border);border-radius:4px;padding:2px 8px;margin-left:8px;vertical-align:middle">My Sales Only</span>' : ''}</h2>
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+          <select id="tx-view" style="width:120px" onchange="App._txViewChanged()" title="Sales, or the returns made against them">
+            <option value="sales">Sales</option>
+            <option value="returns">Returns</option>
+          </select>
           <label style="font-size:13px;text-transform:none;color:var(--text)">From</label>
           <input type="date" id="tx-start" value="${weekAgo}" style="width:150px">
           <label style="font-size:13px;text-transform:none;color:var(--text)">To</label>
@@ -14704,6 +14708,56 @@ const App = {
     if (w) { w.document.write(html); w.document.close(); }
   },
 
+  // Transactions screen "Sales / Returns" switch. Returns use the same date,
+  // branch, number and customer boxes; the sales-only filters are hidden.
+  _txViewChanged() {
+    const returns = document.getElementById('tx-view')?.value === 'returns';
+    ['tx-status', 'tx-source', 'tx-cashier', 'tx-credited'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = returns ? 'none' : ''; });
+    const num = document.getElementById('tx-number');
+    if (num) num.placeholder = returns ? 'Return # or Tx #…' : 'Tx # search…';
+    this.loadTransactions();
+  },
+
+  async loadReturnsList() {
+    const params = new URLSearchParams();
+    const val = id => (document.getElementById(id)?.value || '').trim();
+    if (val('tx-start')) params.set('start', val('tx-start'));
+    if (val('tx-end')) params.set('end', val('tx-end'));
+    if (val('tx-branch')) params.set('branch_id', val('tx-branch'));
+    if (val('tx-number')) params.set('number', val('tx-number'));
+    if (val('tx-customer')) params.set('customer_name', val('tx-customer'));
+    const rows = await this.api('GET', `/transactions/returns?${params}`);
+    const el = document.getElementById('tx-table');
+    if (el) el.innerHTML = this.buildReturnsTable(rows);
+  },
+
+  buildReturnsTable(rows) {
+    if (!rows.length) return '<div class="empty-state"><p>No returns found for these dates</p></div>';
+    const label = { refund: 'Refund', credit_note: 'Credit Note', replacement: 'Exchange' };
+    const badge = { refund: 'badge-warning', credit_note: 'badge-info', replacement: 'badge-secondary' };
+    return `<table>
+      <thead><tr><th>Return #</th><th>Date/Time</th><th>Original Sale</th><th>Customer</th><th>Branch</th><th>Items</th><th>Resolution</th><th>Total</th><th>Processed By</th><th></th></tr></thead>
+      <tbody>${rows.map(r => `<tr>
+        <td class="fw-600" style="font-family:monospace">${this.escapeAttr(r.return_number)}</td>
+        <td style="white-space:nowrap">${this.fmtDateTime(r.created_at)}</td>
+        <td>${r.original_transaction_id ? `<a href="#" style="font-family:monospace;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.viewTransaction(${r.original_transaction_id})">${this.escapeAttr(r.original_transaction_number)}</a>` : '—'}</td>
+        <td>${r.customer_name ? this.escapeAttr(r.customer_name) : '<em style="color:#999">Walk-in</em>'}</td>
+        <td style="font-size:12px;color:var(--text-muted)">${this.escapeAttr(r.branch_name || '—')}</td>
+        <td>${r.item_count}</td>
+        <td><span class="badge-pill ${badge[r.resolution] || 'badge-secondary'}">${label[r.resolution] || this.escapeAttr(r.resolution)}</span></td>
+        <td class="fw-600">${this.fmt(r.total)}</td>
+        <td style="font-size:12px">${this.escapeAttr(r.employee_name || '—')}</td>
+        <td style="white-space:nowrap"><button class="btn btn-secondary btn-sm" onclick="App.viewReturn(${r.id})">View / Print</button></td>
+      </tr>`).join('')}</tbody>
+    </table>`;
+  },
+
+  // Opens a return's receipt (Print and Email are on it).
+  async viewReturn(id) {
+    try { this.showReturnReceipt(await this.api('GET', `/transactions/returns/${id}`)); }
+    catch (e) { this.alert(e.message, 'error'); }
+  },
+
   buildTxTable(txs) {
     this._txSelected = new Set();
     if (!txs.length) return '<div class="empty-state"><p>No transactions found</p></div>';
@@ -14730,7 +14784,7 @@ const App = {
         <td class="fw-600">${this.fmt(tx.total)}</td>
         <td><span class="badge-pill badge-info">${tx.payment_method.replace('_',' ')}</span></td>
         <td style="font-size:12px">${this.escapeAttr(tx.credited_name || '—')}</td>
-        <td><span class="badge-pill ${tx.status==='completed'?'badge-success':'badge-danger'}">${tx.status}</span></td>
+        <td><span class="badge-pill ${tx.status==='completed'?'badge-success':'badge-danger'}">${tx.status}</span>${tx.return_count > 0 ? ` <span class="badge-pill badge-warning" title="Has ${tx.return_count} return${tx.return_count > 1 ? 's' : ''} — open the sale to see ${tx.return_count > 1 ? 'them' : 'it'}">↩ Returned</span>` : ''}</td>
         <td style="white-space:nowrap">
           <button class="btn btn-secondary btn-sm" onclick="App.viewTransaction(${tx.id})">View</button>
           ${tx.status==='completed'&&!tx.rental_agreement_number&&!tx.work_order_number&&this.can('transactions_returns')?`<button class="btn btn-warning btn-sm" onclick="App.processReturn(${tx.id})" style="background:#f59e0b;color:#fff;border:none">Return</button>`:''}
@@ -14740,6 +14794,7 @@ const App = {
   },
 
   async loadTransactions() {
+    if (document.getElementById('tx-view')?.value === 'returns') return this.loadReturnsList();
     const start = document.getElementById('tx-start').value;
     const end = document.getElementById('tx-end').value;
     const branch = document.getElementById('tx-branch').value;
@@ -14895,6 +14950,13 @@ const App = {
             <div style="display:flex;justify-content:space-between;font-size:16px;font-weight:700;margin-top:6px"><span>TOTAL</span><span>${this.fmt(tx.total)}</span></div>
             ${tx.change_amount > 0 ? `<div style="display:flex;justify-content:space-between;font-size:13px;color:var(--success)"><span>Change</span><span>${this.fmt(tx.change_amount)}</span></div>` : ''}
           </div>
+          ${(tx.returns || []).length ? `<div style="margin-top:14px;border-top:1px solid var(--border);padding-top:10px">
+            <div style="font-size:12px;font-weight:700;text-transform:uppercase;color:var(--text-muted);margin-bottom:6px">Returns on this sale</div>
+            ${tx.returns.map(r => `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:13px;margin-bottom:4px">
+              <span><a href="#" style="font-family:monospace;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.viewReturn(${r.id})">${this.escapeAttr(r.return_number)}</a> <span style="color:var(--text-muted)">${this.fmtDateTime(r.created_at)} · ${{ refund: 'Refund', credit_note: 'Credit Note', replacement: 'Exchange' }[r.resolution] || this.escapeAttr(r.resolution)}</span></span>
+              <span class="fw-600">${this.fmt(r.total)}</span>
+            </div>`).join('')}
+          </div>` : ''}
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>

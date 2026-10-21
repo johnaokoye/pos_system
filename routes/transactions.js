@@ -170,7 +170,8 @@ router.get('/', requireTransactionsList, async (req, res) => {
       ra.agreement_number as rental_agreement_number, q.quote_number as source_quote_number,
       CASE WHEN ra.checkout_transaction_id = t.id THEN 'checkout' WHEN ra.settlement_transaction_id = t.id THEN 'settlement' END as rental_role,
       wo.wo_number as work_order_number,
-      CASE WHEN wo.assessment_transaction_id = t.id THEN 'assessment' WHEN wo.deposit_transaction_id = t.id THEN 'deposit' WHEN wo.final_transaction_id = t.id THEN 'final' END as wo_role
+      CASE WHEN wo.assessment_transaction_id = t.id THEN 'assessment' WHEN wo.deposit_transaction_id = t.id THEN 'deposit' WHEN wo.final_transaction_id = t.id THEN 'final' END as wo_role,
+      (SELECT COUNT(*) FROM returns rt WHERE rt.original_transaction_id = t.id) as return_count
       FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN branches b ON t.branch_id = b.id
       LEFT JOIN employees ce ON ce.id = ${CREDITED_SQL}
       LEFT JOIN rental_agreements ra ON ra.checkout_transaction_id = t.id OR ra.settlement_transaction_id = t.id
@@ -199,6 +200,39 @@ router.get('/', requireTransactionsList, async (req, res) => {
     sql += ' ORDER BY t.created_at DESC LIMIT ?';
     params.push(parseInt(limit));
     const { rows } = await db.execute({ sql, args: params });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Returns list for the Transactions screen's "Returns" view — each opens its
+// return receipt (GET /returns/:id) to reprint or email. Same date/branch/
+// customer filters as the sales list, plus the return or original sale
+// number; a salesperson only sees returns of sales that are theirs. Must
+// stay above GET /:id, which would otherwise take "returns" as an id.
+router.get('/returns', requirePermission('transactions'), async (req, res) => {
+  try {
+    const { start, end, branch_id, customer_name, number, resolution, limit = 200 } = req.query;
+    let sql = `SELECT r.id, r.return_number, r.created_at, r.resolution, r.subtotal, r.tax_amount, r.total, r.notes,
+      t.id as original_transaction_id, t.transaction_number as original_transaction_number,
+      c.first_name || ' ' || c.last_name as customer_name, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name,
+      (SELECT COALESCE(SUM(ri.quantity), 0) FROM return_items ri WHERE ri.return_id = r.id) as item_count
+      FROM returns r
+      LEFT JOIN transactions t ON r.original_transaction_id = t.id
+      LEFT JOIN customers c ON r.customer_id = c.id
+      LEFT JOIN employees e ON r.employee_id = e.id
+      LEFT JOIN branches b ON r.branch_id = b.id
+      WHERE 1=1`;
+    const args = [];
+    if (start) { sql += ' AND date(r.created_at) >= date(?)'; args.push(start); }
+    if (end) { sql += ' AND date(r.created_at) <= date(?)'; args.push(end); }
+    if (branch_id) { sql += ' AND r.branch_id = ?'; args.push(branch_id); }
+    if (resolution) { sql += ' AND r.resolution = ?'; args.push(resolution); }
+    if (customer_name) { sql += " AND (c.first_name || ' ' || c.last_name) LIKE ?"; args.push(`%${customer_name}%`); }
+    if (number) { sql += ' AND (r.return_number LIKE ? OR t.transaction_number LIKE ?)'; args.push(`%${number}%`, `%${number}%`); }
+    if (req.employee?.is_salesperson) { sql += ` AND (t.employee_id = ? OR ${CREDITED_SQL} = ?)`; args.push(req.employee.id, req.employee.id); }
+    sql += ' ORDER BY r.created_at DESC LIMIT ?';
+    args.push(parseInt(limit) || 200);
+    const { rows } = await db.execute({ sql, args });
     res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -234,6 +268,10 @@ router.get('/:id', requireAuth, async (req, res) => {
     // Each line's share of the ticket discount — the return screen takes it
     // off the refund the same way POST /:id/return does.
     for (const item of items) item.discount_share = returnedDiscountShare(tx, item, items, 1);
+    // Returns made against this sale, for the detail window's "Returns on
+    // this sale" list (each opens its return receipt).
+    const { rows: returns } = await db.execute({ sql: 'SELECT id, return_number, created_at, resolution, total FROM returns WHERE original_transaction_id = ? ORDER BY created_at', args: [req.params.id] });
+    tx.returns = returns;
     // Pause history is agreement-level, not tied to which transaction (checkout
     // vs settlement) this is — shown on either printed invoice for the same rental.
     if (tx.rental_agreement_id) {
