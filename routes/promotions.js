@@ -420,7 +420,7 @@ router.post('/validate-code', requirePermission('pos'), async (req, res) => {
       const bundleItems = await bundleItemsByPromo([{ type: 'bundle', id: pc.promotion_id }]);
       const { discount } = computeBundleDiscount(pc, bundleItems[pc.promotion_id] || [], cart_items || []);
       if (!discount) return res.status(400).json({ error: 'The cart doesn\'t contain a complete bundle for this promotion' });
-      return res.json({ code_id: pc.id, promotion_id: pc.promotion_id, promo_name: pc.promo_name, type: pc.type, value: pc.value, discount_amount: discount });
+      return res.json({ code_id: pc.id, code: pc.code, promotion_id: pc.promotion_id, promo_name: pc.promo_name, type: pc.type, value: pc.value, discount_amount: discount });
     }
 
     // Calculate eligible amount
@@ -447,8 +447,11 @@ router.post('/validate-code', requirePermission('pos'), async (req, res) => {
       ? parseFloat((eligibleAmount * pc.value / 100).toFixed(2))
       : parseFloat(Math.min(pc.value, eligibleAmount).toFixed(2));
 
+    // `code` is what the POS sends back as promotion_code at checkout (and
+    // keeps on a held ticket) — the Promotions report groups by it.
     res.json({
       code_id: pc.id,
+      code: pc.code,
       promotion_id: pc.promotion_id,
       promo_name: pc.promo_name,
       type: pc.type,

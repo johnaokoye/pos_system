@@ -2899,7 +2899,11 @@ const App = {
         <div class="modal-header"><span class="modal-title">Ticket Discount</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px" id="discount-row">
-            <input type="number" id="discount-input" placeholder="Discount $" min="0" step="0.01" style="width:120px;">
+            <select id="discount-type" style="width:auto" title="Dollar amount or percentage of the ticket" onchange="document.getElementById('discount-input').placeholder = this.value === 'percent' ? 'Discount %' : 'Discount $'">
+              <option value="amount">$</option>
+              <option value="percent">%</option>
+            </select>
+            <input type="number" id="discount-input" placeholder="Discount $" min="0" step="0.01" style="width:120px;" onkeydown="if(event.key==='Enter'){event.preventDefault();App.applyDiscount()}">
             <button class="btn btn-secondary btn-sm" onclick="App.applyDiscount()">Apply</button>
             <span id="discount-display" style="font-size:13px;color:var(--success);"></span>
           </div>
@@ -2923,8 +2927,13 @@ const App = {
       pd.innerHTML = `✓ ${this.autoAppliedPromo.name}: -${this.fmt(this.autoAppliedPromo.discount_amount)}${changeBtn}`;
       pd.style.display = 'block';
     } else if (this.cartDiscount > 0) {
-      document.getElementById('discount-input').value = this.cartDiscount.toFixed(2);
-      document.getElementById('discount-display').textContent = `-${this.fmt(this.cartDiscount)}`;
+      const pct = this._manualTicketDiscountPct;
+      if (pct) {
+        document.getElementById('discount-type').value = 'percent';
+        document.getElementById('discount-input').placeholder = 'Discount %';
+      }
+      document.getElementById('discount-input').value = pct ? String(pct) : this.cartDiscount.toFixed(2);
+      document.getElementById('discount-display').textContent = `-${this.fmt(this.cartDiscount)}${pct ? ` (${pct}%)` : ''}`;
     }
     this._updateDiscountCardUI();
   },
@@ -3664,7 +3673,21 @@ const App = {
     if (this.appliedDiscountCard) { this.alert(`This customer already has a ${(this.appliedDiscountCard.label || 'Discount Card').toLowerCase()} applied — remove the customer to use a manual discount instead.`, 'error'); return; }
     let val = parseFloat(document.getElementById('discount-input')?.value) || 0;
     const maxPct = parseFloat(this.settings.max_discount_pct) || 0;
-    if (maxPct > 0 && val > 0) {
+    // A percentage is of the ticket (after line discounts) and is kept as a
+    // percentage, so the amount follows the ticket as it changes.
+    if (document.getElementById('discount-type')?.value === 'percent') {
+      let pct = Math.min(100, Math.max(0, val));
+      if (maxPct > 0 && pct > maxPct) {
+        pct = maxPct;
+        document.getElementById('discount-input').value = String(pct);
+        this.alert(`Discount capped at ${maxPct}%`, 'warning');
+      }
+      this._manualTicketDiscountPct = pct > 0 ? pct : null;
+      val = this._manualPctDiscount();
+    } else {
+      this._manualTicketDiscountPct = null;
+    }
+    if (!this._manualTicketDiscountPct && maxPct > 0 && val > 0) {
       const subtotal = this.cart.reduce((s, i) => s + i.price * i.quantity, 0);
       const maxAllowed = parseFloat((subtotal * maxPct / 100).toFixed(2));
       if (val > maxAllowed) {
@@ -3674,8 +3697,23 @@ const App = {
       }
     }
     this.cartDiscount = val;
-    document.getElementById('discount-display').textContent = val > 0 ? `-${this.fmt(val)}` : '';
-    this.renderCart();
+    this._manualTicketDiscount = val > 0;
+    if (!(val > 0)) this._manualTicketDiscountPct = null;
+    if (val > 0) {
+      // A manual discount replaces an automatic promotion.
+      this.autoAppliedPromo = null;
+      const pd = document.getElementById('promo-display');
+      if (pd) { pd.style.display = 'none'; pd.innerHTML = ''; }
+    }
+    document.getElementById('discount-display').textContent = val > 0 ? `-${this.fmt(val)}${this._manualTicketDiscountPct ? ` (${this._manualTicketDiscountPct}%)` : ''}` : '';
+    if (val > 0) this.renderCart(); else this._checkAutoPromos();
+  },
+
+  // Dollar amount of a percentage Ticket Discount on the ticket as it is now
+  // (after line discounts).
+  _manualPctDiscount() {
+    const net = this.cart.reduce((s, i) => s + this._cartLineNet(i), 0);
+    return parseFloat((net * (this._manualTicketDiscountPct || 0) / 100).toFixed(2));
   },
 
   async applyPromoCode() {
@@ -3688,6 +3726,7 @@ const App = {
       const result = await this.api('POST', '/promotions/validate-code', { code, subtotal, cart_items: cartItems });
       this.appliedPromoCode = result;
       this.cartDiscount = result.discount_amount;
+      this._manualTicketDiscount = false; this._manualTicketDiscountPct = null;
       const di = document.getElementById('discount-input');
       if (di) di.value = '';
       document.getElementById('discount-display').textContent = '';
@@ -3741,11 +3780,72 @@ const App = {
     }
   },
 
+  // What a held ticket's discount was, so Hold Recall can put it back the
+  // same way (routes/transactions.js POST /hold stores it).
+  _ticketDiscountSource() {
+    if (!(this.cartDiscount > 0)) return {};
+    if (this.appliedDiscountCard) return { discount_source: 'card' };
+    if (this.appliedPromoCode) return { discount_source: 'promo_code', promotion_code: this.appliedPromoCode.code, promotion_name: this.appliedPromoCode.promo_name };
+    if (this.autoAppliedPromo && !this._manualTicketDiscount) return { discount_source: 'auto_promo', promotion_name: this.autoAppliedPromo.name };
+    return { discount_source: 'manual', ticket_discount_percent: this._manualTicketDiscountPct || null };
+  },
+
+  // Hold Recall: the customer's discount card / category discount wins (as it
+  // does at the till); otherwise the held promo code is re-applied, a manual
+  // discount comes back as the same amount, and automatic promotions are
+  // re-checked. A hold from before discount_source existed keeps its amount.
+  async _restoreHeldTicketDiscount(held, customer) {
+    this.appliedPromoCode = null;
+    this.autoAppliedPromo = null;
+    this._availablePromos = [];
+    this._manualTicketDiscount = false; this._manualTicketDiscountPct = null;
+    this.cartDiscount = 0;
+    this.appliedDiscountCard = customer ? this._customerDiscountCard(customer) : null;
+    const amount = parseFloat(held.discount_amount || 0);
+    const source = held.discount_source || (amount > 0 ? 'manual' : null);
+    if (this.appliedDiscountCard) { this._updateDiscountCardUI(); return; }
+    if (source === 'promo_code' && held.promotion_code) {
+      try {
+        const subtotal = this.cart.reduce((s, i) => s + i.price * i.quantity, 0);
+        const cart_items = this.cart.map(i => ({ product_id: i.product_id, category_id: i.category_id, price: i.price, quantity: i.quantity, discount_percent: i.discountPercent || 0 }));
+        const result = await this.api('POST', '/promotions/validate-code', { code: held.promotion_code, subtotal, cart_items });
+        this.appliedPromoCode = result;
+        this.cartDiscount = result.discount_amount;
+        return;
+      } catch (e) {
+        // No longer valid (expired, used up) — keep what the customer was
+        // given when the ticket was held, as a manual discount.
+        this.alert(`Promo code ${held.promotion_code} no longer applies (${e.message}) — kept the ${this.fmt(amount)} discount from the held ticket`, 'warning');
+        this.cartDiscount = amount;
+        this._manualTicketDiscount = true;
+        return;
+      }
+    }
+    if (source === 'manual') {
+      this._manualTicketDiscount = amount > 0;
+      this._manualTicketDiscountPct = amount > 0 && held.ticket_discount_percent > 0 ? held.ticket_discount_percent : null;
+      this.cartDiscount = this._manualTicketDiscountPct ? this._manualPctDiscount() : amount;
+      return;
+    }
+    await this._checkAutoPromos();
+  },
+
   async _checkAutoPromos() {
     const seq = this._autoPromoSeq = (this._autoPromoSeq || 0) + 1;
+    // An exchange's return credit is money the customer already paid — it
+    // stays the ticket's discount whatever goes on the replacement ticket.
+    if (this._returnCredit) { this.cartDiscount = this._returnCredit.amount; this.renderCart(); return; }
     if (this.appliedDiscountCard) { this._updateDiscountCardUI(); this.renderCart(); return; }
     if (this.appliedPromoCode) { this.renderCart(); return; }
+    // A manual Ticket Discount stays as entered when the ticket changes —
+    // automatic promotions don't overwrite it (clear it to let them apply).
+    if (this._manualTicketDiscount && this.cartDiscount > 0 && this.cart.length) {
+      if (this._manualTicketDiscountPct) this.cartDiscount = this._manualPctDiscount();
+      this.renderCart();
+      return;
+    }
     if (!this.cart.length) {
+      this._manualTicketDiscount = false; this._manualTicketDiscountPct = null;
       this.autoAppliedPromo = null;
       this._availablePromos = [];
       this.cartDiscount = 0;
@@ -3855,7 +3955,7 @@ const App = {
   },
 
   clearCart() {
-    this.cart = []; this.cartCustomer = null; this.cartDiscount = 0; this._storeCreditApplied = 0; this._cashBackApplied = 0; this.appliedPromoCode = null; this.autoAppliedPromo = null; this._availablePromos = []; this._returnCredit = null; this._activeQuoteId = null; this._ticketCreatedBy = null; this._ticketSalesperson = null; this.appliedDiscountCard = null; this._manualTaxExempt = null;
+    this.cart = []; this.cartCustomer = null; this.cartDiscount = 0; this._storeCreditApplied = 0; this._cashBackApplied = 0; this.appliedPromoCode = null; this.autoAppliedPromo = null; this._availablePromos = []; this._returnCredit = null; this._activeQuoteId = null; this._ticketCreatedBy = null; this._ticketSalesperson = null; this.appliedDiscountCard = null; this._manualTaxExempt = null; this._manualTicketDiscount = false; this._manualTicketDiscountPct = null;
     this.renderCart();
     const aqBar = document.getElementById('active-quote-bar');
     if (aqBar) aqBar.style.display = 'none';
@@ -3944,7 +4044,7 @@ const App = {
     // Straight from getCartTotals() — this is what the "Amount Due" box
     // below shows, so it has to be exactly what checkout charges.
     const { subtotal, tax, discount, total, discountPreTax } = this.getCartTotals();
-    const discountLabel = this._returnCredit ? `↩ Return Credit ${this._returnCredit.return_number}` : this.autoAppliedPromo ? `🏷 ${this.autoAppliedPromo.name}` : 'Discount';
+    const discountLabel = this._returnCredit ? `↩ Return Credit ${this._returnCredit.return_number}` : this.autoAppliedPromo ? `🏷 ${this.autoAppliedPromo.name}` : this._manualTicketDiscountPct ? `Discount (${this._manualTicketDiscountPct}%)` : 'Discount';
 
     totals.innerHTML = `
       <div class="pos-totals">
@@ -4260,6 +4360,8 @@ const App = {
           sell_unit: i.sell_unit || null,
           is_comment: i.is_comment ? 1 : 0,
           is_delivery: i.is_delivery ? 1 : 0,
+          discount_percent: i.discountPercent || 0,
+          discount_override_employee_id: i.discountOverrideEmployeeId || null,
         };
       });
       await this.api('POST', '/transactions/hold', {
@@ -4270,6 +4372,7 @@ const App = {
         branch_id: this.posBranch?.id || null,
         items: cartItems,
         discount_amount: this.cartDiscount || 0,
+        ...this._ticketDiscountSource(),
       });
       const customerName = this.cartCustomer ? `${this.cartCustomer.first_name} ${this.cartCustomer.last_name}` : 'Walk-in Customer';
       this.clearCart();
@@ -4412,14 +4515,19 @@ const App = {
           serial_number: item.serial_number || null,
           is_service: product?.product_type === 'service' ? 1 : 0,
           stock_qty: product?.stock_qty ?? 999,
+          // A line's manual % discount (and manager override) comes back
+          // as it was held; checkout re-validates it.
+          discountPercent: parseFloat(item.discount_percent) || 0,
+          discountOverrideEmployeeId: item.discount_override_by || null,
+          discountOverrideName: item.discount_override_name || null,
           ...this._recalledUnitFields(item, product),
         };
       });
-      this.cartDiscount = parseFloat(held.discount_amount || 0);
       this._storeCreditApplied = 0;
       this._cashBackApplied = 0;
-      this.appliedPromoCode = null;
       this._returnCredit = null;
+      const customer = held.customer_id ? await this.api('GET', `/customers/${held.customer_id}`) : null;
+      await this._restoreHeldTicketDiscount(held, customer);
       // A hold created by converting a quotation carries that link through
       // (via the existing quotations.converted_to_tx join on GET /transactions/:id)
       // — restoring it here is what makes checkout finalize the quote correctly,
@@ -4430,7 +4538,6 @@ const App = {
       this._ticketSalespersonName = held.salesperson_name || null;
       this._renderTicketSalesperson();
       if (held.customer_id) {
-        const customer = await this.api('GET', `/customers/${held.customer_id}`);
         this.cartCustomer = customer;
         if (this.section !== 'pos') return;
         this._renderCartCustomer();
@@ -5180,6 +5287,14 @@ const App = {
     if (btn) btn.style.display = this.cartCustomer ? 'inline-flex' : 'none';
   },
 
+  // A customer's discount card, else their category discount (also used by
+  // Hold Recall) — null when neither applies.
+  _customerDiscountCard(c) {
+    if (c.discount_card_type_id && c.discount_card_type_active) return { type_name: c.discount_card_type_name, percent: c.discount_card_percent, card_number: c.discount_card_number, label: 'Discount Card' };
+    if (c.customer_category_id && c.customer_category_active && c.customer_category_discount_percent > 0) return { type_name: c.customer_category_name, percent: c.customer_category_discount_percent, card_number: null, label: 'Customer Discount' };
+    return null;
+  },
+
   setCartCustomer(id, name) {
     this.api('GET', `/customers/${id}`).then(async c => {
       this.cartCustomer = c;
@@ -5214,26 +5329,16 @@ const App = {
       // A customer category's discount works the same way but only kicks in
       // when there's no discount card — a card is a more deliberate,
       // specific assignment and wins if the customer somehow has both.
-      if (c.discount_card_type_id && c.discount_card_type_active) {
-        this.appliedDiscountCard = { type_name: c.discount_card_type_name, percent: c.discount_card_percent, card_number: c.discount_card_number, label: 'Discount Card' };
+      this.appliedDiscountCard = this._customerDiscountCard(c);
+      if (this.appliedDiscountCard) {
         this.appliedPromoCode = null;
         this.autoAppliedPromo = null;
         this._availablePromos = [];
+        this._manualTicketDiscount = false; this._manualTicketDiscountPct = null;
         const pi = document.getElementById('promo-code-input');
         if (pi) pi.value = '';
         const rb = document.getElementById('remove-promo-btn');
         if (rb) rb.style.display = 'none';
-      } else if (c.customer_category_id && c.customer_category_active && c.customer_category_discount_percent > 0) {
-        this.appliedDiscountCard = { type_name: c.customer_category_name, percent: c.customer_category_discount_percent, card_number: null, label: 'Customer Discount' };
-        this.appliedPromoCode = null;
-        this.autoAppliedPromo = null;
-        this._availablePromos = [];
-        const pi = document.getElementById('promo-code-input');
-        if (pi) pi.value = '';
-        const rb = document.getElementById('remove-promo-btn');
-        if (rb) rb.style.display = 'none';
-      } else {
-        this.appliedDiscountCard = null;
       }
       this._updateDiscountCardUI();
       await this._checkAutoPromos();
@@ -14938,7 +15043,7 @@ const App = {
     const label = { refund: 'Refund', credit_note: 'Credit Note', replacement: 'Exchange' };
     const badge = { refund: 'badge-warning', credit_note: 'badge-info', replacement: 'badge-secondary' };
     return `<table>
-      <thead><tr><th>Return #</th><th>Date/Time</th><th>Original Sale</th><th>Customer</th><th>Branch</th><th>Items</th><th>Resolution</th><th>Total</th><th>Processed By</th><th></th></tr></thead>
+      <thead><tr><th>Return #</th><th>Date/Time</th><th>Original Sale</th><th>Customer</th><th>Branch</th><th>Items</th><th>Resolution</th><th>Total</th><th>Processed By</th><th>Authorized By</th><th>Reason</th><th></th></tr></thead>
       <tbody>${rows.map(r => `<tr>
         <td class="fw-600" style="font-family:monospace">${this.escapeAttr(r.return_number)}</td>
         <td style="white-space:nowrap">${this.fmtDateTime(r.created_at)}</td>
@@ -14949,6 +15054,8 @@ const App = {
         <td><span class="badge-pill ${badge[r.resolution] || 'badge-secondary'}">${label[r.resolution] || this.escapeAttr(r.resolution)}</span></td>
         <td class="fw-600">${this.fmt(r.total)}</td>
         <td style="font-size:12px">${this.escapeAttr(r.employee_name || '—')}</td>
+        <td style="font-size:12px">${this.escapeAttr(r.override_by_name || '—')}</td>
+        <td style="font-size:12px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${this.escapeAttr(r.notes || '')}">${this.escapeAttr(r.notes || '—')}</td>
         <td style="white-space:nowrap"><button class="btn btn-secondary btn-sm" onclick="App.viewReturn(${r.id})">View / Print</button></td>
       </tr>`).join('')}</tbody>
     </table>`;
@@ -15268,8 +15375,13 @@ const App = {
             </div>
           </div>
           <div class="form-group" style="margin-bottom:0">
-            <label style="font-size:13px">Notes (optional)</label>
-            <textarea id="ret-notes" rows="4" placeholder="Reason for return..." style="font-size:13px;width:100%;resize:vertical;white-space:pre-wrap;overflow-wrap:anywhere"></textarea>
+            <label style="font-size:13px">Reason for return *</label>
+            <textarea id="ret-notes" rows="4" placeholder="Why is the customer returning it? e.g. Wrong size, damaged in box" style="font-size:13px;width:100%;resize:vertical;white-space:pre-wrap;overflow-wrap:anywhere"></textarea>
+          </div>
+          <div class="form-group" style="margin:12px 0 0">
+            <label style="font-size:13px">Manager Override PIN *</label>
+            <input type="password" id="ret-override-pin" inputmode="numeric" autocomplete="off" placeholder="Manager enters their PIN" style="width:220px" onkeydown="if(event.key==='Enter'){event.preventDefault();document.getElementById('ret-submit-btn')?.click()}">
+            <div style="font-size:11px;color:var(--text-muted);margin-top:3px">Every return needs a manager's authorization — someone with <em>Authorize Return Override</em>. Recorded on the return.</div>
           </div>
         </div>
         <div class="modal-footer" style="justify-content:space-between;align-items:center">
@@ -15327,12 +15439,16 @@ const App = {
     });
     if (!items.length) { this.alert('Select at least one item to return', 'warning'); return; }
     const resolution = document.querySelector('input[name="ret-resolution"]:checked')?.value || 'refund';
-    const notes = document.getElementById('ret-notes')?.value || '';
+    const notes = (document.getElementById('ret-notes')?.value || '').trim();
+    if (!notes) { this.alert('Enter the reason for the return', 'warning'); document.getElementById('ret-notes')?.focus(); return; }
+    const pinInput = document.getElementById('ret-override-pin');
+    const override_pin = pinInput?.value.trim() || '';
+    if (!override_pin) { this.alert('A manager must enter their PIN to authorize this return', 'warning'); pinInput?.focus(); return; }
     const btn = document.getElementById('ret-submit-btn');
     if (btn) { btn.disabled = true; btn.textContent = 'Processing…'; }
     try {
       const ret = await this.api('POST', `/transactions/${txId}/return`, {
-        items, resolution, notes, employee_id: this.currentUser?.id || null
+        items, resolution, notes, employee_id: this.currentUser?.id || null, override_pin
       });
       document.getElementById('return-overlay')?.remove();
       if (resolution === 'replacement') {
@@ -15358,12 +15474,16 @@ const App = {
       } else {
         const resLabel = resolution === 'credit_note' ? 'Credit note issued' : 'Refund processed';
         this.alert(`${resLabel} — ${ret.return_number} · ${this.fmt(ret.total)}`, 'success');
-        this.loadTransactions();
+        // Returns can be started from a customer's history too — only refresh
+        // the Transactions list when it's the page that's open.
+        if (this.section === 'transactions') this.loadTransactions();
         const fullRet = await this.api('GET', `/transactions/returns/${ret.id}`);
         this.showReturnReceipt(fullRet);
       }
     } catch(e) {
       if (btn) { btn.disabled = false; btn.textContent = 'Process Return'; }
+      // A wrong PIN is cleared so the manager can re-enter it.
+      if (pinInput && /PIN/.test(e.message)) { pinInput.value = ''; pinInput.focus(); }
       this.alert(e.message, 'error');
     }
   },
@@ -15391,6 +15511,7 @@ const App = {
             ${ret.customer_name ? `<div class="receipt-row"><span>Customer:</span><span>${ret.customer_name}</span></div>` : ''}
             <div class="receipt-row"><span>Resolution:</span><span>${resolutionLabel}</span></div>
             ${ret.employee_name ? `<div class="receipt-row"><span>Processed By:</span><span>${ret.employee_name}</span></div>` : ''}
+            ${ret.override_by_name ? `<div class="receipt-row"><span>Authorized By:</span><span>${ret.override_by_name}</span></div>` : ''}
             ${ret.notes ? `<div class="receipt-row"><span style="flex-shrink:0">Reason:</span><span style="text-align:right;white-space:pre-wrap;overflow-wrap:anywhere">${ret.notes}</span></div>` : ''}
             <hr>
             ${items.map(i => `<div class="receipt-row"><span>${i.sku ? `<span style="font-size:11px;color:#555">${i.sku}</span> ` : ''}${i.product_name}</span><span>${this.fmt(i.total)}</span></div>${i.quantity > 1 ? `<div style="color:#666;font-size:11px;padding-left:4px">${i.quantity} x ${this.fmt(i.unit_price)}</div>` : ''}`).join('')}
@@ -24248,6 +24369,16 @@ const App = {
             </label>
           </div>
           <div class="form-group">
+            <label>Returns</label>
+            <label class="perm-item" style="padding:10px 12px;border:1px solid var(--border);border-radius:6px;display:flex;align-items:flex-start;gap:10px;cursor:pointer;margin-top:6px">
+              <input type="checkbox" id="sg-returns-override" ${perms.returns_override ? 'checked' : ''} style="margin-top:2px;flex-shrink:0">
+              <span>
+                <strong>Authorize Return Override</strong><br>
+                <span style="font-size:12px;color:var(--text-muted)">Every return needs a manager to enter their PIN; members of this group can authorize it. Separate from Transactions access, so it isn't granted with the Transactions module.</span>
+              </span>
+            </label>
+          </div>
+          <div class="form-group">
             <label>Credit Control</label>
             <label class="perm-item" style="padding:10px 12px;border:1px solid var(--border);border-radius:6px;display:flex;align-items:flex-start;gap:10px;cursor:pointer;margin-top:6px">
               <input type="checkbox" id="sg-credit-block" ${perms.customers_credit_block ? 'checked' : ''} style="margin-top:2px;flex-shrink:0">
@@ -24317,7 +24448,7 @@ const App = {
     const description = document.getElementById('sg-desc').value.trim();
     if (!name) { this.alert('Name required', 'error'); return; }
     // Start from the stored blob so keys outside _permissionTree survive a save.
-    const permissions = { ...(id ? this._sgEditingPerms : {}), multi_branch_access: document.getElementById('sg-multi-branch')?.checked || false, pos_view_margin: document.getElementById('sg-pos-margin')?.checked || false, customers_credit_block: document.getElementById('sg-credit-block')?.checked || false, pos_receive_payment: document.getElementById('sg-receive-payment')?.checked || false, pos_petty_cash: document.getElementById('sg-petty-cash')?.checked || false };
+    const permissions = { ...(id ? this._sgEditingPerms : {}), multi_branch_access: document.getElementById('sg-multi-branch')?.checked || false, pos_view_margin: document.getElementById('sg-pos-margin')?.checked || false, customers_credit_block: document.getElementById('sg-credit-block')?.checked || false, pos_receive_payment: document.getElementById('sg-receive-payment')?.checked || false, pos_petty_cash: document.getElementById('sg-petty-cash')?.checked || false, returns_override: document.getElementById('sg-returns-override')?.checked || false };
     this._permissionTree.forEach(mod => {
       permissions[mod.key] = document.getElementById(`perm-${mod.key}`)?.checked || false;
       mod.subs.forEach(s => { permissions[s.key] = document.getElementById(`perm-${s.key}`)?.checked || false; });

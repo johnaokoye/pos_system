@@ -2215,6 +2215,14 @@ async function _init() {
     'ALTER TABLE quotations ADD COLUMN approval_signature TEXT',
     'ALTER TABLE commission_records ADD COLUMN approved_by INTEGER REFERENCES employees(id)',
     'ALTER TABLE commission_records ADD COLUMN approval_signature TEXT',
+    // Where a held ticket's discount came from — 'manual' | 'promo_code' |
+    // 'auto_promo' | 'card' — so Hold Recall can put it back the same way
+    // (POST /transactions/hold, App.loadHeldOrder).
+    'ALTER TABLE transactions ADD COLUMN discount_source TEXT',
+    // A held manual Ticket Discount given as a percentage (null = dollar amount).
+    'ALTER TABLE transactions ADD COLUMN ticket_discount_percent REAL',
+    // Manager who authorized a return with their PIN (returns_override).
+    'ALTER TABLE returns ADD COLUMN override_by INTEGER REFERENCES employees(id)',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
@@ -2807,6 +2815,14 @@ async function _init() {
       }
       if (!('customers_credit_block' in perms)) {
         perms.customers_credit_block = /^(administrator|manager|accounts? receivables?)$/i.test(String(g.name || '').trim());
+        changed = true;
+      }
+      // Authorizing a return with a manager PIN — standalone (not a
+      // `transactions` sub, which the Cashier group's full Transactions grant
+      // would inherit) and, by the owner's choice (2026-10-22), starting on
+      // Administrator and Manager.
+      if (!('returns_override' in perms)) {
+        perms.returns_override = /^(administrator|manager)$/i.test(String(g.name || '').trim());
         changed = true;
       }
       if (changed) await db.execute({ sql: 'UPDATE security_groups SET permissions = ? WHERE id = ?', args: [JSON.stringify(perms), g.id] });

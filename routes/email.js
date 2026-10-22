@@ -252,6 +252,7 @@ function buildReturnReceiptHtml(ret, s) {
       ${ret.customer_name ? docRow('Customer', ret.customer_name) : ''}
       ${docRow('Resolution', resolutionLabel)}
       ${ret.employee_name ? docRow('Processed By', ret.employee_name) : ''}
+      ${ret.override_by_name ? docRow('Authorized By', ret.override_by_name) : ''}
       ${ret.notes ? docRow('Reason', ret.notes) : ''}
       <div style="height:12px"></div>
       <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px">
@@ -918,11 +919,13 @@ router.post('/send-return-receipt/:id', requireAuth, async (req, res) => {
     const { rows: [ret] } = await db.execute({ sql: `SELECT r.*, t.transaction_number as original_transaction_number,
       c.first_name || ' ' || c.last_name as customer_name,
       e.first_name || ' ' || e.last_name as employee_name,
+      oe.first_name || ' ' || oe.last_name as override_by_name,
       b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone
       FROM returns r
       LEFT JOIN transactions t ON r.original_transaction_id = t.id
       LEFT JOIN customers c ON r.customer_id = c.id
       LEFT JOIN employees e ON r.employee_id = e.id
+      LEFT JOIN employees oe ON r.override_by = oe.id
       LEFT JOIN branches b ON r.branch_id = b.id
       WHERE r.id = ?`, args: [req.params.id] });
     if (!ret) return res.status(404).json({ error: 'Return not found' });

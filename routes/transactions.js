@@ -87,14 +87,22 @@ async function moveSaleCommissions(moved) {
 // Put order on hold (no stock updates, no payment processing)
 router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
   try {
-    const { customer_id, employee_id, created_by, branch_id, items, discount_amount, notes } = req.body;
+    const { customer_id, employee_id, created_by, branch_id, items, discount_amount, notes, promotion_code, promotion_name } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in cart' });
+    const discountSource = ['manual', 'promo_code', 'auto_promo', 'card'].includes(req.body.discount_source) ? req.body.discount_source : null;
+    const ticketPct = discountSource === 'manual' ? Math.min(100, Math.max(0, parseFloat(req.body.ticket_discount_percent) || 0)) || null : null;
     let salespersonId;
     try { salespersonId = await ticketSalesperson(created_by || employee_id, req.body.salesperson_id); } catch (e) { return res.status(400).json({ error: e.message }); }
 
     const hold_number = 'HOLD-' + Date.now();
-    // Same before-tax ticket discount as checkout (lib/ticketDiscount.js).
-    const lineTotals = items.map(item => parseFloat(((parseFloat(item.unit_price) || 0) * (Number(item.quantity) || 0)).toFixed(2)));
+    // A line's manual % discount (and who overrode the store limit) is kept
+    // so Hold Recall restores it; checkout re-validates it as usual. Line
+    // totals are net of it, then the same before-tax ticket discount as
+    // checkout (lib/ticketDiscount.js).
+    const linePct = items.map(item => Math.min(100, Math.max(0, parseFloat(item.discount_percent) || 0)));
+    const lineGross = items.map(item => parseFloat(((parseFloat(item.unit_price) || 0) * (Number(item.quantity) || 0)).toFixed(2)));
+    const lineDisc = lineGross.map((g, i) => parseFloat((g * linePct[i] / 100).toFixed(2)));
+    const lineTotals = lineGross.map((g, i) => parseFloat((g - lineDisc[i]).toFixed(2)));
     const { discount: disc, shares } = allocateTicketDiscount(lineTotals, discount_amount);
     const lineTaxes = items.map((item, i) => parseFloat(((lineTotals[i] - shares[i]) * (parseFloat(item.tax_rate) || 0) / 100).toFixed(2)));
     const subtotal = parseFloat(lineTotals.reduce((s, t) => s + t, 0).toFixed(2));
@@ -105,8 +113,8 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
     let committed = false;
     try {
       const result = await txn.execute({
-        sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,created_by,salesperson_id,branch_id,subtotal,tax_amount,discount_amount,total,payment_method,status,notes,amount_tendered,change_amount) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,0)`,
-        args: [hold_number, customer_id || null, employee_id || 1, created_by || employee_id || 1, salespersonId, branch_id || null, subtotal, tax_amount, disc, total, 'hold', 'hold', notes || null]
+        sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,created_by,salesperson_id,branch_id,subtotal,tax_amount,discount_amount,total,payment_method,status,notes,amount_tendered,change_amount,promotion_code,promotion_name,discount_source,ticket_discount_percent) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?,?,?)`,
+        args: [hold_number, customer_id || null, employee_id || 1, created_by || employee_id || 1, salespersonId, branch_id || null, subtotal, tax_amount, disc, total, 'hold', 'hold', notes || null, promotion_code || null, promotion_name || null, disc > 0 ? discountSource : null, disc > 0 ? ticketPct : null]
       });
       const txId = Number(result.lastInsertRowid);
       for (const [i, item] of items.entries()) {
@@ -120,8 +128,8 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
           if (prod) ({ sell_unit: sellUnit, units_per: unitsPer, uom_id: uomId } = await resolveUnit(txn, prod, requested));
         }
         await txn.execute({
-          sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,serial_number,sell_unit,units_per,uom_id,is_comment,is_delivery) VALUES (?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?,?)`,
-          args: [txId, item.product_id || null, serial ? serialNumberLabel(serial) : item.product_name, item.sku || '', item.is_comment && !item.product_id ? 1 : item.quantity, parseFloat(item.unit_price) || 0, lineTax, lineTotal, item.variation_id || null, item.variation_name || null, serial || null, sellUnit, unitsPer, uomId, item.is_comment && !item.product_id ? 1 : 0, item.is_delivery && !item.product_id ? 1 : 0]
+          sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,serial_number,sell_unit,units_per,uom_id,is_comment,is_delivery,discount_percent,discount_override_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          args: [txId, item.product_id || null, serial ? serialNumberLabel(serial) : item.product_name, item.sku || '', item.is_comment && !item.product_id ? 1 : item.quantity, parseFloat(item.unit_price) || 0, lineDisc[i], lineTax, lineTotal, item.variation_id || null, item.variation_name || null, serial || null, sellUnit, unitsPer, uomId, item.is_comment && !item.product_id ? 1 : 0, item.is_delivery && !item.product_id ? 1 : 0, linePct[i], linePct[i] > 0 ? (item.discount_override_employee_id || null) : null]
         });
       }
       await txn.commit();
@@ -215,11 +223,13 @@ router.get('/returns', requirePermission('transactions'), async (req, res) => {
     let sql = `SELECT r.id, r.return_number, r.created_at, r.resolution, r.subtotal, r.tax_amount, r.total, r.notes,
       t.id as original_transaction_id, t.transaction_number as original_transaction_number,
       c.first_name || ' ' || c.last_name as customer_name, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name,
+      oe.first_name || ' ' || oe.last_name as override_by_name,
       (SELECT COALESCE(SUM(ri.quantity), 0) FROM return_items ri WHERE ri.return_id = r.id) as item_count
       FROM returns r
       LEFT JOIN transactions t ON r.original_transaction_id = t.id
       LEFT JOIN customers c ON r.customer_id = c.id
       LEFT JOIN employees e ON r.employee_id = e.id
+      LEFT JOIN employees oe ON r.override_by = oe.id
       LEFT JOIN branches b ON r.branch_id = b.id
       WHERE 1=1`;
     const args = [];
@@ -259,7 +269,7 @@ router.get('/:id', requireAuth, async (req, res) => {
       LEFT JOIN work_orders wo ON wo.assessment_transaction_id = t.id OR wo.deposit_transaction_id = t.id OR wo.final_transaction_id = t.id
       WHERE t.id = ?`, args: [req.params.id] });
     if (!tx) return res.status(404).json({ error: 'Transaction not found' });
-    const { rows: items } = await db.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [req.params.id] });
+    const { rows: items } = await db.execute({ sql: `SELECT ti.*, oe.first_name || ' ' || oe.last_name AS discount_override_name FROM transaction_items ti LEFT JOIN employees oe ON oe.id = ti.discount_override_by WHERE ti.transaction_id = ? ORDER BY ti.id`, args: [req.params.id] });
     tx.items = items;
     const { rows: payments } = await db.execute({ sql: 'SELECT * FROM transaction_payments WHERE transaction_id = ? ORDER BY id', args: [req.params.id] });
     tx.payments = payments;
@@ -652,11 +662,13 @@ router.get('/returns/:id', requireAuth, async (req, res) => {
     const { rows: [ret] } = await db.execute({ sql: `SELECT r.*, t.transaction_number as original_transaction_number,
       c.first_name || ' ' || c.last_name as customer_name, c.email as customer_email,
       e.first_name || ' ' || e.last_name as employee_name,
+      oe.first_name || ' ' || oe.last_name as override_by_name,
       b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone
       FROM returns r
       LEFT JOIN transactions t ON r.original_transaction_id = t.id
       LEFT JOIN customers c ON r.customer_id = c.id
       LEFT JOIN employees e ON r.employee_id = e.id
+      LEFT JOIN employees oe ON r.override_by = oe.id
       LEFT JOIN branches b ON r.branch_id = b.id
       WHERE r.id = ?`, args: [req.params.id] });
     if (!ret) return res.status(404).json({ error: 'Return not found' });
@@ -739,6 +751,21 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
     const { items, resolution, notes, employee_id } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items selected for return' });
     if (!['refund', 'replacement', 'credit_note'].includes(resolution)) return res.status(400).json({ error: 'Invalid resolution type' });
+    // Every return needs a manager's override: the PIN of an active employee
+    // whose group has returns_override (standalone key). Checked here, not
+    // trusted from the till, and recorded on the return.
+    let overrideBy = null;
+    if (!req.apiKey) {
+      // The reason goes with the manager's authorization (returns.notes —
+      // printed as Reason on the return receipt).
+      if (!String(notes || '').trim()) return res.status(400).json({ error: 'Enter the reason for the return', code: 'reason_required' });
+      const pin = String(req.body.override_pin || '').trim();
+      if (!pin) return res.status(403).json({ error: 'A manager must enter their PIN to authorize this return', code: 'override_required' });
+      const { rows: candidates } = await db.execute({ sql: 'SELECT e.id, e.pin, sg.permissions FROM employees e LEFT JOIN security_groups sg ON e.security_group_id = sg.id WHERE e.active = 1 AND e.pin = ?', args: [pin] });
+      const authorizer = candidates.find(c => { try { return JSON.parse(c.permissions || '{}').returns_override === true; } catch { return false; } });
+      if (!authorizer) return res.status(403).json({ error: "That PIN isn't a manager who can authorize returns", code: 'override_invalid' });
+      overrideBy = authorizer.id;
+    }
     if (!req.apiKey) {
       if (resolution === 'refund' && !can(req.employee?.permissions, 'transactions_refund')) return res.status(403).json({ error: 'Missing permission: transactions_refund' });
       if (resolution === 'credit_note' && !can(req.employee?.permissions, 'transactions_credit_note')) return res.status(403).json({ error: 'Missing permission: transactions_credit_note' });
@@ -816,7 +843,7 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
     const retTx = await db.transaction('write');
     let committed = false;
     try {
-      const retResult = await retTx.execute({ sql: `INSERT INTO returns (return_number,original_transaction_id,customer_id,employee_id,branch_id,resolution,subtotal,tax_amount,total,notes) VALUES (?,?,?,?,?,?,?,?,?,?)`, args: [return_number, tx.id, tx.customer_id, employee_id || tx.employee_id, tx.branch_id, resolution, returnSubtotal, returnTax, returnTotal, notes || null] });
+      const retResult = await retTx.execute({ sql: `INSERT INTO returns (return_number,original_transaction_id,customer_id,employee_id,branch_id,resolution,subtotal,tax_amount,total,notes,override_by) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, args: [return_number, tx.id, tx.customer_id, employee_id || tx.employee_id, tx.branch_id, resolution, returnSubtotal, returnTax, returnTotal, notes || null, overrideBy] });
       const retId = Number(retResult.lastInsertRowid);
 
       for (const { txItem, quantity, lineTotal, lineTax } of processedItems) {
