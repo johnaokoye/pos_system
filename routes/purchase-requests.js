@@ -24,6 +24,28 @@ const PR_SELECT = `
   LEFT JOIN suppliers s ON pr.supplier_id = s.id
   LEFT JOIN purchase_orders po ON pr.converted_to_po_id = po.id`;
 
+// Department pick-list for the PR form. Declared before /:id so
+// "departments" isn't taken for a PR id.
+router.get('/departments', async (req, res) => {
+  try {
+    const { rows } = await db.execute('SELECT id, name FROM pr_departments ORDER BY name COLLATE NOCASE');
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Adds a department, or returns the existing one if the name (any case) is
+// already listed.
+router.post('/departments', async (req, res) => {
+  try {
+    const name = String(req.body.name || '').trim().replace(/\s+/g, ' ');
+    if (!name) return res.status(400).json({ error: 'Department name is required' });
+    if (name.length > 100) return res.status(400).json({ error: 'Department name is too long' });
+    await db.execute({ sql: 'INSERT OR IGNORE INTO pr_departments (name, created_by) VALUES (?, ?)', args: [name, req.employee?.id || null] });
+    const { rows } = await db.execute({ sql: 'SELECT id, name FROM pr_departments WHERE name = ?', args: [name] });
+    res.json(rows[0]);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 router.get('/', async (req, res) => {
   try {
     const { status, request_type, branch_id, employee_id, start, end, limit = 100 } = req.query;

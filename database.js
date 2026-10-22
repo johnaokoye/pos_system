@@ -1162,6 +1162,14 @@ async function _init() {
       reason TEXT,
       changed_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // Pick-list for purchase_requests.department (still stored as text on
+    // the PR). Added to from the PR form when a department isn't listed.
+    { sql: `CREATE TABLE IF NOT EXISTS pr_departments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      created_by INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS returns (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       return_number TEXT UNIQUE NOT NULL,
@@ -2191,6 +2199,12 @@ async function _init() {
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
   }
+
+  // Departments typed on PRs before the pick-list existed join the list.
+  try {
+    await db.execute(`INSERT OR IGNORE INTO pr_departments (name)
+      SELECT DISTINCT TRIM(department) FROM purchase_requests WHERE TRIM(COALESCE(department, '')) <> ''`);
+  } catch(e) {}
 
   // quotation_item_sources.purchase_request_item_id originally declared a
   // plain (no ON DELETE action) FK to purchase_request_items — on a DB that

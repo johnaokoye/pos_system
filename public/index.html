@@ -694,6 +694,7 @@ const App = {
 
   // ─── Init ────────────────────────────────────────────────
   async init() {
+    this._initSearchableSelects();
     this.updateClock();
     setInterval(() => this.updateClock(), 1000);
     // The 8h session cookie survives a page reload even though this.currentUser
@@ -1510,6 +1511,98 @@ const App = {
   },
 
   closeModal() { document.querySelector('.modal-overlay')?.remove(); },
+
+  // Type-to-search for long dropdowns (suppliers/vendors): any <select
+  // data-searchable> gets a text box + filtered list in front of it as soon
+  // as it's added to the page. The select stays (hidden) and holds the value,
+  // so code reading .value or listening for change works unchanged.
+  // data-add="App._someFn" also offers "+ Add …" when nothing matches
+  // exactly; the fn gets the typed text and returns { value, text } (or
+  // null), which becomes a new option and is selected.
+  _initSearchableSelects() {
+    const enhance = root => {
+      if (root.matches?.('select[data-searchable]')) this._searchableSelect(root);
+      root.querySelectorAll?.('select[data-searchable]').forEach(sel => this._searchableSelect(sel));
+    };
+    new MutationObserver(muts => muts.forEach(m => m.addedNodes.forEach(n => { if (n.nodeType === 1) enhance(n); })))
+      .observe(document.body, { childList: true, subtree: true });
+    document.addEventListener('click', e => {
+      document.querySelectorAll('.ss-wrap').forEach(w => { if (!w.contains(e.target)) w._ssClose(); });
+    });
+  },
+  _searchableSelect(sel) {
+    if (sel.dataset.ssDone) return;
+    sel.dataset.ssDone = '1';
+    const wrap = document.createElement('span');
+    wrap.className = 'ss-wrap';
+    const inline = sel.style.width === 'auto';
+    wrap.style.cssText = `position:relative;display:${inline ? 'inline-block' : 'block'};${sel.style.minWidth ? `min-width:${sel.style.minWidth};` : ''}`;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.autocomplete = 'off';
+    input.style.width = '100%';
+    input.disabled = sel.disabled;
+    const blank = [...sel.options].find(o => o.value === '');
+    input.placeholder = 'Type to search…';
+    const dd = document.createElement('div');
+    dd.style.cssText = 'display:none;position:absolute;top:100%;left:0;right:0;min-width:220px;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:300;max-height:260px;overflow-y:auto;margin-top:2px;text-align:left';
+    const shown = () => { const o = sel.options[sel.selectedIndex]; return o && o.value !== '' ? o.text : ''; };
+    input.value = shown();
+    const matches = q => {
+      q = q.toLowerCase().trim();
+      return [...sel.options].filter(o => q ? o.value !== '' && o.text.toLowerCase().includes(q) : true);
+    };
+    const pick = o => {
+      const changed = sel.value !== o.value;
+      sel.value = o.value;
+      input.value = shown();
+      dd.style.display = 'none';
+      if (changed) sel.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    const addFn = sel.dataset.add && sel.dataset.add.replace(/^App\./, '');
+    const canAdd = q => addFn && q.trim() && ![...sel.options].some(o => o.value !== '' && o.text.toLowerCase() === q.trim().toLowerCase());
+    const add = async q => {
+      dd.style.display = 'none';
+      const made = await this[addFn](q.trim().replace(/\s+/g, ' ')).catch(err => { this.alert(err.message, 'error'); return null; });
+      if (!made) { input.value = shown(); return; }
+      let o = [...sel.options].find(x => String(x.value) === String(made.value));
+      if (!o) { o = new Option(made.text, made.value); sel.add(o); }
+      pick(o);
+    };
+    const itemEl = (text, color, onPick) => {
+      const item = document.createElement('div');
+      item.className = 'nav-item';
+      item.style.cssText = `padding:8px 10px;cursor:pointer;color:${color}`;
+      item.textContent = text;
+      item.addEventListener('click', onPick);
+      return item;
+    };
+    const render = q => {
+      const list = matches(q);
+      const items = list.slice(0, 100).map(o => itemEl(o.text, o.value === '' ? 'var(--text-muted)' : 'var(--text)', () => pick(o)));
+      if (canAdd(q)) items.push(itemEl(`+ Add “${q.trim()}”`, 'var(--accent)', () => add(q)));
+      dd.replaceChildren(...(items.length ? items : [Object.assign(document.createElement('div'), { textContent: 'No matches', style: 'padding:10px;color:var(--text-muted);font-size:13px' })]));
+      dd.style.display = '';
+    };
+    // Leaving without picking puts back the current choice's name.
+    wrap._ssClose = () => { if (dd.style.display !== 'none') { dd.style.display = 'none'; input.value = shown(); } };
+    input.addEventListener('focus', () => { input.select(); render(''); });
+    input.addEventListener('click', () => { if (dd.style.display === 'none') { input.select(); render(''); } });
+    input.addEventListener('input', () => render(input.value));
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const first = input.value.trim() && matches(input.value)[0];
+        if (first) pick(first); else if (canAdd(input.value)) add(input.value); else wrap._ssClose();
+      }
+      else if (e.key === 'Escape') { e.stopPropagation(); wrap._ssClose(); }
+      else if (e.key === 'Tab') wrap._ssClose();
+    });
+    if (blank) input.placeholder = `${blank.text.replace(/^[\s—–-]+|[\s—–-]+$/g, '')} — type to search`;
+    sel.style.display = 'none';
+    sel.parentNode.insertBefore(wrap, sel);
+    wrap.append(input, dd);
+  },
 
   // ─── Cash Tender Modal ────────────────────────────────────
   showCashTenderModal(total) {
@@ -5856,7 +5949,7 @@ const App = {
           <select id="pf-cat"><option value="">— None —</option>${categories.map(c => `<option value="${c.id}" ${p.category_id==c.id?'selected':''}>${c.name}</option>`).join('')}</select>
         </div>
         <div class="form-group"><label>Supplier</label>
-          <select id="pf-supplier"><option value="">— None —</option>${suppliers.map(s => `<option value="${s.id}" ${p.supplier_id==s.id?'selected':''}>${s.name}</option>`).join('')}</select>
+          <select id="pf-supplier" data-searchable><option value="">— None —</option>${suppliers.map(s => `<option value="${s.id}" ${p.supplier_id==s.id?'selected':''}>${s.name}</option>`).join('')}</select>
         </div>
         <div class="form-group"><label>Brand</label>
           <select id="pf-brand">
@@ -17551,7 +17644,7 @@ const App = {
     }
   },
 
-  // `pdfOption` adds an "Attach as PDF" checkbox (quotations and invoices —
+  // `pdfOption` adds an "Attach as PDF" checkbox (quotations, invoices, POs, GRNs —
   // see documentEmailContent in routes/email.js); onSend then gets
   // { as_pdf } as its second argument. The last choice is remembered per
   // browser, since a store tends to settle on one or the other.
@@ -17617,13 +17710,13 @@ const App = {
   },
 
   emailGRN(poId, supplierEmail) {
-    this.showEmailModal('Email Goods Received Note', supplierEmail, async (to) => {
+    this.showEmailModal('Email Goods Received Note', supplierEmail, async (to, { as_pdf }) => {
       this.closeModal();
       try {
-        await this.api('POST', `/email/send-grn/${poId}`, { to });
+        await this.api('POST', `/email/send-grn/${poId}`, { to, as_pdf });
         this.alert(`Goods received note sent to ${to}`);
       } catch(e) { this.alert(e.message, 'error'); }
-    });
+    }, { pdfOption: true });
   },
 
   // Units of measure list (routes/units.js). Opened over the product form
@@ -18451,11 +18544,18 @@ const App = {
   },
 
   // ─── Purchase Requests ────────────────────────────────────
+  // "+ Add" on the PR form's Department list (_searchableSelect data-add).
+  async _addPRDepartment(name) {
+    const d = await this.api('POST', '/purchase-requests/departments', { name });
+    return { value: d.name, text: d.name };
+  },
+
   async showPRForm(editId) {
-    const [products, suppliers, settings] = await Promise.all([
+    const [products, suppliers, settings, deptRows] = await Promise.all([
       this.api('GET', '/products'),
       this.api('GET', '/suppliers'),
       this.api('GET', '/settings').catch(() => ({})),
+      this.api('GET', '/purchase-requests/departments').catch(() => []),
     ]);
     const branches = this.currentUser.branches || [];
     const defaultCurrency = (settings.currency || 'USD').toUpperCase();
@@ -18464,6 +18564,12 @@ const App = {
     this._editingPRId = editId || null;
     const pr = editId ? await this.api('GET', `/purchase-requests/${editId}`) : null;
     const prCurrency = (pr && pr.currency) || defaultCurrency;
+    // Match the PR's own department to the list loosely (older PRs were free
+    // text) and keep it selectable even if it's not on the list.
+    const departments = deptRows.map(d => d.name);
+    const typedDept = String((pr && pr.department) || '').trim();
+    const prDept = departments.find(d => d.toLowerCase() === typedDept.toLowerCase()) || typedDept;
+    if (prDept && !departments.includes(prDept)) departments.unshift(prDept);
     if (!currencies.includes(prCurrency.toUpperCase())) currencies.unshift(prCurrency);
     const supOpts = `<option value="">-- No Supplier --</option>${suppliers.map(s=>`<option value="${s.id}" data-local="${s.is_local||0}" ${pr&&pr.supplier_id===s.id?'selected':''}>${s.name}${s.is_local?' (Local)':''}</option>`).join('')}`;
     this.showModal(`
@@ -18481,7 +18587,7 @@ const App = {
 
           <div class="input-row" style="grid-template-columns:1fr 1fr 1fr">
             <div class="form-group"><label>Supplier</label>
-              <select id="pr-supplier" onchange="App._onPRSupplierChange()">${supOpts}</select>
+              <select id="pr-supplier" data-searchable onchange="App._onPRSupplierChange()">${supOpts}</select>
             </div>
             <div class="form-group"><label>Currency</label>
               <select id="pr-currency" onchange="App._onPRCurrencyChange()">
@@ -18497,7 +18603,12 @@ const App = {
           </div>
 
           <div class="input-row">
-            <div class="form-group"><label>Department</label><input id="pr-dept" placeholder="e.g. Warehouse, Sales, Admin" value="${this.escapeAttr(pr&&pr.department)}"></div>
+            <div class="form-group"><label>Department</label>
+              <select id="pr-dept" data-searchable data-add="App._addPRDepartment">
+                <option value="">— None —</option>
+                ${departments.map(d => `<option value="${this.escapeAttr(d)}" ${prDept === d ? 'selected' : ''}>${this.escapeAttr(d)}</option>`).join('')}
+              </select>
+            </div>
             <div class="form-group"><label>Required By Date</label><input id="pr-date" type="date" value="${pr&&pr.required_date?String(pr.required_date).slice(0,10):''}"></div>
             <div class="form-group"><label>Notes / Reason</label><input id="pr-notes" placeholder="Reason for request..." value="${this.escapeAttr(pr&&pr.notes)}"></div>
           </div>
@@ -18914,7 +19025,7 @@ const App = {
           </div>
           <div style="text-align:right;font-size:14px;font-weight:700;margin-bottom:14px">Est. Total: ${this.fmt(total)}</div>
           <div class="form-group"><label>Supplier *</label>
-            <select id="cpr-supplier">
+            <select id="cpr-supplier" data-searchable>
               <option value="">-- Select Supplier --</option>
               ${suppliers.map(s=>`<option value="${s.id}">${s.name}</option>`).join('')}
             </select>
@@ -18964,7 +19075,7 @@ const App = {
         <div class="modal-body">
           <div class="input-row">
             <div class="form-group"><label>Supplier *</label>
-              <select id="po-supplier" onchange="App.onPOSupplierChange()">
+              <select id="po-supplier" data-searchable onchange="App.onPOSupplierChange()">
                 <option value="">-- Select Supplier --</option>
                 ${suppliers.map(s => `<option value="${s.id}" ${po&&po.supplier_id===s.id?'selected':''}>${s.name}</option>`).join('')}
               </select>
@@ -19768,13 +19879,13 @@ const App = {
   },
 
   emailApprovedPO(id, supplierEmail) {
-    this.showEmailModal('Email Purchase Order', supplierEmail, async (to) => {
+    this.showEmailModal('Email Purchase Order', supplierEmail, async (to, { as_pdf }) => {
       this.closeModal();
       try {
-        await this.api('POST', `/email/send-po/${id}`, { to });
+        await this.api('POST', `/email/send-po/${id}`, { to, as_pdf });
         this.alert(`Purchase order sent to ${to}`);
       } catch(e) { this.alert(e.message, 'error'); }
-    });
+    }, { pdfOption: true });
   },
 
   // Letter-size print of the invoice (see _printServerDocument) — available
@@ -22679,7 +22790,7 @@ const App = {
         <select id="ap-f-status" style="width:auto">
           ${[['unpaid', 'Unpaid'], ['overdue', 'Overdue'], ['paid', 'Paid'], ['void', 'Void'], ['all', 'All']].map(([v, l]) => `<option value="${v}" ${f.status === v ? 'selected' : ''}>${l}</option>`).join('')}
         </select>
-        <select id="ap-f-vendor" style="width:auto;min-width:200px">
+        <select id="ap-f-vendor" data-searchable style="width:auto;min-width:200px">
           <option value="">All vendors</option>
           ${this._apSuppliers.map(s => `<option value="${s.id}" ${String(f.supplier_id) === String(s.id) ? 'selected' : ''}>${this.escapeAttr(s.name)}</option>`).join('')}
         </select>
@@ -22777,7 +22888,7 @@ const App = {
         <div class="modal-header"><span class="modal-title">${id ? `Edit Bill ${bill.bill_number}` : 'Enter Bill'}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <div class="form-group"><label>Vendor *</label>
-            <select id="bf-ap-vendor" ${bill && bill.paid > 0 ? 'disabled' : ''} onchange="App._apBillVendorChanged()">
+            <select id="bf-ap-vendor" data-searchable ${bill && bill.paid > 0 ? 'disabled' : ''} onchange="App._apBillVendorChanged()">
               <option value="">— Select vendor —</option>
               ${suppliers.map(s => `<option value="${s.id}" ${String(b.supplier_id) === String(s.id) ? 'selected' : ''}>${this.escapeAttr(s.name)} (${s.supplier_number})</option>`).join('')}
             </select>
@@ -22957,7 +23068,7 @@ const App = {
         <div class="modal-header"><span class="modal-title">Pay Vendor</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <div class="form-group"><label>Vendor *</label>
-            <select id="pv-vendor" onchange="App._pvLoadBills()">
+            <select id="pv-vendor" data-searchable onchange="App._pvLoadBills()">
               <option value="">— Select vendor —</option>
               ${suppliers.map(s => `<option value="${s.id}" ${String(supplierId) === String(s.id) ? 'selected' : ''}>${this.escapeAttr(s.name)} (${s.supplier_number})</option>`).join('')}
             </select>

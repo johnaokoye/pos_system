@@ -1350,7 +1350,7 @@ router.post('/send-po/:id', requireAuth, async (req, res) => {
         to,
         subject: `Purchase Order ${po.po_number} from ${s.store_name || 'Our Store'}`,
         // Signatures are login-only on this server — embed them in the email.
-        ...inlineProtectedImages(buildApprovedPoHtml(po, s, origin)),
+        ...(await documentEmailContent(req.body.as_pdf, s, poPdfModel(po, s), inlineProtectedImages(buildApprovedPoHtml(po, s, origin)))),
       });
       res.json({ success: true, message: `Purchase order sent to ${to}` });
     } catch (e) {
@@ -1385,7 +1385,7 @@ router.post('/send-grn/:id', requireAuth, async (req, res) => {
         from: `"${fromName}" <${fromAddr}>`,
         to,
         subject: `Goods Received Note - ${po.po_number} from ${s.store_name || 'Our Store'}`,
-        html: buildGrnHtml(po, s),
+        ...(await documentEmailContent(req.body.as_pdf, s, grnPdfModel(po, s), buildGrnHtml(po, s))),
       });
 
       await db.execute({ sql: 'UPDATE purchase_orders SET grn_sent_at = CURRENT_TIMESTAMP WHERE id = ?', args: [po.id] });
@@ -1898,7 +1898,7 @@ router.post('/send-missed-pickup-confirmation/:id', requireAuth, async (req, res
 });
 
 // ─── "Attach as PDF" ─────────────────────────────────────────────────────────
-// Quotations and invoices can go out as a PDF attachment instead of an HTML
+// Quotations, invoices, purchase orders and GRNs can go out as a PDF attachment instead of an HTML
 // email (the email dialog's "Attach as PDF" option — `as_pdf` in the request
 // body). Each *PdfModel below maps the same data its HTML builder above uses
 // onto lib/documentPdf.js's generic layout, so the PDF carries the same
@@ -1934,6 +1934,48 @@ function quotePdfModel(q, s) {
     ],
     notes: [q.notes ? `Notes: ${q.notes}` : ''],
     footer: s.receipt_footer || 'Thank you for your business!',
+  };
+}
+
+// Same content as buildApprovedPoHtml — the supplier-facing approved PO.
+function poPdfModel(po, s) {
+  const discounts = (po.items || []).reduce((sum, i) => sum + (Number(i.vendor_discount) || 0), 0);
+  return {
+    store: pdfStore(s),
+    title: 'PURCHASE ORDER', number: po.po_number,
+    meta: [['Approved', pdfDate(po.approved_at)], ['Branch', po.branch_name], ['Vendor Order #', po.vendor_order_number]],
+    party: { label: 'Supplier', lines: [po.supplier_name, po.supplier_contact, po.supplier_email] },
+    tables: [{ columns: [{ label: 'Item', width: 3.6 }, { label: 'Qty', width: 0.8, align: 'center' }, { label: 'Unit Cost', width: 1.2, align: 'right' }, { label: 'Discount', width: 1.3, align: 'right' }, { label: 'Tax', width: 1.1, align: 'right' }, { label: 'Total', width: 1.3, align: 'right' }],
+      rows: (po.items || []).map(i => ({
+        cells: [i.product_name, i.quantity_ordered, fmt(i.unit_cost),
+          i.vendor_discount > 0 ? `-${fmt(i.vendor_discount)}${i.vendor_discount_percent != null ? ` (${i.vendor_discount_percent}%)` : ''}` : '-',
+          i.tax_option === 'local' ? `GCT ${i.tax_rate}%` : 'No tax', fmt(i.total)],
+        sub: [i.sku, i.purchase_unit && Number(i.units_per) > 1 ? `Per ${i.purchase_unit} of ${i.units_per}` : ''].filter(Boolean).join(' · '),
+      })) }],
+    totals: [
+      discounts > 0 ? { label: 'Vendor discounts', value: `-${fmt(discounts)}`, style: 'green' } : null,
+      { label: 'Subtotal', value: fmt(po.subtotal) },
+      { label: 'GCT', value: fmt(po.tax_amount) },
+      { label: 'TOTAL', value: fmt(po.total), style: 'grand' },
+    ],
+    notes: [po.notes ? `Notes: ${po.notes}` : ''],
+    signatures: po.approval_signature ? [{ label: 'Approved By', name: po.approved_by_name || '', signedAt: pdfDateTime(po.approved_at), image: po.approval_signature }] : [],
+  };
+}
+
+// Same content as buildGrnHtml — ordered / received / damaged / good per line.
+function grnPdfModel(po, s) {
+  return {
+    store: pdfStore(s),
+    title: 'GOODS RECEIVED NOTE', number: po.po_number,
+    meta: [['Date', new Date().toLocaleDateString()], ['Branch', po.branch_name]],
+    party: { label: 'Supplier', lines: [po.supplier_name, po.supplier_contact, po.supplier_email] },
+    tables: [{ columns: [{ label: 'Item', width: 4 }, { label: 'Ordered', width: 1, align: 'center' }, { label: 'Received', width: 1, align: 'center' }, { label: 'Damaged', width: 1, align: 'center' }, { label: 'Good', width: 1, align: 'center' }],
+      rows: (po.items || []).map(i => {
+        const damaged = i.quantity_damaged || 0;
+        return { cells: [i.product_name, i.quantity_ordered, i.quantity_received || 0, damaged, (i.quantity_received || 0) - damaged], sub: i.sku || '' };
+      }) }],
+    notes: [po.notes ? `Notes: ${po.notes}` : ''],
   };
 }
 
