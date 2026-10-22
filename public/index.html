@@ -5829,7 +5829,7 @@ const App = {
           <td style="white-space:nowrap">
             <button class="btn btn-outline btn-sm" onclick="App.showProductCard(${p.id})">View</button>
             <button class="btn btn-secondary btn-sm" onclick="App.showProductForm(${p.id})">Edit</button>
-            ${this.can('inventory_adjust') ? `<button class="btn btn-outline btn-sm" onclick="App.showStockAdjust(${p.id},'${p.name}',${p.stock_qty}${branchId ? `,${branchId},'${branchName}'` : ''})">Stock</button>` : ''}
+            ${this.can('inventory_adjust') ? `<button class="btn btn-outline btn-sm" onclick="App.showStockAdjust(${p.id},${this.escapeAttr(JSON.stringify(p.name))},${Number(p.stock_qty) || 0}${branchId ? `,${branchId},${this.escapeAttr(JSON.stringify(branchName))}` : ''})">Stock</button>` : ''}
             <button class="btn btn-secondary btn-sm" id="inv-hist-btn-${p.id}" onclick="App.toggleProductHistory(${p.id})" title="Stock history" style="padding:4px 7px">
               <svg viewBox="0 0 24 24" fill="currentColor" width="13" height="13"><path d="M13 3a9 9 0 1 0 9 9h-2a7 7 0 1 1-7-7v2l4-4-4-4v2zm-1 5v5l4.25 2.52.77-1.28-3.52-2.09V8z"/></svg>
             </button>
@@ -12312,7 +12312,7 @@ const App = {
       <td><span class="badge-pill ${v.active ? 'badge-success' : 'badge-danger'}">${v.active ? 'Yes' : 'No'}</span></td>
       <td style="white-space:nowrap">
         <button class="btn btn-secondary btn-sm" onclick="App._inlineEditVariation(${productId},${v.id})">Edit</button>
-        ${this.can('inventory_adjust') ? `<button class="btn btn-outline btn-sm" onclick="App._varStockAdjust(${productId},${v.id},'${v.name.replace(/'/g,"\\'")}',${v.stock_qty})">Stock</button>` : ''}
+        ${this.can('inventory_adjust') ? `<button class="btn btn-outline btn-sm" onclick="App._varStockAdjust(${productId},${v.id},${this.escapeAttr(JSON.stringify(v.name))},${Number(v.stock_qty) || 0})">Stock</button>` : ''}
         <button class="btn btn-danger btn-sm" onclick="App._deleteVariation(${productId},${v.id})">✕</button>
       </td>
     </tr>`;
