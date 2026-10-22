@@ -2019,6 +2019,10 @@ async function _init() {
     'ALTER TABLE account_payments ADD COLUMN drawer_session_id INTEGER REFERENCES drawer_sessions(id)',
     'ALTER TABLE account_payments ADD COLUMN payment_mode TEXT',
     'ALTER TABLE account_payments ADD COLUMN reference TEXT',
+    // Legacy credit notes pushed from RetailPOS Books (POST
+    // /accounts/legacy-credit-notes) are account_payments with
+    // payment_method 'credit_note'; this is Books' id, so a re-send is a no-op.
+    'ALTER TABLE account_payments ADD COLUMN external_id TEXT',
     // Set on a duplicate folded into another customer (lib/customerMerge.js).
     'ALTER TABLE customers ADD COLUMN merged_into_customer_id INTEGER REFERENCES customers(id)',
     'ALTER TABLE customers ADD COLUMN merged_at DATETIME',
@@ -3107,6 +3111,7 @@ async function _init() {
     'CREATE INDEX IF NOT EXISTS idx_purchase_order_items_po_id ON purchase_order_items(po_id)',
     'CREATE INDEX IF NOT EXISTS idx_purchase_request_items_pr_id ON purchase_request_items(pr_id)',
     'CREATE INDEX IF NOT EXISTS idx_account_payments_customer_id ON account_payments(customer_id)',
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_account_payments_external_id ON account_payments(external_id) WHERE external_id IS NOT NULL',
     'CREATE INDEX IF NOT EXISTS idx_commission_records_employee_id ON commission_records(employee_id)',
     'CREATE INDEX IF NOT EXISTS idx_commission_records_source ON commission_records(source_type, source_id)',
     'CREATE INDEX IF NOT EXISTS idx_payment_allocations_transaction_id ON payment_allocations(transaction_id)',

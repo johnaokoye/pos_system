@@ -380,4 +380,89 @@ router.post('/legacy-invoices/:id/void', requirePermission('accounts_create'), a
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Legacy credit notes: credit the customer was owed in the old system,
+// entered in RetailPOS Books and pushed here. Each becomes an open credit on
+// the account — an account_payments row with payment_method 'credit_note',
+// payment_mode 'open' and no drawer session (no money changed hands, so it's
+// never in a drawer count or the collections report). Like an unapplied
+// payment it lowers the balance now, counts against the oldest invoices in
+// the credit check, and is applied to invoices by the cashier or Books'
+// receivables reps. If it's more than is owed the balance goes negative
+// (the customer is in credit), as with returns.
+async function creditNoteRow(id) {
+  const { rows: [row] } = await db.execute({ sql: `SELECT ap.*, ${UNAPPLIED_SQL} AS unapplied FROM account_payments ap WHERE ap.id = ?`, args: [id] });
+  return row;
+}
+
+router.post('/legacy-credit-notes', requirePermission('accounts_create'), async (req, res) => {
+  try {
+    const { customer_id, credit_note_number, date, memo } = req.body;
+    const external_id = req.body.external_id != null && req.body.external_id !== '' ? String(req.body.external_id) : null;
+    const amount = parseFloat(parseFloat(req.body.amount).toFixed(2));
+    const number = String(credit_note_number || '').trim();
+    if (!customer_id) return res.status(400).json({ error: 'customer_id is required' });
+    if (!number) return res.status(400).json({ error: 'The old credit note number is required' });
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || '')) || isNaN(new Date(date))) return res.status(400).json({ error: 'date must be a date (YYYY-MM-DD)' });
+    if (!(amount > 0)) return res.status(400).json({ error: 'amount must be more than 0' });
+
+    if (external_id) {
+      const { rows: [already] } = await db.execute({ sql: 'SELECT id FROM account_payments WHERE external_id = ?', args: [external_id] });
+      if (already) return res.json({ ...(await creditNoteRow(already.id)), already_recorded: true });
+    }
+
+    const { rows: [customer] } = await db.execute({ sql: 'SELECT id, first_name, last_name, credit_enabled FROM customers WHERE id = ?', args: [customer_id] });
+    if (!customer) return res.status(404).json({ error: `No POS customer with id ${customer_id}` });
+    if (!customer.credit_enabled) return res.status(400).json({ error: `${customer.first_name} ${customer.last_name} isn't set up for credit in the POS — enable credit on their account (Accounts) first` });
+    const reference = `Legacy CN ${number}`;
+    const { rows: [dup] } = await db.execute({ sql: "SELECT id FROM account_payments WHERE customer_id = ? AND payment_method = 'credit_note' AND reference = ?", args: [customer_id, reference] });
+    if (dup) return res.status(409).json({ error: `Legacy credit note ${number} is already on this customer's account` });
+
+    const payment_number = await nextNumber(db, 'account_payments', 'payment_number', 'CN-', 6);
+    const tx = await db.transaction('write');
+    let committed = false, id;
+    try {
+      const result = await tx.execute({
+        sql: "INSERT INTO account_payments (payment_number, customer_id, amount, payment_method, payment_mode, reference, notes, external_id, created_at) VALUES (?,?,?,'credit_note','open',?,?,?,?)",
+        args: [payment_number, customer_id, amount, reference, memo || null, external_id, `${date} 12:00:00`],
+      });
+      id = Number(result.lastInsertRowid);
+      await tx.execute({ sql: 'UPDATE customers SET account_balance = account_balance - ? WHERE id = ?', args: [amount, customer_id] });
+      await tx.commit();
+      committed = true;
+    } catch(e) {
+      if (!committed) await tx.rollback();
+      throw e;
+    }
+    try { await runCreditCheck(customer_id); } catch(e) {}
+    res.status(201).json(await creditNoteRow(id));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Remove a legacy credit note entered by mistake — only while none of it has
+// been applied to an invoice.
+router.post('/legacy-credit-notes/:id/void', requirePermission('accounts_create'), async (req, res) => {
+  try {
+    const cn = await creditNoteRow(req.params.id);
+    if (!cn || cn.payment_method !== 'credit_note') return res.status(404).json({ error: 'Legacy credit note not found' });
+    if (cn.amount - cn.unapplied > 0.001) return res.status(409).json({ error: `${(cn.amount - cn.unapplied).toFixed(2)} of credit note ${cn.payment_number} has been applied to invoices, so it can't be voided` });
+    // Its allocation history is kept, so one that was ever allocated stays.
+    const { rows: [history] } = await db.execute({ sql: 'SELECT id FROM payment_allocation_changes WHERE payment_id = ? LIMIT 1', args: [cn.id] });
+    if (history) return res.status(409).json({ error: `Credit note ${cn.payment_number} has been allocated before, so it can't be voided` });
+
+    const tx = await db.transaction('write');
+    let committed = false;
+    try {
+      await tx.execute({ sql: 'DELETE FROM account_payments WHERE id = ?', args: [cn.id] });
+      await tx.execute({ sql: 'UPDATE customers SET account_balance = account_balance + ? WHERE id = ?', args: [cn.amount, cn.customer_id] });
+      await tx.commit();
+      committed = true;
+    } catch(e) {
+      if (!committed) await tx.rollback();
+      throw e;
+    }
+    try { await runCreditCheck(cn.customer_id); } catch(e) {}
+    res.json({ ok: true, id: cn.id });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 module.exports = router;
