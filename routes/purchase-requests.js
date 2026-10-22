@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
-const { requirePermission } = require('../lib/permissions');
+const { requirePermission, can } = require('../lib/permissions');
+const { resolveApprovalSignature } = require('../lib/signatures');
 const { nextNumber } = require('../lib/nextNumber');
 const { localTaxRate, defaultTaxOption, priceLine, poTotals } = require('../lib/poLines');
 
@@ -199,17 +200,27 @@ router.put('/:id', async (req, res) => {
 
 router.patch('/:id/status', async (req, res) => {
   try {
-    const { status, approved_by, rejection_reason } = req.body;
+    const { status, rejection_reason, signature } = req.body;
     const valid = ['draft', 'submitted', 'approved', 'rejected'];
     if (!valid.includes(status)) return res.status(400).json({ error: 'Invalid status' });
+    // Approving/rejecting is pr_approve's call — the router-level gate only
+    // checks the Purchase Requests module.
+    if ((status === 'approved' || status === 'rejected') && !req.apiKey && !can(req.employee?.permissions, 'pr_approve')) {
+      return res.status(403).json({ error: 'Missing permission: pr_approve' });
+    }
     const { rows: [pr] } = await db.execute({ sql: 'SELECT * FROM purchase_requests WHERE id = ?', args: [req.params.id] });
     if (!pr) return res.status(404).json({ error: 'Not found' });
     if (pr.status === 'converted') return res.status(400).json({ error: 'Cannot change status of a converted PR' });
 
     if (status === 'approved') {
+      // Signed with the approver's saved signature (or a newly drawn one).
+      const approverId = req.employee?.id || req.body.approved_by || null;
+      let sigUrl;
+      try { sigUrl = await resolveApprovalSignature(db, approverId, signature); }
+      catch (e) { return res.status(e.status || 500).json({ error: e.message, code: e.code }); }
       await db.execute({
-        sql: 'UPDATE purchase_requests SET status = ?, approved_by = ?, approved_at = CURRENT_TIMESTAMP WHERE id = ?',
-        args: [status, approved_by || null, req.params.id]
+        sql: 'UPDATE purchase_requests SET status = ?, approved_by = ?, approved_at = CURRENT_TIMESTAMP, approval_signature = ? WHERE id = ?',
+        args: [status, approverId, sigUrl, req.params.id]
       });
     } else if (status === 'rejected') {
       await db.execute({

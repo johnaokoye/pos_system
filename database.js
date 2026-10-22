@@ -2208,6 +2208,11 @@ async function _init() {
     'ALTER TABLE quotation_items ADD COLUMN is_delivery INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE transaction_items ADD COLUMN is_delivery INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE crm_opportunities ADD COLUMN lead_type TEXT',
+    // Approver's saved signature (lib/signatures.js resolveApprovalSignature),
+    // and the copy stamped on each approved document.
+    'ALTER TABLE employees ADD COLUMN approval_signature TEXT',
+    'ALTER TABLE purchase_requests ADD COLUMN approval_signature TEXT',
+    'ALTER TABLE quotations ADD COLUMN approval_signature TEXT',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

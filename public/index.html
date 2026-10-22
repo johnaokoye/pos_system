@@ -19000,7 +19000,7 @@ const App = {
             <div>
               <strong>Created:</strong> ${this.fmtDate(pr.created_at)}<br>
               <strong>Required By:</strong> ${pr.required_date ? this.fmtDate(pr.required_date) : '-'}<br>
-              ${pr.approver_name ? `<strong>Approved by:</strong> <span class="color-success">${pr.approver_name}</span>${pr.approved_at?' on '+this.fmtDate(pr.approved_at):''}` : ''}
+              ${pr.approver_name ? `<strong>Approved by:</strong> <span class="color-success">${pr.approver_name}</span>${pr.approved_at?' on '+this.fmtDate(pr.approved_at):''}${this._approvalSigImg(pr.approval_signature)}` : ''}
               ${pr.converted_po_number ? `<strong>Converted to:</strong> <span class="color-success fw-600">${this._prConvertedPOLink(pr)}</span>` : ''}
             </div>
           </div>
@@ -19041,13 +19041,17 @@ const App = {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
-  async approvePR(id) {
-    const approved_by = this.currentUser?.id || null;
-    try {
-      await this.api('PATCH', `/purchase-requests/${id}/status`, { status: 'approved', approved_by });
-      this.alert('Purchase request approved');
-      this.renderPurchasing('requests');
-    } catch(e) { this.alert(e.message, 'error'); }
+  approvePR(id) {
+    this._showApprovalDialog({
+      title: 'Approve Purchase Request',
+      intro: 'Your signature is recorded on the approved request.',
+      approve: async (signature) => {
+        await this.api('PATCH', `/purchase-requests/${id}/status`, { status: 'approved', signature });
+        this.closeModal();
+        this.alert('Purchase request approved');
+        this.renderPurchasing('requests');
+      },
+    });
   },
 
   async rejectPR(id) {
@@ -19625,7 +19629,7 @@ const App = {
           </div>` : ''}
           ${po.status==='approved' ? `<div style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px;font-size:13px">
             <strong>Approved by:</strong> ${po.approved_by_name||'-'} on ${this.fmtDateTime(po.approved_at)}
-            ${po.approval_signature ? `<button type="button" class="btn btn-sm btn-outline" style="margin-left:8px;padding:1px 8px;font-size:11px" onclick="App.showRentalSignature('${po.approval_signature.replace(/'/g,"\\'")}','Approver Signature')">View Signature</button>` : ''}
+            ${this._approvalSigImg(po.approval_signature)}
           </div>` : ''}
 
           <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:14px">
@@ -19930,33 +19934,74 @@ const App = {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
-  showApprovePOModal(id) {
+  // Shared Approve dialog (POs, purchase requests, Special Projects). The
+  // approver signs once: their signature is saved (employees.
+  // approval_signature) and every later approval shows it and applies it with
+  // one click; "Draw a new signature" replaces it. `approve(signature)` makes
+  // the approval call — `signature` is a newly drawn PNG data URL, or
+  // undefined to use the saved one (lib/signatures.js resolveApprovalSignature).
+  async _showApprovalDialog({ title, intro = '', approveLabel = 'Approve', approve }) {
+    let saved = null;
+    try { saved = (await this.api('GET', '/employees/me/signature')).approval_signature; } catch (e) {}
+    this._approval = { approve, drawing: !saved };
+    const me = this.currentUser ? `${this.currentUser.first_name} ${this.currentUser.last_name}` : '';
     this.showModal(`
       <div class="modal" style="max-width:480px">
-        <div class="modal-header"><span class="modal-title">Approve Purchase Order</span><button class="modal-close">✕</button></div>
+        <div class="modal-header"><span class="modal-title">${title}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
-          <p style="font-size:13px;color:var(--text-muted)">Sign to approve. Your signature is recorded on the completed PO.</p>
-          ${this._sigPadHtml('po-approve-sig', 'Approver Signature', 'sign to approve')}
+          ${intro ? `<p style="font-size:13px;color:var(--text-muted);margin-top:0">${intro}</p>` : ''}
+          <div id="approval-saved" style="display:${saved ? '' : 'none'}">
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">Your signature will be applied to the approved document${me ? ` as <strong>${this.escapeAttr(me)}</strong>` : ''}:</div>
+            ${saved ? `<div style="border:1px solid var(--border);border-radius:6px;background:#fff;padding:8px;text-align:center"><img src="${this.escapeAttr(saved)}" alt="Your signature" style="max-height:90px;max-width:100%"></div>` : ''}
+            <button type="button" class="btn btn-sm btn-outline" style="margin-top:8px" onclick="App._approvalDrawNew()">Draw a new signature</button>
+          </div>
+          <div id="approval-draw" style="display:${saved ? 'none' : ''}">
+            <p style="font-size:12px;color:var(--text-muted);margin-top:0">${saved ? 'Your new signature replaces the saved one for this and future approvals.' : "Draw your signature once — it's saved and applied automatically to your future approvals."}</p>
+            ${this._sigPadHtml('approval-sig', 'Your Signature', 'sign to approve')}
+          </div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-          <button class="btn btn-primary" onclick="App.confirmApprovePO(${id})">Approve</button>
+          <button class="btn btn-success" id="approval-btn" onclick="App._approvalConfirm()">${approveLabel}</button>
         </div>
       </div>`);
-    this._sigPadInit('po-approve-sig');
+    this._sigPadInit('approval-sig');
+  },
+  _approvalDrawNew() {
+    document.getElementById('approval-saved').style.display = 'none';
+    document.getElementById('approval-draw').style.display = '';
+    this._approval.drawing = true;
+  },
+  async _approvalConfirm() {
+    const a = this._approval;
+    if (!a) return;
+    if (a.drawing && !this._sigPadHasDrawn('approval-sig')) { this.alert('Draw your signature to approve', 'error'); return; }
+    const btn = document.getElementById('approval-btn');
+    if (btn) btn.disabled = true;
+    try {
+      await a.approve(a.drawing ? this._sigPadDataUrl('approval-sig') : undefined);
+    } catch (e) {
+      if (btn) btn.disabled = false;
+      this.alert(e.message, 'error');
+    }
+  },
+  // Approved-by signature shown on a document's in-app view.
+  _approvalSigImg(path, label = 'Approver signature') {
+    if (!path) return '';
+    return `<div style="margin-top:6px"><img src="${this.escapeAttr(path)}" alt="${label}" style="max-height:56px;max-width:220px;background:#fff;border:1px solid var(--border);border-radius:4px;padding:2px 6px"></div>`;
   },
 
-  async confirmApprovePO(id) {
-    if (!this._sigPadHasDrawn('po-approve-sig')) { this.alert('Your signature is required to approve this PO', 'error'); return; }
-    try {
-      await this.api('PATCH', `/purchase-orders/${id}/approve`, {
-        signature: this._sigPadDataUrl('po-approve-sig'),
-        employee_id: this.currentUser.id,
-      });
-      this.closeModal();
-      this.alert('Purchase order approved');
-      this.renderPurchasing();
-    } catch(e) { this.alert(e.message, 'error'); }
+  showApprovePOModal(id) {
+    this._showApprovalDialog({
+      title: 'Approve Purchase Order',
+      intro: 'Your signature is recorded on the approved PO and appears on its printed, emailed and PDF copies.',
+      approve: async (signature) => {
+        await this.api('PATCH', `/purchase-orders/${id}/approve`, { signature });
+        this.closeModal();
+        this.alert('Purchase order approved');
+        this.renderPurchasing();
+      },
+    });
   },
 
   printApprovedPO(id) {
@@ -22058,7 +22103,7 @@ const App = {
     const approvalBanner = !isSpecialProject ? '' : q.status === 'pending_approval'
       ? `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--warning,#f59e0b);border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:12px">Submitted for approval ${this.fmtDateTime(q.submitted_at)} — awaiting a supervisor's pricing sign-off.</div>`
       : q.approved_at
-      ? `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--success,#22c55e);border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:12px">Approved by ${q.approved_by_name||'a supervisor'} on ${this.fmtDateTime(q.approved_at)}.</div>`
+      ? `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--success,#22c55e);border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:12px">Approved by ${q.approved_by_name||'a supervisor'} on ${this.fmtDateTime(q.approved_at)}.${this._approvalSigImg(q.approval_signature)}</div>`
       : q.rejected_at
       ? `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--danger,#ef4444);border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:12px">Rejected by ${q.rejected_by_name||'a supervisor'} on ${this.fmtDateTime(q.rejected_at)} — ${q.rejection_reason}<br>Edit and resubmit when ready.</div>`
       : '';
@@ -22365,26 +22410,16 @@ const App = {
   },
 
   showApproveSpecialProjectModal(id) {
-    this.showModal(`
-      <div class="modal" style="max-width:420px">
-        <div class="modal-header"><span class="modal-title">Approve Special Project</span><button class="modal-close">✕</button></div>
-        <div class="modal-body">
-          <p style="font-size:13px;color:var(--text-muted)">This signs off on the pricing as entered — the project can then be sent to the customer and converted to an invoice.</p>
-        </div>
-        <div class="modal-footer">
-          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-          <button class="btn btn-success" onclick="App.confirmApproveSpecialProject(${id})">Approve</button>
-        </div>
-      </div>`);
-  },
-
-  async confirmApproveSpecialProject(id) {
-    try {
-      await this.api('PATCH', `/quotations/${id}/approve`, { employee_id: this.currentUser.id });
-      this.closeModal();
-      this.alert('Special project approved');
-      this.viewQuote(id);
-    } catch(e) { this.alert(e.message, 'error'); }
+    this._showApprovalDialog({
+      title: 'Approve Special Project',
+      intro: 'This signs off on the pricing as entered — the project can then be sent to the customer and converted to an invoice. Your signature appears on the quotation\'s printed, emailed and PDF copies.',
+      approve: async (signature) => {
+        await this.api('PATCH', `/quotations/${id}/approve`, { signature });
+        this.closeModal();
+        this.alert('Special project approved');
+        this.viewQuote(id);
+      },
+    });
   },
 
   showRejectSpecialProjectModal(id) {

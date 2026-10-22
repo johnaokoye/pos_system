@@ -14,6 +14,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
+const { resolveApprovalSignature } = require('../lib/signatures');
 
 // Special Projects (quote_type='special_project') are gated by their own
 // `special_projects`/`special_projects_approve` permissions, deliberately
@@ -833,17 +834,22 @@ router.patch('/:id/submit-for-approval', requirePermission('special_projects'), 
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Signed with the approver's saved signature, or `signature` newly drawn
+// (lib/signatures.js) — stamped on the quotation's print, email and PDF.
 router.patch('/:id/approve', requirePermission('special_projects_approve'), async (req, res) => {
   try {
-    const { employee_id } = req.body;
+    const employee_id = req.employee?.id || req.body.employee_id || null;
     const { rows: [q] } = await db.execute({ sql: 'SELECT * FROM quotations WHERE id = ?', args: [req.params.id] });
     if (!q) return res.status(404).json({ error: 'Not found' });
     if (q.status !== 'pending_approval') return res.status(400).json({ error: `This special project is ${q.status}, not awaiting approval` });
+    let sigUrl;
+    try { sigUrl = await resolveApprovalSignature(db, employee_id, req.body.signature); }
+    catch (e) { return res.status(e.status || 500).json({ error: e.message, code: e.code }); }
     const tx = await db.transaction('write');
     let committed = false;
     try {
       await holdSpecialProjectRentals(tx, q, employee_id);
-      await tx.execute({ sql: `UPDATE quotations SET status = 'approved', approved_by = ?, approved_at = CURRENT_TIMESTAMP WHERE id = ?`, args: [employee_id || null, req.params.id] });
+      await tx.execute({ sql: `UPDATE quotations SET status = 'approved', approved_by = ?, approved_at = CURRENT_TIMESTAMP, approval_signature = ? WHERE id = ?`, args: [employee_id, sigUrl, req.params.id] });
       await tx.commit();
       committed = true;
     } catch(e) {

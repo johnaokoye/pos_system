@@ -253,6 +253,15 @@ router.get('/me', requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// The signed-in employee's saved approval signature (null until their first
+// approval) — the approve dialogs show it and apply it.
+router.get('/me/signature', requireAuth, async (req, res) => {
+  try {
+    const { rows: [emp] } = await db.execute({ sql: 'SELECT approval_signature FROM employees WHERE id = ?', args: [req.employee.id] });
+    res.json({ approval_signature: emp?.approval_signature || null });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.post('/logout', requireAuth, async (req, res) => {
   try {
     await destroySession(readCookie(req));

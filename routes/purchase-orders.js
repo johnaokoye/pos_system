@@ -10,7 +10,7 @@ const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { autoBills, createBill, dueDateFor, today } = require('../lib/payables');
-const { uploadSignature } = require('../lib/signatures');
+const { resolveApprovalSignature } = require('../lib/signatures');
 const { getSetting } = require('../lib/settings');
 const { localTaxRate, defaultTaxOption, priceLine, poTotals, receivedValue } = require('../lib/poLines');
 const { allocateTicketDiscount } = require('../lib/ticketDiscount');
@@ -158,22 +158,25 @@ router.patch('/:id/status', async (req, res) => {
 });
 
 // Approve a submitted PO — requires purchasing_approve (on top of the
-// router-level `purchasing` gate above) and a captured signature, so
-// approval always carries who signed off and how. Only a 'sent' (formally
-// submitted) PO can be approved; a draft has to be sent first.
+// router-level `purchasing` gate above) and the approver's signature (their
+// saved one, or `signature` newly drawn — lib/signatures.js), so approval
+// always carries who signed off. Only a 'sent' (formally submitted) PO can be
+// approved; a draft has to be sent first.
 router.patch('/:id/approve', requirePermission('purchasing_approve'), async (req, res) => {
   try {
-    const { signature, employee_id } = req.body;
-    if (!signature) return res.status(400).json({ error: "The approver's signature is required to approve a purchase order" });
+    const { signature } = req.body;
+    const approverId = (req.employee && req.employee.id) || req.body.employee_id || null;
     const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });
     if (!po) return res.status(404).json({ error: 'Not found' });
     if (po.status !== 'sent') return res.status(400).json({ error: `This PO is ${po.status}, not awaiting approval` });
 
-    const sigUrl = await uploadSignature(signature, `po-${req.params.id}-approve`, 'po-approval-signatures');
+    let sigUrl;
+    try { sigUrl = await resolveApprovalSignature(db, approverId, signature); }
+    catch (e) { return res.status(e.status || 500).json({ error: e.message, code: e.code }); }
     await db.execute({
       sql: `UPDATE purchase_orders SET status = 'approved', approved_by = ?, approved_at = CURRENT_TIMESTAMP, approval_signature = ?,
             rejected_by = NULL, rejected_at = NULL, rejection_reason = NULL WHERE id = ?`,
-      args: [employee_id || (req.employee && req.employee.id) || null, sigUrl, req.params.id],
+      args: [approverId, sigUrl, req.params.id],
     });
     const { rows: [updated] } = await db.execute({ sql: PO_DETAIL_SELECT, args: [req.params.id] });
     res.json(updated);

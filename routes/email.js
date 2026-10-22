@@ -672,6 +672,7 @@ ${print ? PRINT_PAGE_STYLE : ''}
         <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">TOTAL</td><td style="font-size:16px;font-weight:700;color:${BRAND.black};text-align:right">${fmt(q.total)}</td></tr>
       </table>
       ${q.notes ? `<div style="margin-top:16px;font-size:13px;color:#444"><strong>Notes:</strong> ${q.notes}</div>` : ''}
+      ${approvalSignatureHtml(q)}
       <div style="text-align:center;margin-top:20px;font-size:13px;color:#666;font-style:italic">${footer}</div>
     </td></tr>
   </table>
@@ -679,6 +680,19 @@ ${print ? PRINT_PAGE_STYLE : ''}
 </table>
 </body>
 </html>`;
+}
+
+// "Approved By" signature block for an approved Special Project. The image is
+// a login-only upload — send-quote wraps the HTML in inlineProtectedImages so
+// the email carries it, and the print preview is opened by a signed-in user.
+function approvalSignatureHtml(q) {
+  if (!q.approval_signature) return '';
+  return `<div style="margin-top:24px;padding-top:16px;border-top:1px solid #e8e8e8">
+        <div style="font-size:10px;font-weight:bold;text-transform:uppercase;color:#888;margin-bottom:6px">Approved By</div>
+        <img src="${q.approval_signature}" style="max-height:60px;max-width:220px;border-bottom:1px solid #333;padding-bottom:4px;display:block" />
+        <div style="font-size:12px;color:#555;margin-top:4px">${q.approved_by_name || ''}</div>
+        ${q.approved_at ? `<div style="font-size:11px;color:#888">${new Date(q.approved_at).toLocaleString()}</div>` : ''}
+      </div>`;
 }
 
 // Rate card shown under each rental line. Tools bill on the daily rate only
@@ -1081,11 +1095,13 @@ async function loadQuoteForDocument(id) {
   const { rows: [q] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name,
     c.customer_number, c.customer_type, c.email as customer_email, c.phone as customer_phone,
     c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
-    b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name
+    b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name,
+    ae.first_name || ' ' || ae.last_name as approved_by_name
     FROM quotations q
     LEFT JOIN customers c ON q.customer_id = c.id
     LEFT JOIN branches b ON q.branch_id = b.id
     LEFT JOIN employees e ON q.employee_id = e.id
+    LEFT JOIN employees ae ON q.approved_by = ae.id
     WHERE q.id = ?`, args: [id] });
   if (!q) return null;
   const { rows: items } = await db.execute({ sql: 'SELECT * FROM quotation_items WHERE quote_id = ? ORDER BY id', args: [id] });
@@ -1137,7 +1153,8 @@ router.post('/send-quote/:id', requireAuth, async (req, res) => {
         from: `"${fromName}" <${fromAddr}>`,
         to,
         subject: `${isRental ? 'Rental Quotation' : 'Quotation'} ${q.quote_number} from ${s.store_name || 'Our Store'}`,
-        ...(await documentEmailContent(req.body.as_pdf, s, isRental ? rentalQuotePdfModel(q, s) : quotePdfModel(q, s), isRental ? buildRentalQuoteHtml(q, s) : buildQuoteHtml(q, s))),
+        // An approved Special Project's signature is a login-only image — embed it.
+        ...(await documentEmailContent(req.body.as_pdf, s, isRental ? rentalQuotePdfModel(q, s) : quotePdfModel(q, s), isRental ? buildRentalQuoteHtml(q, s) : inlineProtectedImages(buildQuoteHtml(q, s)))),
       });
 
       // Auto-mark as sent if still in draft
@@ -1933,6 +1950,7 @@ function quotePdfModel(q, s) {
       { label: 'TOTAL', value: fmt(q.total), style: 'grand' },
     ],
     notes: [q.notes ? `Notes: ${q.notes}` : ''],
+    signatures: q.approval_signature ? [{ label: 'Approved By', name: q.approved_by_name || '', signedAt: pdfDateTime(q.approved_at), image: q.approval_signature }] : [],
     footer: s.receipt_footer || 'Thank you for your business!',
   };
 }
