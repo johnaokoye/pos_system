@@ -1170,6 +1170,14 @@ async function _init() {
       created_by INTEGER REFERENCES employees(id),
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // How an opportunity came in (Bid, Email, WhatsApp…) — the pick-list for
+    // crm_opportunities.lead_type, added to from the opportunity form.
+    { sql: `CREATE TABLE IF NOT EXISTS crm_lead_types (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      created_by INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS returns (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       return_number TEXT UNIQUE NOT NULL,
@@ -2198,9 +2206,15 @@ async function _init() {
     // Delivery line on a retail quote / Special Project: description + pre-tax
     // price, taxed at the store rate; no product and never sent to Purchasing.
     'ALTER TABLE quotation_items ADD COLUMN is_delivery INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE crm_opportunities ADD COLUMN lead_type TEXT',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
+  }
+
+  // Starting opportunity lead types (more are added from the form).
+  for (const name of ['Bid', 'Email', 'WhatsApp', 'Website', 'Site visit']) {
+    try { await db.execute({ sql: 'INSERT OR IGNORE INTO crm_lead_types (name) VALUES (?)', args: [name] }); } catch(e) {}
   }
 
   // Departments typed on PRs before the pick-list existed join the list.

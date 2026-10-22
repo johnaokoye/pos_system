@@ -25207,6 +25207,7 @@ const App = {
                   <div class="pipeline-card-title">${o.title}</div>
                   <div class="pipeline-card-sub">${o.lead_name||o.customer_name||'—'}</div>
                   ${o.lead_company?`<div class="pipeline-card-sub">${o.lead_company}</div>`:''}
+                  ${o.lead_type?`<div class="pipeline-card-sub">Lead: ${this.escapeAttr(o.lead_type)}</div>`:''}
                   <div class="pipeline-card-value">${this.fmt(o.value)}</div>
                   <div style="display:flex;justify-content:space-between;margin-top:6px">
                     <span style="font-size:11px;color:var(--text-muted)">${o.probability}% likely</span>
@@ -25483,13 +25484,21 @@ const App = {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
+  // "+ Add" on the opportunity form's Lead list (_searchableSelect data-add).
+  async _addLeadType(name) {
+    const t = await this.api('POST', '/crm/lead-types', { name });
+    return { value: t.name, text: t.name };
+  },
+
   async showOppModal(id = null) {
-    const [employees, leads, opp] = await Promise.all([
+    const [employees, leadTypeRows, opp] = await Promise.all([
       this.api('GET', '/employees'),
-      this.api('GET', '/crm/leads'),
+      this.api('GET', '/crm/lead-types').catch(() => []),
       id ? this.api('GET', `/crm/opportunities/${id}`) : Promise.resolve(null),
     ]);
     const o = opp || {};
+    const leadTypes = leadTypeRows.map(t => t.name);
+    if (o.lead_type && !leadTypes.includes(o.lead_type)) leadTypes.unshift(o.lead_type);
     const oppCustomer = o.customer_id ? await this._customerById(o.customer_id) : null;
     const stages = ['qualification','proposal','negotiation','closed_won','closed_lost'];
     this.showModal(`
@@ -25502,9 +25511,9 @@ const App = {
           <div class="form-group"><label>Title *</label><input id="o-title" value="${o.title||''}"></div>
           <div class="input-row">
             <div class="form-group"><label>Lead</label>
-              <select id="o-lead">
+              <select id="o-lead-type" data-searchable data-add="App._addLeadType">
                 <option value="">None</option>
-                ${leads.map(l => `<option value="${l.id}" ${o.lead_id===l.id?'selected':''}>${l.first_name} ${l.last_name}${l.company?' — '+l.company:''}</option>`).join('')}
+                ${leadTypes.map(t => `<option value="${this.escapeAttr(t)}" ${o.lead_type === t ? 'selected' : ''}>${this.escapeAttr(t)}</option>`).join('')}
               </select>
             </div>
             <div class="form-group"><label>Customer</label>
@@ -25544,7 +25553,7 @@ const App = {
   async saveOpp(id) {
     const data = {
       title: document.getElementById('o-title').value.trim(),
-      lead_id: document.getElementById('o-lead').value || null,
+      lead_type: document.getElementById('o-lead-type').value || null,
       customer_id: document.getElementById('o-cust').value || null,
       stage: document.getElementById('o-stage').value,
       probability: parseInt(document.getElementById('o-prob').value) || 50,
@@ -25621,7 +25630,7 @@ const App = {
             <span style="font-size:13px;color:var(--text-muted)">${opp.probability}% likely</span>
           </div>
           <div class="input-row" style="margin-bottom:12px">
-            <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Lead / Contact</label><div style="font-size:13px">${opp.lead_name||opp.customer_name||'—'}</div></div>
+            <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Lead / Contact</label><div style="font-size:13px">${opp.lead_type ? `${this.escapeAttr(opp.lead_type)}${opp.lead_name || opp.customer_name ? ' · ' : ''}` : ''}${opp.lead_name||opp.customer_name||(opp.lead_type ? '' : '—')}</div></div>
             <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Assigned</label><div style="font-size:13px">${opp.employee_name||'—'}</div></div>
           </div>
           <div class="input-row" style="margin-bottom:16px">

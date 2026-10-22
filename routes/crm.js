@@ -204,8 +204,32 @@ router.get('/opportunities/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Lead types ─────────────────────────────────────────────
+// The opportunity form's Lead list (Bid, Email, WhatsApp…), in the order
+// they were added; stored on the opportunity as text in
+// crm_opportunities.lead_type.
+router.get('/lead-types', async (req, res) => {
+  try {
+    const { rows } = await db.execute('SELECT id, name FROM crm_lead_types ORDER BY id');
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Adds a lead type, or returns the existing one if the name (any case) is
+// already listed.
+router.post('/lead-types', async (req, res) => {
+  try {
+    const name = String(req.body.name || '').trim().replace(/\s+/g, ' ');
+    if (!name) return res.status(400).json({ error: 'Lead type name is required' });
+    if (name.length > 60) return res.status(400).json({ error: 'Lead type name is too long' });
+    await db.execute({ sql: 'INSERT OR IGNORE INTO crm_lead_types (name, created_by) VALUES (?, ?)', args: [name, req.employee?.id || null] });
+    const { rows } = await db.execute({ sql: 'SELECT id, name FROM crm_lead_types WHERE name = ?', args: [name] });
+    res.json(rows[0]);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.post('/opportunities', async (req, res) => {
-  const { title, lead_id, customer_id, employee_id, stage, probability, value, expected_close, notes } = req.body;
+  const { title, lead_id, lead_type, customer_id, employee_id, stage, probability, value, expected_close, notes } = req.body;
   if (!title) return res.status(400).json({ error: 'Title required' });
   try {
     const opp_number = await nextNumber(db, 'crm_opportunities', 'opp_number', 'OPP-', 5);
@@ -215,7 +239,7 @@ router.post('/opportunities', async (req, res) => {
     // the client sent is ignored. Falls back to the body's value only for a
     // system/API-key caller with no logged-in employee to attribute it to.
     const ownerId = req.employee?.id || employee_id || null;
-    const result = await db.execute({ sql: `INSERT INTO crm_opportunities (opp_number,title,lead_id,customer_id,employee_id,stage,probability,value,expected_close,notes) VALUES (?,?,?,?,?,?,?,?,?,?)`, args: [opp_number, title, lead_id||null, customer_id||null, ownerId, stage||'qualification', parseInt(probability||50), parseFloat(value||0), expected_close||null, notes||null] });
+    const result = await db.execute({ sql: `INSERT INTO crm_opportunities (opp_number,title,lead_id,lead_type,customer_id,employee_id,stage,probability,value,expected_close,notes) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, args: [opp_number, title, lead_id||null, String(lead_type || '').trim() || null, customer_id||null, ownerId, stage||'qualification', parseInt(probability||50), parseFloat(value||0), expected_close||null, notes||null] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM crm_opportunities WHERE id = ?', args: [Number(result.lastInsertRowid)] });
     res.status(201).json(row);
   } catch(e) { res.status(400).json({ error: e.message }); }
@@ -226,12 +250,16 @@ router.put('/opportunities/:id', async (req, res) => {
     const { rows: [opp] } = await db.execute({ sql: 'SELECT * FROM crm_opportunities WHERE id = ?', args: [req.params.id] });
     if (!opp) return res.status(404).json({ error: 'Not found' });
     if (req.employee?.is_salesperson && opp.employee_id !== req.employee.id) return res.status(403).json({ error: 'Not your opportunity' });
-    const { title, lead_id, customer_id, employee_id, stage, probability, value, expected_close, notes, lost_reason } = req.body;
+    const { title, lead_id, lead_type, customer_id, employee_id, stage, probability, value, expected_close, notes, lost_reason } = req.body;
+    // The form no longer picks a lead record (it sends lead_type instead) —
+    // an existing link is kept unless lead_id is sent explicitly.
+    const leadId = lead_id === undefined ? opp.lead_id : (lead_id || null);
+    const leadType = lead_type === undefined ? opp.lead_type : (String(lead_type || '').trim() || null);
     // Reassigning to a different salesperson is a sales_manager-only action —
     // see PATCH /:id/reassign. A plain edit here can't change who owns it.
     const ownerId = can(req.employee?.permissions, 'sales_manager') ? (employee_id || null) : opp.employee_id;
     const isWon = stage === 'closed_won' && opp.stage !== 'closed_won';
-    await db.execute({ sql: `UPDATE crm_opportunities SET title=?,lead_id=?,customer_id=?,employee_id=?,stage=?,probability=?,value=?,expected_close=?,notes=?,lost_reason=?,won=?,won_at=?,updated_at=datetime('now') WHERE id=?`, args: [title||opp.title, lead_id||null, customer_id||null, ownerId, stage||opp.stage, parseInt(probability||opp.probability), parseFloat(value||opp.value), expected_close||null, notes||null, lost_reason||null, isWon ? 1 : (stage === 'closed_won' ? opp.won : 0), isWon ? new Date().toISOString() : opp.won_at, req.params.id] });
+    await db.execute({ sql: `UPDATE crm_opportunities SET title=?,lead_id=?,lead_type=?,customer_id=?,employee_id=?,stage=?,probability=?,value=?,expected_close=?,notes=?,lost_reason=?,won=?,won_at=?,updated_at=datetime('now') WHERE id=?`, args: [title||opp.title, leadId, leadType, customer_id||null, ownerId, stage||opp.stage, parseInt(probability||opp.probability), parseFloat(value||opp.value), expected_close||null, notes||null, lost_reason||null, isWon ? 1 : (stage === 'closed_won' ? opp.won : 0), isWon ? new Date().toISOString() : opp.won_at, req.params.id] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM crm_opportunities WHERE id = ?', args: [req.params.id] });
     res.json(row);
   } catch(e) { res.status(500).json({ error: e.message }); }
