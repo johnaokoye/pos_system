@@ -2195,6 +2195,9 @@ async function _init() {
     // quote/receipt/invoice — no product, price, tax, stock or Purchasing.
     'ALTER TABLE quotation_items ADD COLUMN is_comment INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE transaction_items ADD COLUMN is_comment INTEGER NOT NULL DEFAULT 0',
+    // Delivery line on a retail quote / Special Project: description + pre-tax
+    // price, taxed at the store rate; no product and never sent to Purchasing.
+    'ALTER TABLE quotation_items ADD COLUMN is_delivery INTEGER NOT NULL DEFAULT 0',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

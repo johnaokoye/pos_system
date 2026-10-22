@@ -76,7 +76,7 @@ router.get('/', async (req, res) => {
 async function insertQuoteLines(tx, quoteId, processedItems) {
   for (const item of processedItems) {
     const { product_id, product_name, sku, is_temp_item, is_q_item, purchase_request_id, sources, qty, unit_price, unit_cost, lineTotal, lineTax, lineDisc, serial_number } = item;
-    const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,unit_cost,discount_amount,tax_amount,total,is_temp_item,is_q_item,purchase_request_id,serial_number,is_rental_line,rental_start,rental_end,is_mandatory,rate_plan,sell_unit,units_per,uom_id,is_comment) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [quoteId, product_id, product_name, sku, qty, unit_price, unit_cost, lineDisc, lineTax, lineTotal, is_temp_item, is_q_item, purchase_request_id, serial_number || null, item.is_rental_line ? 1 : 0, item.rental_start || null, item.rental_end || null, item.is_mandatory ? 1 : 0, item.rate_plan || null, item.sell_unit || null, item.units_per || 1, item.uom_id ?? null, item.is_comment ? 1 : 0] });
+    const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,unit_cost,discount_amount,tax_amount,total,is_temp_item,is_q_item,purchase_request_id,serial_number,is_rental_line,rental_start,rental_end,is_mandatory,rate_plan,sell_unit,units_per,uom_id,is_comment,is_delivery) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [quoteId, product_id, product_name, sku, qty, unit_price, unit_cost, lineDisc, lineTax, lineTotal, is_temp_item, is_q_item, purchase_request_id, serial_number || null, item.is_rental_line ? 1 : 0, item.rental_start || null, item.rental_end || null, item.is_mandatory ? 1 : 0, item.rate_plan || null, item.sell_unit || null, item.units_per || 1, item.uom_id ?? null, item.is_comment ? 1 : 0, item.is_delivery ? 1 : 0] });
     item.id = Number(itemResult.lastInsertRowid);
     if (sources) {
       for (const src of sources) {
@@ -287,6 +287,23 @@ async function processQuoteItems(items, { allowRental = false } = {}) {
         product_id: null, product_name: text, sell_unit: null, units_per: 1, uom_id: null, serial_number: null, sku: null,
         is_temp_item: 0, is_q_item: 0, is_comment: 1, purchase_request_id: null, sources: null,
         qty: 1, unit_price: 0, unit_cost: null, lineTotal: 0, lineTax: 0, taxRate: 0, lineDisc: 0,
+      });
+      continue;
+    }
+    // Delivery line — description + pre-tax price, taxed at the store's
+    // default rate. Not a temp/Q item, so it never goes to Purchasing.
+    if (!item.product_id && item.is_delivery) {
+      const text = String(item.description || item.product_name || '').trim() || 'Delivery';
+      const unit_price = parseFloat(item.unit_price);
+      if (!(unit_price >= 0)) throw new Error(`Enter a price for the delivery line "${text}"`);
+      const lineTotal = parseFloat(unit_price.toFixed(2));
+      const lineTax = parseFloat((lineTotal * defaultTaxRate / 100).toFixed(2));
+      subtotal += lineTotal;
+      tax_amount += lineTax;
+      processedItems.push({
+        product_id: null, product_name: text, sell_unit: null, units_per: 1, uom_id: null, serial_number: null, sku: null,
+        is_temp_item: 0, is_q_item: 0, is_delivery: 1, purchase_request_id: null, sources: null,
+        qty: 1, unit_price: lineTotal, unit_cost: null, lineTotal, lineTax, taxRate: defaultTaxRate, lineDisc: 0,
       });
       continue;
     }

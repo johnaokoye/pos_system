@@ -3274,6 +3274,7 @@ const App = {
       document.getElementById('qt-item-0')?.remove();
       for (const item of this.cart) {
         if (item.is_comment) { this.addQuoteCommentItem({ product_name: item.name }); continue; }
+        if (item.is_delivery) { this.addQuoteDeliveryItem({ product_name: item.name, unit_price: item.price }); continue; }
         if (item.variation_id) {
           // quotation_items has no variation_id/variation_name column —
           // encode the variant into the description instead of silently
@@ -3309,7 +3310,7 @@ const App = {
         return;
       }
       const desc = document.getElementById(`qti-desc-${idx}`)?.value.trim();
-      if (desc) items.push({ product_name: desc, quantity, unit_price });
+      if (desc) items.push({ product_name: desc, quantity, unit_price, is_delivery: row.dataset.delivery === '1' });
     });
     return { customer_id, branch_id, notes, items };
   },
@@ -3322,7 +3323,7 @@ const App = {
     const notesEl = document.getElementById('qt-notes'); if (notesEl) notesEl.value = snap.notes;
     if (snap.items.length) {
       document.getElementById('qt-item-0')?.remove();
-      for (const item of snap.items) item.product_id ? this.addQuoteItem(item) : this.addQuoteCustomItem(item);
+      for (const item of snap.items) item.product_id ? this.addQuoteItem(item) : item.is_delivery ? this.addQuoteDeliveryItem(item) : this.addQuoteCustomItem(item);
     }
   },
 
@@ -4532,6 +4533,7 @@ const App = {
           tax_rate: product ? (product.tax_rate || 0) : derivedTaxRate,
           quantity: item.quantity,
           is_service: product?.product_type === 'service' ? 1 : 0,
+          is_delivery: item.is_delivery ? 1 : 0,
           stock_qty: product?.stock_qty ?? 999,
           ...this._recalledUnitFields(item, product),
         };
@@ -20871,6 +20873,7 @@ const App = {
                 <button class="btn btn-sm btn-outline" onclick="App.addQuoteItem()">+ Add Item</button>
                 <button class="btn btn-sm btn-outline" onclick="App.addQuoteCustomItem()">+ Custom Item</button>
                 <button class="btn btn-sm btn-outline" onclick="App.addQuoteCommentItem()" title="A comment line — free text printed on the quote and invoice, with no price and nothing sent to Purchasing">+ C Item</button>
+                <button class="btn btn-sm btn-outline" onclick="App.addQuoteDeliveryItem()" title="A delivery charge — your description and a price before tax; tax is added at the store rate">+ Delivery</button>
                 <button class="btn btn-sm btn-outline" id="qt-add-q-item-btn" style="display:none" onclick="App.addQuoteCustomItem(null,{qItem:true})" title="Something not in inventory that Purchasing should order — a Purchase Request is auto-created when the project is accepted">+ Q Item</button>
                 <button class="btn btn-sm btn-outline" id="qt-add-rental-item-btn" style="display:none" onclick="App.addQuoteRentalItem()" title="A rental item for a set period — held when the project is approved, issued and checked back in through Rentals">+ Rental Item</button>
               </div>
@@ -20941,6 +20944,7 @@ const App = {
           // A rental line's mandatory accessories are re-added by the server on save.
           if (item.is_rental_line) { if (!item.parent_item_id) this.addQuoteRentalItem(item); return; }
           if (item.is_comment) { this.addQuoteCommentItem(item); return; }
+          if (item.is_delivery) { this.addQuoteDeliveryItem(item); return; }
           item.product_id ? this.addQuoteItem(item) : this.addQuoteCustomItem(item, { qItem: !!item.is_q_item });
         });
       } else {
@@ -21309,6 +21313,31 @@ const App = {
     container.appendChild(div);
     this.calcQuoteTotal();
     if (isSP) this._updateQuoteItemMargin(idx);
+  },
+
+  // Delivery line: description + price before tax (taxed at the store rate,
+  // routes/quotations.js processQuoteItems). Not a Q item — nothing goes to
+  // Purchasing. Quantity is always 1; the hidden qti-qty keeps calcQuoteTotal
+  // counting it like any other line.
+  addQuoteDeliveryItem(prefill) {
+    this._quoteItems = this._quoteItems || [];
+    const idx = this._quoteItems.length;
+    this._quoteItems.push({ delivery: true });
+    const rate = parseFloat(this.settings?.tax_rate) || 0;
+    const div = document.createElement('div');
+    div.className = 'po-receive-row';
+    div.id = `qt-item-${idx}`;
+    div.dataset.delivery = '1';
+    div.innerHTML = `
+      <span class="badge-pill badge-teal" style="flex-shrink:0" title="Delivery charge — taxed at the store rate">Delivery</span>
+      <input id="qti-desc-${idx}" style="flex:2" placeholder="Description, e.g. Delivery to Montego Bay" value="${this.escapeAttr(prefill ? prefill.product_name : 'Delivery')}">
+      <input id="qti-qty-${idx}" type="hidden" value="1">
+      <input id="qti-price-${idx}" type="number" min="0" step="0.01" value="${prefill ? prefill.unit_price : ''}" style="width:110px" placeholder="Price (pre-tax)" title="Price before tax — tax is added on top" oninput="App.calcQuoteTotal()">
+      <span style="font-size:11px;color:var(--text-muted);white-space:nowrap">+ tax ${rate}%</span>
+      <button class="btn btn-sm btn-danger" onclick="document.getElementById('qt-item-${idx}').remove();App.calcQuoteTotal()">✕</button>`;
+    document.getElementById('qt-items').appendChild(div);
+    if (!prefill) document.getElementById(`qti-price-${idx}`).focus();
+    this.calcQuoteTotal();
   },
 
   // "C" (comment) line: free text printed on the quote, carried onto the sale
@@ -21798,12 +21827,18 @@ const App = {
 
     const valid_until = document.getElementById('qt-valid').value;
     const items = [];
-    let snClash = null;
+    let snClash = null, deliveryErr = null;
     document.querySelectorAll('#qt-items > [id^="qt-item-"]').forEach(row => {
       const idx = row.id.split('-').pop();
       if (row.dataset.comment === '1') {
         const text = document.getElementById(`qti-comment-${idx}`)?.value.trim();
         if (text) items.push({ is_comment: 1, description: text });
+        return;
+      }
+      if (row.dataset.delivery === '1') {
+        const priceVal = document.getElementById(`qti-price-${idx}`)?.value;
+        if (priceVal === '' && !deliveryErr) deliveryErr = 'Enter a price (before tax) for the delivery line';
+        items.push({ is_delivery: 1, description: document.getElementById(`qti-desc-${idx}`)?.value.trim() || 'Delivery', unit_price: parseFloat(priceVal) || 0, quantity: 1 });
         return;
       }
       if (row.dataset.rental === '1') {
@@ -21875,6 +21910,7 @@ const App = {
       items.push({ description, quantity, unit_price, unit_cost, discount, purchase_request_id, is_q_item });
     });
     if (snClash) { this.alert(snClash, 'error'); return; }
+    if (deliveryErr) { this.alert(deliveryErr, 'error'); return; }
     if (!items.length) { this.alert('Add at least one item', 'error'); return; }
     const isSpecialProject = this._quoteType === 'special_project';
     try {
