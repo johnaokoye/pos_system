@@ -61,6 +61,15 @@ router.get('/public', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// The base currency and the alternate-currency rates from Settings, as
+// { base: 'JMD', rates: { USD: { base_per_unit: 155 } } } — nothing else.
+// RetailPOS Books reads it (API key scope accounts:read) for its exchange rates.
+router.get('/currency', requireAuth, async (req, res) => {
+  try {
+    res.json(await require('../lib/drawerReport').currencySettings(db));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.put('/', requirePermission('settings'), async (req, res) => {
   try {
     // The Settings form saves every tab's fields in one request regardless
