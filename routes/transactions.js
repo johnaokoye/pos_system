@@ -120,8 +120,8 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
           if (prod) ({ sell_unit: sellUnit, units_per: unitsPer, uom_id: uomId } = await resolveUnit(txn, prod, requested));
         }
         await txn.execute({
-          sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,serial_number,sell_unit,units_per,uom_id,is_comment) VALUES (?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?)`,
-          args: [txId, item.product_id || null, serial ? serialNumberLabel(serial) : item.product_name, item.sku || '', item.is_comment && !item.product_id ? 1 : item.quantity, parseFloat(item.unit_price) || 0, lineTax, lineTotal, item.variation_id || null, item.variation_name || null, serial || null, sellUnit, unitsPer, uomId, item.is_comment && !item.product_id ? 1 : 0]
+          sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,serial_number,sell_unit,units_per,uom_id,is_comment,is_delivery) VALUES (?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?,?)`,
+          args: [txId, item.product_id || null, serial ? serialNumberLabel(serial) : item.product_name, item.sku || '', item.is_comment && !item.product_id ? 1 : item.quantity, parseFloat(item.unit_price) || 0, lineTax, lineTotal, item.variation_id || null, item.variation_name || null, serial || null, sellUnit, unitsPer, uomId, item.is_comment && !item.product_id ? 1 : 0, item.is_delivery && !item.product_id ? 1 : 0]
         });
       }
       await txn.commit();
@@ -351,6 +351,8 @@ router.post('/', requirePermission('pos'), async (req, res) => {
     const maxLineDiscountPercent = parseFloat(maxDiscSetting?.value) || 0;
 
     const isTaxExempt = tax_exempt ? 1 : 0;
+    const { rows: [taxRateSetting] } = await db.execute({ sql: "SELECT value FROM settings WHERE key = 'tax_rate'", args: [] });
+    const storeTaxRate = parseFloat(taxRateSetting?.value) || 0;
     let subtotal = 0, tax_amount = 0;
     const processedItems = [];
     for (const item of items) {
@@ -368,6 +370,19 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         const text = String(item.product_name || '').trim();
         if (!text) continue;
         processedItems.push({ product: null, variation: null, customName: text, isComment: 1, quantity: 1, unit_price: 0, lineTotal: 0, lineTax: 0, taxRate: 0, discount: 0, discountPercent: 0, discountOverrideBy: null });
+        continue;
+      }
+      // Delivery line (POS Delivery button, or a quote's delivery line):
+      // description + pre-tax price, always taxed at the store rate.
+      if (!item.product_id && item.is_delivery) {
+        const product_name = String(item.product_name || '').trim() || 'Delivery';
+        const unit_price = parseFloat(item.unit_price);
+        if (!(unit_price >= 0)) throw new Error(`Enter a price for the delivery line "${product_name}"`);
+        const lineTotal = parseFloat(unit_price.toFixed(2));
+        const lineTax = isTaxExempt ? 0 : parseFloat((lineTotal * storeTaxRate / 100).toFixed(2));
+        subtotal += lineTotal;
+        tax_amount += lineTax;
+        processedItems.push({ product: null, variation: null, customName: product_name, isDelivery: 1, quantity: 1, unit_price: lineTotal, lineTotal, lineTax, taxRate: storeTaxRate, discount: 0, discountPercent: 0, discountOverrideBy: null });
         continue;
       }
       if (!item.product_id) {
@@ -525,11 +540,11 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         await tx.execute({ sql: 'INSERT INTO transaction_payments (transaction_id, payment_method, amount, approval_code) VALUES (?,?,?,?)', args: [txId, leg.payment_method, leg.amount, leg.approval_code || null] });
       }
 
-      for (const { product, variation, unit, customName, isComment, serialNumber, quantity: lineQty, unit_price, lineTotal, lineTax, ticketDiscount, discount, discountPercent, discountOverrideBy } of processedItems) {
+      for (const { product, variation, unit, customName, isComment, isDelivery, serialNumber, quantity: lineQty, unit_price, lineTotal, lineTax, ticketDiscount, discount, discountPercent, discountOverrideBy } of processedItems) {
         const itemName = customName || (serialNumber ? serialNumberLabel(serialNumber) : variation ? `${product.name} — ${variation.name}` : lineName(product.name, unit));
         const itemSku = customName ? '' : (variation ? variation.sku : product.sku);
         const unitsPer = unit?.units_per || 1;
-        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,discount_percent,discount_override_by,serial_number,sell_unit,units_per,uom_id,ticket_discount,is_comment) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [txId, product ? product.id : null, itemName, itemSku, lineQty, unit_price, discount, lineTax, lineTotal, variation?.id||null, variation?.name||null, discountPercent || 0, discountOverrideBy || null, serialNumber || null, variation ? null : unit?.sell_unit || null, variation ? 1 : unitsPer, variation ? null : unit?.uom_id ?? null, ticketDiscount ?? null, isComment ? 1 : 0] });
+        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,discount_percent,discount_override_by,serial_number,sell_unit,units_per,uom_id,ticket_discount,is_comment,is_delivery) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [txId, product ? product.id : null, itemName, itemSku, lineQty, unit_price, discount, lineTax, lineTotal, variation?.id||null, variation?.name||null, discountPercent || 0, discountOverrideBy || null, serialNumber || null, variation ? null : unit?.sell_unit || null, variation ? 1 : unitsPer, variation ? null : unit?.uom_id ?? null, ticketDiscount ?? null, isComment ? 1 : 0, isDelivery ? 1 : 0] });
         // A custom/temp line has no catalog product — nothing to deduct; an
         // SN line is a stockless placeholder for the serial.
         if (!product || serialNumber) continue;

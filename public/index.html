@@ -2732,6 +2732,7 @@ const App = {
       this.currentUser?.permissions?.pos_petty_cash ? `<button class="pos-grid-btn" onclick="App.showPettyCashModal()" title="Pay petty cash out of your drawer against a petty cash request slip">Petty Cash</button>` : '',
       this.can('pos_change_quantity') ? `<button class="pos-grid-btn" onclick="App.posQuantitySelectedLine()">Quantity</button>` : '',
       `<button class="pos-grid-btn" onclick="App.showCommentItemModal()" title="Add a comment line — free text printed on the receipt/invoice, no price">C Item</button>`,
+      `<button class="pos-grid-btn" onclick="App.showDeliveryItemModal()" title="Add a delivery charge — your description and a price before tax">Delivery</button>`,
       this.can('pos_cancel_ticket') ? `<button class="pos-grid-btn void" onclick="App.posCancelTicket()">Cancel Ticket</button>` : '',
       this.can('pos_payment') ? `<button class="pos-grid-btn payment" style="grid-column:1 / -1" onclick="App.showPOSPaymentModal()">PAYMENT</button>` : '',
     ].filter(Boolean).join('');
@@ -3209,11 +3210,53 @@ const App = {
     document.getElementById('pos-item-input')?.focus();
   },
 
+  // "Delivery" — a delivery charge on the ticket: description + price before
+  // tax, taxed at the store rate (the server applies that rate itself — see
+  // the is_delivery branch in routes/transactions.js). Always quantity 1.
+  showDeliveryItemModal(editIdx = null) {
+    const editing = editIdx != null && this.cart[editIdx]?.is_delivery;
+    const line = editing ? this.cart[editIdx] : null;
+    const rate = parseFloat(this.settings?.tax_rate) || 0;
+    this.showModal(`
+      <div class="modal" style="max-width:440px">
+        <div class="modal-header"><span class="modal-title">${editing ? 'Edit Delivery' : 'Add Delivery'}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div class="form-group"><label>Description</label><input id="pos-delivery-desc" value="${this.escapeAttr(line ? line.name : 'Delivery')}" placeholder="e.g. Delivery to Ocho Rios"></div>
+          <div class="form-group" style="margin:0"><label>Price (before tax) *</label><input id="pos-delivery-price" type="number" min="0" step="0.01" value="${line ? line.price : ''}" placeholder="0.00"
+            onkeydown="if(event.key==='Enter'){event.preventDefault();App.saveDeliveryItem(${editing ? editIdx : 'null'})}"></div>
+          <p style="font-size:11px;color:var(--text-muted);margin:6px 0 0">Tax is added on top at ${rate}%.</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.saveDeliveryItem(${editing ? editIdx : 'null'})">${editing ? 'Save' : 'Add to Ticket'}</button>
+        </div>
+      </div>`);
+    setTimeout(() => document.getElementById('pos-delivery-price')?.focus(), 50);
+  },
+
+  saveDeliveryItem(editIdx) {
+    const name = (document.getElementById('pos-delivery-desc')?.value || '').trim() || 'Delivery';
+    const priceVal = document.getElementById('pos-delivery-price')?.value;
+    const price = parseFloat(priceVal);
+    if (priceVal === '' || !(price >= 0)) { this.alert('Enter the delivery price (before tax)', 'warning'); return; }
+    const rounded = Math.round(price * 100) / 100;
+    if (editIdx != null && this.cart[editIdx]?.is_delivery) {
+      Object.assign(this.cart[editIdx], { name, price: rounded });
+    } else {
+      this.cart.push({ product_id: null, is_delivery: 1, name, price: rounded, quantity: 1, tax_rate: parseFloat(this.settings?.tax_rate) || 0, is_service: 1 });
+      this._selectedCartLine = null;
+    }
+    this.closeModal();
+    this.renderCart();
+    document.getElementById('pos-item-input')?.focus();
+  },
+
   posItemZoom() {
     const idx = this._selectedCartLine;
     if (idx == null || !this.cart[idx]) { this.alert('Click a ticket line first', 'warning'); return; }
     const item = this.cart[idx];
     if (item.is_comment) { this.showCommentItemModal(idx); return; }
+    if (item.is_delivery) { this.showDeliveryItemModal(idx); return; }
     if (!item.product_id) { this.alert('No catalog record for this line', 'warning'); return; }
     this.showProductForm(item.product_id);
   },
@@ -3240,6 +3283,7 @@ const App = {
     const item = this.cart[idx];
     if (!item) return;
     if (item.is_comment) { this.alert('A comment line has no quantity', 'warning'); return; }
+    if (item.is_delivery) { this.alert('A delivery line is always 1 — add another Delivery for a second drop', 'warning'); this.renderCart(); return; }
     if (!this.can('pos_change_quantity')) { this.alert("You don't have permission to change quantities", 'error'); this.renderCart(); return; }
     // Measured units (yards, kg… — lib/units.js) take part quantities.
     const newQty = item.allow_decimal ? Math.round(parseFloat(input) * 1000) / 1000 : Number(input);
@@ -3854,6 +3898,19 @@ const App = {
         <td colspan="5" style="font-style:italic;white-space:pre-wrap;color:var(--text-muted)">${this.escapeAttr(item.name)}</td>
         <td style="white-space:nowrap"><button class="btn-remove" onclick="event.stopPropagation();App.removeFromCart(${idx})">×</button></td>
       </tr>`;
+      if (item.is_delivery) {
+        const lineShare = lineShares[idx], lineTax = lineTaxes[idx];
+        return `
+      <tr class="pos-ticket-row${this._selectedCartLine === idx ? ' selected' : ''}" onclick="App.selectCartLine(event,${idx})" ondblclick="App.showDeliveryItemModal(${idx})" title="Delivery line — double-click to edit">
+        <td><span class="badge-pill badge-teal" style="font-size:10px">Delivery</span></td>
+        <td>${this.escapeAttr(item.name)}</td>
+        <td style="text-align:center"><span class="qty-val">1</span></td>
+        <td style="text-align:right">${this.fmt(item.price)}</td>
+        <td style="text-align:right;color:var(--text-muted)">${isExempt ? '—' : this.fmt(lineTax)}</td>
+        <td style="text-align:right;font-weight:600">${this.fmt(item.price - lineShare + lineTax)}</td>
+        <td style="white-space:nowrap"><button class="btn-remove" onclick="event.stopPropagation();App.removeFromCart(${idx})">×</button></td>
+      </tr>`;
+      }
       const sku = item.sku || this.allProducts.find(p => p.id === item.product_id)?.sku || '—';
       const lineGross = item.price * item.quantity;
       const lineNet = this._cartLineNet(item);
@@ -4141,7 +4198,7 @@ const App = {
         // directly for that case only; a real product_id line still has its
         // price/tax authoritatively re-derived server-side, never trusted
         // from the client.
-        items: this.cart.map(i => ({ product_id: i.product_id, variation_id: i.variation_id||null, serial_number: i.serial_number||null, uom_id: i.uom_id ?? null, sell_unit: i.sell_unit || null, quantity: i.quantity, discount_percent: i.discountPercent||0, discount_override_employee_id: i.discountOverrideEmployeeId||null, ...(i.product_id ? {} : { product_name: i.name, unit_price: i.price, tax_rate: i.tax_rate||0, is_comment: i.is_comment ? 1 : 0 }) })),
+        items: this.cart.map(i => ({ product_id: i.product_id, variation_id: i.variation_id||null, serial_number: i.serial_number||null, uom_id: i.uom_id ?? null, sell_unit: i.sell_unit || null, quantity: i.quantity, discount_percent: i.discountPercent||0, discount_override_employee_id: i.discountOverrideEmployeeId||null, ...(i.product_id ? {} : { product_name: i.name, unit_price: i.price, tax_rate: i.tax_rate||0, is_comment: i.is_comment ? 1 : 0, is_delivery: i.is_delivery ? 1 : 0 }) })),
         discount_amount: discount,
         promotion_code: this.appliedDiscountCard ? (this.appliedDiscountCard.card_number || null) : (this.appliedPromoCode?.code || null),
         promotion_name: this.appliedDiscountCard ? `${this.appliedDiscountCard.type_name} ${this.appliedDiscountCard.label || 'Discount Card'}` : (this.appliedPromoCode?.promo_name || this.autoAppliedPromo?.name || null),
@@ -4202,6 +4259,7 @@ const App = {
           uom_id: i.uom_id ?? null,
           sell_unit: i.sell_unit || null,
           is_comment: i.is_comment ? 1 : 0,
+          is_delivery: i.is_delivery ? 1 : 0,
         };
       });
       await this.api('POST', '/transactions/hold', {
@@ -4347,8 +4405,9 @@ const App = {
           variation_id: item.variation_id || null,
           name: item.product_name,
           price: parseFloat(item.unit_price),
-          tax_rate: product ? (product.tax_rate || 0) : derivedTaxRate,
+          tax_rate: item.is_delivery ? (parseFloat(this.settings?.tax_rate) || 0) : product ? (product.tax_rate || 0) : derivedTaxRate,
           quantity: item.quantity,
+          is_delivery: item.is_delivery ? 1 : 0,
           variation_name: item.variation_name || null,
           serial_number: item.serial_number || null,
           is_service: product?.product_type === 'service' ? 1 : 0,

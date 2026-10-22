@@ -1014,7 +1014,7 @@ router.post('/:id/convert', async (req, res) => {
         // goes out through its rental agreement.
         const isRental = !!item.is_rental_line;
         const name = isRental && !item.is_mandatory ? `${item.product_name} — ${holdNumbers[item.id]}` : item.product_name;
-        await convTx.execute({ sql: 'INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,serial_number,sell_unit,units_per,uom_id,is_comment) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [txId, isRental ? null : item.product_id, name, isRental ? 'RENTAL' : (item.sku || ''), item.quantity, item.unit_price, item.discount_amount, item.tax_amount, item.total, item.serial_number || null, isRental ? null : (item.sell_unit || null), isRental ? 1 : (item.units_per || 1), isRental ? null : (item.uom_id ?? null), item.is_comment ? 1 : 0] });
+        await convTx.execute({ sql: 'INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,serial_number,sell_unit,units_per,uom_id,is_comment,is_delivery) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [txId, isRental ? null : item.product_id, name, isRental ? 'RENTAL' : (item.sku || ''), item.quantity, item.unit_price, item.discount_amount, item.tax_amount, item.total, item.serial_number || null, isRental ? null : (item.sell_unit || null), isRental ? 1 : (item.units_per || 1), isRental ? null : (item.uom_id ?? null), item.is_comment ? 1 : 0, item.is_delivery ? 1 : 0] });
       }
 
       await convTx.execute({ sql: 'UPDATE quotations SET status = ?, converted_to_tx = ? WHERE id = ?', args: ['converted', txId, quote.id] });

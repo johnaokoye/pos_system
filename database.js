@@ -2206,6 +2206,7 @@ async function _init() {
     // Delivery line on a retail quote / Special Project: description + pre-tax
     // price, taxed at the store rate; no product and never sent to Purchasing.
     'ALTER TABLE quotation_items ADD COLUMN is_delivery INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE transaction_items ADD COLUMN is_delivery INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE crm_opportunities ADD COLUMN lead_type TEXT',
   ];
   for (const sql of migrations) {
