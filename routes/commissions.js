@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { requirePermission } = require('../lib/permissions');
+const { resolveApprovalSignature } = require('../lib/signatures');
 
 // ── Shared calculation helper (also exported for use in other routes) ──
 // asOf (a sale's created_at) picks the plan in force and the period for a
@@ -167,7 +168,7 @@ router.delete('/assignments/:id', requirePermission('commissions_plans'), async 
 router.get('/records', async (req, res) => {
   try {
     const { employee_id, period, status } = req.query;
-    let sql = `SELECT cr.*, e.first_name || ' ' || e.last_name as employee_name, e.employee_number, cp.name as plan_name, cp.type as plan_type FROM commission_records cr JOIN employees e ON cr.employee_id = e.id LEFT JOIN commission_plans cp ON cr.plan_id = cp.id WHERE 1=1`;
+    let sql = `SELECT cr.*, e.first_name || ' ' || e.last_name as employee_name, e.employee_number, cp.name as plan_name, cp.type as plan_type, ae.first_name || ' ' || ae.last_name as approved_by_name FROM commission_records cr JOIN employees e ON cr.employee_id = e.id LEFT JOIN commission_plans cp ON cr.plan_id = cp.id LEFT JOIN employees ae ON cr.approved_by = ae.id WHERE 1=1`;
     const params = [];
     // A salesperson only ever sees their own commission records, regardless
     // of what employee_id filter the client asked for.
@@ -192,12 +193,19 @@ router.post('/records', async (req, res) => {
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
 
+// Approving signs the record with the approver's saved signature, or
+// `signature` newly drawn (lib/signatures.js) — same as PO/PR/Special
+// Project approvals. Bulk approve applies the one signature to every record.
 router.patch('/records/:id/approve', requirePermission('commissions_approve'), async (req, res) => {
   try {
     const { rows: [rec] } = await db.execute({ sql: 'SELECT * FROM commission_records WHERE id = ?', args: [req.params.id] });
     if (!rec) return res.status(404).json({ error: 'Not found' });
     if (rec.status === 'paid') return res.status(400).json({ error: 'Already paid' });
-    await db.execute({ sql: "UPDATE commission_records SET status='approved', approved_at=datetime('now') WHERE id=?", args: [req.params.id] });
+    const approverId = req.employee?.id || req.body.employee_id || null;
+    let sigUrl;
+    try { sigUrl = await resolveApprovalSignature(db, approverId, req.body.signature); }
+    catch (e) { return res.status(e.status || 500).json({ error: e.message, code: e.code }); }
+    await db.execute({ sql: "UPDATE commission_records SET status='approved', approved_at=datetime('now'), approved_by=?, approval_signature=? WHERE id=?", args: [approverId, sigUrl, req.params.id] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM commission_records WHERE id = ?', args: [req.params.id] });
     res.json(row);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -217,10 +225,16 @@ router.patch('/records/bulk-approve', requirePermission('commissions_approve'), 
   try {
     const { ids } = req.body;
     if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids array required' });
+    const approverId = req.employee?.id || req.body.employee_id || null;
+    let sigUrl;
+    try { sigUrl = await resolveApprovalSignature(db, approverId, req.body.signature); }
+    catch (e) { return res.status(e.status || 500).json({ error: e.message, code: e.code }); }
+    let updated = 0;
     for (const id of ids) {
-      await db.execute({ sql: "UPDATE commission_records SET status='approved', approved_at=datetime('now') WHERE id=? AND status='pending'", args: [id] });
+      const r = await db.execute({ sql: "UPDATE commission_records SET status='approved', approved_at=datetime('now'), approved_by=?, approval_signature=? WHERE id=? AND status='pending'", args: [approverId, sigUrl, id] });
+      updated += r.rowsAffected;
     }
-    res.json({ updated: ids.length });
+    res.json({ updated });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

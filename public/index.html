@@ -24526,12 +24526,18 @@ const App = {
   async bulkApproveAll(period) {
     const recs = await this.api('GET', `/commissions/records?period=${period}&status=pending`);
     if (!recs.length) return this.alert('No pending records', 'warning');
-    if (!confirm(`Approve all ${recs.length} pending commission records for ${period}?`)) return;
-    try {
-      await this.api('PATCH', '/commissions/records/bulk-approve', { ids: recs.map(r => r.id) });
-      this.alert(`${recs.length} records approved`);
-      this.renderCommTab();
-    } catch(e) { this.alert(e.message, 'error'); }
+    const total = recs.reduce((t, r) => t + (r.commission_amount || 0), 0);
+    this._showApprovalDialog({
+      title: 'Approve Commissions',
+      intro: `Approve all <strong>${recs.length}</strong> pending commission record${recs.length === 1 ? '' : 's'} for ${period} (${this.fmt(total)}). Your signature is recorded on each one.`,
+      approveLabel: `Approve ${recs.length}`,
+      approve: async (signature) => {
+        const r = await this.api('PATCH', '/commissions/records/bulk-approve', { ids: recs.map(r => r.id), signature });
+        this.closeModal();
+        this.alert(`${r.updated} record${r.updated === 1 ? '' : 's'} approved`);
+        this.renderCommTab();
+      },
+    });
   },
 
   async bulkPayAll(period) {
@@ -24603,7 +24609,7 @@ const App = {
                     <td style="text-align:right;color:var(--text-muted)">${r.commission_rate > 0 ? r.commission_rate+'%' : '—'}</td>
                     <td style="text-align:right;font-weight:700;color:var(--success)">${this.fmt(r.commission_amount)}</td>
                     <td><span class="comm-plan-badge">${r.plan_name||'Manual'}</span></td>
-                    <td>${this.commStatusBadge(r.status)}</td>
+                    <td>${this.commStatusBadge(r.status)}${r.approved_by_name ? `<div style="font-size:11px;color:var(--text-muted);margin-top:3px;white-space:nowrap" title="Approved ${r.approved_at ? this.fmtDateTime(r.approved_at) : ''}">by ${this.escapeAttr(r.approved_by_name)}</div>` : ''}${r.approval_signature ? `<img src="${this.escapeAttr(r.approval_signature)}" alt="Approver signature" style="display:block;max-height:28px;max-width:110px;margin-top:2px;background:#fff;border-radius:3px">` : ''}</td>
                     <td style="white-space:nowrap">
                       ${r.status==='pending' && this.can('commissions_approve') ? `<button class="btn btn-sm btn-primary" onclick="App.approveRecord(${r.id})">Approve</button> ` : ''}
                       ${r.status==='approved' && this.can('commissions_pay') ? `<button class="btn btn-sm btn-success" onclick="App.payRecord(${r.id})">Pay</button> ` : ''}
@@ -24621,12 +24627,17 @@ const App = {
       </div>`;
   },
 
-  async approveRecord(id) {
-    try {
-      await this.api('PATCH', `/commissions/records/${id}/approve`);
-      this.alert('Approved');
-      this.renderCommTab();
-    } catch(e) { this.alert(e.message, 'error'); }
+  approveRecord(id) {
+    this._showApprovalDialog({
+      title: 'Approve Commission',
+      intro: 'Your signature is recorded on the approved commission.',
+      approve: async (signature) => {
+        await this.api('PATCH', `/commissions/records/${id}/approve`, { signature });
+        this.closeModal();
+        this.alert('Approved');
+        this.renderCommTab();
+      },
+    });
   },
 
   async payRecord(id) {

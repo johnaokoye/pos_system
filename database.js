@@ -2213,6 +2213,8 @@ async function _init() {
     'ALTER TABLE employees ADD COLUMN approval_signature TEXT',
     'ALTER TABLE purchase_requests ADD COLUMN approval_signature TEXT',
     'ALTER TABLE quotations ADD COLUMN approval_signature TEXT',
+    'ALTER TABLE commission_records ADD COLUMN approved_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE commission_records ADD COLUMN approval_signature TEXT',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
