@@ -1300,12 +1300,18 @@ function buildApprovedPoHtml(po, s, origin) {
       <div style="text-align:right;font-size:15px;font-weight:700;color:${BRAND.black}">Total: ${fmt(po.total)}</div>
       ${po.notes ? `<div style="margin-top:16px;font-size:13px;color:#444"><strong>Notes:</strong> ${po.notes}</div>` : ''}
       ${po.approval_signature ? `
-      <div style="margin-top:24px;padding-top:16px;border-top:1px solid #e8e8e8">
-        <div style="font-size:10px;font-weight:bold;text-transform:uppercase;color:#888;margin-bottom:6px">Approved By</div>
-        <img src="${absUrl(po.approval_signature)}" style="max-height:60px;max-width:220px;border-bottom:1px solid #333;padding-bottom:4px;display:block" />
-        <div style="font-size:12px;color:#555;margin-top:4px">${po.approved_by_name || ''}</div>
-        ${po.approved_at ? `<div style="font-size:11px;color:#888">${new Date(po.approved_at).toLocaleString()}</div>` : ''}
-      </div>` : ''}
+      <!-- Approver's signature, bottom right. Nested tables (not flex/float) so
+           email clients keep it on the right. -->
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:24px;border-top:1px solid #e8e8e8">
+        <tr><td align="right" style="padding-top:16px">
+          <table cellpadding="0" cellspacing="0" style="width:240px"><tr><td style="text-align:left">
+            <div style="font-size:10px;font-weight:bold;text-transform:uppercase;color:#888;margin-bottom:6px">Approved By</div>
+            <img src="${absUrl(po.approval_signature)}" style="max-height:60px;max-width:220px;display:block" />
+            <div style="border-top:1px solid #333;margin-top:4px;padding-top:4px;font-size:12px;color:#555">${po.approved_by_name || ''}</div>
+            ${po.approved_at ? `<div style="font-size:11px;color:#888">${new Date(po.approved_at).toLocaleString()}</div>` : ''}
+          </td></tr></table>
+        </td></tr>
+      </table>` : ''}
     </td></tr>
   </table>
 </td></tr>
@@ -1978,6 +1984,7 @@ function poPdfModel(po, s) {
     ],
     notes: [po.notes ? `Notes: ${po.notes}` : ''],
     signatures: po.approval_signature ? [{ label: 'Approved By', name: po.approved_by_name || '', signedAt: pdfDateTime(po.approved_at), image: po.approval_signature }] : [],
+    signatureAlign: 'right',
   };
 }
 

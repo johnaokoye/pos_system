@@ -13,6 +13,7 @@ uploads/po-approval-signatures/*
 uploads/customer-address-proofs/*
 uploads/customer-reference-ids/*
 uploads/quote-attachments/*
+uploads/approval-signatures/*
 !uploads/products/.gitkeep
 !uploads/po-attachments/.gitkeep
 !uploads/branding/.gitkeep
@@ -23,6 +24,7 @@ uploads/quote-attachments/*
 !uploads/customer-address-proofs/.gitkeep
 !uploads/customer-reference-ids/.gitkeep
 !uploads/quote-attachments/.gitkeep
+!uploads/approval-signatures/.gitkeep
 .env
 .vercel
 test-results/
