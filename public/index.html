@@ -1581,11 +1581,20 @@ const App = {
       const list = matches(q);
       const items = list.slice(0, 100).map(o => itemEl(o.text, o.value === '' ? 'var(--text-muted)' : 'var(--text)', () => pick(o)));
       if (canAdd(q)) items.push(itemEl(`+ Add “${q.trim()}”`, 'var(--accent)', () => add(q)));
+      else if (addFn && !q.trim()) items.push(itemEl('+ Add new… (type its name above)', 'var(--accent)', startAdd));
       dd.replaceChildren(...(items.length ? items : [Object.assign(document.createElement('div'), { textContent: 'No matches', style: 'padding:10px;color:var(--text-muted);font-size:13px' })]));
       dd.style.display = '';
     };
+    // The + button (and "+ Add new…" in the list): empty the box and ask
+    // for the new name; typing it then offers "+ Add “…”" / Enter.
+    const startAdd = () => {
+      input.value = '';
+      input.placeholder = 'Type the new name, then press Enter';
+      input.focus();
+      render('');
+    };
     // Leaving without picking puts back the current choice's name.
-    wrap._ssClose = () => { if (dd.style.display !== 'none') { dd.style.display = 'none'; input.value = shown(); } };
+    wrap._ssClose = () => { if (dd.style.display !== 'none') { dd.style.display = 'none'; input.value = shown(); input.placeholder = placeholder; } };
     input.addEventListener('focus', () => { input.select(); render(''); });
     input.addEventListener('click', () => { if (dd.style.display === 'none') { input.select(); render(''); } });
     input.addEventListener('input', () => render(input.value));
@@ -1599,9 +1608,25 @@ const App = {
       else if (e.key === 'Tab') wrap._ssClose();
     });
     if (blank) input.placeholder = `${blank.text.replace(/^[\s—–-]+|[\s—–-]+$/g, '')} — type to search`;
+    const placeholder = input.placeholder;
     sel.style.display = 'none';
     sel.parentNode.insertBefore(wrap, sel);
     wrap.append(input, dd);
+    if (addFn) {
+      wrap.style.display = 'flex';
+      wrap.style.gap = '6px';
+      input.style.flex = '1';
+      input.style.minWidth = '0';
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn-outline';
+      btn.textContent = '+';
+      btn.title = 'Add a new one';
+      btn.style.cssText = 'flex:none;padding:0 14px;font-size:18px;font-weight:700';
+      btn.disabled = sel.disabled;
+      btn.addEventListener('click', startAdd);
+      wrap.append(btn);
+    }
   },
 
   // ─── Cash Tender Modal ────────────────────────────────────
