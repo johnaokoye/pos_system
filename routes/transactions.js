@@ -99,9 +99,12 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
     // so Hold Recall restores it; checkout re-validates it as usual. Line
     // totals are net of it, then the same before-tax ticket discount as
     // checkout (lib/ticketDiscount.js).
-    const linePct = items.map(item => Math.min(100, Math.max(0, parseFloat(item.discount_percent) || 0)));
+    // A "$" line discount (discount_fixed) is held as the amount, with its
+    // equivalent % alongside.
     const lineGross = items.map(item => parseFloat(((parseFloat(item.unit_price) || 0) * (Number(item.quantity) || 0)).toFixed(2)));
-    const lineDisc = lineGross.map((g, i) => parseFloat((g * linePct[i] / 100).toFixed(2)));
+    const lineFixed = items.map((item, i) => Math.min(lineGross[i], Math.max(0, parseFloat(item.discount_fixed) || 0)) || null);
+    const linePct = items.map((item, i) => lineFixed[i] ? (lineGross[i] > 0 ? parseFloat((lineFixed[i] / lineGross[i] * 100).toFixed(4)) : 0) : Math.min(100, Math.max(0, parseFloat(item.discount_percent) || 0)));
+    const lineDisc = lineGross.map((g, i) => lineFixed[i] ? parseFloat(lineFixed[i].toFixed(2)) : parseFloat((g * linePct[i] / 100).toFixed(2)));
     const lineTotals = lineGross.map((g, i) => parseFloat((g - lineDisc[i]).toFixed(2)));
     const { discount: disc, shares } = allocateTicketDiscount(lineTotals, discount_amount);
     const lineTaxes = items.map((item, i) => parseFloat(((lineTotals[i] - shares[i]) * (parseFloat(item.tax_rate) || 0) / 100).toFixed(2)));
@@ -128,8 +131,8 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
           if (prod) ({ sell_unit: sellUnit, units_per: unitsPer, uom_id: uomId } = await resolveUnit(txn, prod, requested));
         }
         await txn.execute({
-          sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,serial_number,sell_unit,units_per,uom_id,is_comment,is_delivery,discount_percent,discount_override_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          args: [txId, item.product_id || null, serial ? serialNumberLabel(serial) : item.product_name, item.sku || '', item.is_comment && !item.product_id ? 1 : item.quantity, parseFloat(item.unit_price) || 0, lineDisc[i], lineTax, lineTotal, item.variation_id || null, item.variation_name || null, serial || null, sellUnit, unitsPer, uomId, item.is_comment && !item.product_id ? 1 : 0, item.is_delivery && !item.product_id ? 1 : 0, linePct[i], linePct[i] > 0 ? (item.discount_override_employee_id || null) : null]
+          sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,serial_number,sell_unit,units_per,uom_id,is_comment,is_delivery,discount_percent,discount_override_by,discount_fixed) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          args: [txId, item.product_id || null, serial ? serialNumberLabel(serial) : item.product_name, item.sku || '', item.is_comment && !item.product_id ? 1 : item.quantity, parseFloat(item.unit_price) || 0, lineDisc[i], lineTax, lineTotal, item.variation_id || null, item.variation_name || null, serial || null, sellUnit, unitsPer, uomId, item.is_comment && !item.product_id ? 1 : 0, item.is_delivery && !item.product_id ? 1 : 0, linePct[i], linePct[i] > 0 ? (item.discount_override_employee_id || null) : null, lineFixed[i] && linePct[i] > 0 ? lineFixed[i] : null]
         });
       }
       await txn.commit();
@@ -441,7 +444,10 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       // Manual per-line discount — re-validated here (not just trusted from
       // the POS UI's own check) so a bypassed client can't apply one to an
       // ineligible item or skip the manager override past the store limit.
-      const discountPercent = parseFloat(item.discount_percent) || 0;
+      // A "$" discount (discount_fixed, off the whole line) goes through the
+      // same checks as its equivalent percentage.
+      const discountFixed = Math.min(grossLineTotal, Math.max(0, parseFloat(item.discount_fixed) || 0)) || null;
+      const discountPercent = discountFixed ? (grossLineTotal > 0 ? parseFloat((discountFixed / grossLineTotal * 100).toFixed(4)) : 0) : parseFloat(item.discount_percent) || 0;
       let discountAmount = 0, discountOverrideBy = null;
       if (discountPercent > 0) {
         if (discountPercent > 100) throw new Error(`Invalid discount percentage for ${product.name}`);
@@ -453,7 +459,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         }
         if (maxLineDiscountPercent > 0 && discountPercent > maxLineDiscountPercent) {
           if (!item.discount_override_employee_id) {
-            throw new Error(`A ${discountPercent}% discount on ${product.name} exceeds the store limit of ${maxLineDiscountPercent}% — manager override required`);
+            throw new Error(`A ${discountFixed ? `$${discountFixed.toFixed(2)} (${discountPercent.toFixed(2)}%)` : `${discountPercent}%`} discount on ${product.name} exceeds the store limit of ${maxLineDiscountPercent}% — manager override required`);
           }
           const { rows: [overrider] } = await db.execute({ sql: 'SELECT sg.permissions FROM employees e LEFT JOIN security_groups sg ON e.security_group_id = sg.id WHERE e.id = ? AND e.active = 1', args: [item.discount_override_employee_id] });
           let authorized = false;
@@ -461,14 +467,14 @@ router.post('/', requirePermission('pos'), async (req, res) => {
           if (!authorized) throw new Error(`The employee authorizing the discount override on ${product.name} doesn't have override privileges`);
           discountOverrideBy = item.discount_override_employee_id;
         }
-        discountAmount = parseFloat((grossLineTotal * discountPercent / 100).toFixed(2));
+        discountAmount = discountFixed ? parseFloat(discountFixed.toFixed(2)) : parseFloat((grossLineTotal * discountPercent / 100).toFixed(2));
       }
 
       const lineTotal = parseFloat((grossLineTotal - discountAmount).toFixed(2));
       const lineTax = isTaxExempt ? 0 : parseFloat((lineTotal * product.tax_rate / 100).toFixed(2));
       subtotal += lineTotal;
       tax_amount += lineTax;
-      processedItems.push({ product, variation, unit, quantity: item.quantity, unit_price, lineTotal, lineTax, taxRate: product.tax_rate || 0, discount: discountAmount, discountPercent, discountOverrideBy });
+      processedItems.push({ product, variation, unit, quantity: item.quantity, unit_price, lineTotal, lineTax, taxRate: product.tax_rate || 0, discount: discountAmount, discountPercent, discountOverrideBy, discountFixed: discountPercent > 0 ? discountFixed : null });
     }
 
     if (!processedItems.some(p => !p.isComment)) return res.status(400).json({ error: 'No items in transaction' });
@@ -550,11 +556,11 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         await tx.execute({ sql: 'INSERT INTO transaction_payments (transaction_id, payment_method, amount, approval_code) VALUES (?,?,?,?)', args: [txId, leg.payment_method, leg.amount, leg.approval_code || null] });
       }
 
-      for (const { product, variation, unit, customName, isComment, isDelivery, serialNumber, quantity: lineQty, unit_price, lineTotal, lineTax, ticketDiscount, discount, discountPercent, discountOverrideBy } of processedItems) {
+      for (const { product, variation, unit, customName, isComment, isDelivery, serialNumber, quantity: lineQty, unit_price, lineTotal, lineTax, ticketDiscount, discount, discountPercent, discountOverrideBy, discountFixed } of processedItems) {
         const itemName = customName || (serialNumber ? serialNumberLabel(serialNumber) : variation ? `${product.name} — ${variation.name}` : lineName(product.name, unit));
         const itemSku = customName ? '' : (variation ? variation.sku : product.sku);
         const unitsPer = unit?.units_per || 1;
-        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,discount_percent,discount_override_by,serial_number,sell_unit,units_per,uom_id,ticket_discount,is_comment,is_delivery) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [txId, product ? product.id : null, itemName, itemSku, lineQty, unit_price, discount, lineTax, lineTotal, variation?.id||null, variation?.name||null, discountPercent || 0, discountOverrideBy || null, serialNumber || null, variation ? null : unit?.sell_unit || null, variation ? 1 : unitsPer, variation ? null : unit?.uom_id ?? null, ticketDiscount ?? null, isComment ? 1 : 0, isDelivery ? 1 : 0] });
+        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,discount_percent,discount_override_by,serial_number,sell_unit,units_per,uom_id,ticket_discount,is_comment,is_delivery,discount_fixed) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [txId, product ? product.id : null, itemName, itemSku, lineQty, unit_price, discount, lineTax, lineTotal, variation?.id||null, variation?.name||null, discountPercent || 0, discountOverrideBy || null, serialNumber || null, variation ? null : unit?.sell_unit || null, variation ? 1 : unitsPer, variation ? null : unit?.uom_id ?? null, ticketDiscount ?? null, isComment ? 1 : 0, isDelivery ? 1 : 0, discountFixed || null] });
         // A custom/temp line has no catalog product — nothing to deduct; an
         // SN line is a stockless placeholder for the serial.
         if (!product || serialNumber) continue;

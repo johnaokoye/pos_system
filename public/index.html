@@ -3721,7 +3721,7 @@ const App = {
     const code = document.getElementById('promo-code-input')?.value?.trim();
     if (!code) return;
     const subtotal = this.cart.reduce((s, i) => s + i.price * i.quantity, 0);
-    const cartItems = this.cart.map(i => ({ product_id: i.product_id, category_id: i.category_id, price: i.price, quantity: i.quantity, discount_percent: i.discountPercent || 0 }));
+    const cartItems = this.cart.map(i => ({ product_id: i.product_id, category_id: i.category_id, price: i.price, quantity: i.quantity, discount_percent: this._cartLineDiscountPct(i) }));
     try {
       const result = await this.api('POST', '/promotions/validate-code', { code, subtotal, cart_items: cartItems });
       this.appliedPromoCode = result;
@@ -3807,7 +3807,7 @@ const App = {
     if (source === 'promo_code' && held.promotion_code) {
       try {
         const subtotal = this.cart.reduce((s, i) => s + i.price * i.quantity, 0);
-        const cart_items = this.cart.map(i => ({ product_id: i.product_id, category_id: i.category_id, price: i.price, quantity: i.quantity, discount_percent: i.discountPercent || 0 }));
+        const cart_items = this.cart.map(i => ({ product_id: i.product_id, category_id: i.category_id, price: i.price, quantity: i.quantity, discount_percent: this._cartLineDiscountPct(i) }));
         const result = await this.api('POST', '/promotions/validate-code', { code: held.promotion_code, subtotal, cart_items });
         this.appliedPromoCode = result;
         this.cartDiscount = result.discount_amount;
@@ -3853,7 +3853,7 @@ const App = {
       return;
     }
     const subtotal = this.cart.reduce((s, i) => s + i.price * i.quantity, 0);
-    const cartItems = this.cart.map(i => ({ product_id: i.product_id, category_id: i.category_id, price: i.price, quantity: i.quantity, discount_percent: i.discountPercent || 0 }));
+    const cartItems = this.cart.map(i => ({ product_id: i.product_id, category_id: i.category_id, price: i.price, quantity: i.quantity, discount_percent: this._cartLineDiscountPct(i) }));
     // Show the line straight away; the promo lookup is a server round trip
     // and only adjusts the discount. When items go in faster than it
     // answers, only the latest cart's answer is applied.
@@ -4022,7 +4022,7 @@ const App = {
       return `
       <tr class="pos-ticket-row${this._selectedCartLine === idx ? ' selected' : ''}" onclick="App.selectCartLine(event,${idx})">
         <td style="font-family:monospace;font-size:12px">${sku}</td>
-        <td>${item.name}${item.variation_name ? `<div style="font-size:11px;color:var(--text-muted)">${item.variation_name}</div>` : ''}${item.discountPercent > 0 ? `<div style="font-size:11px;color:var(--success)">-${item.discountPercent}% off${item.discountOverrideName ? ` (override: ${item.discountOverrideName})` : ''}</div>` : ''}${showMargin ? this._cartLineMarginTag(item) : ''}</td>
+        <td>${item.name}${item.variation_name ? `<div style="font-size:11px;color:var(--text-muted)">${item.variation_name}</div>` : ''}${item.discountPercent > 0 || item.discountFixed > 0 ? `<div style="font-size:11px;color:var(--success)">-${item.discountFixed > 0 ? this.fmt(item.discountFixed) : `${item.discountPercent}%`} off${item.discountOverrideName ? ` (override: ${item.discountOverrideName})` : ''}</div>` : ''}${showMargin ? this._cartLineMarginTag(item) : ''}</td>
         <td style="text-align:center">
           <div class="qty-ctrl" style="justify-content:center">
             <button class="qty-btn" onclick="App.updateCartQty(${idx},-1)">−</button>
@@ -4032,9 +4032,10 @@ const App = {
         </td>
         <td style="text-align:right">${this.fmt(item.price)}</td>
         <td style="text-align:right;color:var(--text-muted)">${isExempt ? '—' : this.fmt(lineTax)}</td>
-        <td style="text-align:right;font-weight:600">${item.discountPercent > 0 || lineShare > 0 ? `<span style="text-decoration:line-through;color:var(--text-muted);font-weight:400;font-size:11px" title="Before discount">${this.fmt(lineGross + (isExempt ? 0 : parseFloat((lineGross * (item.tax_rate || 0) / 100).toFixed(2))))}</span> ` : ''}${this.fmt(lineNet - lineShare + lineTax)}</td>
+        <td style="text-align:right;font-weight:600">${item.discountPercent > 0 || item.discountFixed > 0 || lineShare > 0 ? `<span style="text-decoration:line-through;color:var(--text-muted);font-weight:400;font-size:11px" title="Before discount">${this.fmt(lineGross + (isExempt ? 0 : parseFloat((lineGross * (item.tax_rate || 0) / 100).toFixed(2))))}</span> ` : ''}${this.fmt(lineNet - lineShare + lineTax)}</td>
         <td style="white-space:nowrap">
-          ${this.can('pos_discounts') ? `<button class="btn-secondary" style="padding:2px 8px;font-size:11px" title="Line Discount" onclick="event.stopPropagation();App.showLineDiscountModal(${idx})">%</button>` : ''}
+          ${this.can('pos_discounts') ? `<button class="btn-secondary" style="padding:2px 8px;font-size:11px" title="Line Discount" onclick="event.stopPropagation();App.showLineDiscountModal(${idx})">%</button>
+          <button class="btn-secondary" style="padding:2px 8px;font-size:11px" title="Line Discount — fixed amount" onclick="event.stopPropagation();App.showLineDiscountModal(${idx},'fixed')">$</button>` : ''}
           <button class="btn-remove" onclick="App.removeFromCart(${idx})">×</button>
         </td>
       </tr>`;
@@ -4081,8 +4082,21 @@ const App = {
   // two can never drift out of sync with each other (see the comment on
   // renderCart's total below).
   _cartLineNet(item) {
+    const gross = item.price * item.quantity;
+    // A "$" discount is a fixed amount off the whole line, never below zero.
+    if (item.discountFixed > 0) return parseFloat(Math.max(0, gross - item.discountFixed).toFixed(2));
     const pct = item.discountPercent || 0;
-    return parseFloat((item.price * item.quantity * (1 - pct / 100)).toFixed(2));
+    return parseFloat((gross * (1 - pct / 100)).toFixed(2));
+  },
+
+  // The line's manual discount as a percentage — a "$" discount converted
+  // on the line's current amount (what the store limit and promotions see).
+  _cartLineDiscountPct(item) {
+    if (item.discountFixed > 0) {
+      const gross = item.price * item.quantity;
+      return gross > 0 ? Math.min(100, item.discountFixed / gross * 100) : 0;
+    }
+    return item.discountPercent || 0;
   },
 
   // Spreads a ticket discount over lines by their net amount — the exact
@@ -4127,14 +4141,16 @@ const App = {
     return { subtotal: parseFloat(subtotal.toFixed(2)), tax: parseFloat(tax.toFixed(2)), discount: parseFloat(discount.toFixed(2)), storeCredit: parseFloat(storeCredit.toFixed(2)), cashBack: parseFloat(cashBack.toFixed(2)), total: parseFloat(total.toFixed(2)), discountPreTax, lineTaxes, lineShares: split.shares };
   },
 
-  // Manual per-line discount ("%" button on a cart row) — capped at the
+  // Manual per-line discount ("%" button on a cart row, or "$" for a fixed
+  // amount off the line — mode 'fixed', held to the same cap as the
+  // percentage it works out to) — capped at the
   // store's configured limit (Settings → POS Discounts) for items not
   // already covered by an active promotion and not on the brand-exclusion
   // list; going over the cap prompts for a manager PIN with override
   // privileges. Re-validated server-side at checkout
   // either way (see POST /transactions) — this modal is convenience, not
   // the actual gate.
-  async showLineDiscountModal(idx) {
+  async showLineDiscountModal(idx, mode = 'percent') {
     const item = this.cart[idx];
     if (!item) return;
     if (!item.product_id) { this.alert('This line has no catalog product to check discount eligibility against', 'error'); return; }
@@ -4157,52 +4173,72 @@ const App = {
     }
 
     const maxPct = parseFloat(eligibility.max_percent) || 0;
+    const fixed = mode === 'fixed';
+    const gross = parseFloat((item.price * item.quantity).toFixed(2));
+    const limitText = maxPct > 0
+      ? (fixed ? `Up to ${this.fmt(Math.floor(gross * maxPct + 1e-6) / 100)} (${maxPct}% of ${this.fmt(gross)}) without a manager override.` : `Up to ${maxPct}% without a manager override.`)
+      : 'No store limit currently configured.';
     this.showModal(`
       <div class="modal" style="max-width:400px">
         <div class="modal-header"><span class="modal-title">Line Discount — ${this.escapeAttr(item.name)}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
-          <p style="font-size:13px;color:var(--text-muted)">${maxPct > 0 ? `Up to ${maxPct}% without a manager override.` : 'No store limit currently configured.'}</p>
-          <div class="form-group"><label>Discount %</label><input type="number" id="line-disc-pct" min="0" max="100" step="0.1" value="${item.discountPercent||''}" placeholder="e.g. 10"></div>
+          <p style="font-size:13px;color:var(--text-muted)">${limitText}</p>
+          ${fixed
+            ? `<div class="form-group"><label>Discount Amount (off this line of ${this.fmt(gross)})</label><input type="number" id="line-disc-amt" min="0" max="${gross}" step="0.01" value="${item.discountFixed||''}" placeholder="e.g. 5.00" onkeydown="if(event.key==='Enter')App.confirmLineDiscount(${idx},${maxPct},'fixed')"></div>`
+            : `<div class="form-group"><label>Discount %</label><input type="number" id="line-disc-pct" min="0" max="100" step="0.1" value="${item.discountFixed > 0 ? '' : item.discountPercent||''}" placeholder="e.g. 10" onkeydown="if(event.key==='Enter')App.confirmLineDiscount(${idx},${maxPct})"></div>`}
           <div id="line-disc-override" style="display:none">
             <div class="form-group"><label>Manager Override PIN</label>
-              <input type="password" id="line-disc-pin" maxlength="8" placeholder="Enter PIN" style="letter-spacing:4px;font-size:18px;text-align:center" onkeydown="if(event.key==='Enter')App.confirmLineDiscount(${idx},${maxPct})">
+              <input type="password" id="line-disc-pin" maxlength="8" placeholder="Enter PIN" style="letter-spacing:4px;font-size:18px;text-align:center" onkeydown="if(event.key==='Enter')App.confirmLineDiscount(${idx},${maxPct},'${mode}')">
             </div>
           </div>
           <div id="line-disc-err" style="color:var(--danger);font-size:13px;min-height:16px"></div>
         </div>
         <div class="modal-footer">
-          ${item.discountPercent > 0 ? `<button class="btn btn-outline" onclick="App.clearLineDiscount(${idx})">Remove Discount</button>` : ''}
+          ${item.discountPercent > 0 || item.discountFixed > 0 ? `<button class="btn btn-outline" onclick="App.clearLineDiscount(${idx})">Remove Discount</button>` : ''}
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-          <button class="btn btn-primary" onclick="App.confirmLineDiscount(${idx},${maxPct})">Apply</button>
+          <button class="btn btn-primary" onclick="App.confirmLineDiscount(${idx},${maxPct},'${mode}')">Apply</button>
         </div>
       </div>`);
+    setTimeout(() => document.getElementById(fixed ? 'line-disc-amt' : 'line-disc-pct')?.focus(), 50);
   },
 
-  confirmLineDiscount(idx, maxPct) {
+  confirmLineDiscount(idx, maxPct, mode = 'percent') {
     const item = this.cart[idx];
     if (!item) return;
     const errEl = document.getElementById('line-disc-err');
-    const pct = parseFloat(document.getElementById('line-disc-pct')?.value);
-    if (!pct || pct <= 0) { if (errEl) errEl.textContent = 'Enter a discount percentage.'; return; }
-    if (pct > 100) { if (errEl) errEl.textContent = 'Discount can\'t exceed 100%.'; return; }
+    const fixed = mode === 'fixed';
+    let pct, amt = 0;
+    if (fixed) {
+      const gross = parseFloat((item.price * item.quantity).toFixed(2));
+      amt = Math.round((parseFloat(document.getElementById('line-disc-amt')?.value) || 0) * 100) / 100;
+      if (!(amt > 0)) { if (errEl) errEl.textContent = 'Enter a discount amount.'; return; }
+      if (amt > gross) { if (errEl) errEl.textContent = `Discount can't exceed the line amount of ${this.fmt(gross)}.`; return; }
+      pct = gross > 0 ? amt / gross * 100 : 0;
+    } else {
+      pct = parseFloat(document.getElementById('line-disc-pct')?.value);
+      if (!pct || pct <= 0) { if (errEl) errEl.textContent = 'Enter a discount percentage.'; return; }
+      if (pct > 100) { if (errEl) errEl.textContent = 'Discount can\'t exceed 100%.'; return; }
+    }
+    const label = fixed ? this.fmt(amt) : `${pct}%`;
 
     if (maxPct > 0 && pct > maxPct) {
       const overrideRow = document.getElementById('line-disc-override');
       const pin = document.getElementById('line-disc-pin')?.value;
       if (overrideRow && overrideRow.style.display === 'none') {
         overrideRow.style.display = 'block';
-        if (errEl) errEl.textContent = `Exceeds the ${maxPct}% store limit — enter a manager PIN to override.`;
+        if (errEl) errEl.textContent = `Exceeds the ${maxPct}% store limit${fixed ? ` (${pct.toFixed(2)}%)` : ''} — enter a manager PIN to override.`;
         document.getElementById('line-disc-pin')?.focus();
         return;
       }
       if (!pin) { if (errEl) errEl.textContent = 'PIN is required to override the store limit.'; return; }
       this.api('POST', '/employees/validate-pin', { pin, permission: 'pos_discount_override' }).then(result => {
-        item.discountPercent = pct;
+        item.discountPercent = fixed ? 0 : pct;
+        item.discountFixed = fixed ? amt : 0;
         item.discountOverrideEmployeeId = result.id;
         item.discountOverrideName = result.name;
         this.closeModal();
         this._checkAutoPromos();
-        this.alert(`${pct}% discount applied — authorised by ${result.name}`, 'success');
+        this.alert(`${label} discount applied — authorised by ${result.name}`, 'success');
       }).catch(e => {
         if (errEl) errEl.textContent = e.message;
         document.getElementById('line-disc-pin').value = '';
@@ -4210,7 +4246,8 @@ const App = {
       return;
     }
 
-    item.discountPercent = pct;
+    item.discountPercent = fixed ? 0 : pct;
+    item.discountFixed = fixed ? amt : 0;
     item.discountOverrideEmployeeId = null;
     item.discountOverrideName = null;
     this.closeModal();
@@ -4222,6 +4259,7 @@ const App = {
     const item = this.cart[idx];
     if (!item) return;
     item.discountPercent = 0;
+    item.discountFixed = 0;
     item.discountOverrideEmployeeId = null;
     item.discountOverrideName = null;
     this.closeModal();
@@ -4298,7 +4336,7 @@ const App = {
         // directly for that case only; a real product_id line still has its
         // price/tax authoritatively re-derived server-side, never trusted
         // from the client.
-        items: this.cart.map(i => ({ product_id: i.product_id, variation_id: i.variation_id||null, serial_number: i.serial_number||null, uom_id: i.uom_id ?? null, sell_unit: i.sell_unit || null, quantity: i.quantity, discount_percent: i.discountPercent||0, discount_override_employee_id: i.discountOverrideEmployeeId||null, ...(i.product_id ? {} : { product_name: i.name, unit_price: i.price, tax_rate: i.tax_rate||0, is_comment: i.is_comment ? 1 : 0, is_delivery: i.is_delivery ? 1 : 0 }) })),
+        items: this.cart.map(i => ({ product_id: i.product_id, variation_id: i.variation_id||null, serial_number: i.serial_number||null, uom_id: i.uom_id ?? null, sell_unit: i.sell_unit || null, quantity: i.quantity, discount_percent: i.discountPercent||0, discount_fixed: i.discountFixed||0, discount_override_employee_id: i.discountOverrideEmployeeId||null, ...(i.product_id ? {} : { product_name: i.name, unit_price: i.price, tax_rate: i.tax_rate||0, is_comment: i.is_comment ? 1 : 0, is_delivery: i.is_delivery ? 1 : 0 }) })),
         discount_amount: discount,
         promotion_code: this.appliedDiscountCard ? (this.appliedDiscountCard.card_number || null) : (this.appliedPromoCode?.code || null),
         promotion_name: this.appliedDiscountCard ? `${this.appliedDiscountCard.type_name} ${this.appliedDiscountCard.label || 'Discount Card'}` : (this.appliedPromoCode?.promo_name || this.autoAppliedPromo?.name || null),
@@ -4361,6 +4399,7 @@ const App = {
           is_comment: i.is_comment ? 1 : 0,
           is_delivery: i.is_delivery ? 1 : 0,
           discount_percent: i.discountPercent || 0,
+          discount_fixed: i.discountFixed || 0,
           discount_override_employee_id: i.discountOverrideEmployeeId || null,
         };
       });
@@ -4517,7 +4556,8 @@ const App = {
           stock_qty: product?.stock_qty ?? 999,
           // A line's manual % discount (and manager override) comes back
           // as it was held; checkout re-validates it.
-          discountPercent: parseFloat(item.discount_percent) || 0,
+          discountPercent: item.discount_fixed > 0 ? 0 : parseFloat(item.discount_percent) || 0,
+          discountFixed: parseFloat(item.discount_fixed) || 0,
           discountOverrideEmployeeId: item.discount_override_by || null,
           discountOverrideName: item.discount_override_name || null,
           ...this._recalledUnitFields(item, product),
@@ -4850,7 +4890,7 @@ const App = {
             ${items.map(i => { if (i.is_comment) return `<div class="receipt-item" style="font-style:italic;white-space:pre-wrap;padding-left:8px">${this.escapeAttr(i.product_name)}</div>`; if (i.serial_number) return `<div class="receipt-item" style="padding-left:8px;font-size:12px">${this._serialNote(i)}</div>`; const pct = this._lineDiscountPct(i); return `<div class="receipt-item">
               <div>${i.sku ? `<span style="font-size:11px;color:#555">${i.sku}</span> ` : ''}${i.product_name}</div>
               <div class="receipt-row"><span style="padding-left:8px">${i.quantity} x ${this.fmt(i.unit_price)}</span><span>${this.fmt(i.total)}</span></div>
-              ${pct > 0 ? `<div style="color:#666;font-size:11px;padding-left:8px">less ${pct}% (-${this.fmt(i.discount_amount)})</div>` : ''}
+              ${pct > 0 ? `<div style="color:#666;font-size:11px;padding-left:8px">less ${i.discount_fixed > 0 ? this.fmt(i.discount_amount) : `${pct}% (-${this.fmt(i.discount_amount)})`}</div>` : ''}
             </div>`; }).join('')}
             <hr>
             <div class="receipt-row"><span>Subtotal</span><span>${this.fmt(tx.subtotal)}</span></div>
@@ -4966,7 +5006,7 @@ const App = {
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:center">${rentalReturnedLabel}</td>
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:center">${rentalDurationCellLabel}</td>` : ''}
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:right">${this.fmt(i.unit_price)}</td>
-        ${hasLineDiscount ? `<td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:right">${this._lineDiscountPct(i) > 0 ? `${this._lineDiscountPct(i)}%` : '—'}</td>` : ''}
+        ${hasLineDiscount ? `<td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:right">${this._lineDiscountPct(i) > 0 ? (i.discount_fixed > 0 ? this.fmt(i.discount_amount) : `${this._lineDiscountPct(i)}%`) : '—'}</td>` : ''}
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:right;font-weight:600">${this.fmt(i.total)}</td>
       </tr>`).join('');
 
@@ -17284,7 +17324,7 @@ const App = {
           </div>
           <div class="card" style="margin-bottom:16px">
             <div class="card-header"><span class="card-title">POS Line-Item Discounts</span></div>
-            <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">Governs the per-line "%" discount in the POS cart. It's capped at the Maximum Discount above (currently ${parseFloat(s.max_discount_pct) > 0 ? `${parseFloat(s.max_discount_pct)}%` : 'unlimited'}); a discount above that needs a manager PIN with <span class="perm-pill">pos_discount_override</span> to authorize. An item already covered by an active promotion, or whose brand is listed below, can't take a manual discount at all.</p>
+            <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">Governs the per-line "%" and "$" (fixed amount) discounts in the POS cart — a "$" discount counts as the percentage it takes off the line. It's capped at the Maximum Discount above (currently ${parseFloat(s.max_discount_pct) > 0 ? `${parseFloat(s.max_discount_pct)}%` : 'unlimited'}); a discount above that needs a manager PIN with <span class="perm-pill">pos_discount_override</span> to authorize. An item already covered by an active promotion, or whose brand is listed below, can't take a manual discount at all.</p>
             <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Brands Excluded From Manual Discounts</div>
             <div id="discount-excluded-brands-wrap">Loading…</div>
             <div class="input-row" style="margin-top:10px;align-items:flex-end">

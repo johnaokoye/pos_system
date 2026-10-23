@@ -109,7 +109,8 @@ function buildReceiptHtml(tx, s) {
     // price and the line total — e.g. "× 2 @ $10.00 less 5% (-$1.00)".
     const gross = (parseFloat(i.unit_price) || 0) * (parseFloat(i.quantity) || 0);
     const pct = parseFloat(i.discount_percent) || (parseFloat(i.discount_amount) > 0 && gross > 0 ? parseFloat((i.discount_amount / gross * 100).toFixed(2)) : 0);
-    const disc = pct > 0 ? ` <span style="color:${BRAND.green}">less ${pct}% (-${fmt(i.discount_amount)})</span>` : '';
+    // A "$" discount (discount_fixed) shows just the amount — "less $5.00".
+    const disc = pct > 0 ? ` <span style="color:${BRAND.green}">less ${i.discount_fixed > 0 ? fmt(i.discount_amount) : `${pct}% (-${fmt(i.discount_amount)})`}</span>` : '';
     return `
     <tr>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku || ''}${i.quantity > 1 || pct > 0 ? ` × ${i.quantity} @ ${fmt(i.unit_price)}` : ''}${disc}</span></td>
@@ -2063,7 +2064,7 @@ function receiptPdfModel(tx, s) {
       if (i.serial_number) return commentRowPdf(`Serial: ${i.serial_number}`, ITEM_COLUMNS.length);
       const gross = (parseFloat(i.unit_price) || 0) * (parseFloat(i.quantity) || 0);
       const pct = parseFloat(i.discount_percent) || (parseFloat(i.discount_amount) > 0 && gross > 0 ? parseFloat((i.discount_amount / gross * 100).toFixed(2)) : 0);
-      return { cells: [i.product_name, i.quantity, fmt(i.unit_price), fmt(i.total)], sub: [i.sku, pct > 0 ? `less ${pct}% (-${fmt(i.discount_amount)})` : ''].filter(Boolean).join(' · ') };
+      return { cells: [i.product_name, i.quantity, fmt(i.unit_price), fmt(i.total)], sub: [i.sku, pct > 0 ? `less ${i.discount_fixed > 0 ? fmt(i.discount_amount) : `${pct}% (-${fmt(i.discount_amount)})`}` : ''].filter(Boolean).join(' · ') };
     }) }],
     totals: [
       { label: 'Subtotal', value: fmt(tx.subtotal) },

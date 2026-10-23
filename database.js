@@ -2211,6 +2211,9 @@ async function _init() {
     // price, taxed at the store rate; no product and never sent to Purchasing.
     'ALTER TABLE quotation_items ADD COLUMN is_delivery INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE transaction_items ADD COLUMN is_delivery INTEGER NOT NULL DEFAULT 0',
+    // POS "$" line discount: the fixed amount taken off the line (discount_percent
+    // then holds the equivalent %, for the limit check and promotions). NULL = a % discount.
+    'ALTER TABLE transaction_items ADD COLUMN discount_fixed REAL',
     'ALTER TABLE crm_opportunities ADD COLUMN lead_type TEXT',
     // Approver's saved signature (lib/signatures.js resolveApprovalSignature),
     // and the copy stamped on each approved document.
