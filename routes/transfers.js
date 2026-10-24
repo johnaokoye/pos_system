@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { syncBinQty } = require('../lib/binSync');
-const { createTransfer } = require('../lib/transfers');
+const { createTransfer, deductTransferStock } = require('../lib/transfers');
 const { requirePermission, requireAuth } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 
@@ -29,7 +29,9 @@ router.get('/', requirePermission('transfers'), async (req, res) => {
 // GET single transfer with items
 router.get('/:id', requirePermission('transfers'), async (req, res) => {
   try {
-    const { rows: [transfer] } = await db.execute({ sql: `SELECT t.*, fb.name as from_branch_name, tb.name as to_branch_name, e.first_name || ' ' || e.last_name as employee_name FROM branch_transfers t LEFT JOIN branches fb ON t.from_branch_id = fb.id LEFT JOIN branches tb ON t.to_branch_id = tb.id LEFT JOIN employees e ON t.employee_id = e.id WHERE t.id = ?`, args: [req.params.id] });
+    const { rows: [transfer] } = await db.execute({ sql: `SELECT t.*, fb.name as from_branch_name, tb.name as to_branch_name, e.first_name || ' ' || e.last_name as employee_name,
+      se.first_name || ' ' || se.last_name as sent_by_name
+      FROM branch_transfers t LEFT JOIN branches fb ON t.from_branch_id = fb.id LEFT JOIN branches tb ON t.to_branch_id = tb.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN employees se ON t.sent_by = se.id WHERE t.id = ?`, args: [req.params.id] });
     if (!transfer) return res.status(404).json({ error: 'Not found' });
     const { rows: items } = await db.execute({ sql: 'SELECT * FROM branch_transfer_items WHERE transfer_id = ?', args: [req.params.id] });
     transfer.items = items;
@@ -37,8 +39,12 @@ router.get('/:id', requirePermission('transfers'), async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// POST create transfer — deducts qty from source branch immediately
-router.post('/', requirePermission('transfers'), async (req, res) => {
+// POST create a transfer request — a branch asks another branch for stock.
+// Nothing moves yet: the inventory team sets the quantities actually sent
+// and sends it (PATCH /:id/send), then the branch receives it as usual.
+// (Transfers auto-created by quotations / work orders skip the request step
+// — lib/transfers.js createTransfer without `request`.)
+router.post('/', requirePermission('transfers_create'), async (req, res) => {
   try {
     const { from_branch_id, to_branch_id, employee_id, items, notes } = req.body;
     if (!from_branch_id || !to_branch_id) return res.status(400).json({ error: 'Both from and to branches are required' });
@@ -48,19 +54,59 @@ router.post('/', requirePermission('transfers'), async (req, res) => {
     const transfer_number = await nextNumber(db, 'branch_transfers', 'transfer_number', 'TRF-', 6);
 
     const tx = await db.transaction('write');
+    let transferId;
     try {
-      const transferId = await createTransfer(tx, { transfer_number, from_branch_id, to_branch_id, employee_id, items, notes, quote_id: null });
-
+      transferId = await createTransfer(tx, { transfer_number, from_branch_id, to_branch_id, employee_id: employee_id || req.employee?.id, items, notes, quote_id: null, request: true });
       await tx.commit();
-
-      const { rows: [transfer] } = await db.execute({ sql: `SELECT t.*, fb.name as from_branch_name, tb.name as to_branch_name FROM branch_transfers t LEFT JOIN branches fb ON t.from_branch_id = fb.id LEFT JOIN branches tb ON t.to_branch_id = tb.id WHERE t.id = ?`, args: [transferId] });
-      const { rows: transferItems } = await db.execute({ sql: 'SELECT * FROM branch_transfer_items WHERE transfer_id = ?', args: [transferId] });
-      transfer.items = transferItems;
-      res.status(201).json(transfer);
     } catch(e) {
       await tx.rollback();
-      res.status(400).json({ error: e.message });
+      return res.status(400).json({ error: e.message });
     }
+
+    const { rows: [transfer] } = await db.execute({ sql: `SELECT t.*, fb.name as from_branch_name, tb.name as to_branch_name FROM branch_transfers t LEFT JOIN branches fb ON t.from_branch_id = fb.id LEFT JOIN branches tb ON t.to_branch_id = tb.id WHERE t.id = ?`, args: [transferId] });
+    const { rows: transferItems } = await db.execute({ sql: 'SELECT * FROM branch_transfer_items WHERE transfer_id = ?', args: [transferId] });
+    transfer.items = transferItems;
+    res.status(201).json(transfer);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// PATCH send — the inventory team sends a requested transfer with the
+// quantities they're actually sending (items: [{ item_id, quantity }]; a
+// line left out keeps its asked quantity, 0 drops it). Stock leaves the
+// source branch now; the transfer is then 'pending' (ready for pickup /
+// receiving). quantity_requested becomes the sent quantity — receive and
+// cancel work from it — and quantity_asked keeps the original ask.
+router.patch('/:id/send', requirePermission('transfers_approve'), async (req, res) => {
+  try {
+    const { rows: [transfer] } = await db.execute({ sql: 'SELECT * FROM branch_transfers WHERE id = ?', args: [req.params.id] });
+    if (!transfer) return res.status(404).json({ error: 'Not found' });
+    if (transfer.status !== 'requested') return res.status(400).json({ error: 'Only a transfer request can be sent' });
+    const sentById = new Map((req.body.items || []).map(i => [Number(i.item_id), i.quantity]));
+
+    const tx = await db.transaction('write');
+    try {
+      const { rows: lines } = await tx.execute({ sql: 'SELECT * FROM branch_transfer_items WHERE transfer_id = ?', args: [req.params.id] });
+      const toSend = [];
+      for (const line of lines) {
+        const raw = sentById.has(line.id) ? sentById.get(line.id) : line.quantity_requested;
+        const qty = Number(raw);
+        if (!Number.isInteger(qty) || qty < 0) throw new Error(`Enter a whole quantity of 0 or more for ${line.product_name}`);
+        await tx.execute({ sql: 'UPDATE branch_transfer_items SET quantity_requested = ?, quantity_asked = COALESCE(quantity_asked, ?) WHERE id = ?', args: [qty, line.quantity_requested, line.id] });
+        if (qty > 0 && line.product_id) toSend.push({ product_id: line.product_id, quantity: qty });
+      }
+      if (!lines.some(l => Number(sentById.has(l.id) ? sentById.get(l.id) : l.quantity_requested) > 0)) throw new Error('Nothing to send — enter a quantity for at least one item, or cancel the request');
+      await deductTransferStock(tx, transfer.from_branch_id, toSend);
+      await tx.execute({ sql: "UPDATE branch_transfers SET status = 'pending', sent_by = ?, sent_at = ? WHERE id = ?", args: [req.employee?.id || null, new Date().toISOString(), req.params.id] });
+      await tx.commit();
+    } catch(e) {
+      await tx.rollback();
+      return res.status(400).json({ error: e.message });
+    }
+
+    const { rows: [updated] } = await db.execute({ sql: `SELECT t.*, fb.name as from_branch_name, tb.name as to_branch_name FROM branch_transfers t LEFT JOIN branches fb ON t.from_branch_id = fb.id LEFT JOIN branches tb ON t.to_branch_id = tb.id WHERE t.id = ?`, args: [req.params.id] });
+    const { rows: updatedItems } = await db.execute({ sql: 'SELECT * FROM branch_transfer_items WHERE transfer_id = ?', args: [req.params.id] });
+    updated.items = updatedItems;
+    res.json(updated);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -84,6 +130,7 @@ router.patch('/:id/receive', requirePermission('transfers_dropoff'), async (req,
     const { rows: [transfer] } = await db.execute({ sql: 'SELECT * FROM branch_transfers WHERE id = ?', args: [req.params.id] });
     if (!transfer) return res.status(404).json({ error: 'Not found' });
     if (transfer.status === 'cancelled') return res.status(400).json({ error: 'Cannot receive cancelled transfer' });
+    if (transfer.status === 'requested') return res.status(400).json({ error: 'This transfer has not been sent yet' });
     if (transfer.status === 'received') return res.status(400).json({ error: 'Transfer already fully received' });
 
     const tx = await db.transaction('write');
@@ -131,6 +178,13 @@ router.patch('/:id/cancel', requirePermission('transfers'), async (req, res) => 
     if (!transfer) return res.status(404).json({ error: 'Not found' });
     if (transfer.status === 'received') return res.status(400).json({ error: 'Cannot cancel a fully received transfer' });
     if (transfer.status === 'cancelled') return res.status(400).json({ error: 'Transfer already cancelled' });
+
+    // A request that was never sent took no stock — nothing to put back.
+    if (transfer.status === 'requested') {
+      await db.execute({ sql: "UPDATE branch_transfers SET status = 'cancelled' WHERE id = ?", args: [req.params.id] });
+      const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM branch_transfers WHERE id = ?', args: [req.params.id] });
+      return res.json(row);
+    }
 
     const tx = await db.transaction('write');
     try {

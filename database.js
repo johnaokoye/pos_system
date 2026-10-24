@@ -2230,6 +2230,13 @@ async function _init() {
     'ALTER TABLE transactions ADD COLUMN ticket_discount_percent REAL',
     // Manager who authorized a return with their PIN (returns_override).
     'ALTER TABLE returns ADD COLUMN override_by INTEGER REFERENCES employees(id)',
+    // Transfer requests (routes/transfers.js): a branch asks, the inventory
+    // team sets what's actually sent and sends it. quantity_asked keeps the
+    // branch's original ask; quantity_requested becomes the sent quantity
+    // (what receive/cancel work from). NULL = made before requests existed.
+    'ALTER TABLE branch_transfer_items ADD COLUMN quantity_asked INTEGER',
+    'ALTER TABLE branch_transfers ADD COLUMN sent_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE branch_transfers ADD COLUMN sent_at DATETIME',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

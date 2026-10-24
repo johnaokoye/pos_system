@@ -20515,11 +20515,11 @@ const App = {
     ]);
     if (this.section !== 'transfers') return;
     const branches = this.currentUser.branches || [];
-    const statusColor = { pending:'badge-warning', in_transit:'badge-info', received:'badge-success', cancelled:'badge-danger' };
+    const statusColor = this._transferStatusColor;
     c.innerHTML = `
       <div class="section-header">
         <h2>Branch Transfers</h2>
-        <button class="btn btn-primary" onclick="App.showTransferForm()">+ New Transfer</button>
+        ${this.can('transfers_create') ? `<button class="btn btn-primary" onclick="App.showTransferForm()">+ Request Transfer</button>` : ''}
       </div>
       <div class="card">
         <div style="margin-bottom:10px">
@@ -20537,11 +20537,12 @@ const App = {
                   <td class="fw-600">${t.transfer_number}</td>
                   <td>${t.from_branch_name||'-'}</td>
                   <td>${t.to_branch_name||'-'}</td>
-                  <td><span class="badge-pill ${statusColor[t.status]||'badge-info'}">${t.status.replace('_',' ')}</span></td>
+                  <td><span class="badge-pill ${statusColor[t.status]||'badge-info'}">${this._transferStatusLabel(t.status)}</span></td>
                   <td style="color:var(--text-muted)">${this.fmtDate(t.created_at)}</td>
                   <td style="color:var(--text-muted)">${t.received_at ? this.fmtDate(t.received_at) : '—'}</td>
                   <td>
                     <button class="btn btn-sm btn-secondary" onclick="App.viewTransfer(${t.id})">View</button>
+                    ${t.status==='requested' && this.can('transfers_approve') ? `<button class="btn btn-sm btn-primary" onclick="App.showSendTransfer(${t.id})">Review &amp; Send</button>` : ''}
                     ${(t.status==='pending'||t.status==='in_transit') && this.can('transfers_dropoff') ? `<button class="btn btn-sm btn-success" onclick="App.showReceiveTransfer(${t.id})">Receive</button>` : ''}
                   </td>
                 </tr>`).join('') : '<tr><td colspan="7" class="empty-state">No transfers yet</td></tr>'}
@@ -20564,37 +20565,43 @@ const App = {
   // prefill (optional): { fromBranchId, productId } — used by Rental Items'
   // "Transfer" action to jump straight into a transfer of one specific item
   // instead of making the user reselect the branch and product by hand.
+  // A transfer starts as a request: the branch that needs stock asks another
+  // branch for it; the inventory team there sets what's actually sent
+  // (showSendTransfer) and the requesting branch receives it.
   async showTransferForm(prefill) {
-    const branches = this.currentUser.branches || [];
+    // Ask any branch, for one of your own (the one receiving it).
+    const myBranches = this.currentUser.branches || [];
+    const allBranches = await this.api('GET', '/branches').catch(() => myBranches);
     this._transferProducts = [];
     this._transferItemIdx = 0;
     this.showModal(`
       <div class="modal" style="max-width:720px">
-        <div class="modal-header"><span class="modal-title">New Branch Transfer</span><button class="modal-close">✕</button></div>
+        <div class="modal-header"><span class="modal-title">Request Branch Transfer</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin:0 0 12px">No stock moves yet — the sending branch's inventory team confirms the quantities and sends it, then you receive it.</p>
           <div class="input-row">
-            <div class="form-group"><label>From Branch *</label>
+            <div class="form-group"><label>Request From (sending branch) *</label>
               <select id="trf-from" onchange="App.onTransferFromChange()">
                 <option value="">-- Select Source --</option>
-                ${branches.map(b => `<option value="${b.id}" ${prefill?.fromBranchId && String(prefill.fromBranchId)===String(b.id)?'selected':''}>${b.name}</option>`).join('')}
+                ${allBranches.map(b => `<option value="${b.id}" ${prefill?.fromBranchId && String(prefill.fromBranchId)===String(b.id)?'selected':''}>${b.name}</option>`).join('')}
               </select>
             </div>
-            <div class="form-group"><label>To Branch *</label>
+            <div class="form-group"><label>Deliver To (receiving branch) *</label>
               <select id="trf-to">
                 <option value="">-- Select Destination --</option>
-                ${branches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
+                ${myBranches.map(b => `<option value="${b.id}" ${myBranches.length === 1 ? 'selected' : ''}>${b.name}</option>`).join('')}
               </select>
             </div>
           </div>
           <div class="form-group"><label>Notes</label><input id="trf-notes"></div>
           <div style="margin-bottom:10px">
-            <div class="card-header"><span class="card-title">Items to Transfer</span><button class="btn btn-sm btn-outline" id="trf-add-btn" onclick="App.addTransferItem()" disabled>+ Add Item</button></div>
+            <div class="card-header"><span class="card-title">Items Requested</span><button class="btn btn-sm btn-outline" id="trf-add-btn" onclick="App.addTransferItem()" disabled>+ Add Item</button></div>
             <div id="trf-items"><p style="color:var(--text-muted);font-size:13px;padding:8px 0">Select a source branch to load available products.</p></div>
           </div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-          <button class="btn btn-primary" onclick="App.saveTransfer()">Create Transfer</button>
+          <button class="btn btn-primary" onclick="App.saveTransfer()">Send Request</button>
         </div>
       </div>`);
     if (prefill?.fromBranchId) await this.onTransferFromChange(prefill.productId);
@@ -20662,8 +20669,8 @@ const App = {
         <input type="hidden" id="trfi-prod-${idx}" value="${preselectedProduct?preselectedProduct.id:''}" data-stock="${preselectedProduct?preselectedProduct.available_qty:''}">
         <div id="trfi-prod-dd-${idx}" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
       </span>
-      <input id="trfi-qty-${idx}" type="number" min="1" max="${preselectedProduct?preselectedProduct.available_qty:''}" value="1" style="width:80px" placeholder="Qty">
-      <span id="trfi-stock-${idx}" style="font-size:12px;color:var(--text-muted);white-space:nowrap">${preselectedProduct?`Max: ${preselectedProduct.available_qty}`:''}</span>
+      <input id="trfi-qty-${idx}" type="number" min="1" value="1" style="width:80px" placeholder="Qty">
+      <span id="trfi-stock-${idx}" style="font-size:12px;color:var(--text-muted);white-space:nowrap">${preselectedProduct?`Avail: ${preselectedProduct.available_qty}`:''}</span>
       <button class="btn btn-sm btn-danger" onclick="document.getElementById('trf-item-${idx}').remove()">✕</button>`;
     container.appendChild(div);
   },
@@ -20703,8 +20710,7 @@ const App = {
     const qtyEl = document.getElementById(`trfi-qty-${idx}`);
     if (!hidden || !hidden.value) { if (stockEl) stockEl.textContent = ''; return; }
     const stock = parseInt(hidden.dataset.stock) || 0;
-    if (stockEl) stockEl.textContent = `Max: ${stock}`;
-    if (qtyEl) qtyEl.max = stock;
+    if (stockEl) stockEl.textContent = `Avail: ${stock}`;
   },
 
   async saveTransfer() {
@@ -20726,7 +20732,7 @@ const App = {
     try {
       await this.api('POST', '/transfers', { from_branch_id, to_branch_id, notes, items });
       this.closeModal();
-      this.alert('Transfer created — stock deducted from source branch');
+      this.alert('Transfer requested — the sending branch will confirm quantities and send it');
       // Not renderTransfers() directly — it can be opened from other
       // sections (e.g. Rental Items' "Transfer" quick action), and
       // renderTransfers() bails out after its own "Loading..." placeholder
@@ -20736,15 +20742,25 @@ const App = {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
+  _transferStatusColor: { requested:'badge-secondary', pending:'badge-warning', in_transit:'badge-info', received:'badge-success', cancelled:'badge-danger' },
+  // 'pending' is a sent transfer waiting for pickup / receiving.
+  _transferStatusLabel(status) {
+    return { requested: 'requested', pending: 'sent', in_transit: 'in transit' }[status] || status;
+  },
+
   async viewTransfer(id) {
     const t = await this.api('GET', `/transfers/${id}`);
-    const statusColor = { pending:'badge-warning', in_transit:'badge-info', received:'badge-success', cancelled:'badge-danger' };
+    const statusColor = this._transferStatusColor;
+    // Sent = stock left the source: anything past 'requested', except a
+    // request cancelled before sending (no sent_at; transfers from before
+    // requests existed have no quantity_asked).
+    const sent = t.status !== 'requested' && (!!t.sent_at || t.status !== 'cancelled' || t.items.every(i => i.quantity_asked == null));
     this.showModal(`
       <div class="modal" style="max-width:660px">
         <div class="modal-header">
           <span class="modal-title">Transfer: ${t.transfer_number}</span>
           <div style="display:flex;gap:8px;align-items:center">
-            <span class="badge-pill ${statusColor[t.status]||''}">${t.status.replace('_',' ')}</span>
+            <span class="badge-pill ${statusColor[t.status]||''}">${this._transferStatusLabel(t.status)}</span>
             <button class="modal-close">✕</button>
           </div>
         </div>
@@ -20752,23 +20768,27 @@ const App = {
           <div class="two-col" style="margin-bottom:14px;font-size:13px">
             <div><strong>From:</strong> ${t.from_branch_name||'-'}</div>
             <div><strong>To:</strong> ${t.to_branch_name||'-'}</div>
+            <div><strong>Requested by:</strong> ${t.employee_name||'-'} · ${this.fmtDate(t.created_at)}</div>
+            ${t.sent_at ? `<div><strong>Sent by:</strong> ${t.sent_by_name||'-'} · ${this.fmtDate(t.sent_at)}</div>` : ''}
           </div>
           ${t.notes ? `<p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">${t.notes}</p>` : ''}
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Product</th><th>SKU</th><th>Requested</th><th>Received</th></tr></thead>
+              <thead><tr><th>Product</th><th>SKU</th><th>Requested</th>${sent ? '<th>Sent</th><th>Received</th>' : ''}</tr></thead>
               <tbody>
                 ${t.items.map(i => `<tr>
                   <td>${i.product_name}</td>
                   <td>${i.sku||'-'}</td>
-                  <td>${i.quantity_requested}</td>
-                  <td><span class="${(i.quantity_received||0)>=i.quantity_requested?'color-success':'color-warning'}">${i.quantity_received||0}</span></td>
+                  <td>${i.quantity_asked ?? i.quantity_requested}</td>
+                  ${sent ? `<td><span class="${i.quantity_asked != null && i.quantity_requested < i.quantity_asked ? 'color-warning fw-600' : ''}">${i.quantity_requested}</span></td>
+                  <td><span class="${(i.quantity_received||0)>=i.quantity_requested?'color-success':'color-warning'}">${i.quantity_received||0}</span></td>` : ''}
                 </tr>`).join('')}
               </tbody>
             </table>
           </div>
         </div>
         <div class="modal-footer">
+          ${t.status==='requested' && this.can('transfers_approve') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showSendTransfer(${t.id})">Review &amp; Send</button>` : ''}
           ${t.status==='pending' && this.can('transfers_pickup') ? `<button class="btn btn-secondary" onclick="App.dispatchTransfer(${t.id})">Mark In-Transit</button>` : ''}
           ${t.status!=='cancelled'&&t.status!=='received' ? `<button class="btn btn-danger" onclick="App.cancelTransfer(${t.id})">Cancel</button>` : ''}
           ${(t.status==='pending'||t.status==='in_transit') && this.can('transfers_dropoff') ? `<button class="btn btn-success" onclick="App.closeModal();App.showReceiveTransfer(${t.id})">Receive Items</button>` : ''}
@@ -20796,17 +20816,70 @@ const App = {
   },
 
   async cancelTransfer(id) {
-    if (!confirm('Cancel this transfer? Unreceived quantities will be returned to the source branch.')) return;
+    const t = await this.api('GET', `/transfers/${id}`).catch(() => null);
+    const isRequest = t?.status === 'requested';
+    if (!confirm(isRequest ? 'Cancel this transfer request?' : 'Cancel this transfer? Unreceived quantities will be returned to the source branch.')) return;
     try {
       await this.api('PATCH', `/transfers/${id}/cancel`, {});
       this.closeModal();
-      this.alert('Transfer cancelled — stock restored to source branch');
+      this.alert(isRequest ? 'Transfer request cancelled' : 'Transfer cancelled — stock restored to source branch');
       this._refreshTransferView();
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
+  // Inventory team: set what's actually being sent for each requested line
+  // (defaults to the ask, capped at what the sending branch has free), then
+  // send — stock leaves the sending branch at this point.
+  async showSendTransfer(id) {
+    const t = await this.api('GET', `/transfers/${id}`);
+    if (t.status !== 'requested') { this.alert('This transfer has already been sent', 'warning'); return this.viewTransfer(id); }
+    const stock = await Promise.all(t.items.map(i => i.product_id
+      ? this.api('GET', `/products/${i.product_id}?branch_id=${t.from_branch_id}`).then(p => p.branch_stock_qty ?? 0).catch(() => null)
+      : null));
+    this.showModal(`
+      <div class="modal" style="max-width:640px">
+        <div class="modal-header"><span class="modal-title">Send Transfer — ${t.transfer_number}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:6px">From <strong>${t.from_branch_name}</strong> to <strong>${t.to_branch_name}</strong> · requested by ${t.employee_name || '—'}</p>
+          ${t.notes ? `<p style="font-size:13px;color:var(--text-muted);margin-bottom:6px">${t.notes}</p>` : ''}
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px">Enter the quantity you're sending for each item (0 to leave it out). Stock is taken from ${t.from_branch_name} when you send.</p>
+          ${t.items.map((i, n) => {
+            const avail = stock[n];
+            const def = avail == null ? i.quantity_requested : Math.max(0, Math.min(i.quantity_requested, avail));
+            return `
+            <div class="po-receive-row">
+              <div style="flex:1">
+                <div class="fw-600">${i.product_name}</div>
+                <div style="font-size:12px;color:var(--text-muted)">${i.sku || ''}${i.sku ? ' · ' : ''}Requested: ${i.quantity_requested}${avail != null ? ` · In stock at ${t.from_branch_name}: <span class="${avail < i.quantity_requested ? 'color-danger fw-600' : ''}">${avail}</span>` : ''}</div>
+              </div>
+              <input id="tsend-${i.id}" type="number" min="0" step="1" value="${def}" style="width:80px" placeholder="Qty">
+            </div>`;
+          }).join('')}
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-danger" onclick="App.cancelTransfer(${t.id})">Cancel Request</button>
+          <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+          <button class="btn btn-primary" id="tsend-btn" onclick="App.confirmSendTransfer(${t.id}, [${t.items.map(i => i.id).join(',')}])">Send</button>
+        </div>
+      </div>`);
+  },
+
+  async confirmSendTransfer(transferId, itemIds) {
+    const items = itemIds.map(id => ({ item_id: id, quantity: parseInt(document.getElementById(`tsend-${id}`).value) || 0 }));
+    if (!items.some(i => i.quantity > 0)) { this.alert('Enter a quantity for at least one item, or cancel the request', 'error'); return; }
+    const btn = document.getElementById('tsend-btn');
+    if (btn) btn.disabled = true;
+    try {
+      await this.api('PATCH', `/transfers/${transferId}/send`, { items });
+      this.closeModal();
+      this.alert('Transfer sent — stock taken from the sending branch; the receiving branch can now receive it');
+      this._refreshTransferView();
+    } catch(e) { if (btn) btn.disabled = false; this.alert(e.message, 'error'); }
+  },
+
   async showReceiveTransfer(id) {
     const t = await this.api('GET', `/transfers/${id}`);
+    if (t.status === 'requested') { this.alert('This transfer has not been sent yet', 'warning'); return; }
     const pending = t.items.filter(i => (i.quantity_received||0) < i.quantity_requested);
     if (!pending.length) { this.alert('All items already received', 'warning'); return; }
     this.showModal(`
@@ -20819,7 +20892,7 @@ const App = {
             <div class="po-receive-row">
               <div style="flex:1">
                 <div class="fw-600">${i.product_name}</div>
-                <div style="font-size:12px;color:var(--text-muted)">Requested: ${i.quantity_requested} | Received: ${i.quantity_received||0} | Pending: ${i.quantity_requested-(i.quantity_received||0)}</div>
+                <div style="font-size:12px;color:var(--text-muted)">Sent: ${i.quantity_requested} | Received: ${i.quantity_received||0} | Pending: ${i.quantity_requested-(i.quantity_received||0)}</div>
               </div>
               <input id="trecv-${i.id}" type="number" min="0" max="${i.quantity_requested-(i.quantity_received||0)}" value="${i.quantity_requested-(i.quantity_received||0)}" style="width:80px" placeholder="Qty">
             </div>`).join('')}
@@ -20875,7 +20948,7 @@ const App = {
           <td>${t.from_branch_name||'—'}</td>
           <td>${t.to_branch_name||'—'}</td>
           <td style="max-width:260px">${t.item_summary||'—'}</td>
-          <td><span class="badge-pill ${statusColor[t.status]||'badge-secondary'}">${t.status.replace('_',' ')}</span></td>
+          <td><span class="badge-pill ${statusColor[t.status]||'badge-secondary'}">${this._transferStatusLabel(t.status)}</span></td>
           <td style="text-align:right;white-space:nowrap">
             ${t.status==='pending' && this.can('transfers_pickup') ? `<button class="btn btn-sm btn-primary" onclick="App.dispatchTransfer(${t.id})">Picked Up</button>` : ''}
             ${(t.status==='pending'||t.status==='in_transit') && this.can('transfers_dropoff') ? `<button class="btn btn-sm btn-success" onclick="App.showReceiveTransfer(${t.id})">Dropped Off</button>` : ''}

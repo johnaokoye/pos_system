@@ -692,12 +692,13 @@
       <h2 class="module">Branch Transfers <span class="tag">transfers</span></h2>
       <p class="module-intro">Moving stock between two of your locations.</p>
       <ol class="steps">
-        <li><strong>Create</strong> a transfer — stock is deducted from the source branch immediately, so it's off that branch's books as soon as the transfer exists, not just once it physically leaves.</li>
-        <li><strong>Dispatch</strong> (needs <span class="perm-pill">transfers_pickup</span>) — marks it picked up from the source and in transit.</li>
-        <li><strong>Receive</strong> (needs <span class="perm-pill">transfers_dropoff</span>) — add the stock to the destination branch; this can be done in partial batches over more than one delivery.</li>
+        <li><strong>Request</strong> (needs <span class="perm-pill">transfers_create</span>) — the branch that needs stock picks the branch to request it from, the branch it's for, and the items and quantities. The transfer shows as <strong>requested</strong>; no stock moves yet.</li>
+        <li><strong>Review &amp; Send</strong> (needs <span class="perm-pill">transfers_approve</span> — give this to the inventory team) — the sending branch sees each item's requested quantity next to what it has in stock, enters the quantity it's actually sending (0 to leave an item out), and sends. Stock is deducted from the sending branch at this point and the transfer shows as <strong>sent</strong>. The original request is kept, so the transfer shows Requested, Sent and Received side by side.</li>
+        <li><strong>Dispatch</strong> (optional, needs <span class="perm-pill">transfers_pickup</span>) — marks it picked up from the source and in transit.</li>
+        <li><strong>Receive</strong> (needs <span class="perm-pill">transfers_dropoff</span>) — the requesting branch adds the sent quantities to its stock; this can be done in partial batches over more than one delivery.</li>
       </ol>
-      <p>Cancelling a transfer restores whatever hadn't yet been received back to the source branch. Transfers can also be created automatically when a multi-branch quotation is accepted and part of the order has to come from another location.</p>
-      <p>The New Transfer product picker is <strong>searchable</strong> — type a few letters of the name or SKU and pick from the matching results, instead of scrolling a long list — and works for rental items too (tagged <span style="font-weight:600">[Rental]</span> in the results) — see <a href="#rentals">Rentals</a> for how a rental item's currently-checked-out units are excluded from what's offered.</p>
+      <p>A request can be cancelled before it's sent with nothing to undo. Cancelling a sent transfer restores whatever hadn't yet been received back to the source branch. Transfers created automatically — when a multi-branch quotation is accepted, or a work order needs parts from another location — skip the request step and are sent straight away.</p>
+      <p>The Request Transfer product picker is <strong>searchable</strong> — type a few letters of the name or SKU and pick from the matching results, instead of scrolling a long list — and works for rental items too (tagged <span style="font-weight:600">[Rental]</span> in the results) — see <a href="#rentals">Rentals</a> for how a rental item's currently-checked-out units are excluded from what's offered.</p>
     </section>
 
     <section class="module" id="warehouse">
@@ -966,7 +967,7 @@
         <tr><td>layaway</td><td>layaway_create, layaway_payments, layaway_cancel</td></tr>
         <tr><td>purchase_requests</td><td>pr_create, pr_approve, pr_convert</td></tr>
         <tr><td>purchasing</td><td>purchasing_create, purchasing_approve, purchasing_receive</td></tr>
-        <tr><td>transfers</td><td>transfers_create, transfers_approve, transfers_pickup, transfers_dropoff</td></tr>
+        <tr><td>transfers</td><td>transfers_create (request), transfers_approve (review &amp; send), transfers_pickup, transfers_dropoff (receive)</td></tr>
         <tr><td>quotations</td><td>quotations_create, quotations_approve, quotations_convert</td></tr>
         <tr><td>sales_manager</td><td>(none)</td></tr>
         <tr><td>special_projects</td><td>(none — special_projects_approve is a separate, independent permission below, not a sub-key)</td></tr>
