@@ -6648,9 +6648,22 @@ const App = {
 
   // ─── Services & Non-Inventory Items ─────────────────────────────────────
 
-  async renderServices() {
+  // Services filter bar as it stands, so a save / deactivate re-renders on the
+  // same search; `fallback` fills the search only when it was empty.
+  _svcFilterState(fallback = {}) {
+    const val = id => (document.getElementById(id) || {}).value || '';
+    return {
+      search: val('svc-search') || fallback.search || '',
+      category: val('svc-cat-filter'),
+      status: val('svc-status-filter'),
+    };
+  },
+
+  async renderServices(filters = null) {
+    const hasFilters = !!(filters && (filters.search || filters.category || filters.status));
     const [services, categories] = await Promise.all([
-      this.api('GET', '/products?is_service=1'),
+      // refilter() below fetches the filtered list when filters are restored.
+      hasFilters ? [] : this.api('GET', '/products?is_service=1'),
       this.api('GET', '/categories'),
     ]);
     if (this.section !== 'services') return;
@@ -6678,12 +6691,15 @@ const App = {
       </div>
       <div class="card">
         <div class="table-wrap" id="svc-table-wrap">
-          ${this._buildServiceTable(services)}
+          ${hasFilters ? '<p style="color:var(--text-muted);padding:16px">Loading…</p>' : this._buildServiceTable(services)}
         </div>
       </div>`;
 
+    // Only the latest request may paint the table (see renderInventory).
+    let refilterSeq = 0;
     const refilter = async () => {
-      const q = document.getElementById('svc-search').value;
+      const seq = ++refilterSeq;
+      const q = document.getElementById('svc-search').value.trim();
       const cat = document.getElementById('svc-cat-filter').value;
       const status = document.getElementById('svc-status-filter').value;
       let url = '/products?is_service=1&';
@@ -6691,12 +6707,23 @@ const App = {
       if (cat) url += `category=${cat}&`;
       if (status !== '') url += `active=${status}&`;
       const filtered = await this.api('GET', url);
+      if (seq !== refilterSeq || this.section !== 'services') return;
       document.getElementById('svc-table-wrap').innerHTML = this._buildServiceTable(filtered);
     };
 
-    document.getElementById('svc-search').addEventListener('input', refilter);
+    let searchTimer;
+    const searchEl = document.getElementById('svc-search');
+    searchEl.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(refilter, 250); });
+    searchEl.addEventListener('keydown', e => { if (e.key === 'Enter') { clearTimeout(searchTimer); refilter(); } });
     document.getElementById('svc-cat-filter').addEventListener('change', refilter);
     document.getElementById('svc-status-filter').addEventListener('change', refilter);
+
+    if (hasFilters) {
+      searchEl.value = filters.search || '';
+      document.getElementById('svc-cat-filter').value = filters.category || '';
+      document.getElementById('svc-status-filter').value = filters.status || '';
+      await refilter();
+    }
   },
 
   _buildServiceTable(services) {
@@ -6784,9 +6811,10 @@ const App = {
     try {
       if (id) await this.api('PUT', `/products/${id}`, data);
       else await this.api('POST', '/products', data);
+      const filters = this._svcFilterState({ search: sku });
       this.closeModal();
       this.alert(id ? 'Service updated' : 'Service created');
-      this.renderServices();
+      this.renderServices(filters);
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
@@ -6813,9 +6841,10 @@ const App = {
   async deleteService(id) {
     if (!confirm('Deactivate this service?')) return;
     await this.api('DELETE', `/products/${id}`);
+    const filters = this._svcFilterState();
     this.closeModal();
     this.alert('Service deactivated');
-    this.renderServices();
+    this.renderServices(filters);
   },
 
   // ─── Rentals ──────────────────────────────────────────────────────────────
