@@ -13908,15 +13908,23 @@ const App = {
     });
   },
 
-  // Search box + type filter together (GET /customers ?search= &type=).
-  _customerListQuery() {
-    const q = document.getElementById('cust-search')?.value || '';
+  // Search box + type filter together (GET /customers ?search= &type=), one
+  // page at a time (?paged=1 → { rows, total }).
+  _customerListQuery(offset = 0) {
+    const q = (document.getElementById('cust-search')?.value || '').trim();
     const type = document.getElementById('cust-type-filter')?.value || '';
-    return `/customers?active=1${q ? `&search=${encodeURIComponent(q)}` : ''}${type ? `&type=${type}` : ''}`;
+    return `/customers?active=1&paged=1&offset=${offset}${q ? `&search=${encodeURIComponent(q)}` : ''}${type ? `&type=${type}` : ''}`;
   },
 
-  async renderCustomers() {
-    const customers = await this.api('GET', '/customers?active=1');
+  // Customers filter bar as it stands, so a save / deactivate re-renders on
+  // the same customer; `fallback` fills the search only when it was empty.
+  _custFilterState(fallback = {}) {
+    if (this.section !== 'customers') return null;
+    const val = id => (document.getElementById(id) || {}).value || '';
+    return { search: val('cust-search') || fallback.search || '', type: val('cust-type-filter') };
+  },
+
+  async renderCustomers(filters = null) {
     if (this.section !== 'customers') return;
 
     document.getElementById('content').innerHTML = `
@@ -13947,30 +13955,68 @@ const App = {
         <span id="cust-count" style="font-size:13px;color:var(--text-muted);margin-left:auto"></span>
       </div>
       <div class="card">
-        <div class="table-wrap" id="cust-table"></div>
+        <div class="table-wrap" id="cust-table" style="max-height:65vh;overflow-y:auto"
+          onscroll="if(this.scrollTop+this.clientHeight>=this.scrollHeight-400)App._custMoreRows()"></div>
       </div>`;
 
-    this.buildCustomerTable(customers);
+    if (filters) {
+      document.getElementById('cust-search').value = filters.search || '';
+      document.getElementById('cust-type-filter').value = filters.type || '';
+    }
 
-    const refresh = async () => {
-      const url = this._customerListQuery();
-      this._customerListUrl = url;
-      const data = await this.api('GET', url);
-      if (this._customerListUrl === url) this.buildCustomerTable(data); // ignore a slower, older response
-    };
-    document.getElementById('cust-search').addEventListener('input', refresh);
-    document.getElementById('cust-type-filter').addEventListener('change', refresh);
+    // Search once typing pauses (Enter at once); _custLoad ignores replies
+    // to anything but the latest request.
+    let searchTimer;
+    const searchEl = document.getElementById('cust-search');
+    searchEl.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => this._custLoad(), 250); });
+    searchEl.addEventListener('keydown', e => { if (e.key === 'Enter') { clearTimeout(searchTimer); this._custLoad(); } });
+    document.getElementById('cust-type-filter').addEventListener('change', () => this._custLoad());
+    await this._custLoad();
   },
 
-  buildCustomerTable(customers) {
+  // First page of the list for the current filters.
+  async _custLoad() {
+    const seq = this._custSeq = (this._custSeq || 0) + 1;
+    this._custList = null; // no "next page" against the old list meanwhile
+    const { rows, total } = await this.api('GET', this._customerListQuery(0));
+    if (seq !== this._custSeq || !document.getElementById('cust-table')) return;
+    this._custList = { shown: rows.length, total, loading: false };
+    this.buildCustomerTable(rows, total);
+  },
+
+  // Next page, when the table is scrolled near its bottom.
+  async _custMoreRows() {
+    const t = this._custList, seq = this._custSeq;
+    if (!t || t.loading || t.shown >= t.total) return;
+    t.loading = true;
+    try {
+      const { rows } = await this.api('GET', this._customerListQuery(t.shown));
+      if (seq !== this._custSeq || t !== this._custList) return;
+      t.shown += rows.length;
+      document.getElementById('cust-tbody')?.insertAdjacentHTML('beforeend', this._custRowsHtml(rows));
+      const shownEl = document.getElementById('cust-shown');
+      if (shownEl) shownEl.textContent = t.shown.toLocaleString();
+      if (t.shown >= t.total || !rows.length) { t.shown = t.total; document.getElementById('cust-more')?.remove(); }
+    } finally { t.loading = false; }
+  },
+
+  buildCustomerTable(customers, total = customers.length) {
     const el = document.getElementById('cust-table');
     if (!el) return;
     const count = document.getElementById('cust-count');
-    if (count) count.textContent = `${customers.length.toLocaleString()} customer${customers.length === 1 ? '' : 's'}`;
+    if (count) count.textContent = `${total.toLocaleString()} customer${total === 1 ? '' : 's'}`;
     if (!customers.length) { el.innerHTML = '<div class="empty-state"><p>No customers found</p></div>'; return; }
-    el.innerHTML = `<table>
+    el.innerHTML = `<table class="sticky-table">
       <thead><tr><th>Customer #</th><th>Name</th><th>Type</th><th>Email</th><th>Phone</th><th>City</th><th>Loyalty Pts</th><th>Total Spent</th><th>Actions</th></tr></thead>
-      <tbody>${customers.map(c => {
+      <tbody id="cust-tbody">${this._custRowsHtml(customers)}</tbody>
+    </table>
+    ${customers.length < total ? `<div id="cust-more" style="padding:10px;text-align:center;color:var(--text-muted);font-size:12px">
+      Showing <span id="cust-shown">${customers.length.toLocaleString()}</span> of ${total.toLocaleString()} — scroll for more
+    </div>` : ''}`;
+  },
+
+  _custRowsHtml(customers) {
+    return customers.map(c => {
         const isCredit = c.customer_type === 'credit';
         const typeBadge = isCredit
           ? `<span class="badge-pill badge-info">Credit</span>${c.account_blocked ? ' <span class="badge-pill badge-danger">Blocked</span>' : ''}`
@@ -13991,8 +14037,7 @@ const App = {
           ${this.can('customers_edit') ? `<button class="btn btn-secondary btn-sm" onclick="App.showCustomerForm(${c.id})">Edit</button>` : ''}
           <button class="btn btn-outline btn-sm" onclick="App.viewCustomer(${c.id})">History</button>
         </td>
-      </tr>`;}).join('')}</tbody>
-    </table>`;
+      </tr>`;}).join('');
   },
 
   async showCustomerForm(id, opts = {}) {
@@ -14002,6 +14047,7 @@ const App = {
       this.api('GET', '/cash-back-cards'),
       this.api('GET', '/customer-categories'),
     ]);
+    this._custFormNumber = c.customer_number || '';
     const isCredit = (c.customer_type || 'cash') === 'credit';
     const isTaxExempt = c.tax_exempt ? true : false;
     const isRentalCust = c.is_rental_customer ? true : false;
@@ -14431,16 +14477,19 @@ const App = {
     if (data.customer_type === 'credit' && data.credit_terms_days < 1) { this.alert('Credit terms must be at least 1 day', 'error'); return; }
     if (opts.force) data.force = true;
     try {
+      let number = this._custFormNumber;
       if (id) {
         await this.api('PUT', `/customers/${id}`, data);
         if (blockChange) await this.api('PATCH', `/customers/${id}/credit-block`, blockChange);
       } else {
         const created = await this.api('POST', '/customers', data);
         if (this._customerFormStack) return this._finishStackedCustomerForm(created.id);
+        number = created.customer_number;
       }
+      const filters = this._custFilterState({ search: number });
       this.closeModal();
       this.alert(id ? 'Customer updated' : 'Customer created');
-      this.renderCustomers();
+      this.renderCustomers(filters);
     } catch (e) {
       // The customer form's inputs are gone once the duplicate-picker modal
       // replaces it, so stash the already-collected data for "Create Anyway"
@@ -14495,9 +14544,10 @@ const App = {
       const created = await this.api('POST', '/customers', data);
       this._pendingCustomerData = null;
       if (this._customerFormStack) return this._finishStackedCustomerForm(created.id);
+      const filters = this._custFilterState({ search: created.customer_number });
       this.closeModal();
       this.alert('Customer created');
-      this.renderCustomers();
+      this.renderCustomers(filters);
     } catch (e) { this.alert(e.message, 'error'); }
   },
 
@@ -14720,9 +14770,10 @@ const App = {
   async deleteCustomer(id) {
     if (!confirm('Deactivate this customer?')) return;
     await this.api('DELETE', `/customers/${id}`);
+    const filters = this._custFilterState();
     this.closeModal();
     this.alert('Customer deactivated');
-    this.renderCustomers();
+    this.renderCustomers(filters);
   },
 
   async viewCustomer(id) {

@@ -223,10 +223,19 @@ router.get('/', requireAuth, async (req, res) => {
     const { search, active, type } = req.query;
     // ?limit= (the POS customer lookup) returns just the first matches, and
     // credit-checks only those, instead of every customer on file.
-    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 0, 0), 500);
+    //
+    // ?paged=1 (the Customers screen) returns { rows, total } — one page of
+    // `limit` (default 200) starting at ?offset=, plus the total matching —
+    // so the list loads a page at a time as it scrolls instead of every
+    // customer on file on each keystroke.
+    const paged = req.query.paged === '1';
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || (paged ? 200 : 0), 0), 500);
+    const offset = paged ? Math.max(parseInt(req.query.offset, 10) || 0, 0) : 0;
 
-    // Auto-block any overdue credit customers before returning list
-    if (!limit) {
+    // Auto-block any overdue credit customers before returning list — on the
+    // paged Customers screen, when it opens (first page, no search) rather
+    // than on every keystroke.
+    if (!limit || (paged && offset === 0 && !search)) {
       const { rows: overdue } = await db.execute({ sql: "SELECT id FROM customers WHERE customer_type = 'credit' AND active = 1 AND account_balance > 0", args: [] });
       await runCreditCheckBatch(overdue.map(c => c.id));
     }
@@ -254,9 +263,23 @@ router.get('/', requireAuth, async (req, res) => {
     if (type === 'credit' || type === 'cash') { sql += ' AND customer_type = ?'; params.push(type); }
     // Only customers with something owing on account (POS Receive Payment).
     if (req.query.owing) sql += ' AND account_balance > 0.005';
-    sql += ' ORDER BY last_name, first_name';
-    if (limit) { sql += ' LIMIT ?'; params.push(limit); }
-    const { rows } = await db.execute({ sql, args: params });
+    // Rental approved / other is worked out per row below, so those filters
+    // can't be paged in SQL — they page the filtered list instead.
+    const rentalType = type === 'rental_approved' || type === 'other';
+    let total = null;
+    if (paged && !rentalType) {
+      const { rows: [n] } = await db.execute({ sql: sql.replace('SELECT *', 'SELECT COUNT(*) AS n'), args: params });
+      total = Number(n.n);
+    }
+    sql += ` ORDER BY last_name, first_name${paged ? ', id' : ''}`;
+    if (limit && !(paged && rentalType)) { sql += ' LIMIT ? OFFSET ?'; params.push(limit, offset); }
+    let { rows } = await db.execute({ sql, args: params });
+    if (paged && rentalType) {
+      const approved = c => !!c.is_rental_customer && (!!c.rental_preapproved || getMissingRentalFields(c).length === 0);
+      rows = rows.filter(c => approved(c) === (type === 'rental_approved'));
+      total = rows.length;
+      rows = rows.slice(offset, offset + limit);
+    }
     if (limit) {
       const owing = rows.filter(c => c.customer_type === 'credit' && c.active && c.account_balance > 0).map(c => c.id);
       if (owing.length) {
@@ -266,7 +289,8 @@ router.get('/', requireAuth, async (req, res) => {
         for (const c of rows) if (blocked.has(c.id)) c.account_blocked = blocked.get(c.id);
       }
     }
-    if (type === 'rental_approved' || type === 'other') {
+    if (paged) return res.json({ rows, total });
+    if (rentalType) {
       const approved = c => !!c.is_rental_customer && (!!c.rental_preapproved || getMissingRentalFields(c).length === 0);
       return res.json(rows.filter(c => approved(c) === (type === 'rental_approved')));
     }
