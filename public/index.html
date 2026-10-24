@@ -18445,7 +18445,11 @@ const App = {
   },
 
   // ─── Suppliers ────────────────────────────────────────────
-  async renderSuppliers() {
+  async renderSuppliers(filters = null) {
+    // Keep the search across a refresh from a save / A/P action unless the
+    // caller passed its own (renderSuppliers() from the menu starts clean
+    // because the content area holds another section by then).
+    if (!filters && this.section === 'suppliers' && document.getElementById('sup-search')) filters = { search: document.getElementById('sup-search').value };
     const c = document.getElementById('content');
     c.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
     let suppliers;
@@ -18489,16 +18493,23 @@ const App = {
           </table>
         </div>
       </div>`;
-    this.buildSuppliersTable(suppliers);
-    document.getElementById('sup-search').addEventListener('input', e => {
-      const q = e.target.value.toLowerCase();
-      const filtered = (this._allSuppliers || []).filter(s =>
+    const searchEl = document.getElementById('sup-search');
+    const refilter = () => {
+      const q = searchEl.value.trim().toLowerCase();
+      const filtered = !q ? (this._allSuppliers || []) : (this._allSuppliers || []).filter(s =>
         s.name.toLowerCase().includes(q) ||
         s.supplier_number.toLowerCase().includes(q) ||
         (s.contact_name && s.contact_name.toLowerCase().includes(q))
       );
       this.buildSuppliersTable(filtered);
-    });
+    };
+    searchEl.value = filters?.search || '';
+    refilter();
+    // Filter once typing pauses rather than rebuilding the table on every
+    // keystroke; Enter filters straight away.
+    let searchTimer;
+    searchEl.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(refilter, 200); });
+    searchEl.addEventListener('keydown', e => { if (e.key === 'Enter') { clearTimeout(searchTimer); refilter(); } });
   },
 
   buildSuppliersTable(suppliers) {
@@ -18714,11 +18725,12 @@ const App = {
     if (id) data.active = parseInt(document.getElementById('sf-active').value);
     if (!data.name) { this.alert('Name required', 'error'); return; }
     try {
-      if (id) await this.api('PUT', `/suppliers/${id}`, data);
-      else await this.api('POST', '/suppliers', data);
+      const saved = id ? await this.api('PUT', `/suppliers/${id}`, data) : await this.api('POST', '/suppliers', data);
+      // Same search as before, or this supplier's number when it was empty.
+      const search = document.getElementById('sup-search')?.value || saved?.supplier_number || data.supplier_number || data.name;
       this.closeModal();
       this.alert('Supplier saved');
-      this.renderSuppliers();
+      this.renderSuppliers({ search });
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
