@@ -20543,6 +20543,7 @@ const App = {
                   <td>
                     <button class="btn btn-sm btn-secondary" onclick="App.viewTransfer(${t.id})">View</button>
                     ${t.status==='requested' && this.can('transfers_approve') ? `<button class="btn btn-sm btn-primary" onclick="App.showSendTransfer(${t.id})">Review &amp; Send</button>` : ''}
+                    ${t.status==='requested'||t.status==='pending' ? `<button class="btn btn-sm btn-outline" onclick="App.printTransferPickList(${t.id})" title="Print Pick List">🗒 Pick List</button>` : ''}
                     ${(t.status==='pending'||t.status==='in_transit') && this.can('transfers_dropoff') ? `<button class="btn btn-sm btn-success" onclick="App.showReceiveTransfer(${t.id})">Receive</button>` : ''}
                   </td>
                 </tr>`).join('') : '<tr><td colspan="7" class="empty-state">No transfers yet</td></tr>'}
@@ -20789,6 +20790,7 @@ const App = {
         </div>
         <div class="modal-footer">
           ${t.status==='requested' && this.can('transfers_approve') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showSendTransfer(${t.id})">Review &amp; Send</button>` : ''}
+          ${t.status!=='cancelled' ? `<button class="btn btn-outline" onclick="App.printTransferPickList(${t.id})">🗒 Print Pick List</button>` : ''}
           ${t.status==='pending' && this.can('transfers_pickup') ? `<button class="btn btn-secondary" onclick="App.dispatchTransfer(${t.id})">Mark In-Transit</button>` : ''}
           ${t.status!=='cancelled'&&t.status!=='received' ? `<button class="btn btn-danger" onclick="App.cancelTransfer(${t.id})">Cancel</button>` : ''}
           ${(t.status==='pending'||t.status==='in_transit') && this.can('transfers_dropoff') ? `<button class="btn btn-success" onclick="App.closeModal();App.showReceiveTransfer(${t.id})">Receive Items</button>` : ''}
@@ -20833,9 +20835,7 @@ const App = {
   async showSendTransfer(id) {
     const t = await this.api('GET', `/transfers/${id}`);
     if (t.status !== 'requested') { this.alert('This transfer has already been sent', 'warning'); return this.viewTransfer(id); }
-    const stock = await Promise.all(t.items.map(i => i.product_id
-      ? this.api('GET', `/products/${i.product_id}?branch_id=${t.from_branch_id}`).then(p => p.branch_stock_qty ?? 0).catch(() => null)
-      : null));
+    const stock = t.items.map(i => i.product_id ? (i.source_stock ?? 0) : null);
     this.showModal(`
       <div class="modal" style="max-width:640px">
         <div class="modal-header"><span class="modal-title">Send Transfer — ${t.transfer_number}</span><button class="modal-close">✕</button></div>
@@ -20858,10 +20858,76 @@ const App = {
         </div>
         <div class="modal-footer">
           <button class="btn btn-danger" onclick="App.cancelTransfer(${t.id})">Cancel Request</button>
+          <button class="btn btn-outline" onclick="App.printTransferPickList(${t.id})">🗒 Print Pick List</button>
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
           <button class="btn btn-primary" id="tsend-btn" onclick="App.confirmSendTransfer(${t.id}, [${t.items.map(i => i.id).join(',')}])">Send</button>
         </div>
       </div>`);
+  },
+
+  // Pick list for the sending branch's inventory team: each item with its
+  // bin location(s) there, sorted by bin so it can be walked in order, the
+  // quantity to pick (asked while still a request, sent once sent), what's
+  // in stock, and blank Picked boxes + sign-off lines. Once sent, the stock
+  // (and bin counts) already exclude these units, so those are left off.
+  async printTransferPickList(id) {
+    const t = await this.api('GET', `/transfers/${id}`);
+    const store = this.settings || {};
+    const esc = v => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const date = new Date().toLocaleDateString('en-US', { year:'numeric', month:'long', day:'numeric' });
+    const isRequest = t.status === 'requested';
+    const qtyLabel = isRequest ? 'Requested' : 'Sent';
+    const binText = i => i.bins.length ? i.bins.map(b => `${esc(b.bin_code)}${b.zone_name ? ` <span style="color:#777">(${esc(b.zone_name)})</span>` : ''}${isRequest && i.bins.length > 1 ? ` <span style="color:#777">· ${b.quantity}</span>` : ''}`).join('<br>') : '—';
+    const lines = [...t.items].filter(i => isRequest || i.quantity_requested > 0)
+      .sort((a, b) => (a.bins[0]?.bin_code ? 0 : 1) - (b.bins[0]?.bin_code ? 0 : 1) || String(a.bins[0]?.bin_code || '').localeCompare(String(b.bins[0]?.bin_code || ''), undefined, { numeric: true }) || a.product_name.localeCompare(b.product_name));
+    const totalQty = lines.reduce((n, i) => n + (Number(i.quantity_requested) || 0), 0);
+    const rows = lines.map(i => `
+      <tr>
+        <td>${binText(i)}</td>
+        <td>${esc(i.product_name)}</td>
+        <td>${esc(i.sku)}</td>
+        <td style="text-align:center;font-weight:bold">${i.quantity_requested}</td>
+        ${isRequest ? `<td style="text-align:center;${(i.source_stock ?? 0) < i.quantity_requested ? 'color:#c00;font-weight:bold' : ''}">${i.source_stock ?? 0}</td>` : ''}
+        <td style="width:80px">&nbsp;</td>
+      </tr>`).join('');
+    const win = window.open('', '_blank', 'width=850,height=1000');
+    win.document.write(`<!DOCTYPE html><html><head><title>Pick List – ${esc(t.transfer_number)}</title>
+    <style>
+      body{font-family:Arial,sans-serif;font-size:13px;margin:32px;color:#111}
+      h1{font-size:20px;margin:0}h2{font-size:15px;font-weight:normal;margin:4px 0 0}
+      .meta{display:flex;flex-wrap:wrap;gap:16px 40px;margin:16px 0 12px;font-size:12px}
+      .meta div{line-height:1.6}
+      .meta label{font-weight:bold;text-transform:uppercase;font-size:10px;color:#555;display:block}
+      table{width:100%;border-collapse:collapse;margin-top:12px}
+      th{background:#f0f0f0;text-align:left;padding:6px 8px;font-size:11px;text-transform:uppercase;border:1px solid #ccc}
+      td{padding:6px 8px;border:1px solid #ddd;vertical-align:middle}
+      tr:nth-child(even) td{background:#fafafa}
+      .sign{display:flex;gap:40px;margin-top:36px;font-size:12px}
+      .sign div{flex:1;border-top:1px solid #333;padding-top:4px}
+      .footer{margin-top:24px;font-size:11px;color:#777;border-top:1px solid #ddd;padding-top:8px}
+      @media print{body{margin:16px}}
+    </style></head><body>
+    ${this._printLogoTag(50)}
+    <h1>${esc(store.store_name || 'Pick List')}</h1>
+    <h2>TRANSFER PICK LIST</h2>
+    <div class="meta">
+      <div><label>Transfer #</label>${esc(t.transfer_number)}</div>
+      <div><label>Pick From</label>${esc(t.from_branch_name || '—')}</div>
+      <div><label>Deliver To</label>${esc(t.to_branch_name || '—')}</div>
+      <div><label>Requested</label>${this.fmtDate(t.created_at)}${t.employee_name ? ` · ${esc(t.employee_name)}` : ''}</div>
+      ${t.sent_at ? `<div><label>Sent</label>${this.fmtDate(t.sent_at)}${t.sent_by_name ? ` · ${esc(t.sent_by_name)}` : ''}</div>` : ''}
+      <div><label>Status</label>${esc(this._transferStatusLabel(t.status))}</div>
+    </div>
+    ${t.notes ? `<p style="font-size:12px"><strong>Notes:</strong> ${esc(t.notes)}</p>` : ''}
+    <table>
+      <thead><tr><th>Bin Location</th><th>Product</th><th>SKU</th><th>${qtyLabel}</th>${isRequest ? '<th>In Stock</th>' : ''}<th>Picked ✓</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="sign"><div>Picked by</div><div>Checked by</div><div>Date</div></div>
+    <div class="footer">Printed: ${date} &nbsp;|&nbsp; ${lines.length} item(s), ${totalQty} unit(s)</div>
+    <script>window.onload=()=>{window.print()}<\/script>
+    </body></html>`);
+    win.document.close();
   },
 
   async confirmSendTransfer(transferId, itemIds) {

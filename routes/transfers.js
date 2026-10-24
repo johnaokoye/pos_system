@@ -33,7 +33,18 @@ router.get('/:id', requirePermission('transfers'), async (req, res) => {
       se.first_name || ' ' || se.last_name as sent_by_name
       FROM branch_transfers t LEFT JOIN branches fb ON t.from_branch_id = fb.id LEFT JOIN branches tb ON t.to_branch_id = tb.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN employees se ON t.sent_by = se.id WHERE t.id = ?`, args: [req.params.id] });
     if (!transfer) return res.status(404).json({ error: 'Not found' });
-    const { rows: items } = await db.execute({ sql: 'SELECT * FROM branch_transfer_items WHERE transfer_id = ?', args: [req.params.id] });
+    // Each line also carries what the sending branch holds (source_stock)
+    // and where it's shelved there (bins, primary first) — for Review & Send
+    // and the printed pick list.
+    const { rows: items } = await db.execute({ sql: `SELECT ti.*, bi.stock_qty AS source_stock,
+        (SELECT json_group_array(json_object('bin_code', x.bin_code, 'zone_name', x.zone_name, 'quantity', x.quantity, 'is_primary', x.is_primary)) FROM (
+          SELECT sb.bin_code, z.name AS zone_name, a.quantity, a.is_primary FROM product_bin_assignments a
+          JOIN storage_bins sb ON sb.id = a.bin_id LEFT JOIN warehouse_zones z ON z.id = sb.zone_id
+          WHERE a.product_id = ti.product_id AND a.branch_id = ? ORDER BY a.is_primary DESC, sb.bin_code) x) AS bins
+      FROM branch_transfer_items ti
+      LEFT JOIN branch_inventory bi ON bi.product_id = ti.product_id AND bi.branch_id = ?
+      WHERE ti.transfer_id = ? ORDER BY ti.id`, args: [transfer.from_branch_id, transfer.from_branch_id, req.params.id] });
+    for (const i of items) i.bins = JSON.parse(i.bins || '[]');
     transfer.items = items;
     res.json(transfer);
   } catch(e) { res.status(500).json({ error: e.message }); }
