@@ -26,6 +26,28 @@ router.get('/', requirePermission('transfers'), async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// GET inbox — transfer requests waiting to be sent from one of the
+// caller's branches (employee_branches + default branch; every branch if
+// they have none), newest first, leaving out the caller's own. Polled by the app to notify the inventory
+// team (App._pollTransferInbox). Registered before GET /:id.
+router.get('/inbox', requirePermission('transfers_approve'), async (req, res) => {
+  try {
+    const empId = req.employee?.id;
+    const { rows: mine } = empId ? await db.execute({ sql: `SELECT branch_id FROM employee_branches WHERE employee_id = ?
+      UNION SELECT default_branch_id FROM employees WHERE id = ? AND default_branch_id IS NOT NULL`, args: [empId, empId] }) : { rows: [] };
+    const branchIds = mine.map(r => r.branch_id).filter(Boolean);
+    const scope = branchIds.length ? ` AND t.from_branch_id IN (${branchIds.map(() => '?').join(',')})` : '';
+    const { rows } = await db.execute({ sql: `SELECT t.id, t.transfer_number, t.created_at, t.notes, t.from_branch_id, t.to_branch_id,
+        fb.name AS from_branch_name, tb.name AS to_branch_name, e.first_name || ' ' || e.last_name AS employee_name,
+        (SELECT COUNT(*) FROM branch_transfer_items WHERE transfer_id = t.id) AS item_count,
+        (SELECT COALESCE(SUM(quantity_requested), 0) FROM branch_transfer_items WHERE transfer_id = t.id) AS unit_count
+      FROM branch_transfers t LEFT JOIN branches fb ON fb.id = t.from_branch_id LEFT JOIN branches tb ON tb.id = t.to_branch_id
+      LEFT JOIN employees e ON e.id = t.employee_id
+      WHERE t.status = 'requested'${scope} AND COALESCE(t.employee_id, 0) != ? ORDER BY t.id DESC LIMIT 50`, args: [...branchIds, empId || 0] });
+    res.json({ count: rows.length, requests: rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET single transfer with items
 router.get('/:id', requirePermission('transfers'), async (req, res) => {
   try {

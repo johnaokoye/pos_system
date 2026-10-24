@@ -62,6 +62,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .hub-tile span { font-size: 14.5px; font-weight: 600; text-align: center; letter-spacing: .2px; line-height: 1.25; }
 .hub-tile:hover { transform: translateY(-3px); box-shadow: 0 8px 18px rgba(0,0,0,.18); filter: brightness(1.06); }
 .hub-tile:active { transform: translateY(0) scale(.96); filter: brightness(.94); }
+.hub-tile { position: relative; }
+.count-pill { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px; background: #e53935; color: #fff; font-size: 11px; font-weight: 700; line-height: 1; }
+.hub-tile .count-pill { position: absolute; top: 10px; right: 10px; min-width: 24px; height: 24px; font-size: 12px; border-radius: 12px; box-shadow: 0 0 0 2px #fff; }
+.nav-item .count-pill { margin-left: auto; }
+#notify-stack { position: fixed; right: 16px; bottom: 16px; z-index: 9400; display: flex; flex-direction: column; gap: 10px; max-width: min(380px, calc(100vw - 32px)); }
+.notify-card { background: var(--card, #fff); color: var(--text, #111); border: 1px solid var(--border, #ddd); border-left: 4px solid #FF9800; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.18); padding: 12px 14px; font-size: 13px; }
+.notify-card .notify-title { font-weight: 700; margin-bottom: 4px; display: flex; justify-content: space-between; gap: 8px; }
+.notify-card .notify-close { background: none; border: none; cursor: pointer; color: var(--text-muted, #777); font-size: 14px; padding: 0; }
+.notify-card .notify-actions { display: flex; gap: 8px; margin-top: 10px; }
 
 /* Cards */
 .card { background: var(--card); border-radius: 8px; border: 1px solid var(--border); padding: 16px; }
@@ -897,7 +906,110 @@ const App = {
     else firstSection = perms ? (allSections.find(s => this.can(s)) || 'dashboard') : 'dashboard';
     this.showSection(firstSection);
     this.checkLowStock();
+    this._startTransferInbox();
     this._resumeDownloadAfterLogin();
+  },
+
+  // ─── Transfer request notifications ─────────────────────────────────────
+  // The inventory team (transfers_approve) is told when a branch requests
+  // stock from one of their branches: GET /transfers/inbox is polled every
+  // minute; each request not seen before pops a notice that stays until
+  // dismissed, and the waiting count shows on the Warehouse menu item and
+  // the Branch Transfers tile. Requests that arrived while signed out come
+  // up as one summary at sign-in. Seen ids are remembered per user in this
+  // browser (localStorage) so a reload doesn't repeat them.
+  _startTransferInbox() {
+    clearInterval(this._trfInboxTimer);
+    this._trfInboxCount = 0;
+    this._trfInboxFirst = true;
+    if (!this.can('transfers_approve')) return this._paintTransferBadges();
+    this._pollTransferInbox();
+    this._trfInboxTimer = setInterval(() => this._pollTransferInbox(), 60000);
+  },
+
+  _stopTransferInbox() {
+    clearInterval(this._trfInboxTimer);
+    this._trfInboxTimer = null;
+    this._trfInboxCount = 0;
+    this._paintTransferBadges();
+    document.getElementById('notify-stack')?.remove();
+  },
+
+  _trfSeenKey() { return `trfInboxSeen:${this.currentUser?.id}`; },
+  _trfSeenIds() {
+    try { return new Set(JSON.parse(localStorage.getItem(this._trfSeenKey()) || '[]')); } catch { return new Set(); }
+  },
+  _trfRememberSeen(ids) {
+    try { localStorage.setItem(this._trfSeenKey(), JSON.stringify([...ids].slice(-200))); } catch {}
+  },
+
+  async _pollTransferInbox() {
+    if (!this.currentUser || !this.can('transfers_approve')) return;
+    let inbox;
+    try { inbox = await this.api('GET', '/transfers/inbox'); } catch { return; }
+    if (!this.currentUser) return;
+    this._trfInboxCount = inbox.count;
+    this._paintTransferBadges();
+    const seen = this._trfSeenIds();
+    const fresh = inbox.requests.filter(r => !seen.has(r.id));
+    if (fresh.length) {
+      if (this._trfInboxFirst && fresh.length > 1) {
+        this._notify({
+          title: `📦 ${fresh.length} transfer requests waiting`,
+          body: `Branches are waiting on stock from ${[...new Set(fresh.map(r => r.from_branch_name))].join(', ')}.`,
+          actions: [{ label: 'Open Branch Transfers', run: () => this.showSection('transfers') }],
+        });
+      } else {
+        for (const r of fresh.slice().reverse()) {
+          this._notify({
+            title: `📦 Transfer request ${r.transfer_number}`,
+            body: `<strong>${this.escapeAttr(r.to_branch_name)}</strong> requests ${r.item_count} item${r.item_count === 1 ? '' : 's'} (${r.unit_count} unit${r.unit_count === 1 ? '' : 's'}) from ${this.escapeAttr(r.from_branch_name)}${r.employee_name ? ` · ${this.escapeAttr(r.employee_name)}` : ''}${r.notes ? `<div style="color:var(--text-muted);margin-top:4px">${this.escapeAttr(r.notes)}</div>` : ''}`,
+            actions: [
+              { label: 'Review &amp; Send', primary: true, run: () => this.showSendTransfer(r.id) },
+              { label: '🗒 Pick List', run: () => this.printTransferPickList(r.id) },
+            ],
+          });
+        }
+      }
+      fresh.forEach(r => seen.add(r.id));
+      this._trfRememberSeen(seen);
+    }
+    this._trfInboxFirst = false;
+  },
+
+  // A notice that stays on screen (bottom-right) until closed or acted on —
+  // unlike alert(), which fades after 3 seconds.
+  _notify({ title, body, actions = [] }) {
+    let stack = document.getElementById('notify-stack');
+    if (!stack) { stack = document.createElement('div'); stack.id = 'notify-stack'; document.body.appendChild(stack); }
+    const card = document.createElement('div');
+    card.className = 'notify-card';
+    card.innerHTML = `
+      <div class="notify-title"><span>${title}</span><button class="notify-close" title="Dismiss">✕</button></div>
+      <div>${body}</div>
+      ${actions.length ? `<div class="notify-actions">${actions.map((a, i) => `<button class="btn btn-sm ${a.primary ? 'btn-primary' : 'btn-outline'}" data-i="${i}">${a.label}</button>`).join('')}</div>` : ''}`;
+    card.querySelector('.notify-close').onclick = () => card.remove();
+    card.querySelectorAll('.notify-actions button').forEach(btn => {
+      btn.onclick = () => { card.remove(); actions[btn.dataset.i].run(); };
+    });
+    stack.appendChild(card);
+    while (stack.children.length > 4) stack.firstElementChild.remove();
+  },
+
+  // Waiting-request count on the Warehouse menu item and (when the hub is
+  // open) the Branch Transfers tile; nothing shown at 0.
+  _paintTransferBadges() {
+    const n = this._trfInboxCount || 0;
+    const paint = (el, cls) => {
+      if (!el) return;
+      let pill = el.querySelector(`.count-pill.${cls}`);
+      if (!n) { pill?.remove(); return; }
+      if (!pill) { pill = document.createElement('span'); pill.className = `count-pill ${cls}`; el.appendChild(pill); }
+      pill.textContent = n > 99 ? '99+' : n;
+      pill.title = `${n} transfer request${n === 1 ? '' : 's'} waiting to be sent`;
+    };
+    paint(document.querySelector('.nav-item[data-section="warehouse-hub"]'), 'trf-inbox');
+    paint(document.querySelector('.hub-tile[data-section="transfers"]'), 'trf-inbox');
   },
 
   // server.js redirects a logged-out browser hitting a document download
@@ -1213,7 +1325,7 @@ const App = {
     const tiles = hub.children
       .filter(c => this._hubTileAllowed(c.section))
       .map(c => `
-        <div class="hub-tile" style="background:${c.color}" onclick="App.showSection('${c.section}')">
+        <div class="hub-tile" data-section="${c.section}" style="background:${c.color}" onclick="App.showSection('${c.section}')">
           <svg viewBox="0 0 24 24" fill="currentColor">${c.icon}</svg>
           <span>${c.label}</span>
         </div>`).join('');
@@ -1259,6 +1371,7 @@ const App = {
       <div class="section-header"><h2>${hub.title}</h2></div>
       <div class="hub-grid" style="margin-bottom:${reportsPanel ? '16px' : '0'}">${tiles}</div>
       ${reportsPanel}`;
+    this._paintTransferBadges();
 
     if (showReports) this.loadWarehouseHubReports();
   },
@@ -1335,6 +1448,7 @@ const App = {
     // Best-effort — destroys the server-side session so the cookie can't be
     // replayed. Don't block the UI reset on it.
     this.api('POST', '/employees/logout').catch(() => {});
+    this._stopTransferInbox();
     this.currentUser = null;
     this.currentDrawerSession = null;
     this._posHasDrawers = false;
@@ -1401,6 +1515,7 @@ const App = {
       // for the login endpoint itself (invalid credentials also come back as
       // 401 and shouldn't bounce the user off the login screen they're on).
       if (res.status === 401 && url !== '/employees/login' && this.currentUser) {
+        this._stopTransferInbox();
         this.currentUser = null;
         this.showLoginScreen();
       }
@@ -20806,6 +20921,7 @@ const App = {
   _refreshTransferView() {
     if (this.section === 'transfer-dispatch') this.loadTransferDispatch();
     else this.renderTransfers();
+    this._pollTransferInbox(); // sent / cancelled requests leave the badge count
   },
 
   async dispatchTransfer(id) {
