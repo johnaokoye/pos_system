@@ -7343,13 +7343,25 @@ const App = {
   // moved into Sales so a rentals-only security group (gated on `rentals`
   // alone, same as this tile) never has to be granted the broader
   // Warehouse hub just to reach it.
-  async renderRentalItems() {
+  // Rental Items filter bar as it stands, so a save / deactivate re-renders on
+  // the same item and branch; `fallback` fills the search and branch only
+  // when they were empty.
+  _riFilterState(fallback = {}) {
+    const val = id => (document.getElementById(id) || {}).value || '';
+    return {
+      search: val('ri-search') || fallback.search || '',
+      branch: val('ri-branch-filter') || (fallback.branchId ? String(fallback.branchId) : ''),
+      type: val('ri-type-filter'),
+    };
+  },
+
+  async renderRentalItems(filters = null) {
     const branches = await this.api('GET', '/branches');
     document.getElementById('content').innerHTML = `
       <div class="section-header">
         <h2>Rental Items</h2>
         <div id="rental-header-actions" style="display:flex;gap:8px;align-items:center">
-          <input id="ri-search" type="text" placeholder="Search name or SKU…" oninput="App._filterRentalItemsTable()" style="padding:7px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--card);color:var(--text);width:180px">
+          <input id="ri-search" type="text" placeholder="Search name or SKU…" oninput="App._onRentalItemsSearch()" onkeydown="if(event.key==='Enter')App._onRentalItemsSearch(true)" style="padding:7px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--card);color:var(--text);width:180px">
           <select id="ri-branch-filter" onchange="App._filterRentalItemsTable()" style="padding:7px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--card);color:var(--text)">
             <option value="">All Branches</option>
             <option value="unassigned">Unassigned</option>
@@ -7371,7 +7383,20 @@ const App = {
         </div>
       </div>
       <div id="rental-content"></div>`;
+    if (filters) {
+      document.getElementById('ri-search').value = filters.search || '';
+      document.getElementById('ri-branch-filter').value = filters.branch || '';
+      document.getElementById('ri-type-filter').value = filters.type || '';
+    }
     await this.loadRentalItems();
+  },
+
+  // Filter once typing pauses rather than rebuilding the table on every
+  // keystroke; Enter filters straight away.
+  _onRentalItemsSearch(now = false) {
+    clearTimeout(this._riSearchTimer);
+    if (now) this._filterRentalItemsTable();
+    else this._riSearchTimer = setTimeout(() => this._filterRentalItemsTable(), 200);
   },
 
   exportRentalItemsCsv() {
@@ -7481,13 +7506,41 @@ const App = {
     const typeFilter = document.getElementById('ri-type-filter')?.value || '';
     if (typeFilter) filtered = filtered.filter(p => typeFilter === 'accessory' ? p.is_accessory : !p.is_accessory);
     if (search) filtered = filtered.filter(p => p.name.toLowerCase().includes(search) || p.sku.toLowerCase().includes(search));
+    // Rows are drawn in batches as the table scrolls (same as Retail
+    // Inventory's buildProductTable) — see _riMoreRows.
+    this._riTable = { rows: filtered, branchFilter, shown: 0 };
     document.getElementById('rental-content').innerHTML = !filtered.length ? '<div class="empty-state"><p>No rental items match this filter.</p></div>' : `
       <div class="card">
-        <div class="table-wrap" style="max-height:65vh;overflow-y:auto">
+        <div class="table-wrap" id="ri-table-wrap" style="max-height:65vh;overflow-y:auto" onscroll="if(this.scrollTop+this.clientHeight>=this.scrollHeight-400)App._riMoreRows()">
           <table class="sticky-table">
             <thead><tr><th style="width:52px"></th><th>SKU</th><th>Name</th><th>Branch</th><th>Class</th><th>Daily</th><th>Weekly</th><th>Monthly</th><th>Hourly</th><th>Stock</th><th>Available</th><th>Status</th><th></th></tr></thead>
-            <tbody>${filtered.map(p => `<tr>
-              <td style="width:52px">${p.image_path ? `<img src="${p.image_path}" class="prod-img-thumb" alt="">` : `<div class="prod-img-placeholder" onclick="App.showRentalItemForm(${p.id})">📷</div>`}</td>
+            <tbody id="ri-tbody">${this._riTakeRows()}</tbody>
+          </table>
+          <div id="ri-more" style="padding:10px;text-align:center;color:var(--text-muted);font-size:12px;${this._riTable.shown < filtered.length ? '' : 'display:none'}">
+            Showing <span id="ri-shown">${this._riTable.shown}</span> of ${filtered.length} — scroll for more
+          </div>
+        </div>
+      </div>`;
+  },
+
+  _riTakeRows() {
+    const t = this._riTable;
+    const slice = t.rows.slice(t.shown, t.shown + this.INV_ROW_BATCH);
+    t.shown += slice.length;
+    return this._riRowsHtml(slice, t.branchFilter);
+  },
+
+  _riMoreRows() {
+    const t = this._riTable, tbody = document.getElementById('ri-tbody');
+    if (!t || !tbody || t.shown >= t.rows.length) return;
+    tbody.insertAdjacentHTML('beforeend', this._riTakeRows());
+    document.getElementById('ri-shown').textContent = t.shown;
+    if (t.shown >= t.rows.length) document.getElementById('ri-more').style.display = 'none';
+  },
+
+  _riRowsHtml(rows, branchFilter) {
+    return rows.map(p => `<tr>
+              <td style="width:52px">${p.image_path ? `<img src="${p.image_path}" class="prod-img-thumb" alt="" loading="lazy" decoding="async">` : `<div class="prod-img-placeholder" onclick="App.showRentalItemForm(${p.id})">📷</div>`}</td>
               <td class="fw-600">${p.sku}${p.is_accessory?' <span class="badge-pill badge-secondary" style="font-size:10px">accessory</span>':''}</td>
               <td>${p.name}${p.rental_allow_sale ? ` <span class="badge-pill badge-teal" style="font-size:10px" title="Also sellable/quotable outright at ${this.fmt(p.price)}">For Sale · ${this.fmt(p.price)}</span>` : ''}${p.online_available ? ` <span class="badge-pill badge-info" style="font-size:10px" title="Visible on the website's Rentals catalog">Online</span>` : ''}</td>
               <td>${p.branch_stock?.length ? p.branch_stock.map(s => `<div style="white-space:nowrap">${s.branch_name}: <span class="fw-600">${s.stock_qty}</span></div>`).join('') : (p.assigned_branch_name || '—')}</td>
@@ -7505,10 +7558,7 @@ const App = {
                 <button class="btn btn-sm btn-outline" onclick="App.showRentalAccessoriesModal(${p.id}, '${p.name.replace(/'/g,"\\'")}')">Accessories</button>` : ''}
                 ${this.can('transfers') && p.assigned_branch_id ? `<button class="btn btn-sm btn-outline" onclick="App.showTransferForm({fromBranchId:${p.branch_stock && branchFilter && p.branch_stock.some(s => String(s.branch_id) === branchFilter) ? branchFilter : p.assigned_branch_id},productId:${p.id}})">Transfer</button>` : ''}
               </td>
-            </tr>`).join('')}</tbody>
-          </table>
-        </div>
-      </div>`;
+            </tr>`).join('');
   },
 
   async showRentalItemForm(id) {
@@ -7765,9 +7815,10 @@ const App = {
       if (id) await this.api('PUT', `/products/${id}`, data);
       else { const created = await this.api('POST', '/products', data); productId = created.id; }
       await this._syncRentalMandatoryAccessories(productId, selectedMandatoryIds);
+      const filters = this._riFilterState({ search: sku, branchId: data.branch_id });
       this.closeModal();
       this.alert(id ? 'Rental item updated' : 'Rental item created');
-      this.renderRentalItems();
+      this.renderRentalItems(filters);
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
@@ -7792,9 +7843,10 @@ const App = {
   async deleteRentalItem(id) {
     if (!confirm('Deactivate this rental item?')) return;
     await this.api('DELETE', `/products/${id}`);
+    const filters = this._riFilterState();
     this.closeModal();
     this.alert('Rental item deactivated');
-    this.renderRentalItems();
+    this.renderRentalItems(filters);
   },
 
   async showRentalAccessoriesModal(productId, productName) {
