@@ -5445,7 +5445,20 @@ const App = {
   },
 
   // ─── Inventory ────────────────────────────────────────────
-  async renderInventory(activeTab) {
+  // Inventory filter bar as it stands, so a save / stock change can re-render
+  // the list on the same item and branch. `fallback` fills the search and
+  // branch only when the user hadn't set them (e.g. the item just saved).
+  _invFilterState(fallback = {}) {
+    const val = id => (document.getElementById(id) || {}).value || '';
+    return {
+      search: val('inv-search') || fallback.search || '',
+      category: val('inv-cat-filter'),
+      brand: val('inv-brand-filter'),
+      branchId: val('inv-branch-filter') || (fallback.branchId ? String(fallback.branchId) : ''),
+    };
+  },
+
+  async renderInventory(activeTab, filters = null) {
     const tab = activeTab || this._inventoryTab || 'all';
     this._inventoryTab = tab;
     const tabBtn = (key, label) => `
@@ -5458,8 +5471,11 @@ const App = {
 
     if (tab === 'non-inventory') return this.renderNonInventoryTab(tabsHtml);
 
+    const hasFilters = !!(filters && (filters.search || filters.category || filters.brand || filters.branchId));
     const [products, categories, brands, movements, branches] = await Promise.all([
-      this.api('GET', '/products?is_service=0&is_rental=0&is_non_inventory=0'),
+      // Re-rendering onto saved filters: refilter() below fetches the
+      // filtered list, so don't pull the whole catalogue first.
+      hasFilters ? [] : this.api('GET', '/products?is_service=0&is_rental=0&is_non_inventory=0'),
       this.api('GET', '/categories'),
       this.api('GET', '/brands'),
       this.api('GET', '/products/movements?limit=30'),
@@ -5503,7 +5519,7 @@ const App = {
       </div>
       <div class="card">
         <div class="table-wrap" id="inv-table-wrap" style="max-height:65vh;overflow-y:auto">
-          ${this.buildProductTable(products)}
+          ${hasFilters ? '<div class="empty-state"><p>Loading…</p></div>' : this.buildProductTable(products)}
         </div>
       </div>
       <div class="card" style="margin-top:20px">
@@ -5521,8 +5537,12 @@ const App = {
       document.getElementById('inv-history-wrap').innerHTML = this.buildStockHistory(m);
     };
 
+    // Only the latest request may paint the table — a slow reply for "h" must
+    // not land on top of the one for "hammer".
+    let refilterSeq = 0;
     const refilter = async () => {
-      const q = document.getElementById('inv-search').value;
+      const seq = ++refilterSeq;
+      const q = document.getElementById('inv-search').value.trim();
       const cat = document.getElementById('inv-cat-filter').value;
       const brand = document.getElementById('inv-brand-filter').value;
       const branchId = document.getElementById('inv-branch-filter').value;
@@ -5532,14 +5552,29 @@ const App = {
       if (brand) url += `brand=${encodeURIComponent(brand)}&`;
       if (branchId) url += `branch_id=${branchId}&`;
       const filtered = await this.api('GET', url);
+      if (seq !== refilterSeq || this.section !== 'inventory') return;
       const branchName = branchId ? (branches.find(b => b.id == branchId) || {}).name || '' : '';
       document.getElementById('inv-table-wrap').innerHTML = this.buildProductTable(filtered, branchName, branchId);
     };
 
-    document.getElementById('inv-search').addEventListener('input', refilter);
+    // Search once typing pauses rather than on every keystroke; Enter (or a
+    // scanner's trailing Enter) searches straight away.
+    let searchTimer;
+    const searchEl = document.getElementById('inv-search');
+    searchEl.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(refilter, 250); });
+    searchEl.addEventListener('keydown', e => { if (e.key === 'Enter') { clearTimeout(searchTimer); refilter(); } });
     document.getElementById('inv-cat-filter').addEventListener('change', refilter);
     document.getElementById('inv-brand-filter').addEventListener('change', refilter);
     document.getElementById('inv-branch-filter').addEventListener('change', () => { refilter(); refilterHistory(); });
+
+    if (filters && (filters.search || filters.category || filters.brand || filters.branchId)) {
+      document.getElementById('inv-search').value = filters.search || '';
+      document.getElementById('inv-cat-filter').value = filters.category || '';
+      document.getElementById('inv-brand-filter').value = filters.brand || '';
+      document.getElementById('inv-branch-filter').value = filters.branchId || '';
+      await refilter();
+      if (filters.branchId) await refilterHistory();
+    }
   },
 
   // Products created by linking a received PO item back to a quotation's "Q"
@@ -5848,14 +5883,54 @@ const App = {
     document.body.removeChild(a);
   },
 
+  // The full catalogue is thousands of rows, each with half a dozen buttons —
+  // building them all at once is what made the table slow. Only the first
+  // INV_ROW_BATCH are drawn; the rest are appended as #inv-table-wrap is
+  // scrolled toward the bottom (_invMoreRows).
+  INV_ROW_BATCH: 200,
+
   buildProductTable(products, branchName = '', branchId = '') {
+    this._invTable = { products, branchName, branchId, shown: 0 };
+    setTimeout(() => this._invBindScroll());
     if (!products.length) return '<div class="empty-state"><p>No products found</p></div>';
     const stockHeader = branchName ? `Stock (${branchName})` : 'Stock';
+    const first = this._invTakeRows();
     return `<table class="sticky-table">
       <thead><tr><th></th><th>SKU</th><th>Name</th><th>Category</th><th>Price</th><th>Cost</th><th>${stockHeader}</th><th>Status</th><th>Actions</th></tr></thead>
-      <tbody>
+      <tbody id="inv-tbody">${first}</tbody>
+    </table>
+    <div id="inv-more" style="padding:10px;text-align:center;color:var(--text-muted);font-size:12px;${this._invTable.shown < products.length ? '' : 'display:none'}">
+      Showing <span id="inv-shown">${this._invTable.shown}</span> of ${products.length} — scroll for more
+    </div>`;
+  },
+
+  _invTakeRows() {
+    const t = this._invTable;
+    const slice = t.products.slice(t.shown, t.shown + this.INV_ROW_BATCH);
+    t.shown += slice.length;
+    return this._invRowsHtml(slice, t.branchName, t.branchId);
+  },
+
+  _invBindScroll() {
+    const wrap = document.getElementById('inv-table-wrap');
+    if (wrap) wrap.onscroll = () => {
+      if (wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 400) this._invMoreRows();
+    };
+  },
+
+  _invMoreRows() {
+    const t = this._invTable, tbody = document.getElementById('inv-tbody');
+    if (!t || !tbody || t.shown >= t.products.length) return;
+    tbody.insertAdjacentHTML('beforeend', this._invTakeRows());
+    const shownEl = document.getElementById('inv-shown');
+    if (shownEl) shownEl.textContent = t.shown;
+    if (t.shown >= t.products.length) document.getElementById('inv-more').style.display = 'none';
+  },
+
+  _invRowsHtml(products, branchName, branchId) {
+    return `
         ${products.map(p => `<tr id="inv-row-${p.id}">
-          <td style="width:52px">${p.image_path ? `<img src="${p.image_path}" class="prod-img-thumb" alt="">` : `<div class="prod-img-placeholder" onclick="App.showProductForm(${p.id})">📷</div>`}</td>
+          <td style="width:52px">${p.image_path ? `<img src="${p.image_path}" class="prod-img-thumb" alt="" loading="lazy" decoding="async">` : `<div class="prod-img-placeholder" onclick="App.showProductForm(${p.id})">📷</div>`}</td>
           <td style="font-family:monospace;font-size:12px">${p.sku}</td>
           <td class="fw-600">${p.name}${p.has_variations > 0 ? `<span class="has-vars-badge">${p.has_variations} var</span>` : ''}${p.used_of_product_id ? `<span class="badge-pill badge-purple" style="font-size:10px;margin-left:6px">Used</span>` : ''}${p.merged_into_product_id ? `<span class="badge-pill badge-secondary" style="font-size:10px;margin-left:6px" title="Merged into ${p.merged_into_sku||''}">Merged → ${p.merged_into_sku||'?'}</span>` : ''}</td>
           <td style="color:var(--text-muted)">${p.category_name || '—'}</td>
@@ -5881,9 +5956,7 @@ const App = {
         </tr>
         <tr id="inv-hist-${p.id}" style="display:none">
           <td colspan="9" style="padding:0;background:var(--bg-secondary)"></td>
-        </tr>`).join('')}
-      </tbody>
-    </table>`;
+        </tr>`).join('')}`;
   },
 
   // Merges a duplicate retail SKU (id) into another product the user picks —
@@ -6377,9 +6450,10 @@ const App = {
           } catch(e) { /* keep placing the remaining rows even if one bin fails */ }
         }
       }
+      const filters = this._invFilterState({ search: data.sku || data.name, branchId: data.branch_id });
       this.closeModal();
       this.alert(id ? 'Product updated' : 'Product created');
-      this.renderInventory();
+      this.renderInventory(null, filters);
     } catch (e) { this.alert(e.message, 'error'); }
   },
 
@@ -6566,9 +6640,10 @@ const App = {
   async deleteProduct(id) {
     if (!confirm('Deactivate this product?')) return;
     await this.api('DELETE', `/products/${id}`);
+    const filters = this._invFilterState();
     this.closeModal();
     this.alert('Product deactivated');
-    this.renderInventory();
+    this.renderInventory(null, filters);
   },
 
   // ─── Services & Non-Inventory Items ─────────────────────────────────────
@@ -12528,6 +12603,7 @@ const App = {
   },
 
   showStockAdjust(id, name, current, branchId = '', branchName = '') {
+    this._stockAdjustName = name;
     const branchNote = branchName ? `<p style="margin-bottom:8px;color:var(--text-muted);font-size:12px">Branch: <strong>${branchName}</strong></p>` : '';
     this.showModal(`
       <div class="modal" style="max-width:360px">
@@ -12550,9 +12626,10 @@ const App = {
     const reason = document.getElementById('stock-reason').value;
     if (isNaN(adj)) { this.alert('Enter a valid number', 'error'); return; }
     await this.api('PATCH', `/products/${id}/stock`, { adjustment: adj, reason, branch_id: branchId || null });
+    const filters = this._invFilterState({ search: this._stockAdjustName, branchId });
     this.closeModal();
     this.alert('Stock updated');
-    this.renderInventory();
+    this.renderInventory(null, filters);
   },
 
   async scanProductImages() {
