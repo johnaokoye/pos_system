@@ -5451,7 +5451,8 @@ const App = {
   _invFilterState(fallback = {}) {
     const val = id => (document.getElementById(id) || {}).value || '';
     return {
-      search: val('inv-search') || fallback.search || '',
+      // Only one of the two tabs' search boxes is on the page at a time.
+      search: val('inv-search') || val('noninv-search') || fallback.search || '',
       category: val('inv-cat-filter'),
       brand: val('inv-brand-filter'),
       branchId: val('inv-branch-filter') || (fallback.branchId ? String(fallback.branchId) : ''),
@@ -5469,7 +5470,7 @@ const App = {
       ${tabBtn('non-inventory','Non-Inventory Items')}
     </div>`;
 
-    if (tab === 'non-inventory') return this.renderNonInventoryTab(tabsHtml);
+    if (tab === 'non-inventory') return this.renderNonInventoryTab(tabsHtml, filters);
 
     const hasFilters = !!(filters && (filters.search || filters.category || filters.brand || filters.branchId));
     const [products, categories, brands, movements, branches] = await Promise.all([
@@ -5582,8 +5583,9 @@ const App = {
   // quote, not stocked for general sale. Kept out of the main table above;
   // still fully findable here and via the raw /products search used by the
   // quote/PR pickers, so they can be reused or ordered again later.
-  async renderNonInventoryTab(tabsHtml) {
-    const products = await this.api('GET', '/products?is_non_inventory=1');
+  async renderNonInventoryTab(tabsHtml, filters = null) {
+    const initialSearch = filters?.search || '';
+    const products = await this.api('GET', `/products?is_non_inventory=1${initialSearch ? `&search=${encodeURIComponent(initialSearch)}` : ''}`);
     if (this.section !== 'inventory') return;
     document.getElementById('content').innerHTML = `
       <div class="section-header">
@@ -5593,7 +5595,7 @@ const App = {
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
         <div class="search-bar" style="flex:0 0 auto">
           <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
-          <input type="text" id="noninv-search" placeholder="Search non-inventory items..." style="width:240px">
+          <input type="text" id="noninv-search" placeholder="Search non-inventory items..." style="width:240px" value="${this.escapeAttr(initialSearch)}">
         </div>
       </div>
       <p style="color:var(--text-muted);font-size:13px;margin:-8px 0 14px">
@@ -5606,11 +5608,19 @@ const App = {
         </div>
       </div>`;
 
-    document.getElementById('noninv-search').addEventListener('input', async (e) => {
-      const q = e.target.value;
+    // Same as the All Inventory tab: search once typing pauses (Enter at
+    // once), and only the latest request may paint the table.
+    let refilterSeq = 0, searchTimer;
+    const searchEl = document.getElementById('noninv-search');
+    const refilter = async () => {
+      const seq = ++refilterSeq;
+      const q = searchEl.value.trim();
       const filtered = await this.api('GET', `/products?is_non_inventory=1${q ? `&search=${encodeURIComponent(q)}` : ''}`);
+      if (seq !== refilterSeq || !document.getElementById('noninv-table-wrap')) return;
       document.getElementById('noninv-table-wrap').innerHTML = this.buildNonInventoryTable(filtered);
-    });
+    };
+    searchEl.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(refilter, 250); });
+    searchEl.addEventListener('keydown', e => { if (e.key === 'Enter') { clearTimeout(searchTimer); refilter(); } });
   },
 
   buildNonInventoryTable(products) {
@@ -5639,7 +5649,7 @@ const App = {
     try {
       await this.api('PATCH', `/products/${id}/promote-to-inventory`);
       this.alert('Added to warehouse inventory — it now shows under All Inventory');
-      this.renderInventory('non-inventory');
+      this.renderInventory('non-inventory', this._invFilterState());
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
