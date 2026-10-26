@@ -19211,7 +19211,7 @@ const App = {
               <input type="checkbox" id="pr-online" onchange="App._onPROnlineToggle()" style="width:16px;height:16px" ${pr&&pr.is_online_purchase?'checked':''}>
               Online Purchase
             </label>
-            <span style="font-size:12px;color:var(--text-muted)">Enable to add product URLs per item</span>
+            <span style="font-size:12px;color:var(--text-muted)">Adds product URLs per item; no local tax</span>
             <label id="pr-taxfree-wrap" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:500;margin:0" title="Local purchase with no GCT — ticks No Tax on every item">
               <input type="checkbox" id="pr-taxfree-all" onchange="App._onPRTaxFreeAll()" style="width:16px;height:16px">
               Tax Exempt (all items)
@@ -19292,10 +19292,14 @@ const App = {
 
   _onPRCurrencyChange() {
     const currency = document.getElementById('pr-currency')?.value || '';
-    this._prIsLocalSupplier = currency === this._prDefaultCurrency;
+    // Online (overseas) purchases never carry local tax, even in local currency
+    this._prIsLocalSupplier = currency === this._prDefaultCurrency && !this._prIsOnline;
     const badge = document.getElementById('pr-tax-badge');
     if (badge) {
-      if (this._prIsLocalSupplier && this._prTaxRate > 0) {
+      if (this._prIsOnline) {
+        badge.style.display = 'block';
+        badge.textContent = 'Online purchase — no local tax';
+      } else if (this._prIsLocalSupplier && this._prTaxRate > 0) {
         badge.style.display = 'block';
         badge.textContent = `${currency} is local currency — ${this._prTaxRate}% tax applies`;
       } else {
@@ -19320,6 +19324,7 @@ const App = {
     document.querySelectorAll('[id^="pri-url-row-"]').forEach(el => {
       el.style.display = this._prIsOnline ? '' : 'none';
     });
+    this._onPRCurrencyChange(); // online drops local tax
   },
 
   addPRItem(prefill) {

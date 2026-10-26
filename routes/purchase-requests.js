@@ -250,11 +250,11 @@ router.post('/:id/convert', async (req, res) => {
     if (!prItems.length) return res.status(400).json({ error: 'PR has no items' });
     // Lines keep the PR's tax decision (it charges local tax when it's in the
     // local currency); an older PR with no currency falls back to the
-    // vendor's default (GCT for a Local supplier); a line marked tax exempt
-    // on the PR gets no tax. Editable on the draft PO.
+    // vendor's default (GCT for a Local supplier); an online purchase or a
+    // line marked tax exempt gets no tax. Editable on the draft PO.
     const { rows: [supplier] } = (supplier_id || pr.supplier_id) ? await db.execute({ sql: 'SELECT is_local FROM suppliers WHERE id = ?', args: [supplier_id || pr.supplier_id] }) : { rows: [] };
     const taxRate = await localTaxRate();
-    const prTaxOption = Number(pr.tax_rate) > 0 ? 'local' : (pr.currency ? 'none' : defaultTaxOption(supplier));
+    const prTaxOption = pr.is_online_purchase ? 'none' : Number(pr.tax_rate) > 0 ? 'local' : (pr.currency ? 'none' : defaultTaxOption(supplier));
     const priced = prItems.map(item => ({ ...priceLine({ name: item.product_name, quantity: item.quantity, unit_cost: item.unit_cost, tax_option: item.tax_exempt ? 'none' : prTaxOption }, taxRate), total: item.total || 0 }));
     for (const line of priced) line.tax_amount = parseFloat((line.total * line.tax_rate / 100).toFixed(2));
     const totals = poTotals(priced);
