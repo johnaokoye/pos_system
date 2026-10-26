@@ -5,6 +5,10 @@ const { requirePermission, can } = require('../lib/permissions');
 const { resolveApprovalSignature } = require('../lib/signatures');
 const { nextNumber } = require('../lib/nextNumber');
 const { localTaxRate, defaultTaxOption, priceLine, poTotals } = require('../lib/poLines');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 
 // Self-contained feature, not used as a cross-section lookup elsewhere —
 // module-level gate for all of it, matching the frontend's own section gate.
@@ -18,7 +22,8 @@ const PR_SELECT = `
     s.name as supplier_name,
     s.is_local as supplier_is_local,
     s.email as supplier_email,
-    po.po_number as converted_po_number
+    po.po_number as converted_po_number,
+    (SELECT COUNT(*) FROM pr_attachments pa WHERE pa.pr_id = pr.id) as attachment_count
   FROM purchase_requests pr
   LEFT JOIN branches b ON pr.branch_id = b.id
   LEFT JOIN employees e ON pr.employee_id = e.id
@@ -316,6 +321,100 @@ router.post('/:id/convert', async (req, res) => {
       if (!committed) await tx.rollback();
       res.status(committed ? 500 : 400).json({ error: e.message });
     }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Attachments ────────────────────────────────────────────────────────────
+// Supporting documents on a request (supplier quotes, a brief/spec…). Mirrors
+// the quotation attachment routes. Files are never served statically
+// (server.js blocks /uploads/pr-attachments) — only through /download here.
+// Anyone with the module can add one at any stage; removing is only allowed
+// before approval, so what the approver signed off on stays on the record.
+const localUploadDir = path.join(__dirname, '../uploads/pr-attachments');
+const PR_DOC_TYPES = ['supplier_quotation', 'specification', 'other'];
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowed = ['application/pdf','image/jpeg','image/png','image/gif','image/webp',
+      'application/msword','application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-excel','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'text/plain'];
+    cb(null, allowed.includes(file.mimetype));
+  },
+});
+const ATTACHMENT_SELECT = `SELECT pa.*, e.first_name || ' ' || e.last_name as uploaded_by_name FROM pr_attachments pa LEFT JOIN employees e ON pa.uploaded_by = e.id`;
+
+router.get('/:id/attachments', async (req, res) => {
+  try {
+    const { rows: [pr] } = await db.execute({ sql: 'SELECT id FROM purchase_requests WHERE id = ?', args: [req.params.id] });
+    if (!pr) return res.status(404).json({ error: 'Not found' });
+    const { rows } = await db.execute({ sql: `${ATTACHMENT_SELECT} WHERE pa.pr_id = ? ORDER BY pa.uploaded_at DESC, pa.id DESC`, args: [pr.id] });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/:id/attachments', (req, res, next) => {
+  // Surface multer's size-limit error as a 400 instead of Express's HTML 500.
+  upload.single('file')(req, res, err => err ? res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'File is larger than 20 MB' : err.message }) : next());
+}, async (req, res) => {
+  try {
+    const { rows: [pr] } = await db.execute({ sql: 'SELECT id FROM purchase_requests WHERE id = ?', args: [req.params.id] });
+    if (!pr) return res.status(404).json({ error: 'Not found' });
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded or file type not allowed' });
+    const docType = PR_DOC_TYPES.includes(req.body.document_type) ? req.body.document_type : 'other';
+
+    const cloudResult = await cloudUpload(req.file.buffer, {
+      folder: 'pos-system/pr-attachments',
+      public_id: `${Date.now()}-${Math.round(Math.random() * 1e6)}`,
+      resource_type: 'auto',
+    });
+    let storedName;
+    if (cloudResult) {
+      storedName = cloudResult.secure_url;
+    } else {
+      fs.mkdirSync(localUploadDir, { recursive: true });
+      storedName = `${Date.now()}-${Math.round(Math.random() * 1e6)}${path.extname(req.file.originalname)}`;
+      fs.writeFileSync(path.join(localUploadDir, storedName), req.file.buffer);
+    }
+
+    const result = await db.execute({ sql: 'INSERT INTO pr_attachments (pr_id, document_type, original_name, stored_name, mime_type, file_size, uploaded_by) VALUES (?,?,?,?,?,?,?)', args: [pr.id, docType, req.file.originalname, storedName, req.file.mimetype, req.file.size, (req.employee && req.employee.id) || null] });
+    const { rows: [row] } = await db.execute({ sql: `${ATTACHMENT_SELECT} WHERE pa.id = ?`, args: [Number(result.lastInsertRowid)] });
+    res.status(201).json(row);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/:id/attachments/:aid/download', async (req, res) => {
+  try {
+    const { rows: [att] } = await db.execute({ sql: 'SELECT * FROM pr_attachments WHERE id = ? AND pr_id = ?', args: [req.params.aid, req.params.id] });
+    if (!att) return res.status(404).json({ error: 'Not found' });
+    if (att.stored_name.startsWith('https://')) {
+      // Cloud file — redirect with fl_attachment to force browser download
+      return res.redirect(att.stored_name.replace('/upload/', '/upload/fl_attachment/'));
+    }
+    const filePath = path.join(localUploadDir, att.stored_name);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File missing on server' });
+    res.setHeader('Content-Type', att.mime_type || 'application/octet-stream');
+    res.attachment(att.original_name);
+    res.sendFile(filePath);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/:id/attachments/:aid', async (req, res) => {
+  try {
+    const { rows: [att] } = await db.execute({ sql: 'SELECT pa.*, pr.status as pr_status FROM pr_attachments pa JOIN purchase_requests pr ON pa.pr_id = pr.id WHERE pa.id = ? AND pa.pr_id = ?', args: [req.params.aid, req.params.id] });
+    if (!att) return res.status(404).json({ error: 'Not found' });
+    if (!['draft', 'submitted', 'rejected'].includes(att.pr_status)) return res.status(400).json({ error: 'Documents on an approved request stay on the record and can\'t be removed' });
+    if (att.stored_name.startsWith('https://')) {
+      // resource_type 'auto' files PDFs/images under image/, Office docs under
+      // raw/ — read it back from the URL rather than guessing from the mime.
+      const resourceType = (att.stored_name.match(/\/(image|raw|video)\/upload\//) || [])[1] || 'raw';
+      await cloudDestroy(att.stored_name, resourceType);
+    } else {
+      try { if (fs.existsSync(path.join(localUploadDir, att.stored_name))) fs.unlinkSync(path.join(localUploadDir, att.stored_name)); } catch(e) {}
+    }
+    await db.execute({ sql: 'DELETE FROM pr_attachments WHERE id = ?', args: [att.id] });
+    res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

@@ -32,7 +32,8 @@ const PO_DETAIL_SELECT = `SELECT po.*, s.name as supplier_name, s.contact_name a
   ea.first_name || ' ' || ea.last_name as approved_by_name,
   er.first_name || ' ' || er.last_name as rejected_by_name,
   (SELECT id FROM purchase_requests WHERE converted_to_po_id = po.id LIMIT 1) as source_pr_id,
-  (SELECT pr_number FROM purchase_requests WHERE converted_to_po_id = po.id LIMIT 1) as source_pr_number
+  (SELECT pr_number FROM purchase_requests WHERE converted_to_po_id = po.id LIMIT 1) as source_pr_number,
+  (SELECT COUNT(*) FROM pr_attachments pa JOIN purchase_requests spr ON pa.pr_id = spr.id WHERE spr.converted_to_po_id = po.id) as source_pr_attachments
   FROM purchase_orders po
   LEFT JOIN suppliers s ON po.supplier_id = s.id
   LEFT JOIN branches b ON po.branch_id = b.id

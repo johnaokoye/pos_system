@@ -19113,7 +19113,7 @@ const App = {
               <tbody>
                 ${requests.length ? requests.map(pr => `
                   <tr>
-                    <td class="fw-600">${pr.pr_number}</td>
+                    <td class="fw-600">${pr.pr_number}${pr.attachment_count > 0 ? ` <span title="${pr.attachment_count} document${pr.attachment_count > 1 ? 's' : ''} attached" style="font-weight:400;font-size:12px;color:var(--text-muted)">📎${pr.attachment_count}</span>` : ''}</td>
                     <td><span class="badge-pill ${typeBadge[pr.request_type]||'badge-info'}" style="font-size:11px">${typeLabel[pr.request_type]||pr.request_type||'Sale Items'}</span></td>
                     <td>${pr.branch_name||'-'}</td>
                     <td>${pr.department||'-'}</td>
@@ -19228,6 +19228,13 @@ const App = {
               <span>Product</span><span>Item Name</span><span id="pr-qty-head">Qty</span><span>Est. Cost</span><span>Item Type</span><span title="Local tax exempt">No Tax</span><span></span>
             </div>
             <div id="pr-items"></div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:4px 0 12px;padding:10px 12px;background:var(--bg);border-radius:6px">
+            <span style="font-weight:600;font-size:13px">📎 Documents</span>
+            <select id="pr-files-type" style="width:auto;font-size:12px">${this._prDocTypeOptions()}</select>
+            <input type="file" id="pr-files" multiple accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.gif,.webp,.txt" style="flex:1;min-width:200px;font-size:12px">
+            <span style="font-size:11px;color:var(--text-muted);width:100%">Supplier quotes, a brief or spec — uploaded when you save${editId ? '; existing documents are on the request\'s View screen' : ''}. Max 20 MB each.</span>
           </div>
 
           <div id="pr-totals-block" style="text-align:right;font-size:13px;line-height:1.9">
@@ -19534,12 +19541,21 @@ const App = {
       const pr = this._editingPRId
         ? await this.api('PUT', `/purchase-requests/${this._editingPRId}`, payload)
         : await this.api('POST', '/purchase-requests', payload);
+      // Documents picked on the form go up once the request exists. The
+      // request itself is saved either way; a failed file is reported.
+      const files = [...(document.getElementById('pr-files')?.files || [])];
+      let uploadError = null;
+      if (files.length) {
+        try { await this._uploadPRFiles(pr.id, files, document.getElementById('pr-files-type').value); }
+        catch (e) { uploadError = e.message; }
+      }
       if (initialStatus === 'submitted') {
         await this.api('PATCH', `/purchase-requests/${pr.id}/status`, { status: 'submitted' });
       }
       this.closeModal();
       this.alert(this._editingPRId ? 'Purchase request updated' : 'Purchase request created');
       this.renderPurchasing('requests');
+      if (uploadError) this.alert(`Request saved, but a document didn't upload — ${uploadError}. Add it from the request's View screen.`, 'error');
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
@@ -19552,7 +19568,12 @@ const App = {
   },
 
   async viewPR(id) {
-    const pr = await this.api('GET', `/purchase-requests/${id}`);
+    const [pr, attachments] = await Promise.all([
+      this.api('GET', `/purchase-requests/${id}`),
+      this.api('GET', `/purchase-requests/${id}/attachments`).catch(() => []),
+    ]);
+    // Documents can be added at any stage; removed only before approval
+    const canRemoveDocs = ['draft', 'submitted', 'rejected'].includes(pr.status);
     const prStatusColor = { draft:'badge-warning', submitted:'badge-info', approved:'badge-teal', rejected:'badge-danger', converted:'badge-success' };
     const typeLabel = this._prTypeLabels;
     const typeBadge = this._prTypeBadges;
@@ -19619,6 +19640,15 @@ const App = {
             ${pr.tax_amount > 0 ? `<div style="color:var(--text-muted)">Tax (${pr.tax_rate}% local): <strong>${this.fmt(pr.tax_amount)}</strong></div>` : ''}
             <div style="font-size:15px;font-weight:700;border-top:1px solid var(--border);padding-top:4px">Est. Total: ${this.fmt(total + (pr.tax_amount||0))}</div>
           </div>`}
+          <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:14px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+              <span style="font-weight:700;font-size:14px">Attachments</span>
+              <button class="btn btn-sm btn-outline" onclick="App.showPRAttachForm(${pr.id})">+ Attach Document</button>
+            </div>
+            <div id="pr-attachments-list" data-can-remove="${canRemoveDocs ? 1 : 0}">
+              ${attachments.length ? attachments.map(a => this._prAttachmentRow(pr.id, a, canRemoveDocs)).join('') : '<div style="font-size:13px;color:var(--text-muted);padding:6px 0" id="pr-att-empty">No documents attached yet.</div>'}
+            </div>
+          </div>
         </div>
         <div class="modal-footer">
           ${pr.status==='draft' ? `<button class="btn btn-secondary" onclick="App.closeModal();App.showPRForm(${pr.id})">Edit</button>` : ''}
@@ -19630,6 +19660,94 @@ const App = {
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
+  },
+
+  _prDocTypeLabels: { supplier_quotation: 'Supplier Quotation', specification: 'Brief / Specification', other: 'Other' },
+
+  _prAttachmentRow(prId, a, canRemove) {
+    const icon = a.mime_type === 'application/pdf' ? '📄' : (a.mime_type || '').startsWith('image/') ? '🖼' : /word|document/.test(a.mime_type || '') ? '📝' : /excel|sheet/.test(a.mime_type || '') ? '📊' : '📎';
+    const size = b => b < 1024 ? `${b} B` : b < 1048576 ? `${(b/1024).toFixed(1)} KB` : `${(b/1048576).toFixed(1)} MB`;
+    return `<div id="pr-att-${a.id}" class="pr-att-row" style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--bg-secondary,#f8f9fa);border:1px solid var(--border);border-radius:6px;margin-bottom:6px">
+        <span style="font-size:18px">${icon}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${this.escapeAttr(a.original_name)}</div>
+          <div style="font-size:11px;color:var(--text-muted)">${this._prDocTypeLabels[a.document_type] || 'Other'} &bull; ${size(a.file_size || 0)} &bull; ${this.fmtDate(a.uploaded_at)}${a.uploaded_by_name ? ` &bull; ${this.escapeAttr(a.uploaded_by_name)}` : ''}</div>
+        </div>
+        <a href="/api/purchase-requests/${prId}/attachments/${a.id}/download" target="_blank" class="btn btn-sm btn-secondary" style="white-space:nowrap">Download</a>
+        ${canRemove ? `<button class="btn btn-sm btn-danger" onclick="App.deletePRAttachment(${prId},${a.id})">✕</button>` : ''}
+      </div>`;
+  },
+
+  _prDocTypeOptions(selected = 'supplier_quotation') {
+    return Object.entries(this._prDocTypeLabels).map(([v, l]) => `<option value="${v}" ${v === selected ? 'selected' : ''}>${l}</option>`).join('');
+  },
+
+  showPRAttachForm(prId) {
+    this.showSecondaryModal(`
+      <div class="modal" style="max-width:480px">
+        <div class="modal-header"><span class="modal-title">Attach Document</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label>Document Type</label>
+            <select id="pratt-doctype">${this._prDocTypeOptions()}</select>
+          </div>
+          <div class="form-group">
+            <label>File <span style="font-size:11px;color:var(--text-muted)">(PDF, Word, Excel, image, text — max 20 MB each)</span></label>
+            <input type="file" id="pratt-file" multiple accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.gif,.webp,.txt" style="display:block;width:100%;padding:8px 0">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeSecondaryModal()">Cancel</button>
+          <button class="btn btn-primary" id="pratt-upload-btn" onclick="App.uploadPRAttachments(${prId})">Upload</button>
+        </div>
+      </div>`);
+  },
+
+  // Uploads each file; returns the saved rows and throws on the first failure.
+  async _uploadPRFiles(prId, files, documentType) {
+    const saved = [];
+    for (const file of files) {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('document_type', documentType);
+      const res = await fetch(`/api/purchase-requests/${prId}/attachments`, { method: 'POST', body: fd });
+      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(`${file.name}: ${e.error || 'Upload failed'}`); }
+      saved.push(await res.json());
+    }
+    return saved;
+  },
+
+  async uploadPRAttachments(prId) {
+    const files = [...(document.getElementById('pratt-file').files || [])];
+    if (!files.length) { this.alert('Please select a file', 'error'); return; }
+    const btn = document.getElementById('pratt-upload-btn');
+    btn.disabled = true; btn.textContent = 'Uploading...';
+    const list = document.getElementById('pr-attachments-list');
+    const canRemove = list && list.dataset.canRemove === '1';
+    try {
+      const saved = await this._uploadPRFiles(prId, files, document.getElementById('pratt-doctype').value);
+      this.closeSecondaryModal();
+      this.alert(saved.length > 1 ? `${saved.length} documents attached` : 'Document attached successfully');
+      if (list) {
+        document.getElementById('pr-att-empty')?.remove();
+        saved.forEach(a => list.insertAdjacentHTML('afterbegin', this._prAttachmentRow(prId, a, canRemove)));
+      }
+    } catch(e) {
+      btn.disabled = false; btn.textContent = 'Upload';
+      this.alert(e.message, 'error');
+    }
+  },
+
+  async deletePRAttachment(prId, attId) {
+    if (!confirm('Remove this attachment permanently?')) return;
+    try {
+      await this.api('DELETE', `/purchase-requests/${prId}/attachments/${attId}`);
+      document.getElementById(`pr-att-${attId}`)?.remove();
+      const list = document.getElementById('pr-attachments-list');
+      if (list && !list.querySelector('.pr-att-row')) {
+        list.innerHTML = '<div style="font-size:13px;color:var(--text-muted);padding:6px 0" id="pr-att-empty">No documents attached yet.</div>';
+      }
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   printPumpAuthorization(id) {
@@ -20231,7 +20349,7 @@ const App = {
             <div>${sp.invoice ? '✅' : '⬜'} Supplier's invoice attached (document type <em>Supplier Invoice</em>)</div>
             ${sp.over.length ? `<div style="margin-top:6px;color:var(--danger)">⚠️ More than the authorized maximum: ${sp.over.map(i => `${this.escapeAttr(i.product_name)} — ${i.quantity_ordered} of max ${i.authorized_qty}`).join('; ')}</div>` : ''}
           </div>` : ''}
-          ${po.source_pr_id ? `<div style="font-size:12px;color:var(--text-muted);margin:-6px 0 12px">Converted from <a href="#" style="color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${po.source_pr_id})">${po.source_pr_number}</a></div>` : ''}
+          ${po.source_pr_id ? `<div style="font-size:12px;color:var(--text-muted);margin:-6px 0 12px">Converted from <a href="#" style="color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${po.source_pr_id})">${po.source_pr_number}</a>${po.source_pr_attachments > 0 ? ` · 📎 ${po.source_pr_attachments} document${po.source_pr_attachments > 1 ? 's' : ''} on the request` : ''}</div>` : ''}
           <div class="table-wrap">
             <table>
               <thead><tr><th>Product</th><th>SKU</th><th>Ordered</th><th>Received</th><th>Damaged</th><th>Unit Cost</th><th>Vendor Disc.</th><th>Tax</th><th>Total</th></tr></thead>

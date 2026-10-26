@@ -1121,6 +1121,19 @@ async function _init() {
       uploaded_by INTEGER REFERENCES employees(id),
       uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // Supporting documents on a purchase request — supplier quotes, briefs/
+    // specs, anything backing the ask. Same storage pattern as quote_attachments.
+    { sql: `CREATE TABLE IF NOT EXISTS pr_attachments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pr_id INTEGER NOT NULL REFERENCES purchase_requests(id) ON DELETE CASCADE,
+      document_type TEXT NOT NULL DEFAULT 'other',
+      original_name TEXT NOT NULL,
+      stored_name TEXT NOT NULL,
+      mime_type TEXT,
+      file_size INTEGER,
+      uploaded_by INTEGER REFERENCES employees(id),
+      uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS purchase_requests (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       pr_number TEXT UNIQUE NOT NULL,
