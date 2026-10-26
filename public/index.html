@@ -20271,6 +20271,12 @@ const App = {
     try { return new Intl.NumberFormat('en-US', { style: 'currency', currency: code, currencyDisplay: po && po.currency ? 'code' : 'symbol' }).format(n || 0); }
     catch (e) { return `${code} ${(Number(n) || 0).toFixed(2)}`; }
   },
+  // A base-currency amount (A/P figures) on a foreign-currency PO: shown in
+  // the PO's currency at its rate, with the base amount alongside.
+  _fmtPOBase(n, po) {
+    if (!po || !po.currency || !(Number(po.exchange_rate) > 0)) return this.fmt(n);
+    return `${this._fmtPO((Number(n) || 0) / Number(po.exchange_rate), po)} <span style="font-weight:400;color:var(--text-muted)">(${this.fmt(n)})</span>`;
+  },
   _poLinkInputHtml(cls, url) {
     return `<input type="url" class="${cls}" value="${this.escapeAttr(url || '')}" placeholder="🔗 Item link (online order)" style="flex-basis:100%;margin-top:4px;font-size:12px">`;
   },
@@ -20706,7 +20712,8 @@ const App = {
               <span style="font-weight:700;font-size:14px">Accounts Payable</span>
               ${billing.unbilled > 0 && this.can('payables_bills') ? `<button class="btn btn-sm btn-outline" onclick="App.showBillForm(null, { po_id: ${po.id} })">+ Create Bill (${this.fmt(billing.unbilled)})</button>` : ''}
             </div>
-            <div style="font-size:13px;margin-bottom:8px">Received: <strong>${this.fmt(billing.received_value)}</strong> &nbsp;·&nbsp; Billed: <strong>${this.fmt(billing.billed)}</strong> &nbsp;·&nbsp; Not yet billed: <strong style="${billing.unbilled > 0 ? 'color:var(--warning,#d97706)' : ''}">${this.fmt(billing.unbilled)}</strong></div>
+            <div style="font-size:13px;margin-bottom:8px">Received: <strong>${this._fmtPOBase(billing.received_value, po)}</strong> &nbsp;·&nbsp; Billed: <strong>${this._fmtPOBase(billing.billed, po)}</strong> &nbsp;·&nbsp; Not yet billed: <strong style="${billing.unbilled > 0 ? 'color:var(--warning,#d97706)' : ''}">${this._fmtPOBase(billing.unbilled, po)}</strong></div>
+            ${po.currency ? `<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">Bills are recorded in ${this._baseCurrency()}${po.exchange_rate ? ` — converted at ${po.exchange_rate} ${this._baseCurrency()} per ${po.currency}` : ''}.</div>` : ''}
             ${billing.bills.map(b => `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;font-size:13px;cursor:pointer" onclick="App.viewBill(${b.id})">
               <span><strong>${b.bill_number}</strong>${b.vendor_invoice_number ? ` · Inv ${this.escapeAttr(b.vendor_invoice_number)}` : ''} · due ${this._apDate(b.due_date)}</span>
               <span>${this.fmt(b.amount)} <span class="badge-pill ${this._apStatusBadge[b.display_status] || ''}" style="margin-left:6px">${b.display_status}</span></span>
