@@ -2164,6 +2164,10 @@ async function _init() {
     'ALTER TABLE work_orders ADD COLUMN item_serial TEXT',
     // One-off fix for POs received before approval was required: sent back
     // for approval without touching the receipt (see /reinstate-for-approval)
+    // Order currency (NULL = base) + base-per-unit rate; online item link carried from the PR
+    'ALTER TABLE purchase_orders ADD COLUMN currency TEXT',
+    'ALTER TABLE purchase_orders ADD COLUMN exchange_rate REAL',
+    'ALTER TABLE purchase_order_items ADD COLUMN product_url TEXT',
     'ALTER TABLE purchase_orders ADD COLUMN reinstated_from_status TEXT',
     'ALTER TABLE purchase_orders ADD COLUMN reinstated_at DATETIME',
     'ALTER TABLE purchase_orders ADD COLUMN reinstated_by INTEGER REFERENCES employees(id)',

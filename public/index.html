@@ -19271,7 +19271,7 @@ const App = {
                     <td>${po.supplier_name || '-'}</td>
                     <td>${po.branch_name || '-'}</td>
                     <td>${po.expected_date ? this.fmtDate(po.expected_date) : '-'}</td>
-                    <td class="fw-600">${this.fmt(po.total)}</td>
+                    <td class="fw-600">${this._fmtPO(po.total, po)}</td>
                     <td><span class="badge-pill ${statusColor[po.status]||'badge-info'}">${po.status}</span></td>
                     <td style="color:var(--text-muted)">${this.fmtDate(po.created_at)}</td>
                     <td>
@@ -19318,7 +19318,7 @@ const App = {
                     <td class="fw-600">${po.po_number}</td>
                     <td>${po.supplier_name || '-'}</td>
                     <td>${po.branch_name || '-'}</td>
-                    <td class="fw-600">${this.fmt(po.total)}</td>
+                    <td class="fw-600">${this._fmtPO(po.total, po)}</td>
                     <td style="color:var(--text-muted)">${this.fmtDate(po.created_at)}</td>
                     <td>
                       <button class="btn btn-sm btn-secondary" onclick="App.viewPO(${po.id})">Review</button>
@@ -20179,6 +20179,17 @@ const App = {
             </div>
           </div>
           <div class="input-row">
+            <div class="form-group"><label>Currency</label>
+              <select id="po-currency" onchange="App._onPOCurrencyChange()">
+                ${this._poCurrencyCodes(po && po.currency).map(c => `<option value="${c}" ${c === ((po && po.currency) || this._baseCurrency()) ? 'selected' : ''}>${c}</option>`).join('')}
+              </select>
+            </div>
+            <div class="form-group" id="po-rate-wrap"><label id="po-rate-label">Exchange Rate</label>
+              <input id="po-rate" type="number" min="0" step="any" value="${po && po.exchange_rate ? po.exchange_rate : ''}" oninput="App.calcPOTotal()">
+              <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Converts the PO for stock cost and the A/P bill. Defaults from Settings.</div>
+            </div>
+          </div>
+          <div class="input-row">
             <div class="form-group"><label>Expected Date</label><input id="po-date" type="date" value="${po&&po.expected_date?String(po.expected_date).slice(0,10):''}"></div>
             <div class="form-group"><label>Vendor Order/Quote #</label><input id="po-vendor-order" placeholder="e.g. Amazon order #" value="${this.escapeAttr(po&&po.vendor_order_number)}"></div>
           </div>
@@ -20202,6 +20213,7 @@ const App = {
           </div>
           <div id="po-totals" style="text-align:right;font-size:13px;line-height:1.7"></div>
           <div style="text-align:right;font-size:15px;font-weight:700">Total: <span id="po-total">$0.00</span></div>
+          <div id="po-total-base" style="text-align:right;font-size:12px;color:var(--text-muted)"></div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
@@ -20212,6 +20224,7 @@ const App = {
     this._poSuppliers = suppliers;
     this._poProducts = [];
     this._poItems = [];
+    this._onPOCurrencyChange(true);
     if (po) {
       this.onPOSupplierChange();
       this.calcPOTotal();
@@ -20228,14 +20241,49 @@ const App = {
     });
   },
 
+  // Order currency — the store's base currency unless chosen otherwise; a
+  // foreign one needs a rate (base per 1 unit, defaulted from Settings).
+  _baseCurrency() { return String(this.settings?.currency || 'USD').toUpperCase(); },
+  _poCurrencyCodes(current) {
+    const codes = [this._baseCurrency(), ...this._altCurrencyList().map(a => String(a.code).toUpperCase()),
+      'USD','EUR','GBP','CAD','AUD','JMD','TTD','BBD','GYD','BSD','HTG','MXN','CNY','JPY','INR','NGN','GHS','KES','ZAR'];
+    if (current) codes.unshift(String(current).toUpperCase());
+    return [...new Set(codes)];
+  },
+  _altCurrencyList() { return this.altCurrencies || []; },
+  _settingsRate(code) {
+    const a = this._altCurrencyList().find(x => String(x.code).toUpperCase() === code);
+    return a ? (parseFloat(a.base_per_unit) || (a.rate > 0 ? 1 / a.rate : '')) : '';
+  },
+  _onPOCurrencyChange(initial) {
+    const code = document.getElementById('po-currency')?.value;
+    const foreign = code && code !== this._baseCurrency();
+    const wrap = document.getElementById('po-rate-wrap');
+    if (wrap) wrap.style.visibility = foreign ? 'visible' : 'hidden';
+    const label = document.getElementById('po-rate-label');
+    if (label) label.textContent = `Exchange Rate (${this._baseCurrency()} per 1 ${code})`;
+    const rate = document.getElementById('po-rate');
+    if (rate && foreign && (!initial || !rate.value)) rate.value = this._settingsRate(code);
+    this.calcPOTotal();
+  },
+  _fmtPO(n, po) {
+    const code = (po && po.currency) || this._baseCurrency();
+    try { return new Intl.NumberFormat('en-US', { style: 'currency', currency: code, currencyDisplay: po && po.currency ? 'code' : 'symbol' }).format(n || 0); }
+    catch (e) { return `${code} ${(Number(n) || 0).toFixed(2)}`; }
+  },
+  _poLinkInputHtml(cls, url) {
+    return `<input type="url" class="${cls}" value="${this.escapeAttr(url || '')}" placeholder="🔗 Item link (online order)" style="flex-basis:100%;margin-top:4px;font-size:12px">`;
+  },
+
   _poExistingItemRowHtml(item) {
-    return `<div class="po-receive-row po-existing-item" data-item-id="${item.id}" data-product-id="${item.product_id||''}">
+    return `<div class="po-receive-row po-existing-item" style="flex-wrap:wrap" data-item-id="${item.id}" data-product-id="${item.product_id||''}">
       <span style="flex:2;font-size:13px">${item.product_name}${item.sku?` <span style="color:var(--text-muted)">(${item.sku})</span>`:''}${item.item_type === 'service' ? ' <span class="badge-pill badge-info" style="font-size:10px">Service</span>' : ''}</span>
       <input type="number" class="poi-existing-qty" min="0" step="any" value="${item.quantity_ordered}" style="width:70px" placeholder="Qty" oninput="App.calcPOTotal()" ${item.authorized_qty != null ? `data-max="${item.authorized_qty}"` : ''}>
       ${item.authorized_qty != null ? `<span class="poi-existing-max" style="font-size:11px;color:var(--text-muted);white-space:nowrap" title="Maximum authorized on the purchase request">max ${item.authorized_qty}</span>` : ''}
       <input type="number" class="poi-existing-cost" step="0.01" value="${item.authorized_qty != null && !(item.unit_cost > 0) ? '' : item.unit_cost}" style="width:90px" placeholder="${item.authorized_qty != null ? 'Invoice cost' : 'Unit Cost'}" oninput="App.calcPOTotal()">
       ${this._poLineExtrasHtml('poi-existing', item.vendor_discount_percent != null ? `${item.vendor_discount_percent}%` : item.vendor_discount, item.tax_option || 'none', false)}
       <button class="btn btn-sm btn-danger" onclick="this.closest('.po-existing-item').remove();App.calcPOTotal()">✕</button>
+      ${this._poLinkInputHtml('poi-existing-url', item.product_url)}
     </div>`;
   },
 
@@ -20317,6 +20365,7 @@ const App = {
     const prefillLabel = preselectedProduct ? `${preselectedProduct.name} (${preselectedProduct.sku||''})` : '';
     const div = document.createElement('div');
     div.className = 'po-receive-row';
+    div.style.flexWrap = 'wrap';
     div.id = `po-item-${idx}`;
     div.innerHTML = `
       <span class="poi-prod-search-wrap" style="flex:2;position:relative">
@@ -20330,7 +20379,8 @@ const App = {
       <input id="poi-qty-${idx}" type="number" min="0" step="any" value="1" style="width:70px" placeholder="Qty" oninput="App.calcPOTotal()">
       <input id="poi-cost-${idx}" type="number" step="0.01" value="${preselectedProduct?(preselectedProduct.cost||''):''}" style="width:90px" placeholder="Unit Cost" oninput="App.calcPOTotal()">
       ${this._poLineExtrasHtml('poi-new', 0, this._poSupplierTaxDefault(), true)}
-      <button class="btn btn-sm btn-danger" onclick="document.getElementById('po-item-${idx}').remove();App.calcPOTotal()">✕</button>`;
+      <button class="btn btn-sm btn-danger" onclick="document.getElementById('po-item-${idx}').remove();App.calcPOTotal()">✕</button>
+      ${this._poLinkInputHtml('poi-new-url', '')}`;
     container.appendChild(div);
     if (preselectedProduct) this._setPOLineUnits(idx, preselectedProduct, null);
     this.calcPOTotal();
@@ -20474,6 +20524,8 @@ const App = {
 
   calcPOTotal() {
     const rate = this._poTaxRate();
+    const curPO = { currency: document.getElementById('po-currency')?.value || null };
+    const fmtc = n => this._fmtPO(n, curPO);
     let gross = 0, discounts = 0, subtotal = 0, tax = 0;
     const price = (row, qty, cost, cls) => {
       const lineGross = qty * cost;
@@ -20484,9 +20536,9 @@ const App = {
       const lineTax = row.querySelector(`.${cls}-tax`)?.value === 'local' ? net * rate / 100 : 0;
       const out = row.querySelector(`.${cls}-line`);
       if (out) {
-        out.textContent = this.fmt(net);
+        out.textContent = fmtc(net);
         out.style.color = bad ? 'var(--danger)' : '';
-        out.title = bad ? 'Enter the discount as dollars (50) or a percentage (10%), no more than the line cost' : `${parsed.vendor_discount_percent ? `${parsed.vendor_discount_percent}% = −${this.fmt(disc)} · ` : ''}${lineTax ? `+ ${this.fmt(lineTax)} GCT` : ''}`;
+        out.title = bad ? 'Enter the discount as dollars (50) or a percentage (10%), no more than the line cost' : `${parsed.vendor_discount_percent ? `${parsed.vendor_discount_percent}% = −${fmtc(disc)} · ` : ''}${lineTax ? `+ ${fmtc(lineTax)} GCT` : ''}`;
       }
       gross += lineGross; discounts += disc; subtotal += net; tax += lineTax;
     };
@@ -20508,11 +20560,17 @@ const App = {
     const r2 = n => Math.round(n * 100) / 100;
     const totalsEl = document.getElementById('po-totals');
     if (totalsEl) totalsEl.innerHTML = `
-      ${discounts ? `<div>Items: ${this.fmt(r2(gross))}</div><div>Vendor discounts: −${this.fmt(r2(discounts))}</div>` : ''}
-      <div>Subtotal: ${this.fmt(r2(subtotal))}</div>
-      <div>GCT: ${this.fmt(r2(tax))}</div>`;
+      ${discounts ? `<div>Items: ${fmtc(r2(gross))}</div><div>Vendor discounts: −${fmtc(r2(discounts))}</div>` : ''}
+      <div>Subtotal: ${fmtc(r2(subtotal))}</div>
+      <div>GCT: ${fmtc(r2(tax))}</div>`;
     const el = document.getElementById('po-total');
-    if (el) el.textContent = this.fmt(r2(subtotal) + r2(tax));
+    if (el) el.textContent = fmtc(r2(subtotal) + r2(tax));
+    const baseEl = document.getElementById('po-total-base');
+    if (baseEl) {
+      const fx = parseFloat(document.getElementById('po-rate')?.value);
+      const foreign = curPO.currency && curPO.currency !== this._baseCurrency();
+      baseEl.textContent = !foreign ? '' : fx > 0 ? `≈ ${this.fmt((r2(subtotal) + r2(tax)) * fx)} at ${fx}` : 'Enter the exchange rate';
+    }
   },
 
   async savePO(editId) {
@@ -20529,7 +20587,7 @@ const App = {
       const disc = this._parsePODiscount(row.querySelector('.poi-existing-disc').value);
       if (disc.error) discountError = true;
       const tax_option = row.querySelector('.poi-existing-tax').value;
-      items.push({ id: row.dataset.itemId, product_id: row.dataset.productId || null, quantity_ordered: qty, unit_cost, vendor_discount: disc.vendor_discount, vendor_discount_percent: disc.vendor_discount_percent, tax_option });
+      items.push({ id: row.dataset.itemId, product_id: row.dataset.productId || null, quantity_ordered: qty, unit_cost, vendor_discount: disc.vendor_discount, vendor_discount_percent: disc.vendor_discount_percent, tax_option, product_url: row.querySelector('.poi-existing-url')?.value.trim() || null });
     });
     document.querySelectorAll('#po-items [id^="po-item-"]').forEach(line => {
       const idx = line.id.replace('po-item-','');
@@ -20541,18 +20599,20 @@ const App = {
       if (disc.error) discountError = true;
       const tax_option = line.querySelector('.poi-new-tax').value;
       const uom_id = Number(document.getElementById(`poi-unit-${idx}`)?.value) || null;
-      items.push({ product_id, quantity_ordered: qty, unit_cost, vendor_discount: disc.vendor_discount, vendor_discount_percent: disc.vendor_discount_percent, tax_option, uom_id });
+      items.push({ product_id, quantity_ordered: qty, unit_cost, vendor_discount: disc.vendor_discount, vendor_discount_percent: disc.vendor_discount_percent, tax_option, uom_id, product_url: line.querySelector('.poi-new-url')?.value.trim() || null });
     });
     if (!supplier_id) { this.alert('Please select a supplier', 'error'); return; }
     if (!items.length) { this.alert('Add at least one item', 'error'); return; }
     if (discountError) { this.alert('Enter each vendor discount as dollars (e.g. 50) or a percentage (e.g. 10%)', 'error'); return; }
+    const currency = document.getElementById('po-currency').value;
+    const exchange_rate = currency !== this._baseCurrency() ? (parseFloat(document.getElementById('po-rate').value) || null) : null;
     try {
       if (editId) {
-        await this.api('PUT', `/purchase-orders/${editId}`, { supplier_id, branch_id: branch_id||null, notes, expected_date: expected_date||null, vendor_order_number, items });
+        await this.api('PUT', `/purchase-orders/${editId}`, { supplier_id, branch_id: branch_id||null, notes, expected_date: expected_date||null, vendor_order_number, items, currency, exchange_rate });
         this.closeModal();
         this.alert('Purchase order updated');
       } else {
-        await this.api('POST', '/purchase-orders', { supplier_id, branch_id: branch_id||null, notes, expected_date: expected_date||null, vendor_order_number, items });
+        await this.api('POST', '/purchase-orders', { supplier_id, branch_id: branch_id||null, notes, expected_date: expected_date||null, vendor_order_number, items, currency, exchange_rate });
         this.closeModal();
         this.alert('Purchase order created');
       }
@@ -20607,7 +20667,7 @@ const App = {
           </div>` : ''}
           <div class="two-col" style="margin-bottom:14px;font-size:13px">
             <div><strong>Supplier:</strong> ${po.supplier_name||'-'}<br><strong>Contact:</strong> ${po.supplier_contact||'-'}<br><strong>Email:</strong> ${po.supplier_email||'-'}</div>
-            <div><strong>Branch:</strong> ${po.branch_name||'-'}<br><strong>Created:</strong> ${this.fmtDate(po.created_at)}<br><strong>Expected:</strong> ${po.expected_date ? this.fmtDate(po.expected_date) : '-'}<br><strong>Vendor Order/Quote #:</strong> ${po.vendor_order_number || '-'}</div>
+            <div><strong>Branch:</strong> ${po.branch_name||'-'}<br><strong>Created:</strong> ${this.fmtDate(po.created_at)}<br><strong>Expected:</strong> ${po.expected_date ? this.fmtDate(po.expected_date) : '-'}<br><strong>Vendor Order/Quote #:</strong> ${po.vendor_order_number || '-'}${po.currency ? `<br><strong>Currency:</strong> ${po.currency} @ ${po.exchange_rate ? `${po.exchange_rate} ${this._baseCurrency()}` : '<span style="color:var(--danger)">no exchange rate — edit the PO to add it</span>'}` : ''}</div>
           </div>
           ${sp ? `<div id="po-sp-check" style="border:1px solid ${sp.ready ? '#bbf7d0' : '#fde68a'};background:${sp.ready ? '#f0fdf4' : '#fffbeb'};border-radius:6px;padding:10px 12px;margin-bottom:14px;font-size:13px">
             <strong>Fuel / supplier-priced PO</strong> — authorized on ${po.source_pr_number || 'the purchase request'}. Before it can be sent for approval:
@@ -20621,25 +20681,26 @@ const App = {
               <thead><tr><th>Product</th><th>SKU</th><th>Ordered</th><th>Received</th><th>Damaged</th><th>Unit Cost</th><th>Vendor Disc.</th><th>Tax</th><th>Total</th></tr></thead>
               <tbody>
                 ${po.items.map(i => `<tr>
-                  <td>${i.product_name}${i.item_type === 'service' ? ' <span class="badge-pill badge-info" style="font-size:10px">Service</span>' : ''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on the originating quote line">-${this.fmt(i.discount_amount)} quoted</span>` : ''}${i.notes ? `<div style="font-size:11px;color:var(--text-muted);max-width:280px">${this.escapeAttr(i.notes)}</div>` : ''}${itemLinkBadges(i)}${(!i.product_id && i.item_type !== 'service' && i.quantity_received>0) ? `<br><button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="App.showLinkToInventory(${po.id},${i.id})">+ Add to Inventory</button>` : ''}</td>
+                  <td>${i.product_name}${i.item_type === 'service' ? ' <span class="badge-pill badge-info" style="font-size:10px">Service</span>' : ''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on the originating quote line">-${this._fmtPO(i.discount_amount, po)} quoted</span>` : ''}${i.notes ? `<div style="font-size:11px;color:var(--text-muted);max-width:280px">${this.escapeAttr(i.notes)}</div>` : ''}${i.product_url ? `<div style="font-size:11px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="${this.escapeAttr(i.product_url)}" target="_blank" rel="noopener" style="color:var(--primary)">🔗 ${this.escapeAttr(i.product_url)}</a></div>` : ''}${itemLinkBadges(i)}${(!i.product_id && i.item_type !== 'service' && i.quantity_received>0) ? `<br><button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="App.showLinkToInventory(${po.id},${i.id})">+ Add to Inventory</button>` : ''}</td>
                   <td>${i.sku||'-'}</td>
                   <td>${i.quantity_ordered}${i.authorized_qty != null ? `<div style="font-size:11px;color:${i.quantity_ordered > i.authorized_qty ? 'var(--danger)' : 'var(--text-muted)'}">${i.quantity_ordered > i.authorized_qty ? '⚠️ ' : ''}max ${i.authorized_qty}</div>` : ''}</td>
                   <td><span class="${i.quantity_received>=i.quantity_ordered?'color-success':'color-warning'}">${i.quantity_received||0}</span></td>
                   <td>${i.quantity_damaged>0 ? `<span class="color-danger">${i.quantity_damaged}</span>` : '-'}</td>
-                  <td>${this.fmt(i.unit_cost)}</td>
-                  <td>${i.vendor_discount > 0 ? `−${this.fmt(i.vendor_discount)}${i.vendor_discount_percent != null ? `<div style="font-size:11px;color:var(--text-muted)">${i.vendor_discount_percent}%</div>` : ''}` : '-'}</td>
-                  <td>${i.tax_option === 'local' ? `GCT ${i.tax_rate}%<div style="font-size:11px;color:var(--text-muted)">${this.fmt(i.tax_amount)}</div>` : '<span style="color:var(--text-muted)">No tax</span>'}</td>
-                  <td class="fw-600">${this.fmt(i.total)}</td>
+                  <td>${this._fmtPO(i.unit_cost, po)}</td>
+                  <td>${i.vendor_discount > 0 ? `−${this._fmtPO(i.vendor_discount, po)}${i.vendor_discount_percent != null ? `<div style="font-size:11px;color:var(--text-muted)">${i.vendor_discount_percent}%</div>` : ''}` : '-'}</td>
+                  <td>${i.tax_option === 'local' ? `GCT ${i.tax_rate}%<div style="font-size:11px;color:var(--text-muted)">${this._fmtPO(i.tax_amount, po)}</div>` : '<span style="color:var(--text-muted)">No tax</span>'}</td>
+                  <td class="fw-600">${this._fmtPO(i.total, po)}</td>
                 </tr>`).join('')}
               </tbody>
             </table>
           </div>
           <div style="text-align:right;margin-top:10px;font-size:13px;line-height:1.7">
-            ${po.items.some(i => i.vendor_discount > 0) ? `<div>Vendor discounts: −${this.fmt(po.items.reduce((sum, i) => sum + (i.vendor_discount || 0), 0))}</div>` : ''}
-            <div>Subtotal: ${this.fmt(po.subtotal)}</div>
-            <div>GCT: ${this.fmt(po.tax_amount)}</div>
+            ${po.items.some(i => i.vendor_discount > 0) ? `<div>Vendor discounts: −${this._fmtPO(po.items.reduce((sum, i) => sum + (i.vendor_discount || 0), 0), po)}</div>` : ''}
+            <div>Subtotal: ${this._fmtPO(po.subtotal, po)}</div>
+            <div>GCT: ${this._fmtPO(po.tax_amount, po)}</div>
           </div>
-          <div style="text-align:right;font-size:15px;font-weight:700">Total: ${this.fmt(po.total)}</div>
+          <div style="text-align:right;font-size:15px;font-weight:700">Total: ${this._fmtPO(po.total, po)}</div>
+          ${po.currency && po.exchange_rate ? `<div style="text-align:right;font-size:12px;color:var(--text-muted)">≈ ${this.fmt(po.total * po.exchange_rate)} at ${po.exchange_rate}</div>` : ''}
           ${billing ? `<div style="margin-top:20px;border-top:1px solid var(--border);padding-top:14px">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
               <span style="font-weight:700;font-size:14px">Accounts Payable</span>

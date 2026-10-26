@@ -4,7 +4,7 @@ const { db } = require('../database');
 const { requirePermission, can } = require('../lib/permissions');
 const { resolveApprovalSignature } = require('../lib/signatures');
 const { nextNumber } = require('../lib/nextNumber');
-const { localTaxRate, defaultTaxOption, priceLine, poTotals } = require('../lib/poLines');
+const { localTaxRate, defaultTaxOption, priceLine, poTotals, resolvePoCurrency } = require('../lib/poLines');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -285,14 +285,16 @@ router.post('/:id/convert', async (req, res) => {
     // Fuel-style request: the PO starts at the authorized quantities with no
     // cost; the supplier's invoice fills them in (see purchase-orders.js).
     const supplierPriced = pr.request_type === 'supplier_priced';
+    // The PO is in the request's currency, at Settings' exchange rate (editable on the draft PO)
+    const cur = await resolvePoCurrency(pr.currency, req.body.exchange_rate);
 
     const tx = await db.transaction('write');
     let committed = false;
     try {
       const po_number = await nextNumber(tx, 'purchase_orders', 'po_number', 'PO-', 6);
       const poResult = await tx.execute({
-        sql: 'INSERT INTO purchase_orders (po_number, supplier_id, branch_id, employee_id, subtotal, tax_amount, total, notes, expected_date, supplier_priced) VALUES (?,?,?,?,?,?,?,?,?,?)',
-        args: [po_number, supplier_id || null, pr.branch_id, pr.employee_id, totals.subtotal, totals.tax_amount, totals.total, poNotes || pr.notes, expected_date || pr.required_date || null, supplierPriced ? 1 : 0]
+        sql: 'INSERT INTO purchase_orders (po_number, supplier_id, branch_id, employee_id, subtotal, tax_amount, total, notes, expected_date, supplier_priced, currency, exchange_rate) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+        args: [po_number, supplier_id || null, pr.branch_id, pr.employee_id, totals.subtotal, totals.tax_amount, totals.total, poNotes || pr.notes, expected_date || pr.required_date || null, supplierPriced ? 1 : 0, cur.currency, cur.exchange_rate]
       });
       const poId = Number(poResult.lastInsertRowid);
 
@@ -301,8 +303,8 @@ router.post('/:id/convert', async (req, res) => {
         // Internal-use and service items are added to PO but without a product link (won't update stock on receive)
         const productId = item.item_type === 'internal' || item.item_type === 'service' ? null : item.product_id;
         await tx.execute({
-          sql: 'INSERT INTO purchase_order_items (po_id, product_id, product_name, sku, quantity_ordered, unit_cost, total, quotation_item_id, work_order_item_id, discount_amount, tax_option, tax_rate, tax_amount, authorized_qty, item_type, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-          args: [poId, productId, item.product_name, item.sku, item.quantity, item.unit_cost, item.total, item.quotation_item_id, item.work_order_item_id, item.discount_amount || 0, line.tax_option, line.tax_rate, line.tax_amount, supplierPriced ? item.quantity : null, item.item_type === 'service' ? 'service' : null, item.notes || null]
+          sql: 'INSERT INTO purchase_order_items (po_id, product_id, product_name, sku, quantity_ordered, unit_cost, total, quotation_item_id, work_order_item_id, discount_amount, tax_option, tax_rate, tax_amount, authorized_qty, item_type, notes, product_url) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+          args: [poId, productId, item.product_name, item.sku, item.quantity, item.unit_cost, item.total, item.quotation_item_id, item.work_order_item_id, item.discount_amount || 0, line.tax_option, line.tax_rate, line.tax_amount, supplierPriced ? item.quantity : null, item.item_type === 'service' ? 'service' : null, item.notes || null, item.product_url || null]
         });
       }
 

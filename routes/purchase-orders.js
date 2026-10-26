@@ -12,7 +12,7 @@ const { nextNumber } = require('../lib/nextNumber');
 const { autoBills, createBill, dueDateFor, today } = require('../lib/payables');
 const { resolveApprovalSignature } = require('../lib/signatures');
 const { getSetting } = require('../lib/settings');
-const { localTaxRate, defaultTaxOption, priceLine, poTotals, receivedValue } = require('../lib/poLines');
+const { localTaxRate, defaultTaxOption, priceLine, poTotals, receivedValue, resolvePoCurrency, poRate, missingRate } = require('../lib/poLines');
 const { allocateTicketDiscount } = require('../lib/ticketDiscount');
 
 // Items joined with the quotation/work order they trace back to (a PR's "Q"
@@ -104,6 +104,8 @@ router.post('/', async (req, res) => {
   try {
     const { supplier_id, branch_id, employee_id, items, notes, expected_date, vendor_order_number } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in PO' });
+    let cur;
+    try { cur = await resolvePoCurrency(req.body.currency, req.body.exchange_rate); } catch(e) { return res.status(400).json({ error: e.message }); }
 
     const { rows: [supplier] } = supplier_id ? await db.execute({ sql: 'SELECT is_local FROM suppliers WHERE id = ?', args: [supplier_id] }) : { rows: [] };
     const taxRate = await localTaxRate();
@@ -119,7 +121,7 @@ router.post('/', async (req, res) => {
           unit_cost: item.unit_cost || (product ? (product.cost || 0) * unit.units_per : 0),
           vendor_discount: item.vendor_discount, vendor_discount_percent: item.vendor_discount_percent, tax_option: item.tax_option || defaultTaxOption(supplier),
         }, taxRate);
-        processedItems.push({ product_id: item.product_id || null, product_name, sku: item.sku || (product ? product.sku : ''), ...priced, purchase_unit: unit.purchase_unit, units_per: unit.units_per, uom_id: unit.uom_id ?? null });
+        processedItems.push({ product_id: item.product_id || null, product_name, sku: item.sku || (product ? product.sku : ''), ...priced, purchase_unit: unit.purchase_unit, units_per: unit.units_per, uom_id: unit.uom_id ?? null, product_url: String(item.product_url || '').trim() || null });
       }
     } catch(e) { return res.status(400).json({ error: e.message }); }
     const { subtotal, tax_amount, total } = poTotals(processedItems);
@@ -128,10 +130,10 @@ router.post('/', async (req, res) => {
     const tx = await db.transaction('write');
     let committed = false;
     try {
-      const result = await tx.execute({ sql: 'INSERT INTO purchase_orders (po_number,supplier_id,branch_id,employee_id,subtotal,tax_amount,total,notes,expected_date,vendor_order_number) VALUES (?,?,?,?,?,?,?,?,?,?)', args: [po_number, supplier_id||null, branch_id||null, employee_id||null, subtotal, tax_amount, total, notes||null, expected_date||null, vendor_order_number||null] });
+      const result = await tx.execute({ sql: 'INSERT INTO purchase_orders (po_number,supplier_id,branch_id,employee_id,subtotal,tax_amount,total,notes,expected_date,vendor_order_number,currency,exchange_rate) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', args: [po_number, supplier_id||null, branch_id||null, employee_id||null, subtotal, tax_amount, total, notes||null, expected_date||null, vendor_order_number||null, cur.currency, cur.exchange_rate] });
       const poId = Number(result.lastInsertRowid);
       for (const item of processedItems) {
-        await tx.execute({ sql: 'INSERT INTO purchase_order_items (po_id,product_id,product_name,sku,quantity_ordered,unit_cost,total,vendor_discount,vendor_discount_percent,tax_option,tax_rate,tax_amount,purchase_unit,units_per,uom_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [poId, item.product_id, item.product_name, item.sku, item.quantity_ordered, item.unit_cost, item.total, item.vendor_discount, item.vendor_discount_percent, item.tax_option, item.tax_rate, item.tax_amount, item.purchase_unit || null, item.units_per || 1, item.uom_id ?? null] });
+        await tx.execute({ sql: 'INSERT INTO purchase_order_items (po_id,product_id,product_name,sku,quantity_ordered,unit_cost,total,vendor_discount,vendor_discount_percent,tax_option,tax_rate,tax_amount,purchase_unit,units_per,uom_id,product_url) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [poId, item.product_id, item.product_name, item.sku, item.quantity_ordered, item.unit_cost, item.total, item.vendor_discount, item.vendor_discount_percent, item.tax_option, item.tax_rate, item.tax_amount, item.purchase_unit || null, item.units_per || 1, item.uom_id ?? null, item.product_url] });
       }
       await tx.commit();
       committed = true;
@@ -161,6 +163,7 @@ router.patch('/:id/status', async (req, res) => {
     if (!po) return res.status(404).json({ error: 'Not found' });
     if (po.status === 'received') return res.status(400).json({ error: 'Cannot change status of received PO' });
     if (po.reinstated_from_status) return res.status(400).json({ error: 'This PO was already received and is only waiting for its approval — approve or reject it' });
+    if (status === 'sent' && missingRate(po)) return res.status(400).json({ error: `Enter the ${po.currency} exchange rate on the PO before sending it for approval` });
     if (status === 'sent' && po.supplier_priced) {
       const problems = await supplierPricedProblems(po.id);
       if (problems.length) return res.status(400).json({ error: supplierPricedError(problems, 'sent for approval') });
@@ -266,6 +269,10 @@ router.put('/:id', async (req, res) => {
 
     const { supplier_id, branch_id, notes, expected_date, vendor_order_number, items } = req.body;
     if (!items || !items.length) return res.status(400).json({ error: 'A PO needs at least one item' });
+    // Older clients don't send a currency — keep the PO's own
+    let cur;
+    try { cur = 'currency' in req.body ? await resolvePoCurrency(req.body.currency, req.body.exchange_rate) : { currency: po.currency, exchange_rate: po.exchange_rate }; }
+    catch(e) { return res.status(400).json({ error: e.message }); }
 
     const { rows: existingItems } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ?', args: [req.params.id] });
     const existingById = new Map(existingItems.map(i => [i.id, i]));
@@ -294,11 +301,11 @@ router.put('/:id', async (req, res) => {
         }, taxRate);
         priced.push(line);
         if (existing) {
-          await tx.execute({ sql: 'UPDATE purchase_order_items SET quantity_ordered = ?, unit_cost = ?, total = ?, vendor_discount = ?, vendor_discount_percent = ?, tax_option = ?, tax_rate = ?, tax_amount = ? WHERE id = ?', args: [line.quantity_ordered, line.unit_cost, line.total, line.vendor_discount, line.vendor_discount_percent, line.tax_option, line.tax_rate, line.tax_amount, existingId] });
+          await tx.execute({ sql: 'UPDATE purchase_order_items SET quantity_ordered = ?, unit_cost = ?, total = ?, vendor_discount = ?, vendor_discount_percent = ?, tax_option = ?, tax_rate = ?, tax_amount = ?, product_url = ? WHERE id = ?', args: [line.quantity_ordered, line.unit_cost, line.total, line.vendor_discount, line.vendor_discount_percent, line.tax_option, line.tax_rate, line.tax_amount, 'product_url' in item ? (String(item.product_url || '').trim() || null) : existing.product_url, existingId] });
           keepIds.add(existingId);
         } else {
           const unit = await resolvePurchaseUnit(tx, product, item.uom_id ?? item.purchase_unit);
-          const result = await tx.execute({ sql: 'INSERT INTO purchase_order_items (po_id,product_id,product_name,sku,quantity_ordered,unit_cost,total,vendor_discount,vendor_discount_percent,tax_option,tax_rate,tax_amount,purchase_unit,units_per,uom_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [req.params.id, product.id, lineName(product.name, unit), product.sku, line.quantity_ordered, line.unit_cost, line.total, line.vendor_discount, line.vendor_discount_percent, line.tax_option, line.tax_rate, line.tax_amount, unit.purchase_unit, unit.units_per, unit.uom_id ?? null] });
+          const result = await tx.execute({ sql: 'INSERT INTO purchase_order_items (po_id,product_id,product_name,sku,quantity_ordered,unit_cost,total,vendor_discount,vendor_discount_percent,tax_option,tax_rate,tax_amount,purchase_unit,units_per,uom_id,product_url) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [req.params.id, product.id, lineName(product.name, unit), product.sku, line.quantity_ordered, line.unit_cost, line.total, line.vendor_discount, line.vendor_discount_percent, line.tax_option, line.tax_rate, line.tax_amount, unit.purchase_unit, unit.units_per, unit.uom_id ?? null, String(item.product_url || '').trim() || null] });
           keepIds.add(Number(result.lastInsertRowid));
         }
       }
@@ -307,8 +314,8 @@ router.put('/:id', async (req, res) => {
       }
       const { subtotal, tax_amount, total } = poTotals(priced);
       await tx.execute({
-        sql: 'UPDATE purchase_orders SET supplier_id = ?, branch_id = ?, notes = ?, expected_date = ?, vendor_order_number = ?, subtotal = ?, tax_amount = ?, total = ? WHERE id = ?',
-        args: [supplier_id || po.supplier_id, branch_id || null, notes ?? po.notes, expected_date || null, vendor_order_number || null, subtotal, tax_amount, total, req.params.id],
+        sql: 'UPDATE purchase_orders SET supplier_id = ?, branch_id = ?, notes = ?, expected_date = ?, vendor_order_number = ?, subtotal = ?, tax_amount = ?, total = ?, currency = ?, exchange_rate = ? WHERE id = ?',
+        args: [supplier_id || po.supplier_id, branch_id || null, notes ?? po.notes, expected_date || null, vendor_order_number || null, subtotal, tax_amount, total, cur.currency, cur.exchange_rate, req.params.id],
       });
       await tx.commit();
       committed = true;
@@ -376,6 +383,9 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
         ? 'A fuel/supplier-priced PO is received only after it is approved with the invoiced cost'
         : `This PO is ${{ draft: 'still a draft', sent: 'awaiting approval' }[po.status] || po.status} — it must be approved before it can be received` });
     }
+    if (missingRate(po)) return res.status(400).json({ error: `This PO is in ${po.currency} with no exchange rate — it's needed to cost the stock and the A/P bill` });
+    // Stock cost and A/P are in base currency; the PO may not be
+    const rate = poRate(po);
 
     const tx = await db.transaction('write');
     try {
@@ -389,7 +399,7 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
         receiptValue += value.goods;
         receiptTax += value.tax;
         // Stock is costed at what was actually paid per unit — after the vendor's discount, before tax.
-        const netUnitCost = item.quantity_ordered ? (Number(item.total) || 0) / item.quantity_ordered : (Number(item.unit_cost) || 0);
+        const netUnitCost = (item.quantity_ordered ? (Number(item.total) || 0) / item.quantity_ordered : (Number(item.unit_cost) || 0)) * rate;
         const newReceived = (item.quantity_received || 0) + qty;
         await tx.execute({ sql: 'UPDATE purchase_order_items SET quantity_received = ? WHERE id = ?', args: [newReceived, item_id] });
         if (item.product_id) {
@@ -433,7 +443,8 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
         await createBill(tx, {
           supplier_id: po.supplier_id, po_id: po.id, branch_id: po.branch_id,
           bill_date: billDate, due_date: dueDateFor(supplier.payment_terms, billDate),
-          amount: receiptValue + tax, description: `Goods received on ${po.po_number}`,
+          amount: parseFloat(((receiptValue + tax) * rate).toFixed(2)),
+          description: `Goods received on ${po.po_number}${po.currency ? ` (${po.currency} ${(receiptValue + tax).toFixed(2)} @ ${rate})` : ''}`,
           source: 'receipt', created_by: req.employee?.id,
         });
       }

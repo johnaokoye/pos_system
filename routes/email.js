@@ -1245,16 +1245,18 @@ function buildApprovedPoHtml(po, s, origin, { print = false } = {}) {
   const storeName = s.store_name || 'My Store';
   const storeAddr = s.store_address || '';
   const storePhone = s.store_phone || '';
+  // A PO in another currency shows its amounts in that currency
+  const pfmt = n => (po.currency ? `${po.currency} ` : '') + fmt(n);
   const absUrl = (path) => !path ? null : (/^https?:\/\//.test(path) ? path : (origin ? `${origin}${path}` : path));
 
   const rows = (po.items || []).map(i => `
     <tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}${i.item_type === 'service' ? ' <span style="color:#888;font-size:11px">(service)</span>' : ''}<br><span style="color:#888;font-size:11px">${i.sku || ''}</span>${i.notes ? `<div style="color:#555;font-size:11px;margin-top:2px">${i.notes}</div>` : ''}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}${i.item_type === 'service' ? ' <span style="color:#888;font-size:11px">(service)</span>' : ''}<br><span style="color:#888;font-size:11px">${i.sku || ''}</span>${i.notes ? `<div style="color:#555;font-size:11px;margin-top:2px">${i.notes}</div>` : ''}${i.product_url ? `<div style="font-size:11px;margin-top:2px;word-break:break-all"><a href="${i.product_url}" style="color:#2563eb">${i.product_url}</a></div>` : ''}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${i.quantity_ordered}</td>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${fmt(i.unit_cost)}</td>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${i.vendor_discount > 0 ? `−${fmt(i.vendor_discount)}${i.vendor_discount_percent != null ? ` (${i.vendor_discount_percent}%)` : ''}` : '—'}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${pfmt(i.unit_cost)}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${i.vendor_discount > 0 ? `−${pfmt(i.vendor_discount)}${i.vendor_discount_percent != null ? ` (${i.vendor_discount_percent}%)` : ''}` : '—'}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${i.tax_option === 'local' ? `GCT ${i.tax_rate}%` : 'No tax'}</td>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(i.total)}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${pfmt(i.total)}</td>
     </tr>`).join('');
   const discounts = (po.items || []).reduce((sum, i) => sum + (Number(i.vendor_discount) || 0), 0);
 
@@ -1283,6 +1285,7 @@ ${print ? PRINT_PAGE_STYLE : ''}
           <div><strong>Approved:</strong> ${po.approved_at ? new Date(po.approved_at).toLocaleDateString() : '—'}</div>
           ${po.branch_name ? `<div><strong>Branch:</strong> ${po.branch_name}</div>` : ''}
           ${po.vendor_order_number ? `<div><strong>Vendor Order #:</strong> ${po.vendor_order_number}</div>` : ''}
+          ${po.currency ? `<div><strong>Currency:</strong> ${po.currency}</div>` : ''}
         </div>
       </div>
       ${po.supplier_name ? `<div style="background:#f9fafb;border:1px solid #e8e8e8;border-radius:6px;padding:12px;margin-bottom:16px;font-size:13px">
@@ -1300,11 +1303,11 @@ ${print ? PRINT_PAGE_STYLE : ''}
         <tbody>${rows}</tbody>
       </table>
       <div style="text-align:right;margin-top:10px;font-size:13px;color:#444;line-height:1.7">
-        ${discounts > 0 ? `<div>Vendor discounts: −${fmt(discounts)}</div>` : ''}
-        <div>Subtotal: ${fmt(po.subtotal)}</div>
-        <div>GCT: ${fmt(po.tax_amount)}</div>
+        ${discounts > 0 ? `<div>Vendor discounts: −${pfmt(discounts)}</div>` : ''}
+        <div>Subtotal: ${pfmt(po.subtotal)}</div>
+        <div>GCT: ${pfmt(po.tax_amount)}</div>
       </div>
-      <div style="text-align:right;font-size:15px;font-weight:700;color:${BRAND.black}">Total: ${fmt(po.total)}</div>
+      <div style="text-align:right;font-size:15px;font-weight:700;color:${BRAND.black}">Total: ${pfmt(po.total)}</div>
       ${po.notes ? `<div style="margin-top:16px;font-size:13px;color:#444"><strong>Notes:</strong> ${po.notes}</div>` : ''}
       ${po.approval_signature ? `
       <!-- Approver's signature, bottom right. Nested tables (not flex/float) so
@@ -2141,24 +2144,25 @@ function quotePdfModel(q, s) {
 
 // Same content as buildApprovedPoHtml — the supplier-facing approved PO.
 function poPdfModel(po, s) {
+  const pfmt = n => (po.currency ? `${po.currency} ` : '') + fmt(n);
   const discounts = (po.items || []).reduce((sum, i) => sum + (Number(i.vendor_discount) || 0), 0);
   return {
     store: pdfStore(s),
     title: poUnapprovedLabel(po) ? `PURCHASE ORDER - ${poUnapprovedLabel(po).replace('—', '-')}` : 'PURCHASE ORDER', number: po.po_number,
-    meta: [['Approved', pdfDate(po.approved_at)], ['Branch', po.branch_name], ['Vendor Order #', po.vendor_order_number]],
+    meta: [['Approved', pdfDate(po.approved_at)], ['Branch', po.branch_name], ['Vendor Order #', po.vendor_order_number], ['Currency', po.currency]],
     party: { label: 'Supplier', lines: [po.supplier_name, po.supplier_contact, po.supplier_email] },
     tables: [{ columns: [{ label: 'Item', width: 3.6 }, { label: 'Qty', width: 0.8, align: 'center' }, { label: 'Unit Cost', width: 1.2, align: 'right' }, { label: 'Discount', width: 1.3, align: 'right' }, { label: 'Tax', width: 1.1, align: 'right' }, { label: 'Total', width: 1.3, align: 'right' }],
       rows: (po.items || []).map(i => ({
-        cells: [i.product_name, i.quantity_ordered, fmt(i.unit_cost),
-          i.vendor_discount > 0 ? `-${fmt(i.vendor_discount)}${i.vendor_discount_percent != null ? ` (${i.vendor_discount_percent}%)` : ''}` : '-',
-          i.tax_option === 'local' ? `GCT ${i.tax_rate}%` : 'No tax', fmt(i.total)],
-        sub: [i.item_type === 'service' ? 'Service' : '', i.sku, i.purchase_unit && Number(i.units_per) > 1 ? `Per ${i.purchase_unit} of ${i.units_per}` : '', i.notes].filter(Boolean).join(' · '),
+        cells: [i.product_name, i.quantity_ordered, pfmt(i.unit_cost),
+          i.vendor_discount > 0 ? `-${pfmt(i.vendor_discount)}${i.vendor_discount_percent != null ? ` (${i.vendor_discount_percent}%)` : ''}` : '-',
+          i.tax_option === 'local' ? `GCT ${i.tax_rate}%` : 'No tax', pfmt(i.total)],
+        sub: [i.item_type === 'service' ? 'Service' : '', i.sku, i.purchase_unit && Number(i.units_per) > 1 ? `Per ${i.purchase_unit} of ${i.units_per}` : '', i.notes, i.product_url].filter(Boolean).join(' · '),
       })) }],
     totals: [
-      discounts > 0 ? { label: 'Vendor discounts', value: `-${fmt(discounts)}`, style: 'green' } : null,
-      { label: 'Subtotal', value: fmt(po.subtotal) },
-      { label: 'GCT', value: fmt(po.tax_amount) },
-      { label: 'TOTAL', value: fmt(po.total), style: 'grand' },
+      discounts > 0 ? { label: 'Vendor discounts', value: `-${pfmt(discounts)}`, style: 'green' } : null,
+      { label: 'Subtotal', value: pfmt(po.subtotal) },
+      { label: 'GCT', value: pfmt(po.tax_amount) },
+      { label: 'TOTAL', value: pfmt(po.total), style: 'grand' },
     ],
     notes: [po.notes ? `Notes: ${po.notes}` : ''],
     signatures: po.approval_signature ? [{ label: 'Approved By', name: po.approved_by_name || '', signedAt: pdfDateTime(po.approved_at), image: po.approval_signature }] : [],
