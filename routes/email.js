@@ -1753,6 +1753,8 @@ function buildWorkOrderReadyHtml(wo, s) {
     <tr><td style="padding:0 24px 20px">
       ${wo.customer_name ? docRow('Customer', wo.customer_name) : ''}
       ${wo.item_label ? docRow('Item', wo.item_label) : ''}
+      ${wo.item_serial ? docRow('Item #', wo.item_serial) : ''}
+      ${(wo.accessories || []).length ? docRow('Accessories', wo.accessories.map(a => `A${a.line_no} ${a.name}`).join(', ')) : ''}
       ${docRow('Completed', wo.completed_at ? new Date(wo.completed_at).toLocaleString() : '—')}
       ${docRow('Pickup By', wo.pickup_due_date ? new Date(wo.pickup_due_date).toLocaleDateString() : '—', '#dc2626')}
       <div style="text-align:center;margin-top:20px;font-size:14px;color:#333">Your item is ready for pickup. Please bring this reference number with you.</div>
@@ -1774,6 +1776,7 @@ router.post('/send-work-order-ready/:id', requireAuth, async (req, res) => {
     const { rows: [wo] } = await db.execute({ sql: `SELECT wo.*, c.first_name || ' ' || c.last_name as customer_name, b.name as branch_name
       FROM work_orders wo LEFT JOIN customers c ON wo.customer_id = c.id LEFT JOIN branches b ON wo.branch_id = b.id WHERE wo.id = ?`, args: [req.params.id] });
     if (!wo) return res.status(404).json({ error: 'Work order not found' });
+    wo.accessories = (await db.execute({ sql: 'SELECT * FROM work_order_accessories WHERE work_order_id = ? ORDER BY line_no', args: [wo.id] })).rows;
 
     const s = await getSettings();
     try {
@@ -1809,6 +1812,7 @@ async function loadWorkOrderForInvoice(id) {
   if (!wo) return null;
   const { rows: items } = await db.execute({ sql: 'SELECT * FROM work_order_items WHERE work_order_id = ? ORDER BY id', args: [id] });
   wo.items = items;
+  wo.accessories = (await db.execute({ sql: 'SELECT * FROM work_order_accessories WHERE work_order_id = ? ORDER BY line_no', args: [id] })).rows;
   return wo;
 }
 
@@ -1879,7 +1883,20 @@ ${print ? PRINT_PAGE_STYLE : ''}
       <div style="font-size:13px;color:#444;margin-bottom:16px">
         <strong>Description:</strong> ${wo.description}
         ${wo.item_label ? `<br><strong>Item:</strong> ${wo.item_label}` : ''}
+        ${wo.item_serial ? `<br><strong>Item #:</strong> ${wo.item_serial}` : ''}
       </div>
+      ${(wo.accessories || []).length ? `<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px;margin-bottom:16px">
+        <thead><tr style="background:#f9fafb">
+          <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">#</th>
+          <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Accessory Handed In</th>
+          <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Item #</th>
+        </tr></thead>
+        <tbody>${wo.accessories.map(a => `<tr>
+          <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-weight:600">A${a.line_no}</td>
+          <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${a.name}<br><span style="color:#888;font-size:11px">${a.description}</span></td>
+          <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${a.serial_number || '—'}</td>
+        </tr>`).join('')}</tbody>
+      </table>` : ''}
       ${partRows ? `<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px">
         <thead><tr style="background:#f9fafb">
           <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Part</th>
@@ -2276,8 +2293,12 @@ function workOrderInvoicePdfModel(wo, s) {
     title: 'WORK ORDER TAX INVOICE', number: wo.wo_number,
     meta: [['Status', `${WO_STATUS_LABELS[wo.status] || wo.status}${wo.is_express ? ' (Express)' : ''}`], ['Opened', pdfDate(wo.created_at)], ['Pickup Due', wo.pickup_due_date ? pdfDate(wo.pickup_due_date) : '']],
     party: { label: 'Customer', lines: [wo.customer_name, wo.customer_phone, wo.customer_email] },
-    info: [['Description', wo.description], ['Item', wo.item_label]],
-    tables: [{ heading: 'Parts', columns: [{ label: 'Part', width: 4 }, ...ITEM_COLUMNS.slice(1)], rows: (wo.items || []).map(i => ({ cells: [i.product_name, i.quantity, fmt(i.unit_price), fmt(i.total)], sub: i.sku || '' })) }],
+    info: [['Description', wo.description], ['Item', wo.item_label], ['Item #', wo.item_serial]],
+    tables: [
+      { heading: 'Accessories Handed In', columns: [{ label: 'Accessory', width: 4 }, { label: 'Item #', width: 1.8 }],
+        rows: (wo.accessories || []).map(a => ({ cells: [`A${a.line_no}  ${a.name}`, a.serial_number || '-'], sub: a.description })) },
+      { heading: 'Parts', columns: [{ label: 'Part', width: 4 }, ...ITEM_COLUMNS.slice(1)], rows: (wo.items || []).map(i => ({ cells: [i.product_name, i.quantity, fmt(i.unit_price), fmt(i.total)], sub: i.sku || '' })) },
+    ],
     totals: [
       { label: `Assessment Fee${wo.assessment_transaction_id ? ' (paid)' : ''}`, value: fmt(wo.assessment_fee) },
       assessmentTax > 0 ? { label: 'Tax on Assessment Fee', value: fmt(assessmentTax), style: 'muted' } : null,

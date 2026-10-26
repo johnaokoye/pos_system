@@ -10871,8 +10871,9 @@ const App = {
     const branches = this.currentUser.branches || [];
     const isMultiBranch = this.currentUser.permissions?.multi_branch_access && branches.length > 1;
     const defaultBranch = branches.find(b => b.is_default) || branches[0] || null;
+    this._woIntake = { item: [], acc: [] };
     this.showModal(`
-      <div class="modal" style="max-width:520px">
+      <div class="modal" style="max-width:600px">
         <div class="modal-header"><span class="modal-title">New Work Order</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <div class="form-group"><label>Customer *</label>
@@ -10882,7 +10883,11 @@ const App = {
             ${isMultiBranch ? `<select id="wo-branch">${branches.map(b=>`<option value="${b.id}" ${defaultBranch && b.id===defaultBranch.id?'selected':''}>${b.name}</option>`).join('')}</select>`
               : `<input type="text" value="${defaultBranch?.name||'No branch assigned'}" disabled style="background:var(--bg-secondary)"><input type="hidden" id="wo-branch" value="${defaultBranch?.id||''}">`}
           </div>
-          <div class="form-group"><label>Item / Tag Label</label><input id="wo-item-label" placeholder="e.g. Red mountain bike, serial #12345"></div>
+          <div class="input-row">
+            <div class="form-group"><label>Item / Tag Label</label><input id="wo-item-label" placeholder="e.g. Red mountain bike"></div>
+            <div class="form-group"><label>Item # / Serial #</label><input id="wo-item-serial" placeholder="Serial, model or asset number"></div>
+          </div>
+          <div class="form-group"><label>Photos of the Item</label>${this._woPhotoPickerHtml('item')}</div>
           <div class="form-group wo-fee-search-wrap" style="position:relative"><label>Assessment Fee *</label>
             <input type="text" id="wo-fee-search" placeholder="Search assessment fee…" autocomplete="off"
               oninput="App._filterWOFeeOptions(this.value)" onfocus="App._filterWOFeeOptions(this.value)">
@@ -10892,10 +10897,16 @@ const App = {
           </div>
           <div class="form-group"><label>Description *</label><textarea id="wo-description" rows="3" placeholder="What the customer reported / what's being brought in for"></textarea></div>
           <p style="font-size:11px;color:var(--text-muted);margin-top:-4px">The description stays editable after intake, once the item's been assessed.</p>
+          <div class="form-group">
+            <label style="display:flex;justify-content:space-between;align-items:center">Accessories Handed In
+              <button type="button" class="btn btn-sm btn-outline" onclick="App._woAddIntakeAccessory()">+ Add Accessory</button></label>
+            <div id="wo-acc-list"></div>
+            <p style="font-size:11px;color:var(--text-muted);margin:4px 0 0">Charger, case, remote, cables… Each one is numbered (A1, A2…) on the work order and its label.</p>
+          </div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-          <button class="btn btn-primary" onclick="App.saveWOIntake()">Open Work Order</button>
+          <button class="btn btn-primary" id="wo-intake-save" onclick="App.saveWOIntake()">Open Work Order</button>
         </div>
       </div>`);
     document.addEventListener('click', (e) => {
@@ -10933,20 +10944,195 @@ const App = {
     const customer_id = document.getElementById('wo-customer').value;
     const branch_id = document.getElementById('wo-branch')?.value || null;
     const item_label = document.getElementById('wo-item-label').value.trim();
+    const item_serial = document.getElementById('wo-item-serial').value.trim();
     const assessment_fee_product_id = document.getElementById('wo-fee-product').value;
     const description = document.getElementById('wo-description').value.trim();
+    const { item: itemPhotos, acc } = this._woIntake;
     if (!customer_id) { this.alert('Please select a customer', 'error'); return; }
     if (!assessment_fee_product_id) { this.alert('Select an assessment fee', 'error'); return; }
     if (!description) { this.alert('A description is required', 'error'); return; }
+    const badAcc = acc.findIndex(a => !a.name.trim() || !a.description.trim());
+    if (badAcc >= 0) { this.alert(`Accessory A${badAcc + 1} needs a name and a description`, 'error'); return; }
+    const unphotographed = [!itemPhotos.length ? 'the item' : null, ...acc.map((a, i) => a.photos.length ? null : `A${i + 1}`)].filter(Boolean);
+    if (unphotographed.length && !confirm(`No photo of ${unphotographed.join(', ')}. Open the work order anyway?`)) return;
+    const btn = document.getElementById('wo-intake-save');
+    btn.disabled = true; btn.textContent = 'Saving...';
     try {
-      const wo = await this.api('POST', '/work-orders', { customer_id, branch_id, item_label, description, assessment_fee_product_id, employee_id: this.currentUser.id });
+      const wo = await this.api('POST', '/work-orders', { customer_id, branch_id, item_label, item_serial, description, assessment_fee_product_id, employee_id: this.currentUser.id,
+        accessories: acc.map(a => ({ name: a.name, serial_number: a.serial_number, description: a.description })) });
+      // Accessories come back in the order sent, so photo i of accessory i goes to wo.accessories[i]
+      const uploads = [...itemPhotos.map(f => [f, null]), ...acc.flatMap((a, i) => a.photos.map(f => [f, wo.accessories[i].id]))];
+      const failed = [];
+      for (const [i, [file, accessoryId]] of uploads.entries()) {
+        btn.textContent = `Uploading photo ${i + 1} of ${uploads.length}...`;
+        try { await this._woUploadPhoto(wo.id, file, accessoryId); } catch(e) { failed.push(e.message); }
+      }
       this.closeModal();
-      this.alert(`Work order ${wo.wo_number} opened`);
+      if (failed.length) this.alert(`Work order ${wo.wo_number} opened, but ${failed.length} photo(s) didn't upload — add them from the work order. ${failed.join('; ')}`, 'error');
+      else this.alert(`Work order ${wo.wo_number} opened`);
       this.printWOLabel(wo.id);
       // Can be opened from the quote form on the POS screen — don't replace
       // POS with the Work Orders list underneath the closing modal.
       if (this.section === 'work-orders') this.renderWorkOrders();
-    } catch(e) { this.alert(e.message, 'error'); }
+    } catch(e) { this.alert(e.message, 'error'); btn.disabled = false; btn.textContent = 'Open Work Order'; }
+  },
+
+  // Intake photos and accessories. "Take Photo" opens the camera on a phone
+  // or tablet; "Upload" picks existing files. key is 'item' or the
+  // accessory's index in this._woIntake.acc.
+  _woPhotoPickerHtml(key) {
+    return `<div style="display:flex;gap:6px;flex-wrap:wrap">
+        <label class="btn btn-sm btn-outline" style="margin:0;cursor:pointer">📷 Take Photo<input type="file" accept="image/*" capture="environment" style="display:none" onchange="App._woAddIntakePhotos('${key}', this)"></label>
+        <label class="btn btn-sm btn-outline" style="margin:0;cursor:pointer">Upload Photos<input type="file" accept="image/*" multiple style="display:none" onchange="App._woAddIntakePhotos('${key}', this)"></label>
+      </div>
+      <div id="wo-ph-${key}" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px"></div>`;
+  },
+
+  _woIntakePhotoList(key) { return key === 'item' ? this._woIntake.item : this._woIntake.acc[key].photos; },
+
+  _woAddIntakePhotos(key, input) {
+    this._woIntakePhotoList(key).push(...input.files);
+    input.value = '';
+    this._woRenderIntakePhotos(key);
+  },
+
+  _woRemoveIntakePhoto(key, i) {
+    this._woIntakePhotoList(key).splice(i, 1);
+    this._woRenderIntakePhotos(key);
+  },
+
+  _woRenderIntakePhotos(key) {
+    const el = document.getElementById(`wo-ph-${key}`);
+    if (!el) return;
+    el.innerHTML = this._woIntakePhotoList(key).map((f, i) => `<div style="position:relative">
+        <img src="${URL.createObjectURL(f)}" style="width:64px;height:64px;object-fit:cover;border-radius:4px;border:1px solid var(--border)">
+        <button type="button" title="Remove" onclick="App._woRemoveIntakePhoto('${key}',${i})" style="position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;border:none;background:var(--danger);color:#fff;font-size:11px;cursor:pointer;line-height:20px;padding:0">✕</button>
+      </div>`).join('');
+  },
+
+  _woAddIntakeAccessory() {
+    this._woIntake.acc.push({ name: '', serial_number: '', description: '', photos: [] });
+    this._woRenderIntakeAccessories();
+  },
+
+  _woRemoveIntakeAccessory(i) {
+    this._woIntake.acc.splice(i, 1);
+    this._woRenderIntakeAccessories();
+  },
+
+  _woRenderIntakeAccessories() {
+    const el = document.getElementById('wo-acc-list');
+    if (!el) return;
+    el.innerHTML = this._woIntake.acc.map((a, i) => `
+      <div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-top:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><strong>A${i + 1}</strong>
+          <button type="button" class="btn btn-sm btn-outline" onclick="App._woRemoveIntakeAccessory(${i})">Remove</button></div>
+        <div class="input-row">
+          <div class="form-group"><label>Accessory *</label><input value="${this.escapeAttr(a.name)}" placeholder="e.g. Charger" oninput="App._woIntake.acc[${i}].name = this.value"></div>
+          <div class="form-group"><label>Item # / Serial #</label><input value="${this.escapeAttr(a.serial_number)}" oninput="App._woIntake.acc[${i}].serial_number = this.value"></div>
+        </div>
+        <div class="form-group"><label>Description *</label><textarea rows="2" placeholder="Make/model, colour, condition, any marks or damage" oninput="App._woIntake.acc[${i}].description = this.value">${this.escapeAttr(a.description)}</textarea></div>
+        ${this._woPhotoPickerHtml(i)}
+      </div>`).join('');
+    this._woIntake.acc.forEach((a, i) => this._woRenderIntakePhotos(i));
+  },
+
+  async _woUploadPhoto(woId, file, accessoryId) {
+    const fd = new FormData();
+    fd.append('photo', file);
+    if (accessoryId) fd.append('accessory_id', accessoryId);
+    const res = await fetch(`/api/work-orders/${woId}/photos`, { method: 'POST', body: fd });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(`${file.name}: ${e.error || 'Upload failed'}`); }
+    return res.json();
+  },
+
+  // ─── Item & accessories on an existing work order ───
+  _woPhotoThumbs(photos, woId, canRemove) {
+    return photos.map(p => `<div style="position:relative">
+        <a href="${p.url}" target="_blank" rel="noopener"><img src="${p.url}" loading="lazy" style="width:72px;height:72px;object-fit:cover;border-radius:4px;border:1px solid var(--border)"></a>
+        ${canRemove ? `<button type="button" title="Remove photo" onclick="App.deleteWOPhoto(${woId},${p.id})" style="position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;border:none;background:var(--danger);color:#fff;font-size:11px;cursor:pointer;line-height:20px;padding:0">✕</button>` : ''}
+      </div>`).join('');
+  },
+
+  _woDetailPhotoButtons(woId, accessoryId) {
+    const a = accessoryId || 0;
+    return `<label class="btn btn-sm btn-outline" style="margin:0;cursor:pointer;padding:1px 8px;font-size:11px">📷 Take Photo<input type="file" accept="image/*" capture="environment" style="display:none" onchange="App.addWOPhotos(${woId},${a},this)"></label>
+      <label class="btn btn-sm btn-outline" style="margin:0;cursor:pointer;padding:1px 8px;font-size:11px">Upload<input type="file" accept="image/*" multiple style="display:none" onchange="App.addWOPhotos(${woId},${a},this)"></label>`;
+  },
+
+  _woIntakeSectionHtml(wo) {
+    const canAdd = !['picked_up','cancelled'].includes(wo.status) && (this.can('work_orders') || this.can('wo_intake'));
+    const canRemove = wo.status === 'intake' && canAdd;
+    const accs = wo.accessories || [];
+    return `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:13px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Item</strong>
+        <button type="button" class="btn btn-sm btn-outline" style="padding:1px 8px;font-size:11px" onclick="App.printWOLabel(${wo.id})">Print Label</button>
+      </div>
+      <div style="margin-top:4px">${wo.item_label ? this.escapeAttr(wo.item_label) : '<span style="color:var(--text-muted)">No tag label</span>'}${wo.item_serial ? ` · <strong>Item #</strong> ${this.escapeAttr(wo.item_serial)}` : ''}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">${this._woPhotoThumbs(wo.photos || [], wo.id, canRemove) || '<span style="color:var(--text-muted);font-size:12px">No photos of the item</span>'}</div>
+      ${canAdd ? `<div style="display:flex;gap:6px;margin-top:6px">${this._woDetailPhotoButtons(wo.id, 0)}</div>` : ''}
+
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;border-top:1px solid var(--border);padding-top:8px">
+        <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Accessories Handed In (${accs.length})</strong>
+        ${canAdd ? `<button type="button" class="btn btn-sm btn-outline" style="padding:1px 8px;font-size:11px" onclick="document.getElementById('wo-nacc').style.display='block'">+ Add Accessory</button>` : ''}
+      </div>
+      ${accs.length ? accs.map(a => `<div style="border-top:1px dashed var(--border);margin-top:6px;padding-top:6px">
+          <div style="display:flex;justify-content:space-between;gap:8px"><div><strong>A${a.line_no}</strong> — ${this.escapeAttr(a.name)}${a.serial_number ? ` · <strong>Item #</strong> ${this.escapeAttr(a.serial_number)}` : ''}</div>
+            ${canRemove ? `<button type="button" class="btn btn-sm btn-outline" style="padding:1px 8px;font-size:11px" onclick="App.deleteWOAccessory(${wo.id},${a.id},'A${a.line_no}')">Remove</button>` : ''}</div>
+          <div style="color:var(--text-muted);white-space:pre-wrap">${this.escapeAttr(a.description)}</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">${this._woPhotoThumbs(a.photos || [], wo.id, canRemove)}</div>
+          ${canAdd ? `<div style="display:flex;gap:6px;margin-top:4px">${this._woDetailPhotoButtons(wo.id, a.id)}</div>` : ''}
+        </div>`).join('') : '<div style="color:var(--text-muted);font-size:12px;margin-top:4px">None recorded</div>'}
+      ${canAdd ? `<div id="wo-nacc" style="display:none;border-top:1px dashed var(--border);margin-top:8px;padding-top:8px">
+          <div class="input-row">
+            <div class="form-group"><label>Accessory *</label><input id="wo-nacc-name" placeholder="e.g. Charger"></div>
+            <div class="form-group"><label>Item # / Serial #</label><input id="wo-nacc-serial"></div>
+          </div>
+          <div class="form-group"><label>Description *</label><textarea id="wo-nacc-desc" rows="2" placeholder="Make/model, colour, condition, any marks or damage"></textarea></div>
+          <div class="form-group"><label>Photos</label><input type="file" id="wo-nacc-photos" accept="image/*" multiple></div>
+          <div style="text-align:right"><button type="button" class="btn btn-sm btn-primary" id="wo-nacc-save" onclick="App.addWOAccessory(${wo.id})">Add Accessory</button></div>
+        </div>` : ''}
+    </div>`;
+  },
+
+  async addWOPhotos(woId, accessoryId, input) {
+    const files = [...input.files];
+    input.value = '';
+    if (!files.length) return;
+    this.alert(`Uploading ${files.length} photo(s)...`);
+    try {
+      for (const f of files) await this._woUploadPhoto(woId, f, accessoryId || null);
+      await this.viewWorkOrder(woId);
+    } catch(e) { this.alert(e.message, 'error'); await this.viewWorkOrder(woId); }
+  },
+
+  async deleteWOPhoto(woId, photoId) {
+    if (!confirm('Remove this photo?')) return;
+    try { await this.api('DELETE', `/work-orders/${woId}/photos/${photoId}`); await this.viewWorkOrder(woId); }
+    catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async addWOAccessory(woId) {
+    const name = document.getElementById('wo-nacc-name').value.trim();
+    const serial_number = document.getElementById('wo-nacc-serial').value.trim();
+    const description = document.getElementById('wo-nacc-desc').value.trim();
+    const files = [...document.getElementById('wo-nacc-photos').files];
+    if (!name || !description) { this.alert('Enter the accessory and describe it', 'error'); return; }
+    const btn = document.getElementById('wo-nacc-save');
+    btn.disabled = true; btn.textContent = 'Saving...';
+    try {
+      const { accessories } = await this.api('POST', `/work-orders/${woId}/accessories`, { name, serial_number, description });
+      const added = accessories[accessories.length - 1];
+      for (const f of files) await this._woUploadPhoto(woId, f, added.id);
+      await this.viewWorkOrder(woId);
+    } catch(e) { this.alert(e.message, 'error'); btn.disabled = false; btn.textContent = 'Add Accessory'; }
+  },
+
+  async deleteWOAccessory(woId, accId, label) {
+    if (!confirm(`Remove accessory ${label} and its photos?`)) return;
+    try { await this.api('DELETE', `/work-orders/${woId}/accessories/${accId}`); await this.viewWorkOrder(woId); }
+    catch(e) { this.alert(e.message, 'error'); }
   },
 
   printWOLabel(id) {
@@ -10963,7 +11149,9 @@ const App = {
       <div style="font-size:12px;text-transform:uppercase;color:#777">Work Order</div>
       <div class="wo-num">${wo.wo_number}</div>
       <div class="item">${wo.item_label || '—'}</div>
+      ${wo.item_serial ? `<div class="item">Item # ${this.escapeAttr(wo.item_serial)}</div>` : ''}
       <div class="cust">${wo.customer_name || ''}</div>
+      ${(wo.accessories || []).length ? `<div style="margin-top:10px;border-top:1px dashed #999;padding-top:6px;font-size:12px;text-align:left">${wo.accessories.map(a => `<div><strong>${wo.wo_number}-A${a.line_no}</strong> ${this.escapeAttr(a.name)}${a.serial_number ? ` (#${this.escapeAttr(a.serial_number)})` : ''}</div>`).join('')}</div>` : ''}
       <script>window.onload=()=>{window.print()}<\/script>
       </body></html>`);
       win.document.close();
@@ -11047,10 +11235,11 @@ const App = {
             <div id="wo-desc-view">${wo.description}</div>
             <div id="wo-desc-edit" style="display:none">
               <textarea id="wo-desc-input" rows="3">${wo.description}</textarea>
+              <input id="wo-serial-input" placeholder="Item # / Serial #" value="${this.escapeAttr(wo.item_serial || '')}" style="margin-top:6px">
               <div style="text-align:right;margin-top:4px"><button class="btn btn-sm btn-primary" onclick="App.saveWODescription(${wo.id})">Save</button></div>
             </div>
           </div>
-          ${wo.item_label ? `<div style="font-size:12px;color:var(--text-muted);margin:-6px 0 10px">Item: ${wo.item_label} <button type="button" class="btn btn-sm btn-outline" style="padding:1px 8px;font-size:11px;margin-left:4px" onclick="App.printWOLabel(${wo.id})">Print Label</button></div>` : ''}
+          ${this._woIntakeSectionHtml(wo)}
 
           <div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:13px">
             <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Fees & Estimate</strong>
@@ -11136,7 +11325,7 @@ const App = {
     const description = document.getElementById('wo-desc-input').value.trim();
     if (!description) { this.alert('Description cannot be empty', 'error'); return; }
     try {
-      await this.api('PATCH', `/work-orders/${id}`, { description, employee_id: this.currentUser.id });
+      await this.api('PATCH', `/work-orders/${id}`, { description, item_serial: document.getElementById('wo-serial-input').value.trim(), employee_id: this.currentUser.id });
       await this.viewWorkOrder(id);
     } catch(e) { this.alert(e.message, 'error'); }
   },

@@ -4,6 +4,10 @@ const { db } = require('../database');
 const { requirePermission, requireAnyPermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { processWorkOrderItems, processWorkOrderPartSourcing } = require('../lib/workOrders');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 
 // Statuses a WO can freely log a comment against via PATCH /:id/status without
 // going through a dedicated money-moving endpoint (assessment-paid,
@@ -31,6 +35,48 @@ const WO_LIST_SELECT = `SELECT wo.*, c.first_name || ' ' || c.last_name as custo
   LEFT JOIN employees e ON wo.employee_id = e.id
   LEFT JOIN branches b ON wo.branch_id = b.id
   LEFT JOIN employees cb ON wo.completed_by = cb.id`;
+
+// ─── Intake photos & accessories ─────────────────────────────────────────
+// Local photos live in uploads/wo-photos (a PROTECTED_UPLOAD_DIRS folder —
+// static, but only to a signed-in session); Cloudinary when configured.
+const photoDir = path.join(__dirname, '../uploads/wo-photos');
+const photoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => cb(null, /^image\//.test(file.mimetype)),
+});
+const PHOTO_SELECT = `SELECT p.*, CASE WHEN p.stored_name LIKE 'https://%' THEN p.stored_name ELSE '/uploads/wo-photos/' || p.stored_name END as url
+  FROM work_order_photos p`;
+// Accessories and photos are the record of what came in — added any time
+// until the item's gone back, removed only while the WO is still at intake.
+const INTAKE_LOCKED = ['picked_up', 'cancelled'];
+
+async function loadIntakeRecord(woId) {
+  const { rows: accessories } = await db.execute({ sql: 'SELECT * FROM work_order_accessories WHERE work_order_id = ? ORDER BY line_no', args: [woId] });
+  const { rows: photos } = await db.execute({ sql: `${PHOTO_SELECT} WHERE p.work_order_id = ? ORDER BY p.id`, args: [woId] });
+  for (const a of accessories) a.photos = photos.filter(p => p.accessory_id === a.id);
+  return { accessories, photos: photos.filter(p => !p.accessory_id) };
+}
+
+function cleanAccessory(a) {
+  const name = String(a?.name || '').trim();
+  const description = String(a?.description || '').trim();
+  if (!name) return { error: 'Each accessory needs a name' };
+  if (!description) return { error: `Describe the ${name} — its condition, colour, any marks` };
+  return { name, description, serial_number: String(a.serial_number || '').trim() || null };
+}
+
+async function insertAccessory(executor, woId, a, employeeId) {
+  const { rows: [{ n }] } = await executor.execute({ sql: 'SELECT COALESCE(MAX(line_no), 0) + 1 as n FROM work_order_accessories WHERE work_order_id = ?', args: [woId] });
+  const r = await executor.execute({ sql: 'INSERT INTO work_order_accessories (work_order_id, line_no, name, serial_number, description, created_by) VALUES (?,?,?,?,?,?)',
+    args: [woId, n, a.name, a.serial_number, a.description, employeeId || null] });
+  return { id: Number(r.lastInsertRowid), line_no: n };
+}
+
+async function removePhotoFile(photo) {
+  if (photo.stored_name.startsWith('https://')) await cloudDestroy(photo.stored_name, 'image');
+  else { try { fs.unlinkSync(path.join(photoDir, photo.stored_name)); } catch(e) {} }
+}
 
 router.get('/', requirePermission('work_orders'), async (req, res) => {
   try {
@@ -215,6 +261,7 @@ router.get('/:id', requirePermission('work_orders'), async (req, res) => {
       args: [req.params.id],
     });
     wo.tasks = tasks;
+    Object.assign(wo, await loadIntakeRecord(wo.id));
     res.json(wo);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -379,10 +426,16 @@ router.post('/:id/parts/:itemId/return', requirePermission('wo_assign_parts'), a
 
 router.post('/', requirePermission('wo_intake'), async (req, res) => {
   try {
-    const { customer_id, employee_id, branch_id, description, item_label, assessment_fee_product_id } = req.body;
+    const { customer_id, employee_id, branch_id, description, item_label, item_serial, assessment_fee_product_id } = req.body;
     if (!customer_id) return res.status(400).json({ error: 'A customer is required' });
     if (!description || !description.trim()) return res.status(400).json({ error: 'A description is required' });
     if (!assessment_fee_product_id) return res.status(400).json({ error: 'Select an assessment fee' });
+    const accessories = [];
+    for (const a of Array.isArray(req.body.accessories) ? req.body.accessories : []) {
+      const clean = cleanAccessory(a);
+      if (clean.error) return res.status(400).json({ error: clean.error });
+      accessories.push(clean);
+    }
 
     // Different machine types carry different flat assessment fees — staff
     // pick the right one from the Services catalog at intake, same as
@@ -398,13 +451,15 @@ router.post('/', requirePermission('wo_intake'), async (req, res) => {
     const tx = await db.transaction('write');
     let committed = false;
     try {
-      const result = await tx.execute({ sql: `INSERT INTO work_orders (wo_number, customer_id, employee_id, branch_id, description, item_label, assessment_fee, assessment_fee_product_id, assessment_fee_name, assessment_fee_tax_rate)
-        VALUES (?,?,?,?,?,?,?,?,?,?)`, args: [wo_number, customer_id, employee_id || null, branch_id || null, description.trim(), item_label || null, assessmentFee, feeProduct.id, feeProduct.name, assessmentFeeTaxRate] });
+      const result = await tx.execute({ sql: `INSERT INTO work_orders (wo_number, customer_id, employee_id, branch_id, description, item_label, item_serial, assessment_fee, assessment_fee_product_id, assessment_fee_name, assessment_fee_tax_rate)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)`, args: [wo_number, customer_id, employee_id || null, branch_id || null, description.trim(), item_label || null, String(item_serial || '').trim() || null, assessmentFee, feeProduct.id, feeProduct.name, assessmentFeeTaxRate] });
       const woId = Number(result.lastInsertRowid);
+      for (const a of accessories) await insertAccessory(tx, woId, a, employee_id);
       await logStatus(tx, woId, 'intake', 'Work order opened', employee_id);
       await tx.commit();
       committed = true;
       const { rows: [wo] } = await db.execute({ sql: `${WO_LIST_SELECT} WHERE wo.id = ?`, args: [woId] });
+      Object.assign(wo, await loadIntakeRecord(woId));
       res.status(201).json(wo);
     } catch(e) {
       if (!committed) await tx.rollback();
@@ -419,14 +474,14 @@ router.post('/', requirePermission('wo_intake'), async (req, res) => {
 // the history the service rep sees, not just silently overwritten.
 router.patch('/:id', requirePermission('work_orders'), async (req, res) => {
   try {
-    const { description, item_label, employee_id } = req.body;
+    const { description, item_label, item_serial, employee_id } = req.body;
     const { rows: [wo] } = await db.execute({ sql: 'SELECT * FROM work_orders WHERE id = ?', args: [req.params.id] });
     if (!wo) return res.status(404).json({ error: 'Not found' });
     if (['complete', 'awaiting_pickup', 'picked_up', 'cancelled', 'not_worth_fixing'].includes(wo.status)) return res.status(400).json({ error: `Cannot edit a ${wo.status} work order` });
     if (description != null && !description.trim()) return res.status(400).json({ error: 'Description cannot be empty' });
 
     const newDescription = description != null ? description.trim() : wo.description;
-    await db.execute({ sql: 'UPDATE work_orders SET description = ?, item_label = ? WHERE id = ?', args: [newDescription, item_label != null ? item_label : wo.item_label, req.params.id] });
+    await db.execute({ sql: 'UPDATE work_orders SET description = ?, item_label = ?, item_serial = ? WHERE id = ?', args: [newDescription, item_label != null ? item_label : wo.item_label, item_serial != null ? (String(item_serial).trim() || null) : wo.item_serial, req.params.id] });
     if (description != null && description.trim() !== wo.description) {
       await logStatus(db, req.params.id, wo.status, `Description updated: ${description.trim()}`, employee_id);
     }
@@ -439,7 +494,77 @@ router.get('/:id/label', async (req, res) => {
   try {
     const { rows: [wo] } = await db.execute({ sql: `${WO_LIST_SELECT} WHERE wo.id = ?`, args: [req.params.id] });
     if (!wo) return res.status(404).send('Not found');
+    wo.accessories = (await loadIntakeRecord(wo.id)).accessories;
     res.json(wo); // frontend renders the printable label itself, same as printRentalDeliveryNote
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/:id/accessories', requireAnyPermission('work_orders', 'wo_intake'), async (req, res) => {
+  try {
+    const { rows: [wo] } = await db.execute({ sql: 'SELECT id, status FROM work_orders WHERE id = ?', args: [req.params.id] });
+    if (!wo) return res.status(404).json({ error: 'Not found' });
+    if (INTAKE_LOCKED.includes(wo.status)) return res.status(400).json({ error: `This work order is ${wo.status.replace('_', ' ')}` });
+    const clean = cleanAccessory(req.body);
+    if (clean.error) return res.status(400).json({ error: clean.error });
+    const employeeId = req.employee?.id;
+    const { line_no } = await insertAccessory(db, wo.id, clean, employeeId);
+    await logStatus(db, wo.id, wo.status, `Accessory A${line_no} added: ${clean.name}`, employeeId);
+    res.status(201).json(await loadIntakeRecord(wo.id));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/:id/accessories/:aid', requireAnyPermission('work_orders', 'wo_intake'), async (req, res) => {
+  try {
+    const { rows: [a] } = await db.execute({ sql: 'SELECT a.*, wo.status FROM work_order_accessories a JOIN work_orders wo ON a.work_order_id = wo.id WHERE a.id = ? AND a.work_order_id = ?', args: [req.params.aid, req.params.id] });
+    if (!a) return res.status(404).json({ error: 'Not found' });
+    if (a.status !== 'intake') return res.status(400).json({ error: 'Accessories stay on the record once the assessment fee is paid' });
+    const { rows: photos } = await db.execute({ sql: 'SELECT * FROM work_order_photos WHERE accessory_id = ?', args: [a.id] });
+    for (const p of photos) await removePhotoFile(p);
+    await db.execute({ sql: 'DELETE FROM work_order_photos WHERE accessory_id = ?', args: [a.id] });
+    await db.execute({ sql: 'DELETE FROM work_order_accessories WHERE id = ?', args: [a.id] });
+    await logStatus(db, a.work_order_id, a.status, `Accessory A${a.line_no} removed: ${a.name}`, req.employee?.id);
+    res.json(await loadIntakeRecord(a.work_order_id));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// One photo per request; accessory_id ties it to an accessory, else it's of the item
+router.post('/:id/photos', requireAnyPermission('work_orders', 'wo_intake'), (req, res, next) => {
+  photoUpload.single('photo')(req, res, err => err ? res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'Photo is larger than 15 MB' : err.message }) : next());
+}, async (req, res) => {
+  try {
+    const { rows: [wo] } = await db.execute({ sql: 'SELECT id, status FROM work_orders WHERE id = ?', args: [req.params.id] });
+    if (!wo) return res.status(404).json({ error: 'Not found' });
+    if (INTAKE_LOCKED.includes(wo.status)) return res.status(400).json({ error: `This work order is ${wo.status.replace('_', ' ')}` });
+    if (!req.file) return res.status(400).json({ error: 'No photo uploaded, or the file is not an image' });
+    let accessoryId = null;
+    if (req.body.accessory_id) {
+      const { rows: [a] } = await db.execute({ sql: 'SELECT id FROM work_order_accessories WHERE id = ? AND work_order_id = ?', args: [req.body.accessory_id, wo.id] });
+      if (!a) return res.status(400).json({ error: 'That accessory is not on this work order' });
+      accessoryId = a.id;
+    }
+    const base = `wo${wo.id}-${Date.now()}-${Math.round(Math.random() * 1e6)}`;
+    const cloud = await cloudUpload(req.file.buffer, { folder: 'pos-system/wo-photos', public_id: base, resource_type: 'image' });
+    let storedName;
+    if (cloud) storedName = cloud.secure_url;
+    else {
+      fs.mkdirSync(photoDir, { recursive: true });
+      storedName = `${base}${(path.extname(req.file.originalname) || '.jpg').toLowerCase()}`;
+      fs.writeFileSync(path.join(photoDir, storedName), req.file.buffer);
+    }
+    await db.execute({ sql: 'INSERT INTO work_order_photos (work_order_id, accessory_id, stored_name, original_name, mime_type, file_size, uploaded_by) VALUES (?,?,?,?,?,?,?)',
+      args: [wo.id, accessoryId, storedName, req.file.originalname, req.file.mimetype, req.file.size, req.employee?.id || null] });
+    res.status(201).json(await loadIntakeRecord(wo.id));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/:id/photos/:pid', requireAnyPermission('work_orders', 'wo_intake'), async (req, res) => {
+  try {
+    const { rows: [p] } = await db.execute({ sql: 'SELECT p.*, wo.status FROM work_order_photos p JOIN work_orders wo ON p.work_order_id = wo.id WHERE p.id = ? AND p.work_order_id = ?', args: [req.params.pid, req.params.id] });
+    if (!p) return res.status(404).json({ error: 'Not found' });
+    if (p.status !== 'intake') return res.status(400).json({ error: 'Photos stay on the record once the assessment fee is paid' });
+    await removePhotoFile(p);
+    await db.execute({ sql: 'DELETE FROM work_order_photos WHERE id = ?', args: [p.id] });
+    res.json(await loadIntakeRecord(p.work_order_id));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

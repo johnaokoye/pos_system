@@ -305,6 +305,30 @@ async function _init() {
       cancellation_reason TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // What the customer handed in with the item (charger, case, remote…),
+    // numbered A1, A2… per work order so each can be tagged and matched at pickup
+    { sql: `CREATE TABLE IF NOT EXISTS work_order_accessories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      work_order_id INTEGER NOT NULL REFERENCES work_orders(id),
+      line_no INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      serial_number TEXT,
+      description TEXT NOT NULL,
+      created_by INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    // Intake photos of the item (accessory_id NULL) or of one accessory
+    { sql: `CREATE TABLE IF NOT EXISTS work_order_photos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      work_order_id INTEGER NOT NULL REFERENCES work_orders(id),
+      accessory_id INTEGER REFERENCES work_order_accessories(id),
+      stored_name TEXT NOT NULL,
+      original_name TEXT,
+      mime_type TEXT,
+      file_size INTEGER,
+      uploaded_by INTEGER REFERENCES employees(id),
+      uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS work_order_status_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       work_order_id INTEGER NOT NULL REFERENCES work_orders(id),
@@ -2137,6 +2161,7 @@ async function _init() {
     // per-line rate — see work_order_items.tax_rate below.
     'ALTER TABLE work_orders ADD COLUMN assessment_fee_tax_rate REAL NOT NULL DEFAULT 0',
     'ALTER TABLE work_orders ADD COLUMN estimate_tax_rate REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE work_orders ADD COLUMN item_serial TEXT',
     // Pickup window now runs 30 days from completion, not from intake — re-date open WOs (no-op once applied)
     "UPDATE work_orders SET pickup_due_date = CASE WHEN completed_at IS NOT NULL THEN date(completed_at,'+30 days') END WHERE status NOT IN ('picked_up','cancelled','not_worth_fixing')",
     // A real catalog part's own tax_rate at the time it was added; a "Q" item
