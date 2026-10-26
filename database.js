@@ -9,9 +9,36 @@ const _rawDb = createClient({
   authToken: process.env.TURSO_AUTH_TOKEN,
 });
 
+// A pooled HTTP connection to Turso can go stale while the server sits idle,
+// and the first queries after the pause fail with "fetch failed" — which
+// broke whole screens (and, in the session lookup, logged people out).
+// Reads are retried; writes aren't, since a write that reached Turso before
+// the connection dropped would be applied twice.
+const READ_SQL = /^\s*(SELECT|WITH|PRAGMA)\b/i;
+function isNetworkError(e) {
+  const code = e && e.cause && (e.cause.code || (e.cause.cause && e.cause.cause.code));
+  return /fetch failed|socket hang up|other side closed/i.test(String(e && e.message))
+    || ['ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'UND_ERR_SOCKET', 'UND_ERR_CLOSED', 'UND_ERR_CONNECT_TIMEOUT'].includes(code);
+}
+async function executeWithRetry(target, args) {
+  const stmt = args[0];
+  const sql = typeof stmt === 'string' ? stmt : stmt && stmt.sql;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await target.execute(...args);
+    } catch (e) {
+      if (attempt >= 2 || !READ_SQL.test(sql || '') || !isNetworkError(e)) throw e;
+      const cause = e.cause && (e.cause.code || e.cause.message);
+      console.warn(`[db] read failed (${e.message}${cause ? ' / ' + cause : ''}), retrying`);
+      await new Promise(r => setTimeout(r, 150 * (attempt + 1)));
+    }
+  }
+}
+
 // Turso remote requires args:[] on every batch statement; local SQLite is lenient.
 const db = new Proxy(_rawDb, {
   get(target, prop) {
+    if (prop === 'execute') return (...args) => executeWithRetry(target, args);
     if (prop === 'batch') {
       return (stmts, mode) => target.batch(
         stmts.map(s => typeof s === 'string' ? { sql: s, args: [] } : { args: [], ...s }),
