@@ -20598,7 +20598,11 @@ const App = {
           </div>
         </div>
         <div class="modal-body">
-          ${po.status==='draft' && po.rejection_reason ? `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:10px 12px;margin-bottom:14px;font-size:13px;color:#991b1b">
+          ${po.reinstated_from_status ? `<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:10px 12px;margin-bottom:14px;font-size:13px;color:#92400e">
+            <strong>Received before approval — sent back for approval${po.reinstated_by_name ? ` by ${po.reinstated_by_name}` : ''} on ${this.fmtDateTime(po.reinstated_at)}:</strong> ${po.reinstate_reason}<br>
+            The goods are already in; stock and receipts are unchanged. Approving (or rejecting) returns it to <strong>${po.reinstated_from_status === 'partial' ? 'Partially received' : 'Received'}</strong>.
+          </div>` : ''}
+          ${(po.status==='draft' || (['received','partial'].includes(po.status) && !po.approved_at)) && po.rejection_reason ? `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:10px 12px;margin-bottom:14px;font-size:13px;color:#991b1b">
             <strong>Rejected${po.rejected_by_name ? ` by ${po.rejected_by_name}` : ''}${po.rejected_at ? ` on ${this.fmtDateTime(po.rejected_at)}` : ''}:</strong> ${po.rejection_reason}
           </div>` : ''}
           <div class="two-col" style="margin-bottom:14px;font-size:13px">
@@ -20694,7 +20698,8 @@ const App = {
           ${po.status==='draft' ? `<button class="btn btn-secondary" onclick="${sp && sp.over.length ? `if(!confirm('Some lines are over the authorized maximum quantity. Send for approval anyway?'))return;` : ''}App.updatePOStatus(${po.id},'sent')">Send for Approval</button>` : ''}
           ${po.status==='sent' && this.can('purchasing_approve') ? `<button class="btn btn-danger" onclick="App.showRejectPOModal(${po.id})">Reject</button>` : ''}
           ${po.status==='sent' && this.can('purchasing_approve') ? `<button class="btn btn-primary" onclick="${sp && sp.over.length ? `if(!confirm('Some lines are over the authorized maximum quantity. Approve anyway?'))return;` : ''}App.showApprovePOModal(${po.id})">Approve PO</button>` : ''}
-          ${po.status!=='cancelled'&&po.status!=='received' ? `<button class="btn btn-danger" onclick="App.updatePOStatus(${po.id},'cancelled')">Cancel PO</button>` : ''}
+          ${po.status!=='cancelled'&&po.status!=='received'&&!po.reinstated_from_status ? `<button class="btn btn-danger" onclick="App.updatePOStatus(${po.id},'cancelled')">Cancel PO</button>` : ''}
+          ${['received','partial'].includes(po.status) && !po.approved_at && this.can('purchasing_approve') ? `<button class="btn btn-outline" title="Received before approval was required — send it for approval; stock and receipts stay as they are" onclick="App.reinstatePOForApproval(${po.id})">↩ Send Back for Approval</button>` : ''}
           ${(po.status==='approved'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-success" onclick="App.closeModal();App.showReceivePO(${po.id})">Receive Items</button>` : ''}
           ${(po.status==='received'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn" style="background:#f59e0b;color:#fff;border:none" onclick="App.closeModal();App.showProcessDamaged(${po.id})">⚠️ Process Damaged</button>` : ''}
           ${(po.status==='received'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-secondary" onclick="App.emailGRN(${po.id},'${(po.supplier_email||'').replace(/'/g,"\\'")}')">✉️ Email GRN</button>` : ''}
@@ -21038,6 +21043,20 @@ const App = {
   // Any status — copies of a PO that isn't approved are marked as such on the page
   printApprovedPO(id) {
     return this._printServerDocument(`/api/email/po-preview/${id}`, 'purchase-order', 'purchase order');
+  },
+
+  // TEMPORARY — for POs received before approval was required (see the route)
+  async reinstatePOForApproval(id) {
+    const reason = prompt('This PO was received without being approved. Send it back to Awaiting Approval so it can be signed off?\n\nStock and receipts stay exactly as they are; once approved it returns to Received.\n\nReason:');
+    if (reason == null) return;
+    if (!reason.trim()) { this.alert('A reason is required', 'error'); return; }
+    try {
+      await this.api('PATCH', `/purchase-orders/${id}/reinstate-for-approval`, { reason: reason.trim() });
+      this.alert('Sent back for approval');
+      this.closeModal();
+      this.renderPurchasing();
+      this.viewPO(id);
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   emailApprovedPO(id, supplierEmail) {

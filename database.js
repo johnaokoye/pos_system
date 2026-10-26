@@ -2162,6 +2162,12 @@ async function _init() {
     'ALTER TABLE work_orders ADD COLUMN assessment_fee_tax_rate REAL NOT NULL DEFAULT 0',
     'ALTER TABLE work_orders ADD COLUMN estimate_tax_rate REAL NOT NULL DEFAULT 0',
     'ALTER TABLE work_orders ADD COLUMN item_serial TEXT',
+    // One-off fix for POs received before approval was required: sent back
+    // for approval without touching the receipt (see /reinstate-for-approval)
+    'ALTER TABLE purchase_orders ADD COLUMN reinstated_from_status TEXT',
+    'ALTER TABLE purchase_orders ADD COLUMN reinstated_at DATETIME',
+    'ALTER TABLE purchase_orders ADD COLUMN reinstated_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE purchase_orders ADD COLUMN reinstate_reason TEXT',
     // Pickup checklist: which accessories went back, and why any didn't
     'ALTER TABLE work_order_accessories ADD COLUMN returned_at DATETIME',
     'ALTER TABLE work_order_accessories ADD COLUMN returned_by INTEGER REFERENCES employees(id)',

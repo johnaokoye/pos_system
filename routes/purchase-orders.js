@@ -31,6 +31,7 @@ const PO_DETAIL_SELECT = `SELECT po.*, s.name as supplier_name, s.contact_name a
   b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name,
   ea.first_name || ' ' || ea.last_name as approved_by_name,
   er.first_name || ' ' || er.last_name as rejected_by_name,
+  (SELECT first_name || ' ' || last_name FROM employees WHERE id = po.reinstated_by) as reinstated_by_name,
   (SELECT id FROM purchase_requests WHERE converted_to_po_id = po.id LIMIT 1) as source_pr_id,
   (SELECT pr_number FROM purchase_requests WHERE converted_to_po_id = po.id LIMIT 1) as source_pr_number,
   (SELECT COUNT(*) FROM pr_attachments pa JOIN purchase_requests spr ON pa.pr_id = spr.id WHERE spr.converted_to_po_id = po.id) as source_pr_attachments
@@ -159,6 +160,7 @@ router.patch('/:id/status', async (req, res) => {
     const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });
     if (!po) return res.status(404).json({ error: 'Not found' });
     if (po.status === 'received') return res.status(400).json({ error: 'Cannot change status of received PO' });
+    if (po.reinstated_from_status) return res.status(400).json({ error: 'This PO was already received and is only waiting for its approval — approve or reject it' });
     if (status === 'sent' && po.supplier_priced) {
       const problems = await supplierPricedProblems(po.id);
       if (problems.length) return res.status(400).json({ error: supplierPricedError(problems, 'sent for approval') });
@@ -196,10 +198,12 @@ router.patch('/:id/approve', requirePermission('purchasing_approve'), async (req
     let sigUrl;
     try { sigUrl = await resolveApprovalSignature(db, approverId, signature); }
     catch (e) { return res.status(e.status || 500).json({ error: e.message, code: e.code }); }
+    // A PO sent back for approval after it was received goes back to its
+    // received status — the goods are already in, nothing to receive again.
     await db.execute({
-      sql: `UPDATE purchase_orders SET status = 'approved', approved_by = ?, approved_at = CURRENT_TIMESTAMP, approval_signature = ?,
+      sql: `UPDATE purchase_orders SET status = ?, reinstated_from_status = NULL, approved_by = ?, approved_at = CURRENT_TIMESTAMP, approval_signature = ?,
             rejected_by = NULL, rejected_at = NULL, rejection_reason = NULL WHERE id = ?`,
-      args: [approverId, sigUrl, req.params.id],
+      args: [po.reinstated_from_status || 'approved', approverId, sigUrl, req.params.id],
     });
     const { rows: [updated] } = await db.execute({ sql: PO_DETAIL_SELECT, args: [req.params.id] });
     res.json(updated);
@@ -216,11 +220,35 @@ router.patch('/:id/reject', requirePermission('purchasing_approve'), async (req,
     if (!po) return res.status(404).json({ error: 'Not found' });
     if (po.status !== 'sent') return res.status(400).json({ error: `This PO is ${po.status}, not awaiting approval` });
 
+    // An already-received PO can't go back to an editable draft — it returns
+    // to its received status, still unapproved, with the rejection on record.
     await db.execute({
-      sql: `UPDATE purchase_orders SET status = 'draft', rejected_by = ?, rejected_at = CURRENT_TIMESTAMP, rejection_reason = ? WHERE id = ?`,
-      args: [employee_id || (req.employee && req.employee.id) || null, reason.trim(), req.params.id],
+      sql: `UPDATE purchase_orders SET status = ?, reinstated_from_status = NULL, rejected_by = ?, rejected_at = CURRENT_TIMESTAMP, rejection_reason = ? WHERE id = ?`,
+      args: [po.reinstated_from_status || 'draft', employee_id || (req.employee && req.employee.id) || null, reason.trim(), req.params.id],
     });
     const { rows: [updated] } = await db.execute({ sql: PO_DETAIL_SELECT, args: [req.params.id] });
+    res.json(updated);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// TEMPORARY — POs received before receiving required approval
+// (2fcae57) show as never approved on their documents. This sends one back
+// to awaiting approval so it can be signed off; stock, receipts and A/P are
+// untouched, and approving (or rejecting) returns it to its received status.
+// New POs can't be received unapproved, so this only ever applies to those.
+router.patch('/:id/reinstate-for-approval', requirePermission('purchasing_approve'), async (req, res) => {
+  try {
+    const reason = String(req.body.reason || '').trim();
+    if (!reason) return res.status(400).json({ error: 'Give a reason for sending it back for approval' });
+    const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });
+    if (!po) return res.status(404).json({ error: 'Not found' });
+    if (!['received', 'partial'].includes(po.status) || po.approved_at) return res.status(400).json({ error: 'Only a PO that was received without being approved can be sent back for approval' });
+    await db.execute({
+      sql: `UPDATE purchase_orders SET status = 'sent', reinstated_from_status = ?, reinstated_at = CURRENT_TIMESTAMP, reinstated_by = ?, reinstate_reason = ?,
+            rejected_by = NULL, rejected_at = NULL, rejection_reason = NULL WHERE id = ?`,
+      args: [po.status, (req.employee && req.employee.id) || null, reason, po.id],
+    });
+    const { rows: [updated] } = await db.execute({ sql: PO_DETAIL_SELECT, args: [po.id] });
     res.json(updated);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
