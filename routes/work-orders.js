@@ -398,8 +398,8 @@ router.post('/', requirePermission('wo_intake'), async (req, res) => {
     const tx = await db.transaction('write');
     let committed = false;
     try {
-      const result = await tx.execute({ sql: `INSERT INTO work_orders (wo_number, customer_id, employee_id, branch_id, description, item_label, assessment_fee, assessment_fee_product_id, assessment_fee_name, assessment_fee_tax_rate, pickup_due_date)
-        VALUES (?,?,?,?,?,?,?,?,?,?, date('now','+30 days'))`, args: [wo_number, customer_id, employee_id || null, branch_id || null, description.trim(), item_label || null, assessmentFee, feeProduct.id, feeProduct.name, assessmentFeeTaxRate] });
+      const result = await tx.execute({ sql: `INSERT INTO work_orders (wo_number, customer_id, employee_id, branch_id, description, item_label, assessment_fee, assessment_fee_product_id, assessment_fee_name, assessment_fee_tax_rate)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`, args: [wo_number, customer_id, employee_id || null, branch_id || null, description.trim(), item_label || null, assessmentFee, feeProduct.id, feeProduct.name, assessmentFeeTaxRate] });
       const woId = Number(result.lastInsertRowid);
       await logStatus(tx, woId, 'intake', 'Work order opened', employee_id);
       await tx.commit();
@@ -579,7 +579,8 @@ router.patch('/:id/status', requirePermission('work_orders'), async (req, res) =
       if (!FREE_STATUS_TRANSITIONS.includes(status)) return res.status(400).json({ error: `Cannot set status to ${status} directly — use the dedicated action for that step` });
       if (!ACTIVE_WORK_STATUSES.includes(wo.status)) return res.status(400).json({ error: `This work order is ${wo.status}, not in progress` });
       newStatus = status;
-      await db.execute({ sql: 'UPDATE work_orders SET status = ? WHERE id = ?', args: [newStatus, req.params.id] });
+      // Not Worth Fixing ends the job — the customer's 30-day pickup window starts now
+      await db.execute({ sql: `UPDATE work_orders SET status = ?${newStatus === 'not_worth_fixing' ? ", pickup_due_date = date('now','+30 days')" : ''} WHERE id = ?`, args: [newStatus, req.params.id] });
     }
     await logStatus(db, req.params.id, newStatus, comment.trim(), employee_id);
     const { rows: [updated] } = await db.execute({ sql: `${WO_LIST_SELECT} WHERE wo.id = ?`, args: [req.params.id] });
@@ -699,7 +700,7 @@ router.patch('/:id/signoff', requirePermission('wo_signoff'), async (req, res) =
     const incomplete = tasks.filter(t => t.status !== 'complete');
     if (incomplete.length) return res.status(400).json({ error: `${incomplete.length} task(s) are not yet marked complete` });
 
-    await db.execute({ sql: `UPDATE work_orders SET status = 'complete', completed_at = CURRENT_TIMESTAMP, completed_by = ? WHERE id = ?`, args: [employee_id || null, req.params.id] });
+    await db.execute({ sql: `UPDATE work_orders SET status = 'complete', completed_at = CURRENT_TIMESTAMP, completed_by = ?, pickup_due_date = date('now','+30 days') WHERE id = ?`, args: [employee_id || null, req.params.id] });
     await logStatus(db, req.params.id, 'complete', comment || 'Signed off by supervisor', employee_id);
     const { rows: [updated] } = await db.execute({ sql: `${WO_LIST_SELECT} WHERE wo.id = ?`, args: [req.params.id] });
     res.json(updated);

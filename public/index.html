@@ -10815,10 +10815,8 @@ const App = {
     await this.loadWorkOrders();
   },
 
-  // The 30-day pickup window runs from creation regardless of lifecycle
-  // status (confirmed business rule) — shown as its own badge, independent
-  // of the status column, so a WO can show "12 days left to pickup" while
-  // still "In Progress".
+  // The 30-day pickup window runs from completion (sign-off, or Not Worth
+  // Fixing) — no due date until then.
   _woPickupBadge(wo) {
     if (['picked_up', 'cancelled'].includes(wo.status)) return '';
     const daysPast = wo.days_past_pickup_due;
@@ -10848,7 +10846,7 @@ const App = {
           <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${this.escapeAttr(wo.description)}">${wo.description}</td>
           <td>${wo.branch_name||'—'}</td>
           <td>${this.fmtDate(wo.created_at)}</td>
-          ${isQueue ? `<td>${this._woWaitingLabel(wo.created_at)}</td>` : `<td>${this.fmtDate(wo.pickup_due_date)}${this._woPickupBadge(wo)}</td>`}
+          ${isQueue ? `<td>${this._woWaitingLabel(wo.created_at)}</td>` : `<td>${wo.pickup_due_date ? this.fmtDate(wo.pickup_due_date) : '<span style="color:var(--text-muted)">After completion</span>'}${this._woPickupBadge(wo)}</td>`}
           <td><span class="badge-pill ${this._woStatusBadge[wo.status]||'badge-secondary'}">${this._woStatusLabels[wo.status]||wo.status}</span></td>
           <td style="text-align:right;white-space:nowrap">
             <button class="btn btn-sm btn-outline" onclick="App.viewWorkOrder(${wo.id})">View</button>
@@ -11040,7 +11038,7 @@ const App = {
           </div>
           <div class="input-row" style="margin-bottom:10px">
             <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Opened</label><div>${this.fmtDateTime(wo.created_at)}</div></div>
-            <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Pickup Due</label><div>${this.fmtDate(wo.pickup_due_date)}${this._woPickupBadge(wo)}</div></div>
+            <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Pickup Due</label><div>${wo.pickup_due_date ? this.fmtDate(wo.pickup_due_date) : '30 days after completion'}${this._woPickupBadge(wo)}</div></div>
           </div>
           <div class="form-group">
             <label style="display:flex;justify-content:space-between;align-items:center">Description

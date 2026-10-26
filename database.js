@@ -2137,6 +2137,8 @@ async function _init() {
     // per-line rate — see work_order_items.tax_rate below.
     'ALTER TABLE work_orders ADD COLUMN assessment_fee_tax_rate REAL NOT NULL DEFAULT 0',
     'ALTER TABLE work_orders ADD COLUMN estimate_tax_rate REAL NOT NULL DEFAULT 0',
+    // Pickup window now runs 30 days from completion, not from intake — re-date open WOs (no-op once applied)
+    "UPDATE work_orders SET pickup_due_date = CASE WHEN completed_at IS NOT NULL THEN date(completed_at,'+30 days') END WHERE status NOT IN ('picked_up','cancelled','not_worth_fixing')",
     // A real catalog part's own tax_rate at the time it was added; a "Q" item
     // (not yet in the catalog) falls back to the company default instead
     // (see lib/workOrders.js's processWorkOrderItems) since it has no
