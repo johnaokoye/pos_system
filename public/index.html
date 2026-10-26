@@ -21078,11 +21078,11 @@ const App = {
   },
 
   emailWorkOrderInvoice(id, customerEmail) {
-    this.showEmailModal('Email Work Order Invoice', customerEmail, async (to, { as_pdf }) => {
+    this.showEmailModal('Email Service and Repair Tax Invoice', customerEmail, async (to, { as_pdf }) => {
       this.closeModal();
       try {
         await this.api('POST', `/email/send-work-order-invoice/${id}`, { to, as_pdf });
-        this.alert(`Work order invoice sent to ${to}`);
+        this.alert(`Service and Repair Tax Invoice sent to ${to}`);
       } catch(e) { this.alert(e.message, 'error'); }
     }, { pdfOption: true });
   },

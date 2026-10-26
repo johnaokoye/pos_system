@@ -1872,7 +1872,7 @@ function buildWorkOrderInvoiceHtml(wo, s, { print = false } = {}) {
 
   return `<!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"><title>Work Order Tax Invoice ${wo.wo_number}</title>
+<head><meta charset="utf-8"><title>Service and Repair Tax Invoice ${wo.wo_number}</title>
 ${print ? PRINT_PAGE_STYLE : ''}
 </head>
 <body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
@@ -1888,7 +1888,7 @@ ${print ? PRINT_PAGE_STYLE : ''}
     <tr><td style="padding:20px 24px">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px">
         <div>
-          <div style="font-size:20px;font-weight:700;color:${BRAND.black}">WORK ORDER TAX INVOICE</div>
+          <div style="font-size:20px;font-weight:700;color:${BRAND.black}">SERVICE AND REPAIR TAX INVOICE</div>
           <div style="font-size:13px;color:#888;margin-top:2px">${wo.wo_number}</div>
         </div>
         <div style="text-align:right;font-size:13px;color:#444">
@@ -1974,10 +1974,10 @@ router.post('/send-work-order-invoice/:id', requireAuth, async (req, res) => {
       await transporter.sendMail({
         from: `"${fromName}" <${fromAddr}>`,
         to,
-        subject: `Work Order Tax Invoice ${wo.wo_number} from ${s.store_name || 'Our Store'}`,
+        subject: `Service and Repair Tax Invoice ${wo.wo_number} from ${s.store_name || 'Our Store'}`,
         ...(await documentEmailContent(req.body.as_pdf, s, workOrderInvoicePdfModel(wo, s), buildWorkOrderInvoiceHtml(wo, s))),
       });
-      res.json({ success: true, message: `Work order invoice sent to ${to}` });
+      res.json({ success: true, message: `Service and Repair Tax Invoice sent to ${to}` });
     } catch (e) {
       res.status(500).json({ error: `Failed to send email: ${e.message}` });
     }
@@ -2310,7 +2310,7 @@ function workOrderInvoicePdfModel(wo, s) {
   const balanceDue = Math.max(0, estimateTotal + partsTotal + estimateTax + partsTax - (parseFloat(wo.deposit_amount) || 0));
   return {
     store: pdfStore(s, { branch_name: wo.branch_name }),
-    title: 'WORK ORDER TAX INVOICE', number: wo.wo_number,
+    title: 'SERVICE AND REPAIR TAX INVOICE', number: wo.wo_number,
     meta: [['Status', `${WO_STATUS_LABELS[wo.status] || wo.status}${wo.is_express ? ' (Express)' : ''}`], ['Opened', pdfDate(wo.created_at)], ['Pickup Due', wo.pickup_due_date ? pdfDate(wo.pickup_due_date) : '']],
     party: { label: 'Customer', lines: [wo.customer_name, wo.customer_phone, wo.customer_email] },
     info: [['Description', wo.description], ['Item', wo.item_label], ['Item #', wo.item_serial]],
