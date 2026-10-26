@@ -19015,7 +19015,7 @@ const App = {
                     <td>
                       <button class="btn btn-sm btn-secondary" onclick="App.viewPO(${po.id})">View</button>
                       ${po.status==='sent' && this.can('purchasing_approve') ? `<button class="btn btn-sm btn-primary" onclick="App.showApprovePOModal(${po.id})">Approve</button>` : ''}
-                      ${(po.status==='draft'||po.status==='sent'||po.status==='approved'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-sm btn-success" onclick="App.showReceivePO(${po.id})">Receive</button>` : ''}
+                      ${(po.status==='approved'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-sm btn-success" onclick="App.showReceivePO(${po.id})">Receive</button>` : ''}
                     </td>
                   </tr>`).join('') : '<tr><td colspan="8" class="empty-state">No purchase orders yet</td></tr>'}
               </tbody>
@@ -20433,7 +20433,7 @@ const App = {
           ${po.status==='sent' && this.can('purchasing_approve') ? `<button class="btn btn-danger" onclick="App.showRejectPOModal(${po.id})">Reject</button>` : ''}
           ${po.status==='sent' && this.can('purchasing_approve') ? `<button class="btn btn-primary" onclick="${sp && sp.over.length ? `if(!confirm('Some lines are over the authorized maximum quantity. Approve anyway?'))return;` : ''}App.showApprovePOModal(${po.id})">Approve PO</button>` : ''}
           ${po.status!=='cancelled'&&po.status!=='received' ? `<button class="btn btn-danger" onclick="App.updatePOStatus(${po.id},'cancelled')">Cancel PO</button>` : ''}
-          ${(po.supplier_priced ? (po.status==='approved'||po.status==='partial') : (po.status==='draft'||po.status==='sent'||po.status==='approved'||po.status==='partial')) && this.can('purchasing_receive') ? `<button class="btn btn-success" onclick="App.closeModal();App.showReceivePO(${po.id})">Receive Items</button>` : ''}
+          ${(po.status==='approved'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-success" onclick="App.closeModal();App.showReceivePO(${po.id})">Receive Items</button>` : ''}
           ${(po.status==='received'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn" style="background:#f59e0b;color:#fff;border:none" onclick="App.closeModal();App.showProcessDamaged(${po.id})">⚠️ Process Damaged</button>` : ''}
           ${(po.status==='received'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-secondary" onclick="App.emailGRN(${po.id},'${(po.supplier_email||'').replace(/'/g,"\\'")}')">✉️ Email GRN</button>` : ''}
           ${po.status==='approved' ? `<button class="btn btn-secondary" onclick="App.printApprovedPO(${po.id})">🖨️ Print</button>` : ''}

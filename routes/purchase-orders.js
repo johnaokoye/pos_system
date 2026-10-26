@@ -341,7 +341,13 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
     if (!po) return res.status(404).json({ error: 'Not found' });
     if (po.status === 'cancelled') return res.status(400).json({ error: 'Cannot receive cancelled PO' });
     if (po.status === 'received') return res.status(400).json({ error: 'PO already fully received' });
-    if (po.supplier_priced && !['approved', 'partial'].includes(po.status)) return res.status(400).json({ error: 'A fuel/supplier-priced PO is received only after it is approved with the invoiced cost' });
+    // Receiving needs a signed-off PO. 'partial' stays receivable so a PO
+    // part-received before this rule existed can still be finished.
+    if (!['approved', 'partial'].includes(po.status)) {
+      return res.status(400).json({ error: po.supplier_priced
+        ? 'A fuel/supplier-priced PO is received only after it is approved with the invoiced cost'
+        : `This PO is ${{ draft: 'still a draft', sent: 'awaiting approval' }[po.status] || po.status} — it must be approved before it can be received` });
+    }
 
     const tx = await db.transaction('write');
     try {
