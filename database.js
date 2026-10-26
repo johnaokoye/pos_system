@@ -1943,6 +1943,11 @@ async function _init() {
     // its invoiced cost and the supplier's invoice is attached.
     'ALTER TABLE purchase_orders ADD COLUMN supplier_priced INTEGER DEFAULT 0',
     'ALTER TABLE purchase_order_items ADD COLUMN authorized_qty REAL',
+    // 'service' = a non-physical purchase (promo video, design work…) from a
+    // PR's Service line: no product, no stock; receiving it marks it
+    // delivered. notes carries the PR line's details/scope onto the PO.
+    'ALTER TABLE purchase_order_items ADD COLUMN item_type TEXT',
+    'ALTER TABLE purchase_order_items ADD COLUMN notes TEXT',
     'ALTER TABLE purchase_order_items ADD COLUMN discount_amount REAL DEFAULT 0',
     // POS per-line-item discounts (distinct from the existing whole-ticket
     // discount_amount below): the % actually given on that line, and who

@@ -430,6 +430,7 @@ router.post('/:id/items/:itemId/link-product', async (req, res) => {
     const { rows: [item] } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE id = ? AND po_id = ?', args: [req.params.itemId, req.params.id] });
     if (!item) return res.status(404).json({ error: 'PO item not found' });
     if (item.product_id) return res.status(400).json({ error: 'Item is already linked to a product' });
+    if (item.item_type === 'service') return res.status(400).json({ error: 'A service line is not an inventory item' });
 
     const { product_id, sku, name, category_id, price, cost, tax_rate } = req.body;
     const defaultTaxRate = tax_rate ?? (parseFloat(await getSetting('tax_rate', 8.5)) || 8.5);

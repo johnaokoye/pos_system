@@ -95,16 +95,21 @@ async function processPRItems(items, request_type) {
   const supplierPriced = request_type === 'supplier_priced';
   const processedItems = [];
   for (const item of items) {
-    const product = item.product_id ? (await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] })).rows[0] : null;
+    // A Service line (non-physical: a promotional video, design work…) is
+    // never an inventory product — it's described in product_name + notes.
+    const service = item.item_type === 'service';
+    if (service && supplierPriced) throw new Error('Supplier-priced requests can only contain inventory items');
+    if (service && !String(item.product_name || '').trim()) throw new Error('Describe each service line');
+    const product = item.product_id && !service ? (await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] })).rows[0] : null;
     if (supplierPriced && !product) throw new Error('Supplier-priced requests need every item picked from inventory');
     const unit_cost = supplierPriced ? 0 : parseFloat(item.unit_cost || (product ? product.cost : 0)) || 0;
     const qty = supplierPriced ? Math.round((parseFloat(item.quantity) || 0) * 1000) / 1000 : parseInt(item.quantity || 1);
     if (supplierPriced && qty <= 0) throw new Error('Enter the maximum quantity for each item');
-    const item_type = item.item_type || (request_type === 'internal_use' ? 'internal' : 'sale');
+    const item_type = ['sale', 'internal', 'service'].includes(item.item_type) ? item.item_type : (request_type === 'internal_use' ? 'internal' : 'sale');
     processedItems.push({
-      product_id: item.product_id || null,
-      product_name: item.product_name || (product ? product.name : 'Unknown'),
-      sku: item.sku || (product ? product.sku : ''),
+      product_id: service ? null : (item.product_id || null),
+      product_name: service ? String(item.product_name).trim() : (item.product_name || (product ? product.name : 'Unknown')),
+      sku: service ? '' : (item.sku || (product ? product.sku : '')),
       quantity: qty,
       unit_cost,
       item_type,
@@ -288,11 +293,11 @@ router.post('/:id/convert', async (req, res) => {
 
       for (const [n, item] of prItems.entries()) {
         const line = priced[n];
-        // Internal-use items are added to PO but without a product link (won't update stock on receive)
-        const productId = item.item_type === 'internal' ? null : item.product_id;
+        // Internal-use and service items are added to PO but without a product link (won't update stock on receive)
+        const productId = item.item_type === 'internal' || item.item_type === 'service' ? null : item.product_id;
         await tx.execute({
-          sql: 'INSERT INTO purchase_order_items (po_id, product_id, product_name, sku, quantity_ordered, unit_cost, total, quotation_item_id, work_order_item_id, discount_amount, tax_option, tax_rate, tax_amount, authorized_qty) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-          args: [poId, productId, item.product_name, item.sku, item.quantity, item.unit_cost, item.total, item.quotation_item_id, item.work_order_item_id, item.discount_amount || 0, line.tax_option, line.tax_rate, line.tax_amount, supplierPriced ? item.quantity : null]
+          sql: 'INSERT INTO purchase_order_items (po_id, product_id, product_name, sku, quantity_ordered, unit_cost, total, quotation_item_id, work_order_item_id, discount_amount, tax_option, tax_rate, tax_amount, authorized_qty, item_type, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+          args: [poId, productId, item.product_name, item.sku, item.quantity, item.unit_cost, item.total, item.quotation_item_id, item.work_order_item_id, item.discount_amount || 0, line.tax_option, line.tax_rate, line.tax_amount, supplierPriced ? item.quantity : null, item.item_type === 'service' ? 'service' : null, item.notes || null]
         });
       }
 

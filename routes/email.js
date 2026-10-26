@@ -1183,7 +1183,7 @@ function buildGrnHtml(po, s) {
     const good = (i.quantity_received || 0) - damaged;
     return `
     <tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku || ''}</span></td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}${i.item_type === 'service' ? ' <span style="color:#888;font-size:11px">(service)</span>' : ''}<br><span style="color:#888;font-size:11px">${i.sku || ''}</span>${i.notes ? `<div style="color:#555;font-size:11px;margin-top:2px">${i.notes}</div>` : ''}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${i.quantity_ordered}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${i.quantity_received || 0}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center;${damaged > 0 ? 'color:#dc2626;font-weight:600' : ''}">${damaged}</td>
@@ -1249,7 +1249,7 @@ function buildApprovedPoHtml(po, s, origin) {
 
   const rows = (po.items || []).map(i => `
     <tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku || ''}</span></td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}${i.item_type === 'service' ? ' <span style="color:#888;font-size:11px">(service)</span>' : ''}<br><span style="color:#888;font-size:11px">${i.sku || ''}</span>${i.notes ? `<div style="color:#555;font-size:11px;margin-top:2px">${i.notes}</div>` : ''}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${i.quantity_ordered}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${fmt(i.unit_cost)}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${i.vendor_discount > 0 ? `−${fmt(i.vendor_discount)}${i.vendor_discount_percent != null ? ` (${i.vendor_discount_percent}%)` : ''}` : '—'}</td>
@@ -2115,7 +2115,7 @@ function poPdfModel(po, s) {
         cells: [i.product_name, i.quantity_ordered, fmt(i.unit_cost),
           i.vendor_discount > 0 ? `-${fmt(i.vendor_discount)}${i.vendor_discount_percent != null ? ` (${i.vendor_discount_percent}%)` : ''}` : '-',
           i.tax_option === 'local' ? `GCT ${i.tax_rate}%` : 'No tax', fmt(i.total)],
-        sub: [i.sku, i.purchase_unit && Number(i.units_per) > 1 ? `Per ${i.purchase_unit} of ${i.units_per}` : ''].filter(Boolean).join(' · '),
+        sub: [i.item_type === 'service' ? 'Service' : '', i.sku, i.purchase_unit && Number(i.units_per) > 1 ? `Per ${i.purchase_unit} of ${i.units_per}` : '', i.notes].filter(Boolean).join(' · '),
       })) }],
     totals: [
       discounts > 0 ? { label: 'Vendor discounts', value: `-${fmt(discounts)}`, style: 'green' } : null,
