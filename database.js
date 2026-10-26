@@ -2165,6 +2165,8 @@ async function _init() {
     // One-off fix for POs received before approval was required: sent back
     // for approval without touching the receipt (see /reinstate-for-approval)
     // Order currency (NULL = base) + base-per-unit rate; online item link carried from the PR
+    // Quick transfer: sent and received in one step (POST /transfers/quick)
+    'ALTER TABLE branch_transfers ADD COLUMN is_quick INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE purchase_orders ADD COLUMN currency TEXT',
     'ALTER TABLE purchase_orders ADD COLUMN exchange_rate REAL',
     'ALTER TABLE purchase_order_items ADD COLUMN product_url TEXT',
@@ -2912,6 +2914,9 @@ async function _init() {
       // Managing the units of measure list (lib/units.js) starts wherever
       // managing categories does.
       if (!('inventory_units' in perms)) { perms.inventory_units = can(perms, 'inventory_categories'); changed = true; }
+      // Quick Transfer (send + receive in one step) starts with whoever can
+      // already send transfers — the inventory team.
+      if (!('transfers_quick' in perms)) { perms.transfers_quick = can(perms, 'transfers_approve'); changed = true; }
       // Receiving customer account payments at the POS — standalone (not a
       // `pos` sub, which every full-POS group would inherit) and, by the
       // owner's choice (2026-10-19), only for the cashier groups.

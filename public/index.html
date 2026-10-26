@@ -21238,7 +21238,10 @@ const App = {
     c.innerHTML = `
       <div class="section-header">
         <h2>Branch Transfers</h2>
-        ${this.can('transfers_create') ? `<button class="btn btn-primary" onclick="App.showTransferForm()">+ Request Transfer</button>` : ''}
+        <div style="display:flex;gap:8px">
+          ${this.can('transfers_quick') ? `<button class="btn btn-outline" onclick="App.showTransferForm(null, { quick: true })" title="Move stock between branches instantly — no request, pickup or receiving">⚡ Quick Transfer</button>` : ''}
+          ${this.can('transfers_create') ? `<button class="btn btn-primary" onclick="App.showTransferForm()">+ Request Transfer</button>` : ''}
+        </div>
       </div>
       <div class="card">
         <div style="margin-bottom:10px">
@@ -21256,7 +21259,7 @@ const App = {
                   <td class="fw-600">${t.transfer_number}</td>
                   <td>${t.from_branch_name||'-'}</td>
                   <td>${t.to_branch_name||'-'}</td>
-                  <td><span class="badge-pill ${statusColor[t.status]||'badge-info'}">${this._transferStatusLabel(t.status)}</span></td>
+                  <td><span class="badge-pill ${statusColor[t.status]||'badge-info'}">${this._transferStatusLabel(t.status)}</span>${t.is_quick ? ' <span class="badge-pill badge-secondary" title="Quick transfer — moved instantly">⚡ Quick</span>' : ''}</td>
                   <td style="color:var(--text-muted)">${this.fmtDate(t.created_at)}</td>
                   <td style="color:var(--text-muted)">${t.received_at ? this.fmtDate(t.received_at) : '—'}</td>
                   <td>
@@ -21288,40 +21291,45 @@ const App = {
   // A transfer starts as a request: the branch that needs stock asks another
   // branch for it; the inventory team there sets what's actually sent
   // (showSendTransfer) and the requesting branch receives it.
-  async showTransferForm(prefill) {
+  // { quick: true } — Quick Transfer (transfers_quick): pick any source and
+  // destination and the stock moves at once (POST /transfers/quick), for
+  // branches in the same building.
+  async showTransferForm(prefill, { quick = false } = {}) {
     // Ask any branch, for one of your own (the one receiving it).
     const myBranches = this.currentUser.branches || [];
     const allBranches = await this.api('GET', '/branches').catch(() => myBranches);
+    const toBranches = quick ? allBranches : myBranches;
     this._transferProducts = [];
     this._transferItemIdx = 0;
+    this._transferQuick = quick;
     this.showModal(`
       <div class="modal" style="max-width:720px">
-        <div class="modal-header"><span class="modal-title">Request Branch Transfer</span><button class="modal-close">✕</button></div>
+        <div class="modal-header"><span class="modal-title">${quick ? '⚡ Quick Transfer' : 'Request Branch Transfer'}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
-          <p style="font-size:13px;color:var(--text-muted);margin:0 0 12px">No stock moves yet — the sending branch's inventory team confirms the quantities and sends it, then you receive it.</p>
+          <p style="font-size:13px;color:var(--text-muted);margin:0 0 12px">${quick ? 'Stock moves the moment you click Transfer — out of the source branch and into the destination. No request, pickup or receiving; use it for branches in the same building.' : "No stock moves yet — the sending branch's inventory team confirms the quantities and sends it, then you receive it."}</p>
           <div class="input-row">
-            <div class="form-group"><label>Request From (sending branch) *</label>
+            <div class="form-group"><label>${quick ? 'From (source branch)' : 'Request From (sending branch)'} *</label>
               <select id="trf-from" onchange="App.onTransferFromChange()">
                 <option value="">-- Select Source --</option>
                 ${allBranches.map(b => `<option value="${b.id}" ${prefill?.fromBranchId && String(prefill.fromBranchId)===String(b.id)?'selected':''}>${b.name}</option>`).join('')}
               </select>
             </div>
-            <div class="form-group"><label>Deliver To (receiving branch) *</label>
+            <div class="form-group"><label>${quick ? 'To (destination branch)' : 'Deliver To (receiving branch)'} *</label>
               <select id="trf-to">
                 <option value="">-- Select Destination --</option>
-                ${myBranches.map(b => `<option value="${b.id}" ${myBranches.length === 1 ? 'selected' : ''}>${b.name}</option>`).join('')}
+                ${toBranches.map(b => `<option value="${b.id}" ${!quick && myBranches.length === 1 ? 'selected' : ''}>${b.name}</option>`).join('')}
               </select>
             </div>
           </div>
           <div class="form-group"><label>Notes</label><input id="trf-notes"></div>
           <div style="margin-bottom:10px">
-            <div class="card-header"><span class="card-title">Items Requested</span><button class="btn btn-sm btn-outline" id="trf-add-btn" onclick="App.addTransferItem()" disabled>+ Add Item</button></div>
+            <div class="card-header"><span class="card-title">${quick ? 'Items to Move' : 'Items Requested'}</span><button class="btn btn-sm btn-outline" id="trf-add-btn" onclick="App.addTransferItem()" disabled>+ Add Item</button></div>
             <div id="trf-items"><p style="color:var(--text-muted);font-size:13px;padding:8px 0">Select a source branch to load available products.</p></div>
           </div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-          <button class="btn btn-primary" onclick="App.saveTransfer()">Send Request</button>
+          <button class="btn btn-primary" id="trf-save" onclick="App.saveTransfer()">${quick ? '⚡ Transfer Now' : 'Send Request'}</button>
         </div>
       </div>`);
     if (prefill?.fromBranchId) await this.onTransferFromChange(prefill.productId);
@@ -21449,17 +21457,20 @@ const App = {
       items.push({ product_id, quantity: qty });
     });
     if (!items.length) { this.alert('Add at least one item', 'error'); return; }
+    const quick = this._transferQuick;
+    const btn = document.getElementById('trf-save');
+    if (btn) btn.disabled = true;
     try {
-      await this.api('POST', '/transfers', { from_branch_id, to_branch_id, notes, items });
+      const t = await this.api('POST', quick ? '/transfers/quick' : '/transfers', { from_branch_id, to_branch_id, notes, items });
       this.closeModal();
-      this.alert('Transfer requested — the sending branch will confirm quantities and send it');
+      this.alert(quick ? `${t.transfer_number}: ${items.length} item${items.length > 1 ? 's' : ''} moved from ${t.from_branch_name} to ${t.to_branch_name}` : 'Transfer requested — the sending branch will confirm quantities and send it');
       // Not renderTransfers() directly — it can be opened from other
       // sections (e.g. Rental Items' "Transfer" quick action), and
       // renderTransfers() bails out after its own "Loading..." placeholder
       // if this.section isn't already 'transfers' by the time its fetch
       // resolves, leaving the screen stuck. showSection() sets that first.
       this.showSection('transfers');
-    } catch(e) { this.alert(e.message, 'error'); }
+    } catch(e) { this.alert(e.message, 'error'); if (btn) btn.disabled = false; }
   },
 
   _transferStatusColor: { requested:'badge-secondary', pending:'badge-warning', in_transit:'badge-info', received:'badge-success', cancelled:'badge-danger' },
@@ -25330,6 +25341,7 @@ const App = {
       { key: 'transfers_approve', label: 'Approve Transfers' },
       { key: 'transfers_pickup', label: 'Mark Picked Up' },
       { key: 'transfers_dropoff', label: 'Mark Dropped Off' },
+      { key: 'transfers_quick', label: 'Quick Transfer (move stock instantly)' },
     ]},
     { key: 'quotations', label: 'Quotations', subs: [
       { key: 'quotations_create', label: 'Create Quotes' },

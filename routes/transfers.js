@@ -1,8 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
-const { syncBinQty } = require('../lib/binSync');
-const { createTransfer, deductTransferStock } = require('../lib/transfers');
+const { createTransfer, deductTransferStock, addTransferStock } = require('../lib/transfers');
 const { requirePermission, requireAuth } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 
@@ -103,6 +102,42 @@ router.post('/', requirePermission('transfers_create'), async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// POST quick — moves stock between two branches in one step, for branches
+// that share a building (e.g. a store beside the warehouse): no request,
+// pickup or receiving. Stock leaves the source (same availability checks as
+// sending) and lands at the destination at once; the transfer is recorded
+// as received, flagged is_quick.
+router.post('/quick', requirePermission('transfers_quick'), async (req, res) => {
+  try {
+    const { from_branch_id, to_branch_id, items, notes } = req.body;
+    if (!from_branch_id || !to_branch_id) return res.status(400).json({ error: 'Both from and to branches are required' });
+    if (parseInt(from_branch_id) === parseInt(to_branch_id)) return res.status(400).json({ error: 'From and to branches must be different' });
+    if (!items || !items.length) return res.status(400).json({ error: 'No items in transfer' });
+    const employeeId = req.employee?.id || null;
+
+    const transfer_number = await nextNumber(db, 'branch_transfers', 'transfer_number', 'TRF-', 6);
+    const tx = await db.transaction('write');
+    let transferId;
+    try {
+      transferId = await createTransfer(tx, { transfer_number, from_branch_id, to_branch_id, employee_id: employeeId, items, notes, quote_id: null });
+      const { rows: lines } = await tx.execute({ sql: 'SELECT * FROM branch_transfer_items WHERE transfer_id = ?', args: [transferId] });
+      for (const line of lines) {
+        await addTransferStock(tx, to_branch_id, line.product_id, line.quantity_requested);
+        await tx.execute({ sql: 'UPDATE branch_transfer_items SET quantity_received = quantity_requested WHERE id = ?', args: [line.id] });
+      }
+      await tx.execute({ sql: "UPDATE branch_transfers SET status = 'received', received_at = ?, is_quick = 1 WHERE id = ?", args: [new Date().toISOString(), transferId] });
+      await tx.commit();
+    } catch(e) {
+      await tx.rollback();
+      return res.status(400).json({ error: e.message });
+    }
+
+    const { rows: [transfer] } = await db.execute({ sql: `SELECT t.*, fb.name as from_branch_name, tb.name as to_branch_name FROM branch_transfers t LEFT JOIN branches fb ON t.from_branch_id = fb.id LEFT JOIN branches tb ON t.to_branch_id = tb.id WHERE t.id = ?`, args: [transferId] });
+    transfer.items = (await db.execute({ sql: 'SELECT * FROM branch_transfer_items WHERE transfer_id = ?', args: [transferId] })).rows;
+    res.status(201).json(transfer);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // PATCH send — the inventory team sends a requested transfer with the
 // quantities they're actually sending (items: [{ item_id, quantity }]; a
 // line left out keeps its asked quantity, 0 drops it). Stock leaves the
@@ -180,9 +215,7 @@ router.patch('/:id/receive', requirePermission('transfers_dropoff'), async (req,
         await tx.execute({ sql: 'UPDATE branch_transfer_items SET quantity_received = quantity_received + ? WHERE id = ?', args: [actual, item_id] });
 
         if (item.product_id) {
-          await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, transfer.to_branch_id, actual, item.product_id, actual] });
-          await syncBinQty(tx, item.product_id, transfer.to_branch_id, actual);
-          await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [actual, item.product_id] });
+          await addTransferStock(tx, transfer.to_branch_id, item.product_id, actual);
         }
       }
 
@@ -226,9 +259,7 @@ router.patch('/:id/cancel', requirePermission('transfers'), async (req, res) => 
         if (!item.product_id) continue;
         const unreceived = item.quantity_requested - (item.quantity_received || 0);
         if (unreceived <= 0) continue;
-        await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, transfer.from_branch_id, unreceived, item.product_id, unreceived] });
-        await syncBinQty(tx, item.product_id, transfer.from_branch_id, unreceived);
-        await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [unreceived, item.product_id] });
+        await addTransferStock(tx, transfer.from_branch_id, item.product_id, unreceived);
       }
       await tx.execute({ sql: 'UPDATE branch_transfers SET status = ? WHERE id = ?', args: ['cancelled', req.params.id] });
       await tx.commit();
