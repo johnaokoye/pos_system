@@ -1241,7 +1241,7 @@ function buildGrnHtml(po, s) {
 // locally-stored (non-Cloudinary) /uploads/... signature path only resolves
 // against this server's own origin, which an email client can't infer on
 // its own, so both callers pass the request's real origin.
-function buildApprovedPoHtml(po, s, origin) {
+function buildApprovedPoHtml(po, s, origin, { print = false } = {}) {
   const storeName = s.store_name || 'My Store';
   const storeAddr = s.store_address || '';
   const storePhone = s.store_phone || '';
@@ -1260,11 +1260,13 @@ function buildApprovedPoHtml(po, s, origin) {
 
   return `<!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"><title>Purchase Order ${po.po_number}</title></head>
+<head><meta charset="utf-8"><title>Purchase Order ${po.po_number}</title>
+${print ? PRINT_PAGE_STYLE : ''}
+</head>
 <body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
+<table class="page-wrap" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
 <tr><td align="center">
-  <table width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+  <table class="page" width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
     <tr><td style="${BRAND_HEADER_STYLE}">
       <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
       ${storeAddr ? `<div style="color:#ffffff;font-size:12px;margin-top:4px">${storeAddr}</div>` : ''}
@@ -1275,6 +1277,7 @@ function buildApprovedPoHtml(po, s, origin) {
         <div>
           <div style="font-size:20px;font-weight:700;color:${BRAND.black}">PURCHASE ORDER</div>
           <div style="font-size:13px;color:#888;margin-top:2px">${po.po_number}</div>
+          ${poUnapprovedLabel(po) ? `<div style="display:inline-block;margin-top:6px;padding:3px 8px;border:2px solid #dc2626;color:#dc2626;font-size:12px;font-weight:700;letter-spacing:.5px">${poUnapprovedLabel(po)}</div>` : ''}
         </div>
         <div style="text-align:right;font-size:13px;color:#444">
           <div><strong>Approved:</strong> ${po.approved_at ? new Date(po.approved_at).toLocaleDateString() : '—'}</div>
@@ -1328,24 +1331,49 @@ function buildApprovedPoHtml(po, s, origin) {
 // button on the PO detail view), same shared-template pattern as
 // statement-preview below. Requires the PO to already be approved (the
 // document's whole point is showing that signature).
+async function loadPoDocument(id) {
+  const { rows: [po] } = await db.execute({ sql: `SELECT po.*, s.name as supplier_name, s.contact_name as supplier_contact, s.email as supplier_email,
+    b.name as branch_name, ea.first_name || ' ' || ea.last_name as approved_by_name
+    FROM purchase_orders po
+    LEFT JOIN suppliers s ON po.supplier_id = s.id
+    LEFT JOIN branches b ON po.branch_id = b.id
+    LEFT JOIN employees ea ON po.approved_by = ea.id
+    WHERE po.id = ?`, args: [id] });
+  if (!po) return null;
+  po.items = (await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ?', args: [id] })).rows;
+  return po;
+}
+
+// A PO prints at any stage, but a copy that isn't an approved order says so
+// across the top so it can't pass for one.
+function poUnapprovedLabel(po) {
+  if (po.status === 'cancelled') return 'CANCELLED';
+  if (!po.approved_at) return `NOT APPROVED — ${po.status === 'sent' ? 'AWAITING APPROVAL' : String(po.status || 'draft').toUpperCase()}`;
+  return null;
+}
+
 router.get('/po-preview/:id', requireAuth, async (req, res) => {
   try {
-    const { rows: [po] } = await db.execute({ sql: `SELECT po.*, s.name as supplier_name, s.contact_name as supplier_contact, s.email as supplier_email,
-      b.name as branch_name, ea.first_name || ' ' || ea.last_name as approved_by_name
-      FROM purchase_orders po
-      LEFT JOIN suppliers s ON po.supplier_id = s.id
-      LEFT JOIN branches b ON po.branch_id = b.id
-      LEFT JOIN employees ea ON po.approved_by = ea.id
-      WHERE po.id = ?`, args: [req.params.id] });
+    const po = await loadPoDocument(req.params.id);
     if (!po) return res.status(404).send('<p>Purchase order not found</p>');
-    if (po.status !== 'approved') return res.status(400).send('<p>This purchase order has not been approved yet</p>');
-    const { rows: items } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ?', args: [req.params.id] });
-    po.items = items;
     const s = await getSettings();
     const origin = `${req.protocol}://${req.get('host')}`;
     res.setHeader('Content-Type', 'text/html');
-    res.send(buildApprovedPoHtml(po, s, origin));
+    res.setHeader('X-Pos-Document', 'purchase-order');
+    res.send(buildApprovedPoHtml(po, s, origin, { print: true }));
   } catch(e) { res.status(500).send(`<p>Error: ${e.message}</p>`); }
+});
+
+// The same document as a PDF file, downloaded from the PO view.
+router.get('/po-pdf/:id', requireAuth, async (req, res) => {
+  try {
+    const po = await loadPoDocument(req.params.id);
+    if (!po) return res.status(404).json({ error: 'Purchase order not found' });
+    const pdf = await renderDocumentPdf(poPdfModel(po, await getSettings()));
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${po.po_number}.pdf"`);
+    res.send(pdf);
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // Email the approved PO document (with the approver's signature) to the
@@ -1354,17 +1382,9 @@ router.post('/send-po/:id', requireAuth, async (req, res) => {
   const { to } = req.body;
   if (!to) return res.status(400).json({ error: 'Recipient email is required' });
   try {
-    const { rows: [po] } = await db.execute({ sql: `SELECT po.*, s.name as supplier_name, s.contact_name as supplier_contact, s.email as supplier_email,
-      b.name as branch_name, ea.first_name || ' ' || ea.last_name as approved_by_name
-      FROM purchase_orders po
-      LEFT JOIN suppliers s ON po.supplier_id = s.id
-      LEFT JOIN branches b ON po.branch_id = b.id
-      LEFT JOIN employees ea ON po.approved_by = ea.id
-      WHERE po.id = ?`, args: [req.params.id] });
+    const po = await loadPoDocument(req.params.id);
     if (!po) return res.status(404).json({ error: 'Purchase order not found' });
     if (po.status !== 'approved') return res.status(400).json({ error: 'This purchase order has not been approved yet' });
-    const { rows: items } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ?', args: [req.params.id] });
-    po.items = items;
 
     const s = await getSettings();
     const origin = `${req.protocol}://${req.get('host')}`;
@@ -2124,7 +2144,7 @@ function poPdfModel(po, s) {
   const discounts = (po.items || []).reduce((sum, i) => sum + (Number(i.vendor_discount) || 0), 0);
   return {
     store: pdfStore(s),
-    title: 'PURCHASE ORDER', number: po.po_number,
+    title: poUnapprovedLabel(po) ? `PURCHASE ORDER - ${poUnapprovedLabel(po).replace('—', '-')}` : 'PURCHASE ORDER', number: po.po_number,
     meta: [['Approved', pdfDate(po.approved_at)], ['Branch', po.branch_name], ['Vendor Order #', po.vendor_order_number]],
     party: { label: 'Supplier', lines: [po.supplier_name, po.supplier_contact, po.supplier_email] },
     tables: [{ columns: [{ label: 'Item', width: 3.6 }, { label: 'Qty', width: 0.8, align: 'center' }, { label: 'Unit Cost', width: 1.2, align: 'right' }, { label: 'Discount', width: 1.3, align: 'right' }, { label: 'Tax', width: 1.1, align: 'right' }, { label: 'Total', width: 1.3, align: 'right' }],

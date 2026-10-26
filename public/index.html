@@ -20623,7 +20623,8 @@ const App = {
           ${(po.status==='approved'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-success" onclick="App.closeModal();App.showReceivePO(${po.id})">Receive Items</button>` : ''}
           ${(po.status==='received'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn" style="background:#f59e0b;color:#fff;border:none" onclick="App.closeModal();App.showProcessDamaged(${po.id})">⚠️ Process Damaged</button>` : ''}
           ${(po.status==='received'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-secondary" onclick="App.emailGRN(${po.id},'${(po.supplier_email||'').replace(/'/g,"\\'")}')">✉️ Email GRN</button>` : ''}
-          ${po.status==='approved' ? `<button class="btn btn-secondary" onclick="App.printApprovedPO(${po.id})">🖨️ Print</button>` : ''}
+          <button class="btn btn-secondary" onclick="App.printApprovedPO(${po.id})">🖨️ Print</button>
+          <a class="btn btn-secondary" href="/api/email/po-pdf/${po.id}" download="${po.po_number}.pdf" style="text-decoration:none">⬇️ Download PDF</a>
           ${po.status==='approved' ? `<button class="btn btn-secondary" onclick="App.emailApprovedPO(${po.id},'${(po.supplier_email||'').replace(/'/g,"\\'")}')">✉️ Email PO</button>` : ''}
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
@@ -20959,9 +20960,9 @@ const App = {
     });
   },
 
+  // Any status — copies of a PO that isn't approved are marked as such on the page
   printApprovedPO(id) {
-    const win = window.open(`/api/email/po-preview/${id}`, '_blank', 'width=820,height=700');
-    win.addEventListener('load', () => win.print());
+    return this._printServerDocument(`/api/email/po-preview/${id}`, 'purchase-order', 'purchase order');
   },
 
   emailApprovedPO(id, supplierEmail) {
