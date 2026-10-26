@@ -27,6 +27,7 @@ async function logStatus(executor, workOrderId, status, comment, employeeId) {
 const WO_LIST_SELECT = `SELECT wo.*, c.first_name || ' ' || c.last_name as customer_name, c.phone as customer_phone, c.email as customer_email,
   e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name,
   cb.first_name || ' ' || cb.last_name as completed_by_name,
+  (SELECT first_name || ' ' || last_name FROM employees WHERE id = wo.returned_to_customer_by) as returned_to_customer_by_name,
   julianday('now') - julianday(wo.pickup_due_date) as days_past_pickup_due,
   (SELECT COALESCE(SUM(total),0) FROM work_order_items WHERE work_order_id = wo.id) as parts_total,
   (SELECT COALESCE(SUM(total * tax_rate / 100.0),0) FROM work_order_items WHERE work_order_id = wo.id) as parts_tax_total
@@ -72,6 +73,30 @@ async function insertAccessory(executor, woId, a, employeeId) {
   const r = await executor.execute({ sql: 'INSERT INTO work_order_accessories (work_order_id, line_no, name, serial_number, description, created_by) VALUES (?,?,?,?,?,?)',
     args: [woId, n, a.name, a.serial_number, a.description, employeeId || null] });
   return { id: Number(r.lastInsertRowid), line_no: n };
+}
+
+// Accessory checklist when the item goes back — at pickup or Return to
+// Customer. Each accessory handed in is ticked as handed back; any that
+// isn't needs a reason. Returns { error } or what recordAccessoryHandBack needs.
+async function checkAccessoryHandBack(woId, returnedIds, note) {
+  const { rows: accessories } = await db.execute({ sql: 'SELECT id, line_no, name FROM work_order_accessories WHERE work_order_id = ? ORDER BY line_no', args: [woId] });
+  if (accessories.length && !Array.isArray(returnedIds)) return { error: 'Tick off the accessories being handed back (refresh the page if the checklist is missing)' };
+  const ids = new Set((returnedIds || []).map(Number));
+  const handedBack = accessories.filter(a => ids.has(a.id));
+  const kept = accessories.filter(a => !ids.has(a.id));
+  note = String(note || '').trim();
+  if (kept.length && !note) return { error: `${kept.map(a => `A${a.line_no} ${a.name}`).join(', ')} not ticked as handed back — say why` };
+  return { accessories, handedBack, kept, note: kept.length ? note : null };
+}
+
+async function recordAccessoryHandBack(executor, woId, status, check, employeeId) {
+  for (const a of check.handedBack) await executor.execute({ sql: 'UPDATE work_order_accessories SET returned_at = CURRENT_TIMESTAMP, returned_by = ? WHERE id = ?', args: [employeeId || null, a.id] });
+  await executor.execute({ sql: 'UPDATE work_orders SET accessories_pickup_note = ? WHERE id = ?', args: [check.note, woId] });
+  if (!check.accessories.length) return;
+  await logStatus(executor, woId, status, [
+    check.handedBack.length ? `Accessories handed back: ${check.handedBack.map(a => `A${a.line_no} ${a.name}`).join(', ')}` : null,
+    check.kept.length ? `Not handed back: ${check.kept.map(a => `A${a.line_no} ${a.name}`).join(', ')} — ${check.note}` : null,
+  ].filter(Boolean).join('. '), employeeId);
 }
 
 async function removePhotoFile(photo) {
@@ -502,9 +527,9 @@ router.get('/:id/label', async (req, res) => {
 
 router.post('/:id/accessories', requireAnyPermission('work_orders', 'wo_intake'), async (req, res) => {
   try {
-    const { rows: [wo] } = await db.execute({ sql: 'SELECT id, status FROM work_orders WHERE id = ?', args: [req.params.id] });
+    const { rows: [wo] } = await db.execute({ sql: 'SELECT id, status, returned_to_customer_at FROM work_orders WHERE id = ?', args: [req.params.id] });
     if (!wo) return res.status(404).json({ error: 'Not found' });
-    if (INTAKE_LOCKED.includes(wo.status)) return res.status(400).json({ error: `This work order is ${wo.status.replace('_', ' ')}` });
+    if (INTAKE_LOCKED.includes(wo.status) || wo.returned_to_customer_at) return res.status(400).json({ error: wo.returned_to_customer_at ? 'The item has been returned to the customer' : `This work order is ${wo.status.replace('_', ' ')}` });
     const clean = cleanAccessory(req.body);
     if (clean.error) return res.status(400).json({ error: clean.error });
     const employeeId = req.employee?.id;
@@ -533,9 +558,9 @@ router.post('/:id/photos', requireAnyPermission('work_orders', 'wo_intake'), (re
   photoUpload.single('photo')(req, res, err => err ? res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'Photo is larger than 15 MB' : err.message }) : next());
 }, async (req, res) => {
   try {
-    const { rows: [wo] } = await db.execute({ sql: 'SELECT id, status FROM work_orders WHERE id = ?', args: [req.params.id] });
+    const { rows: [wo] } = await db.execute({ sql: 'SELECT id, status, returned_to_customer_at FROM work_orders WHERE id = ?', args: [req.params.id] });
     if (!wo) return res.status(404).json({ error: 'Not found' });
-    if (INTAKE_LOCKED.includes(wo.status)) return res.status(400).json({ error: `This work order is ${wo.status.replace('_', ' ')}` });
+    if (INTAKE_LOCKED.includes(wo.status) || wo.returned_to_customer_at) return res.status(400).json({ error: wo.returned_to_customer_at ? 'The item has been returned to the customer' : `This work order is ${wo.status.replace('_', ' ')}` });
     if (!req.file) return res.status(400).json({ error: 'No photo uploaded, or the file is not an image' });
     let accessoryId = null;
     if (req.body.accessory_id) {
@@ -867,15 +892,8 @@ router.patch('/:id/final-payment', requireAnyPermission('wo_assess', 'pos'), asy
     if (!wo) return res.status(404).json({ error: 'Not found' });
     if (wo.status !== 'awaiting_pickup') return res.status(400).json({ error: `This work order is ${wo.status}, not awaiting pickup` });
 
-    // Accessory checklist — each one handed in is ticked off as handed back;
-    // any that isn't needs a reason before the item can go.
-    const { rows: accessories } = await db.execute({ sql: 'SELECT id, line_no, name FROM work_order_accessories WHERE work_order_id = ? ORDER BY line_no', args: [wo.id] });
-    if (accessories.length && !Array.isArray(accessories_returned)) return res.status(400).json({ error: 'Tick off the accessories being handed back (refresh the page if the checklist is missing)' });
-    const returnedIds = new Set((accessories_returned || []).map(Number));
-    const handedBack = accessories.filter(a => returnedIds.has(a.id));
-    const kept = accessories.filter(a => !returnedIds.has(a.id));
-    const note = String(accessories_note || '').trim();
-    if (kept.length && !note) return res.status(400).json({ error: `${kept.map(a => `A${a.line_no} ${a.name}`).join(', ')} not ticked as handed back — say why` });
+    const handBack = await checkAccessoryHandBack(wo.id, accessories_returned, accessories_note);
+    if (handBack.error) return res.status(400).json({ error: handBack.error });
 
     const estimateTotal = (parseFloat(wo.estimate_labor) || 0) + (parseFloat(wo.estimate_consumables) || 0);
     const estimateTax = parseFloat((estimateTotal * (parseFloat(wo.estimate_tax_rate) || 0) / 100).toFixed(2));
@@ -903,15 +921,9 @@ router.patch('/:id/final-payment', requireAnyPermission('wo_assess', 'pos'), asy
         txId = Number(txResult.lastInsertRowid);
         await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?)`, args: [txId, 'Work Order Balance', 'WO-FINAL', 1, subtotal, taxTotal, subtotal] });
       }
-      await tx.execute({ sql: `UPDATE work_orders SET final_transaction_id = ?, status = 'picked_up', picked_up_at = CURRENT_TIMESTAMP, accessories_pickup_note = ? WHERE id = ?`, args: [txId, kept.length ? note : null, req.params.id] });
-      for (const a of handedBack) await tx.execute({ sql: 'UPDATE work_order_accessories SET returned_at = CURRENT_TIMESTAMP, returned_by = ? WHERE id = ?', args: [employee_id || null, a.id] });
+      await tx.execute({ sql: `UPDATE work_orders SET final_transaction_id = ?, status = 'picked_up', picked_up_at = CURRENT_TIMESTAMP WHERE id = ?`, args: [txId, req.params.id] });
       await logStatus(tx, req.params.id, 'picked_up', balance > 0 ? `Final payment collected (${payment_method || 'cash'}) — ${balance}` : 'Item picked up — no balance due', employee_id);
-      if (accessories.length) {
-        await logStatus(tx, req.params.id, 'picked_up', [
-          handedBack.length ? `Accessories handed back: ${handedBack.map(a => `A${a.line_no} ${a.name}`).join(', ')}` : null,
-          kept.length ? `Not handed back: ${kept.map(a => `A${a.line_no} ${a.name}`).join(', ')} — ${note}` : null,
-        ].filter(Boolean).join('. '), employee_id);
-      }
+      await recordAccessoryHandBack(tx, wo.id, 'picked_up', handBack, employee_id);
       await tx.commit();
       committed = true;
     } catch(e) {
@@ -919,6 +931,32 @@ router.patch('/:id/final-payment', requireAnyPermission('wo_assess', 'pos'), asy
       return res.status(committed ? 500 : 400).json({ error: e.message });
     }
     const { rows: [updated] } = await db.execute({ sql: `${WO_LIST_SELECT} WHERE wo.id = ?`, args: [req.params.id] });
+    res.json(updated);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Hands the item (and accessories) back on a WO that ends without a pickup
+// sale — Not Worth Fixing, or Cancelled before work started. Status keeps
+// the outcome; returned_to_customer_at records that the item has gone.
+router.patch('/:id/return-to-customer', requirePermission('work_orders'), async (req, res) => {
+  try {
+    const { accessories_returned, accessories_note, comment } = req.body;
+    const employeeId = req.employee?.id;
+    const { rows: [wo] } = await db.execute({ sql: 'SELECT * FROM work_orders WHERE id = ?', args: [req.params.id] });
+    if (!wo) return res.status(404).json({ error: 'Not found' });
+    if (!['not_worth_fixing', 'cancelled'].includes(wo.status)) return res.status(400).json({ error: 'Only a Not Worth Fixing or Cancelled work order is returned this way — a repaired item goes back through the cashier\'s final payment' });
+    if (wo.returned_to_customer_at) return res.status(400).json({ error: 'This item has already been returned to the customer' });
+    const handBack = await checkAccessoryHandBack(wo.id, accessories_returned, accessories_note);
+    if (handBack.error) return res.status(400).json({ error: handBack.error });
+
+    const tx = await db.transaction('write');
+    try {
+      await tx.execute({ sql: 'UPDATE work_orders SET returned_to_customer_at = CURRENT_TIMESTAMP, returned_to_customer_by = ? WHERE id = ?', args: [employeeId || null, wo.id] });
+      await logStatus(tx, wo.id, wo.status, `Item returned to customer${String(comment || '').trim() ? ` — ${String(comment).trim()}` : ''}`, employeeId);
+      await recordAccessoryHandBack(tx, wo.id, wo.status, handBack, employeeId);
+      await tx.commit();
+    } catch(e) { try { await tx.rollback(); } catch(_) {} throw e; }
+    const { rows: [updated] } = await db.execute({ sql: `${WO_LIST_SELECT} WHERE wo.id = ?`, args: [wo.id] });
     res.json(updated);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

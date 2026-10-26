@@ -10818,7 +10818,7 @@ const App = {
   // The 30-day pickup window runs from completion (sign-off, or Not Worth
   // Fixing) — no due date until then.
   _woPickupBadge(wo) {
-    if (['picked_up', 'cancelled'].includes(wo.status)) return '';
+    if (['picked_up', 'cancelled'].includes(wo.status) || wo.returned_to_customer_at) return '';
     const daysPast = wo.days_past_pickup_due;
     if (daysPast == null) return '';
     if (daysPast > 0) return `<div style="font-size:11px;color:var(--danger)">Pickup overdue ${Math.floor(daysPast)}d</div>`;
@@ -10847,7 +10847,7 @@ const App = {
           <td>${wo.branch_name||'—'}</td>
           <td>${this.fmtDate(wo.created_at)}</td>
           ${isQueue ? `<td>${this._woWaitingLabel(wo.created_at)}</td>` : `<td>${wo.pickup_due_date ? this.fmtDate(wo.pickup_due_date) : '<span style="color:var(--text-muted)">After completion</span>'}${this._woPickupBadge(wo)}</td>`}
-          <td><span class="badge-pill ${this._woStatusBadge[wo.status]||'badge-secondary'}">${this._woStatusLabels[wo.status]||wo.status}</span></td>
+          <td><span class="badge-pill ${this._woStatusBadge[wo.status]||'badge-secondary'}">${this._woStatusLabels[wo.status]||wo.status}</span>${wo.returned_to_customer_at ? '<div style="font-size:11px;color:var(--text-muted)">Returned to customer</div>' : ''}</td>
           <td style="text-align:right;white-space:nowrap">
             <button class="btn btn-sm btn-outline" onclick="App.viewWorkOrder(${wo.id})">View</button>
           </td>
@@ -11061,7 +11061,7 @@ const App = {
   },
 
   _woIntakeSectionHtml(wo) {
-    const canAdd = !['picked_up','cancelled'].includes(wo.status) && (this.can('work_orders') || this.can('wo_intake'));
+    const canAdd = !['picked_up','cancelled'].includes(wo.status) && !wo.returned_to_customer_at && (this.can('work_orders') || this.can('wo_intake'));
     const canRemove = wo.status === 'intake' && canAdd;
     const accs = wo.accessories || [];
     return `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:13px">
@@ -11081,11 +11081,11 @@ const App = {
           <div style="display:flex;justify-content:space-between;gap:8px"><div><strong>A${a.line_no}</strong> — ${this.escapeAttr(a.name)}${a.serial_number ? ` · <strong>Item #</strong> ${this.escapeAttr(a.serial_number)}` : ''}</div>
             ${canRemove ? `<button type="button" class="btn btn-sm btn-outline" style="padding:1px 8px;font-size:11px" onclick="App.deleteWOAccessory(${wo.id},${a.id},'A${a.line_no}')">Remove</button>` : ''}</div>
           <div style="color:var(--text-muted);white-space:pre-wrap">${this.escapeAttr(a.description)}</div>
-          ${wo.status === 'picked_up' ? (a.returned_at ? `<div style="font-size:12px;color:var(--success)">✓ Handed back ${this.fmtDateTime(a.returned_at)}${a.returned_by_name ? ` by ${this.escapeAttr(a.returned_by_name)}` : ''}</div>` : `<div style="font-size:12px;color:var(--danger)">✗ Not handed back</div>`) : ''}
+          ${wo.status === 'picked_up' || wo.returned_to_customer_at ? (a.returned_at ? `<div style="font-size:12px;color:var(--success)">✓ Handed back ${this.fmtDateTime(a.returned_at)}${a.returned_by_name ? ` by ${this.escapeAttr(a.returned_by_name)}` : ''}</div>` : `<div style="font-size:12px;color:var(--danger)">✗ Not handed back</div>`) : ''}
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">${this._woPhotoThumbs(a.photos || [], wo.id, canRemove)}</div>
           ${canAdd ? `<div style="display:flex;gap:6px;margin-top:4px">${this._woDetailPhotoButtons(wo.id, a.id)}</div>` : ''}
         </div>`).join('') : '<div style="color:var(--text-muted);font-size:12px;margin-top:4px">None recorded</div>'}
-      ${wo.accessories_pickup_note ? `<div style="margin-top:6px;padding:6px 8px;background:var(--bg-secondary);border-radius:4px;font-size:12px"><strong>At pickup:</strong> ${this.escapeAttr(wo.accessories_pickup_note)}</div>` : ''}
+      ${wo.accessories_pickup_note ? `<div style="margin-top:6px;padding:6px 8px;background:var(--bg-secondary);border-radius:4px;font-size:12px"><strong>Hand-back note:</strong> ${this.escapeAttr(wo.accessories_pickup_note)}</div>` : ''}
       ${canAdd ? `<div id="wo-nacc" style="display:none;border-top:1px dashed var(--border);margin-top:8px;padding-top:8px">
           <div class="input-row">
             <div class="form-group"><label>Accessory *</label><input id="wo-nacc-name" placeholder="e.g. Charger"></div>
@@ -11230,6 +11230,7 @@ const App = {
             <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Opened</label><div>${this.fmtDateTime(wo.created_at)}</div></div>
             <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Pickup Due</label><div>${wo.pickup_due_date ? this.fmtDate(wo.pickup_due_date) : '30 days after completion'}${this._woPickupBadge(wo)}</div></div>
           </div>
+          ${wo.returned_to_customer_at ? `<div style="margin-bottom:10px;padding:6px 10px;border-radius:6px;background:var(--bg-secondary);font-size:13px">✓ <strong>Returned to customer</strong> ${this.fmtDateTime(wo.returned_to_customer_at)}${wo.returned_to_customer_by_name ? ` by ${this.escapeAttr(wo.returned_to_customer_by_name)}` : ''}</div>` : ''}
           <div class="form-group">
             <label style="display:flex;justify-content:space-between;align-items:center">Description
               ${!['complete','awaiting_pickup','picked_up','cancelled','not_worth_fixing'].includes(wo.status) && this.can('work_orders') ? `<button type="button" class="btn btn-sm btn-outline" onclick="App._toggleWODescEdit(${wo.id})">Edit</button>` : ''}
@@ -11311,6 +11312,7 @@ const App = {
           ${wo.status==='complete' && this.can('work_orders') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showWONotifyModal(${wo.id})">Notify Customer</button>` : ''}
           ${wo.status==='awaiting_pickup' ? `<span class="badge-pill badge-warning" style="align-self:center;padding:6px 10px" title="Collected at the register — open Hold Recall in POS to take payment">On hold — awaiting cashier</span>` : ''}
           ${['intake','assessed','pending_deposit'].includes(wo.status) && this.can('work_orders') ? `<button class="btn btn-danger" onclick="App.closeModal();App.showWOCancelModal(${wo.id})">Cancel Work Order</button>` : ''}
+          ${['not_worth_fixing','cancelled'].includes(wo.status) && !wo.returned_to_customer_at && this.can('work_orders') ? `<button class="btn btn-primary" onclick="App.showWOReturnToCustomerModal(${wo.id})">Return to Customer</button>` : ''}
           <button class="btn btn-secondary" title="Opens the customer copy — choose Save as PDF in the print dialog to attach it to an email" onclick="App.printWorkOrderInvoice(${wo.id})">🖨️ Print Invoice</button>
           <button class="btn btn-secondary" onclick="App.emailWorkOrderInvoice(${wo.id}, '${(wo.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email Invoice</button>
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
@@ -12099,19 +12101,7 @@ const App = {
               <div style="display:flex;justify-content:space-between"><span>Less deposit paid</span><span>-${this.fmt(wo.deposit_amount)}</span></div>
               <div style="display:flex;justify-content:space-between;margin-top:4px;border-top:1px solid var(--border);padding-top:4px"><strong>Balance Due</strong><strong>${this.fmt(balance)}</strong></div>
             </div>
-            ${(wo.accessories||[]).length ? `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:13px">
-              <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Hand Back Accessories</strong>
-              <div style="font-size:12px;color:var(--text-muted);margin:2px 0 6px">Tick each one as you give it to the customer.</div>
-              ${wo.accessories.map(a => `<label style="display:flex;gap:8px;align-items:flex-start;padding:6px 0;border-top:1px dashed var(--border);cursor:pointer;text-transform:none;font-weight:normal">
-                <input type="checkbox" class="wo-acc-back" value="${a.id}" style="width:auto;margin-top:3px" onchange="App._woPickupAccChanged()">
-                ${a.photos?.[0] ? `<img src="${a.photos[0].url}" style="width:44px;height:44px;object-fit:cover;border-radius:4px;border:1px solid var(--border)">` : ''}
-                <span><strong>A${a.line_no}</strong> — ${this.escapeAttr(a.name)}${a.serial_number ? ` · Item # ${this.escapeAttr(a.serial_number)}` : ''}<br><span style="color:var(--text-muted);font-size:12px">${this.escapeAttr(a.description)}</span></span>
-              </label>`).join('')}
-              <div id="wo-acc-note-wrap" class="form-group" style="margin:6px 0 0">
-                <label>Why isn't everything being handed back? *</label>
-                <textarea id="wo-acc-note" rows="2" placeholder="e.g. Customer left the bag with us / charger not found — manager informed"></textarea>
-              </div>
-            </div>` : ''}
+            ${this._woAccChecklistHtml(wo)}
             ${balance > 0 ? `<div class="form-group"><label>Payment Method</label>
               <select id="wo-final-paymethod"><option value="cash">Cash</option><option value="credit_card">Card</option><option value="check">Check</option></select>
             </div>` : `<p style="font-size:13px;color:var(--text-muted)">No balance due — the deposit already covers the final cost.</p>`}
@@ -12126,6 +12116,68 @@ const App = {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
+  // Accessory hand-back checklist — the cashier's final payment and Return to Customer
+  _woAccChecklistHtml(wo) {
+    if (!(wo.accessories || []).length) return '';
+    return `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:13px">
+      <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Hand Back Accessories</strong>
+      <div style="font-size:12px;color:var(--text-muted);margin:2px 0 6px">Tick each one as you give it to the customer.</div>
+      ${wo.accessories.map(a => `<label style="display:flex;gap:8px;align-items:flex-start;padding:6px 0;border-top:1px dashed var(--border);cursor:pointer;text-transform:none;font-weight:normal">
+        <input type="checkbox" class="wo-acc-back" value="${a.id}" style="width:auto;margin-top:3px" onchange="App._woPickupAccChanged()">
+        ${a.photos?.[0] ? `<img src="${a.photos[0].url}" style="width:44px;height:44px;object-fit:cover;border-radius:4px;border:1px solid var(--border)">` : ''}
+        <span><strong>A${a.line_no}</strong> — ${this.escapeAttr(a.name)}${a.serial_number ? ` · Item # ${this.escapeAttr(a.serial_number)}` : ''}<br><span style="color:var(--text-muted);font-size:12px">${this.escapeAttr(a.description)}</span></span>
+      </label>`).join('')}
+      <div id="wo-acc-note-wrap" class="form-group" style="margin:6px 0 0">
+        <label>Why isn't everything being handed back? *</label>
+        <textarea id="wo-acc-note" rows="2" placeholder="e.g. Customer left the bag with us / charger not found — manager informed"></textarea>
+      </div>
+    </div>`;
+  },
+
+  // Reads the checklist; null (after telling the user) if something isn't ticked and there's no reason
+  _woReadAccChecklist() {
+    const boxes = [...document.querySelectorAll('.wo-acc-back')];
+    const accessories_returned = boxes.filter(b => b.checked).map(b => Number(b.value));
+    const accessories_note = document.getElementById('wo-acc-note')?.value.trim() || '';
+    if (boxes.length && accessories_returned.length < boxes.length && !accessories_note) {
+      this.alert('Some accessories aren\'t ticked as handed back — say why first', 'error');
+      document.getElementById('wo-acc-note')?.focus();
+      return null;
+    }
+    return { accessories_returned, accessories_note };
+  },
+
+  async showWOReturnToCustomerModal(id) {
+    try {
+      const wo = await this.api('GET', `/work-orders/${id}`);
+      this.showModal(`
+        <div class="modal" style="max-width:440px">
+          <div class="modal-header"><span class="modal-title">Return to Customer — ${wo.wo_number}</span><button class="modal-close">✕</button></div>
+          <div class="modal-body">
+            <p style="font-size:13px;color:var(--text-muted);margin-top:0">${wo.status === 'cancelled' ? 'This work order was cancelled' : 'This item was found not worth fixing'} — record the item${(wo.accessories||[]).length ? ' and its accessories' : ''} going back to ${this.escapeAttr(wo.customer_name || 'the customer')}.</p>
+            <div style="font-size:13px;margin-bottom:12px"><strong>Item:</strong> ${this.escapeAttr(wo.item_label || wo.description)}${wo.item_serial ? ` · Item # ${this.escapeAttr(wo.item_serial)}` : ''}</div>
+            ${this._woAccChecklistHtml(wo)}
+            <div class="form-group"><label>Comment</label><input id="wo-return-comment" placeholder="Optional — e.g. collected by the customer's son"></div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="App.confirmWOReturnToCustomer(${id})">Return to Customer</button>
+          </div>
+        </div>`);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async confirmWOReturnToCustomer(id) {
+    const checklist = this._woReadAccChecklist();
+    if (!checklist) return;
+    try {
+      const wo = await this.api('PATCH', `/work-orders/${id}/return-to-customer`, { ...checklist, comment: document.getElementById('wo-return-comment').value.trim() });
+      this.alert(`${wo.wo_number} returned to the customer`);
+      if (this.section === 'work-orders') this.renderWorkOrders();
+      await this.viewWorkOrder(id);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
   _woPickupAccChanged() {
     const boxes = [...document.querySelectorAll('.wo-acc-back')];
     const wrap = document.getElementById('wo-acc-note-wrap');
@@ -12135,18 +12187,11 @@ const App = {
   async confirmWOFinalPayment(id) {
     const paymethodEl = document.getElementById('wo-final-paymethod');
     const payment_method = paymethodEl ? paymethodEl.value : undefined;
-    const boxes = [...document.querySelectorAll('.wo-acc-back')];
-    const accessories_returned = boxes.filter(b => b.checked).map(b => Number(b.value));
-    const accessories_note = document.getElementById('wo-acc-note')?.value.trim() || '';
-    if (boxes.length && accessories_returned.length < boxes.length && !accessories_note) {
-      this.alert('Some accessories aren\'t ticked as handed back — say why before completing the pickup', 'error');
-      document.getElementById('wo-acc-note')?.focus();
-      return;
-    }
+    const checklist = this._woReadAccChecklist();
+    if (!checklist) return;
     try {
       const wo = await this.api('PATCH', `/work-orders/${id}/final-payment`, {
-        payment_method, employee_id: this.currentUser.id, drawer_session_id: this.currentDrawerSession?.id || null,
-        accessories_returned, accessories_note,
+        payment_method, employee_id: this.currentUser.id, drawer_session_id: this.currentDrawerSession?.id || null, ...checklist,
       });
       this.closeModal();
       this.alert(`${wo.wo_number} picked up${payment_method ? ' — final payment collected' : ''}`);
