@@ -19212,6 +19212,10 @@ const App = {
               Online Purchase
             </label>
             <span style="font-size:12px;color:var(--text-muted)">Enable to add product URLs per item</span>
+            <label id="pr-taxfree-wrap" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:500;margin:0" title="Local purchase with no GCT — ticks No Tax on every item">
+              <input type="checkbox" id="pr-taxfree-all" onchange="App._onPRTaxFreeAll()" style="width:16px;height:16px">
+              Tax Exempt (all items)
+            </label>
             <div id="pr-tax-badge" style="display:none;margin-left:auto;padding:4px 12px;background:#e8f5e9;border-radius:20px;font-size:13px;color:#2e7d32"></div>
           </div>
 
@@ -19219,8 +19223,8 @@ const App = {
             <div class="card-header"><span class="card-title">Items</span>
               <button class="btn btn-sm btn-outline" onclick="App.addPRItem()">+ Add Item</button>
             </div>
-            <div style="display:grid;grid-template-columns:2fr 1.5fr 60px 90px 90px 28px;gap:6px;padding:4px 0 4px 8px;font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase">
-              <span>Product</span><span>Item Name</span><span>Qty</span><span>Est. Cost</span><span>Item Type</span><span></span>
+            <div style="display:grid;grid-template-columns:2fr 1.5fr 60px 90px 90px 50px 28px;gap:6px;padding:4px 0 4px 8px;font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase">
+              <span>Product</span><span>Item Name</span><span>Qty</span><span>Est. Cost</span><span>Item Type</span><span title="Local tax exempt">No Tax</span><span></span>
             </div>
             <div id="pr-items"></div>
           </div>
@@ -19298,6 +19302,16 @@ const App = {
         badge.style.display = 'none';
       }
     }
+    // Exemption only means something when local tax would apply
+    document.querySelectorAll('[id^="pri-taxfree-"], #pr-taxfree-all').forEach(cb => { cb.disabled = !this._prIsLocalSupplier; });
+    const wrap = document.getElementById('pr-taxfree-wrap');
+    if (wrap) wrap.style.opacity = this._prIsLocalSupplier ? '' : '.5';
+    this.calcPRTotal();
+  },
+
+  _onPRTaxFreeAll() {
+    const on = document.getElementById('pr-taxfree-all')?.checked || false;
+    document.querySelectorAll('[id^="pri-taxfree-"]').forEach(cb => { cb.checked = on; });
     this.calcPRTotal();
   },
 
@@ -19320,7 +19334,7 @@ const App = {
     wrap.id = `pr-item-${idx}`;
     wrap.style.cssText = 'border-bottom:1px solid var(--border);padding:8px 0';
     wrap.innerHTML = `
-      <div style="display:grid;grid-template-columns:2fr 1.5fr 60px 90px 90px 28px;gap:6px;align-items:center">
+      <div style="display:grid;grid-template-columns:2fr 1.5fr 60px 90px 90px 50px 28px;gap:6px;align-items:center">
         <span class="pri-prod-search-wrap" style="position:relative">
           <input type="text" id="pri-prod-search-${idx}" placeholder="Search product (optional)…" autocomplete="off" style="width:100%"
             value="${this.escapeAttr(prefillLabel)}"
@@ -19335,6 +19349,7 @@ const App = {
           <option value="sale" ${defaultType==='sale'?'selected':''}>Sale</option>
           <option value="internal" ${defaultType==='internal'?'selected':''}>Internal</option>
         </select>
+        <input type="checkbox" id="pri-taxfree-${idx}" title="Tax exempt — no local tax on this item" style="width:16px;height:16px;justify-self:center" ${prefill&&prefill.tax_exempt?'checked':''} ${this._prIsLocalSupplier?'':'disabled'} onchange="App.calcPRTotal()">
         <button class="btn btn-sm btn-danger" onclick="document.getElementById('pr-item-${idx}').remove();App.calcPRTotal()">✕</button>
       </div>
       <div id="pri-url-row-${idx}" style="display:${this._prIsOnline?'':'none'};margin-top:6px;padding:0 0 2px 2px">
@@ -19379,13 +19394,19 @@ const App = {
   },
 
   calcPRTotal() {
-    let subtotal = 0;
+    let subtotal = 0, taxable = 0, lines = 0, exempt = 0;
     document.querySelectorAll('[id^="pri-qty-"]').forEach(qEl => {
       const idx = qEl.id.split('-').pop();
-      subtotal += (parseFloat(qEl.value)||0) * (parseFloat(document.getElementById(`pri-cost-${idx}`)?.value)||0);
+      const amt = (parseFloat(qEl.value)||0) * (parseFloat(document.getElementById(`pri-cost-${idx}`)?.value)||0);
+      const isExempt = !!document.getElementById(`pri-taxfree-${idx}`)?.checked;
+      subtotal += amt;
+      if (!isExempt) taxable += amt;
+      lines++; if (isExempt) exempt++;
     });
+    const allBox = document.getElementById('pr-taxfree-all');
+    if (allBox) allBox.checked = lines > 0 && exempt === lines;
     const taxRate = this._prIsLocalSupplier ? (this._prTaxRate || 0) : 0;
-    const taxAmt = parseFloat((subtotal * taxRate / 100).toFixed(2));
+    const taxAmt = parseFloat((taxable * taxRate / 100).toFixed(2));
     const total = parseFloat((subtotal + taxAmt).toFixed(2));
 
     const currency = document.getElementById('pr-currency')?.value || this._prDefaultCurrency || 'USD';
@@ -19430,12 +19451,13 @@ const App = {
       const item_type = document.getElementById(`pri-itype-${idx}`)?.value || (request_type === 'internal_use' ? 'internal' : 'sale');
       const product_url = document.getElementById(`pri-url-${idx}`)?.value.trim() || null;
       const quotation_item_id = nameEl?.dataset.qiId || null;
-      items.push({ product_id: product_id || null, product_name, sku, quantity, unit_cost, item_type, product_url, quotation_item_id });
+      const tax_exempt = this._prIsLocalSupplier && document.getElementById(`pri-taxfree-${idx}`)?.checked ? 1 : 0;
+      items.push({ product_id: product_id || null, product_name, sku, quantity, unit_cost, item_type, product_url, quotation_item_id, tax_exempt });
     });
     if (!items.length) { this.alert('Add at least one item', 'error'); return; }
 
-    const subtotal = items.reduce((s, i) => s + (i.unit_cost * i.quantity), 0);
-    const tax_amount = parseFloat((subtotal * taxRate / 100).toFixed(2));
+    const taxable = items.reduce((s, i) => s + (i.tax_exempt ? 0 : i.unit_cost * i.quantity), 0);
+    const tax_amount = parseFloat((taxable * taxRate / 100).toFixed(2));
 
     try {
       const payload = {
@@ -19475,7 +19497,7 @@ const App = {
     const hasUrls = (pr.items||[]).some(i => i.product_url);
     const renderItemRows = items => items.map(i => `<tr>
       <td>
-        ${i.product_name}${i.item_type==='internal'?'<span style="font-size:10px;margin-left:4px;color:var(--text-muted)">[internal]</span>':''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on the originating quote line">-${this.fmt(i.discount_amount)} quoted</span>` : ''}
+        ${i.product_name}${i.item_type==='internal'?'<span style="font-size:10px;margin-left:4px;color:var(--text-muted)">[internal]</span>':''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on the originating quote line">-${this.fmt(i.discount_amount)} quoted</span>` : ''}${i.tax_exempt ? ' <span class="badge-pill badge-teal" style="font-size:10px">Tax exempt</span>' : ''}
         ${i.product_url ? `<br><a href="${i.product_url}" target="_blank" rel="noopener" style="font-size:11px;color:var(--accent);word-break:break-all">${i.product_url}</a>` : ''}
       </td>
       <td>${i.sku||'-'}</td>

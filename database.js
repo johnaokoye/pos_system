@@ -1907,6 +1907,9 @@ async function _init() {
     // deciding whether to approve the purchase (the item may be quoted to
     // the customer below list price, worth knowing before signing off on it).
     'ALTER TABLE purchase_request_items ADD COLUMN discount_amount REAL DEFAULT 0',
+    // Local purchase with no GCT on this line (tax-exempt item/supplier); on
+    // conversion the PO line gets tax_option 'none'.
+    'ALTER TABLE purchase_request_items ADD COLUMN tax_exempt INTEGER DEFAULT 0',
     'ALTER TABLE purchase_order_items ADD COLUMN discount_amount REAL DEFAULT 0',
     // POS per-line-item discounts (distinct from the existing whole-ticket
     // discount_amount below): the % actually given on that line, and who

@@ -101,6 +101,7 @@ async function processPRItems(items, request_type) {
       product_url: item.product_url || null,
       notes: item.notes || null,
       quotation_item_id: item.quotation_item_id || null,
+      tax_exempt: item.tax_exempt ? 1 : 0,
       total: parseFloat((unit_cost * qty).toFixed(2))
     });
   }
@@ -129,8 +130,8 @@ router.post('/', async (req, res) => {
       const prId = Number(result.lastInsertRowid);
       for (const item of processedItems) {
         await tx.execute({
-          sql: 'INSERT INTO purchase_request_items (pr_id, product_id, product_name, sku, quantity, unit_cost, item_type, product_url, notes, total, quotation_item_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-          args: [prId, item.product_id, item.product_name, item.sku, item.quantity, item.unit_cost, item.item_type, item.product_url, item.notes, item.total, item.quotation_item_id]
+          sql: 'INSERT INTO purchase_request_items (pr_id, product_id, product_name, sku, quantity, unit_cost, item_type, product_url, notes, total, quotation_item_id, tax_exempt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+          args: [prId, item.product_id, item.product_name, item.sku, item.quantity, item.unit_cost, item.item_type, item.product_url, item.notes, item.total, item.quotation_item_id, item.tax_exempt]
         });
       }
       await tx.commit();
@@ -178,8 +179,8 @@ router.put('/:id', async (req, res) => {
       await tx.execute({ sql: 'DELETE FROM purchase_request_items WHERE pr_id = ?', args: [pr.id] });
       for (const item of processedItems) {
         await tx.execute({
-          sql: 'INSERT INTO purchase_request_items (pr_id, product_id, product_name, sku, quantity, unit_cost, item_type, product_url, notes, total, quotation_item_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-          args: [pr.id, item.product_id, item.product_name, item.sku, item.quantity, item.unit_cost, item.item_type, item.product_url, item.notes, item.total, item.quotation_item_id]
+          sql: 'INSERT INTO purchase_request_items (pr_id, product_id, product_name, sku, quantity, unit_cost, item_type, product_url, notes, total, quotation_item_id, tax_exempt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+          args: [pr.id, item.product_id, item.product_name, item.sku, item.quantity, item.unit_cost, item.item_type, item.product_url, item.notes, item.total, item.quotation_item_id, item.tax_exempt]
         });
       }
       await tx.commit();
@@ -249,11 +250,12 @@ router.post('/:id/convert', async (req, res) => {
     if (!prItems.length) return res.status(400).json({ error: 'PR has no items' });
     // Lines keep the PR's tax decision (it charges local tax when it's in the
     // local currency); an older PR with no currency falls back to the
-    // vendor's default (GCT for a Local supplier). Editable on the draft PO.
+    // vendor's default (GCT for a Local supplier); a line marked tax exempt
+    // on the PR gets no tax. Editable on the draft PO.
     const { rows: [supplier] } = (supplier_id || pr.supplier_id) ? await db.execute({ sql: 'SELECT is_local FROM suppliers WHERE id = ?', args: [supplier_id || pr.supplier_id] }) : { rows: [] };
     const taxRate = await localTaxRate();
     const prTaxOption = Number(pr.tax_rate) > 0 ? 'local' : (pr.currency ? 'none' : defaultTaxOption(supplier));
-    const priced = prItems.map(item => ({ ...priceLine({ name: item.product_name, quantity: item.quantity, unit_cost: item.unit_cost, tax_option: prTaxOption }, taxRate), total: item.total || 0 }));
+    const priced = prItems.map(item => ({ ...priceLine({ name: item.product_name, quantity: item.quantity, unit_cost: item.unit_cost, tax_option: item.tax_exempt ? 'none' : prTaxOption }, taxRate), total: item.total || 0 }));
     for (const line of priced) line.tax_amount = parseFloat((line.total * line.tax_rate / 100).toFixed(2));
     const totals = poTotals(priced);
 
