@@ -2162,6 +2162,10 @@ async function _init() {
     'ALTER TABLE work_orders ADD COLUMN assessment_fee_tax_rate REAL NOT NULL DEFAULT 0',
     'ALTER TABLE work_orders ADD COLUMN estimate_tax_rate REAL NOT NULL DEFAULT 0',
     'ALTER TABLE work_orders ADD COLUMN item_serial TEXT',
+    // Pickup checklist: which accessories went back, and why any didn't
+    'ALTER TABLE work_order_accessories ADD COLUMN returned_at DATETIME',
+    'ALTER TABLE work_order_accessories ADD COLUMN returned_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE work_orders ADD COLUMN accessories_pickup_note TEXT',
     // Pickup window now runs 30 days from completion, not from intake — re-date open WOs (no-op once applied)
     "UPDATE work_orders SET pickup_due_date = CASE WHEN completed_at IS NOT NULL THEN date(completed_at,'+30 days') END WHERE status NOT IN ('picked_up','cancelled','not_worth_fixing')",
     // A real catalog part's own tax_rate at the time it was added; a "Q" item

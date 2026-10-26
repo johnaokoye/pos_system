@@ -11081,9 +11081,11 @@ const App = {
           <div style="display:flex;justify-content:space-between;gap:8px"><div><strong>A${a.line_no}</strong> — ${this.escapeAttr(a.name)}${a.serial_number ? ` · <strong>Item #</strong> ${this.escapeAttr(a.serial_number)}` : ''}</div>
             ${canRemove ? `<button type="button" class="btn btn-sm btn-outline" style="padding:1px 8px;font-size:11px" onclick="App.deleteWOAccessory(${wo.id},${a.id},'A${a.line_no}')">Remove</button>` : ''}</div>
           <div style="color:var(--text-muted);white-space:pre-wrap">${this.escapeAttr(a.description)}</div>
+          ${wo.status === 'picked_up' ? (a.returned_at ? `<div style="font-size:12px;color:var(--success)">✓ Handed back ${this.fmtDateTime(a.returned_at)}${a.returned_by_name ? ` by ${this.escapeAttr(a.returned_by_name)}` : ''}</div>` : `<div style="font-size:12px;color:var(--danger)">✗ Not handed back</div>`) : ''}
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">${this._woPhotoThumbs(a.photos || [], wo.id, canRemove)}</div>
           ${canAdd ? `<div style="display:flex;gap:6px;margin-top:4px">${this._woDetailPhotoButtons(wo.id, a.id)}</div>` : ''}
         </div>`).join('') : '<div style="color:var(--text-muted);font-size:12px;margin-top:4px">None recorded</div>'}
+      ${wo.accessories_pickup_note ? `<div style="margin-top:6px;padding:6px 8px;background:var(--bg-secondary);border-radius:4px;font-size:12px"><strong>At pickup:</strong> ${this.escapeAttr(wo.accessories_pickup_note)}</div>` : ''}
       ${canAdd ? `<div id="wo-nacc" style="display:none;border-top:1px dashed var(--border);margin-top:8px;padding-top:8px">
           <div class="input-row">
             <div class="form-group"><label>Accessory *</label><input id="wo-nacc-name" placeholder="e.g. Charger"></div>
@@ -12097,6 +12099,19 @@ const App = {
               <div style="display:flex;justify-content:space-between"><span>Less deposit paid</span><span>-${this.fmt(wo.deposit_amount)}</span></div>
               <div style="display:flex;justify-content:space-between;margin-top:4px;border-top:1px solid var(--border);padding-top:4px"><strong>Balance Due</strong><strong>${this.fmt(balance)}</strong></div>
             </div>
+            ${(wo.accessories||[]).length ? `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:13px">
+              <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Hand Back Accessories</strong>
+              <div style="font-size:12px;color:var(--text-muted);margin:2px 0 6px">Tick each one as you give it to the customer.</div>
+              ${wo.accessories.map(a => `<label style="display:flex;gap:8px;align-items:flex-start;padding:6px 0;border-top:1px dashed var(--border);cursor:pointer;text-transform:none;font-weight:normal">
+                <input type="checkbox" class="wo-acc-back" value="${a.id}" style="width:auto;margin-top:3px" onchange="App._woPickupAccChanged()">
+                ${a.photos?.[0] ? `<img src="${a.photos[0].url}" style="width:44px;height:44px;object-fit:cover;border-radius:4px;border:1px solid var(--border)">` : ''}
+                <span><strong>A${a.line_no}</strong> — ${this.escapeAttr(a.name)}${a.serial_number ? ` · Item # ${this.escapeAttr(a.serial_number)}` : ''}<br><span style="color:var(--text-muted);font-size:12px">${this.escapeAttr(a.description)}</span></span>
+              </label>`).join('')}
+              <div id="wo-acc-note-wrap" class="form-group" style="margin:6px 0 0">
+                <label>Why isn't everything being handed back? *</label>
+                <textarea id="wo-acc-note" rows="2" placeholder="e.g. Customer left the bag with us / charger not found — manager informed"></textarea>
+              </div>
+            </div>` : ''}
             ${balance > 0 ? `<div class="form-group"><label>Payment Method</label>
               <select id="wo-final-paymethod"><option value="cash">Cash</option><option value="credit_card">Card</option><option value="check">Check</option></select>
             </div>` : `<p style="font-size:13px;color:var(--text-muted)">No balance due — the deposit already covers the final cost.</p>`}
@@ -12111,12 +12126,27 @@ const App = {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
+  _woPickupAccChanged() {
+    const boxes = [...document.querySelectorAll('.wo-acc-back')];
+    const wrap = document.getElementById('wo-acc-note-wrap');
+    if (wrap) wrap.style.display = boxes.every(b => b.checked) ? 'none' : '';
+  },
+
   async confirmWOFinalPayment(id) {
     const paymethodEl = document.getElementById('wo-final-paymethod');
     const payment_method = paymethodEl ? paymethodEl.value : undefined;
+    const boxes = [...document.querySelectorAll('.wo-acc-back')];
+    const accessories_returned = boxes.filter(b => b.checked).map(b => Number(b.value));
+    const accessories_note = document.getElementById('wo-acc-note')?.value.trim() || '';
+    if (boxes.length && accessories_returned.length < boxes.length && !accessories_note) {
+      this.alert('Some accessories aren\'t ticked as handed back — say why before completing the pickup', 'error');
+      document.getElementById('wo-acc-note')?.focus();
+      return;
+    }
     try {
       const wo = await this.api('PATCH', `/work-orders/${id}/final-payment`, {
         payment_method, employee_id: this.currentUser.id, drawer_session_id: this.currentDrawerSession?.id || null,
+        accessories_returned, accessories_note,
       });
       this.closeModal();
       this.alert(`${wo.wo_number} picked up${payment_method ? ' — final payment collected' : ''}`);

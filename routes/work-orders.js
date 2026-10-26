@@ -52,7 +52,8 @@ const PHOTO_SELECT = `SELECT p.*, CASE WHEN p.stored_name LIKE 'https://%' THEN 
 const INTAKE_LOCKED = ['picked_up', 'cancelled'];
 
 async function loadIntakeRecord(woId) {
-  const { rows: accessories } = await db.execute({ sql: 'SELECT * FROM work_order_accessories WHERE work_order_id = ? ORDER BY line_no', args: [woId] });
+  const { rows: accessories } = await db.execute({ sql: `SELECT a.*, e.first_name || ' ' || e.last_name as returned_by_name FROM work_order_accessories a
+    LEFT JOIN employees e ON a.returned_by = e.id WHERE a.work_order_id = ? ORDER BY a.line_no`, args: [woId] });
   const { rows: photos } = await db.execute({ sql: `${PHOTO_SELECT} WHERE p.work_order_id = ? ORDER BY p.id`, args: [woId] });
   for (const a of accessories) a.photos = photos.filter(p => p.accessory_id === a.id);
   return { accessories, photos: photos.filter(p => !p.accessory_id) };
@@ -861,10 +862,20 @@ router.patch('/:id/notify', requirePermission('work_orders'), async (req, res) =
 // there's no separate no-payment "mark picked up" path anymore.
 router.patch('/:id/final-payment', requireAnyPermission('wo_assess', 'pos'), async (req, res) => {
   try {
-    const { payment_method, amount_tendered, employee_id, drawer_session_id, branch_id } = req.body;
+    const { payment_method, amount_tendered, employee_id, drawer_session_id, branch_id, accessories_returned, accessories_note } = req.body;
     const { rows: [wo] } = await db.execute({ sql: `${WO_LIST_SELECT} WHERE wo.id = ?`, args: [req.params.id] });
     if (!wo) return res.status(404).json({ error: 'Not found' });
     if (wo.status !== 'awaiting_pickup') return res.status(400).json({ error: `This work order is ${wo.status}, not awaiting pickup` });
+
+    // Accessory checklist — each one handed in is ticked off as handed back;
+    // any that isn't needs a reason before the item can go.
+    const { rows: accessories } = await db.execute({ sql: 'SELECT id, line_no, name FROM work_order_accessories WHERE work_order_id = ? ORDER BY line_no', args: [wo.id] });
+    if (accessories.length && !Array.isArray(accessories_returned)) return res.status(400).json({ error: 'Tick off the accessories being handed back (refresh the page if the checklist is missing)' });
+    const returnedIds = new Set((accessories_returned || []).map(Number));
+    const handedBack = accessories.filter(a => returnedIds.has(a.id));
+    const kept = accessories.filter(a => !returnedIds.has(a.id));
+    const note = String(accessories_note || '').trim();
+    if (kept.length && !note) return res.status(400).json({ error: `${kept.map(a => `A${a.line_no} ${a.name}`).join(', ')} not ticked as handed back — say why` });
 
     const estimateTotal = (parseFloat(wo.estimate_labor) || 0) + (parseFloat(wo.estimate_consumables) || 0);
     const estimateTax = parseFloat((estimateTotal * (parseFloat(wo.estimate_tax_rate) || 0) / 100).toFixed(2));
@@ -892,8 +903,15 @@ router.patch('/:id/final-payment', requireAnyPermission('wo_assess', 'pos'), asy
         txId = Number(txResult.lastInsertRowid);
         await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?)`, args: [txId, 'Work Order Balance', 'WO-FINAL', 1, subtotal, taxTotal, subtotal] });
       }
-      await tx.execute({ sql: `UPDATE work_orders SET final_transaction_id = ?, status = 'picked_up', picked_up_at = CURRENT_TIMESTAMP WHERE id = ?`, args: [txId, req.params.id] });
+      await tx.execute({ sql: `UPDATE work_orders SET final_transaction_id = ?, status = 'picked_up', picked_up_at = CURRENT_TIMESTAMP, accessories_pickup_note = ? WHERE id = ?`, args: [txId, kept.length ? note : null, req.params.id] });
+      for (const a of handedBack) await tx.execute({ sql: 'UPDATE work_order_accessories SET returned_at = CURRENT_TIMESTAMP, returned_by = ? WHERE id = ?', args: [employee_id || null, a.id] });
       await logStatus(tx, req.params.id, 'picked_up', balance > 0 ? `Final payment collected (${payment_method || 'cash'}) — ${balance}` : 'Item picked up — no balance due', employee_id);
+      if (accessories.length) {
+        await logStatus(tx, req.params.id, 'picked_up', [
+          handedBack.length ? `Accessories handed back: ${handedBack.map(a => `A${a.line_no} ${a.name}`).join(', ')}` : null,
+          kept.length ? `Not handed back: ${kept.map(a => `A${a.line_no} ${a.name}`).join(', ')} — ${note}` : null,
+        ].filter(Boolean).join('. '), employee_id);
+      }
       await tx.commit();
       committed = true;
     } catch(e) {
