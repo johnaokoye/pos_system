@@ -1937,6 +1937,12 @@ async function _init() {
     // Local purchase with no GCT on this line (tax-exempt item/supplier); on
     // conversion the PO line gets tax_option 'none'.
     'ALTER TABLE purchase_request_items ADD COLUMN tax_exempt INTEGER DEFAULT 0',
+    // Supplier-priced purchases (fuel): the PR authorizes a maximum quantity
+    // at no cost; the PO converted from it carries supplier_priced = 1 and
+    // each line's authorized_qty, and can't be approved until every line has
+    // its invoiced cost and the supplier's invoice is attached.
+    'ALTER TABLE purchase_orders ADD COLUMN supplier_priced INTEGER DEFAULT 0',
+    'ALTER TABLE purchase_order_items ADD COLUMN authorized_qty REAL',
     'ALTER TABLE purchase_order_items ADD COLUMN discount_amount REAL DEFAULT 0',
     // POS per-line-item discounts (distinct from the existing whole-ticket
     // discount_amount below): the % actually given on that line, and who

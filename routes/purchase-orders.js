@@ -43,6 +43,20 @@ const PO_DETAIL_SELECT = `SELECT po.*, s.name as supplier_name, s.contact_name a
 
 router.use(requirePermission('purchasing'));
 
+// A PO converted from a supplier-priced request (fuel) goes for approval only
+// once the supplier's invoice is in: every line costed and the invoice
+// attached. Quantities over the authorized maximum are only warned about
+// (in the UI), not blocked.
+async function supplierPricedProblems(poId) {
+  const problems = [];
+  const { rows: [{ uncosted }] } = await db.execute({ sql: 'SELECT COUNT(*) as uncosted FROM purchase_order_items WHERE po_id = ? AND (unit_cost IS NULL OR unit_cost <= 0)', args: [poId] });
+  if (Number(uncosted)) problems.push('enter the invoiced cost on every line');
+  const { rows: [{ invoices }] } = await db.execute({ sql: "SELECT COUNT(*) as invoices FROM po_attachments WHERE po_id = ? AND document_type = 'supplier_invoice'", args: [poId] });
+  if (!Number(invoices)) problems.push("attach the supplier's invoice (document type Supplier Invoice)");
+  return problems;
+}
+const supplierPricedError = (problems, action) => `Before this fuel/supplier-priced PO can be ${action}: ${problems.join(' and ')}`;
+
 const localUploadDir = path.join(__dirname, '../uploads/po-attachments');
 
 const upload = multer({
@@ -144,6 +158,10 @@ router.patch('/:id/status', async (req, res) => {
     const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });
     if (!po) return res.status(404).json({ error: 'Not found' });
     if (po.status === 'received') return res.status(400).json({ error: 'Cannot change status of received PO' });
+    if (status === 'sent' && po.supplier_priced) {
+      const problems = await supplierPricedProblems(po.id);
+      if (problems.length) return res.status(400).json({ error: supplierPricedError(problems, 'sent for approval') });
+    }
     if (status === 'sent') {
       // Re-sending after a rejection is the "resubmitted" step — clear the
       // old rejection so its banner doesn't linger on the PO the requester
@@ -169,6 +187,10 @@ router.patch('/:id/approve', requirePermission('purchasing_approve'), async (req
     const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });
     if (!po) return res.status(404).json({ error: 'Not found' });
     if (po.status !== 'sent') return res.status(400).json({ error: `This PO is ${po.status}, not awaiting approval` });
+    if (po.supplier_priced) {
+      const problems = await supplierPricedProblems(po.id);
+      if (problems.length) return res.status(400).json({ error: supplierPricedError(problems, 'approved') });
+    }
 
     let sigUrl;
     try { sigUrl = await resolveApprovalSignature(db, approverId, signature); }
@@ -318,6 +340,7 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
     if (!po) return res.status(404).json({ error: 'Not found' });
     if (po.status === 'cancelled') return res.status(400).json({ error: 'Cannot receive cancelled PO' });
     if (po.status === 'received') return res.status(400).json({ error: 'PO already fully received' });
+    if (po.supplier_priced && !['approved', 'partial'].includes(po.status)) return res.status(400).json({ error: 'A fuel/supplier-priced PO is received only after it is approved with the invoiced cost' });
 
     const tx = await db.transaction('write');
     try {
@@ -563,7 +586,7 @@ router.post('/:id/attachments', upload.single('file'), async (req, res) => {
     if (!po) return res.status(404).json({ error: 'Not found' });
     if (!req.file) return res.status(400).json({ error: 'No file uploaded or file type not allowed' });
     const { document_type = 'other' } = req.body;
-    const allowed_types = ['purchase_request', 'supplier_quotation', 'other'];
+    const allowed_types = ['purchase_request', 'supplier_quotation', 'supplier_invoice', 'other'];
     const docType = allowed_types.includes(document_type) ? document_type : 'other';
 
     const cloudResult = await cloudUpload(req.file.buffer, {
@@ -609,6 +632,11 @@ router.delete('/:id/attachments/:aid', async (req, res) => {
   try {
     const { rows: [att] } = await db.execute({ sql: 'SELECT * FROM po_attachments WHERE id = ? AND po_id = ?', args: [req.params.aid, req.params.id] });
     if (!att) return res.status(404).json({ error: 'Not found' });
+    // The invoice an approved fuel/supplier-priced PO was approved against stays on it
+    const { rows: [po] } = await db.execute({ sql: 'SELECT status, supplier_priced FROM purchase_orders WHERE id = ?', args: [req.params.id] });
+    if (po && po.supplier_priced && att.document_type === 'supplier_invoice' && !['draft', 'cancelled'].includes(po.status)) {
+      return res.status(400).json({ error: 'The supplier invoice can only be removed while the PO is a draft' });
+    }
     if (att.stored_name.startsWith('https://')) {
       await cloudDestroy(att.stored_name, 'raw');
     } else {

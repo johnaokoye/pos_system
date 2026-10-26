@@ -1386,6 +1386,143 @@ router.post('/send-po/:id', requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Authorization to Pump ──────────────────────────────────────────────
+// The supplier-facing copy of an approved supplier-priced (fuel) purchase
+// request: what may be supplied, the maximum quantity, and the approver's
+// signature. No prices — the supplier's invoice sets the cost on the PO.
+async function loadPumpAuthorization(id) {
+  const { rows: [pr] } = await db.execute({ sql: `SELECT pr.*, s.name as supplier_name, s.contact_name as supplier_contact, s.email as supplier_email,
+    b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name, a.first_name || ' ' || a.last_name as approved_by_name
+    FROM purchase_requests pr
+    LEFT JOIN suppliers s ON pr.supplier_id = s.id
+    LEFT JOIN branches b ON pr.branch_id = b.id
+    LEFT JOIN employees e ON pr.employee_id = e.id
+    LEFT JOIN employees a ON pr.approved_by = a.id
+    WHERE pr.id = ?`, args: [id] });
+  if (!pr) return { status: 404, error: 'Purchase request not found' };
+  if (pr.request_type !== 'supplier_priced') return { status: 400, error: 'Only fuel/supplier-priced requests have an authorization to pump' };
+  // Stays available after approval — converted to a PO, and on to received
+  if (!pr.approved_at || ['draft', 'submitted', 'rejected'].includes(pr.status)) return { status: 400, error: 'This request has not been approved yet' };
+  const { rows: items } = await db.execute({ sql: 'SELECT * FROM purchase_request_items WHERE pr_id = ? ORDER BY id', args: [id] });
+  pr.items = items;
+  return { pr };
+}
+
+function buildPumpAuthorizationHtml(pr, s, origin) {
+  const storeName = s.store_name || 'My Store';
+  const absUrl = (path) => !path ? null : (/^https?:\/\//.test(path) ? path : (origin ? `${origin}${path}` : path));
+  const rows = (pr.items || []).map(i => `
+    <tr>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku || ''}</span></td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center;font-weight:600">${i.quantity}</td>
+    </tr>`).join('');
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Authorization to Pump ${pr.pr_number}</title></head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
+<tr><td align="center">
+  <table width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+    <tr><td style="${BRAND_HEADER_STYLE}">
+      <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
+      ${s.store_address ? `<div style="color:#ffffff;font-size:12px;margin-top:4px">${s.store_address}</div>` : ''}
+      ${s.store_phone ? `<div style="color:#ffffff;font-size:12px">${s.store_phone}</div>` : ''}
+    </td></tr>
+    <tr><td style="padding:20px 24px">
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px"><tr>
+        <td style="vertical-align:top">
+          <div style="font-size:20px;font-weight:700;color:${BRAND.black}">AUTHORIZATION TO PUMP</div>
+          <div style="font-size:13px;color:#888;margin-top:2px">${pr.pr_number}</div>
+        </td>
+        <td style="vertical-align:top;text-align:right;font-size:13px;color:#444">
+          <div><strong>Approved:</strong> ${new Date(pr.approved_at).toLocaleDateString()}</div>
+          ${pr.branch_name ? `<div><strong>Branch:</strong> ${pr.branch_name}</div>` : ''}
+          ${pr.department ? `<div><strong>Department:</strong> ${pr.department}</div>` : ''}
+          ${pr.employee_name ? `<div><strong>Requested by:</strong> ${pr.employee_name}</div>` : ''}
+        </td>
+      </tr></table>
+      ${pr.supplier_name ? `<div style="background:#f9fafb;border:1px solid #e8e8e8;border-radius:6px;padding:12px;margin-bottom:16px;font-size:13px">
+        <strong>Supplier:</strong><br>${pr.supplier_name}${pr.supplier_contact ? `<br>${pr.supplier_contact}` : ''}${pr.supplier_email ? `<br>${pr.supplier_email}` : ''}
+      </div>` : ''}
+      <div style="font-size:13px;color:#444;margin-bottom:12px">You are authorized to supply the items below, up to the maximum quantity shown. Please return your invoice showing the quantity supplied and the amount, quoting <strong>${pr.pr_number}</strong>.</div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px">
+        <thead><tr style="background:#f9fafb">
+          <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Item</th>
+          <th style="padding:8px;text-align:center;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Maximum Qty</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      ${pr.notes ? `<div style="margin-top:16px;font-size:13px;color:#444"><strong>Notes:</strong> ${pr.notes}</div>` : ''}
+      ${pr.approval_signature ? `
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:24px;border-top:1px solid #e8e8e8">
+        <tr><td align="right" style="padding-top:16px">
+          <table cellpadding="0" cellspacing="0" style="width:240px"><tr><td style="text-align:left">
+            <div style="font-size:10px;font-weight:bold;text-transform:uppercase;color:#888;margin-bottom:6px">Authorized By</div>
+            <img src="${absUrl(pr.approval_signature)}" style="max-height:60px;max-width:220px;display:block" />
+            <div style="border-top:1px solid #333;margin-top:4px;padding-top:4px;font-size:12px;color:#555">${pr.approved_by_name || ''}</div>
+            <div style="font-size:11px;color:#888">${new Date(pr.approved_at).toLocaleString()}</div>
+          </td></tr></table>
+        </td></tr>
+      </table>` : ''}
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body>
+</html>`;
+}
+
+function pumpAuthorizationPdfModel(pr, s) {
+  return {
+    store: pdfStore(s),
+    title: 'AUTHORIZATION TO PUMP', number: pr.pr_number,
+    meta: [['Approved', pdfDate(pr.approved_at)], ['Branch', pr.branch_name], ['Department', pr.department], ['Requested by', pr.employee_name]],
+    party: { label: 'Supplier', lines: [pr.supplier_name, pr.supplier_contact, pr.supplier_email] },
+    tables: [{ columns: [{ label: 'Item', width: 5 }, { label: 'Maximum Qty', width: 1.4, align: 'center' }],
+      rows: (pr.items || []).map(i => ({ cells: [i.product_name, i.quantity], sub: i.sku || '' })) }],
+    totals: [],
+    notes: [`You are authorized to supply the items above, up to the maximum quantity shown. Please return your invoice showing the quantity supplied and the amount, quoting ${pr.pr_number}.`, pr.notes ? `Notes: ${pr.notes}` : ''],
+    signatures: pr.approval_signature ? [{ label: 'Authorized By', name: pr.approved_by_name || '', signedAt: pdfDateTime(pr.approved_at), image: pr.approval_signature }] : [],
+    signatureAlign: 'right',
+  };
+}
+
+router.get('/pump-authorization-preview/:id', requirePermission('purchase_requests'), async (req, res) => {
+  try {
+    const { pr, status, error } = await loadPumpAuthorization(req.params.id);
+    if (!pr) return res.status(status).send(`<p>${error}</p>`);
+    const s = await getSettings();
+    res.setHeader('Content-Type', 'text/html');
+    res.send(buildPumpAuthorizationHtml(pr, s, `${req.protocol}://${req.get('host')}`));
+  } catch(e) { res.status(500).send(`<p>Error: ${e.message}</p>`); }
+});
+
+router.post('/send-pump-authorization/:id', requirePermission('purchase_requests'), async (req, res) => {
+  const { to } = req.body;
+  if (!to) return res.status(400).json({ error: 'Recipient email is required' });
+  try {
+    const { pr, status, error } = await loadPumpAuthorization(req.params.id);
+    if (!pr) return res.status(status).json({ error });
+    const s = await getSettings();
+    const origin = `${req.protocol}://${req.get('host')}`;
+    try {
+      const transporter = createTransporter(s);
+      const fromName = s.email_from_name || s.store_name || 'POS System';
+      const fromAddr = s.email_smtp_user || s.store_email || '';
+      await transporter.sendMail({
+        from: `"${fromName}" <${fromAddr}>`,
+        to,
+        subject: `Authorization to Pump ${pr.pr_number} from ${s.store_name || 'Our Store'}`,
+        // Signatures are login-only on this server — embed them in the email.
+        ...(await documentEmailContent(req.body.as_pdf, s, pumpAuthorizationPdfModel(pr, s), inlineProtectedImages(buildPumpAuthorizationHtml(pr, s, origin)))),
+      });
+      res.json({ success: true, message: `Authorization sent to ${to}` });
+    } catch (e) {
+      res.status(500).json({ error: `Failed to send email: ${e.message}` });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Send goods received note
 router.post('/send-grn/:id', requireAuth, async (req, res) => {
   const { to } = req.body;

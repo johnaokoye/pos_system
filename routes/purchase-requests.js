@@ -17,6 +17,7 @@ const PR_SELECT = `
     a.first_name || ' ' || a.last_name as approver_name,
     s.name as supplier_name,
     s.is_local as supplier_is_local,
+    s.email as supplier_email,
     po.po_number as converted_po_number
   FROM purchase_requests pr
   LEFT JOIN branches b ON pr.branch_id = b.id
@@ -84,12 +85,21 @@ router.get('/:id', async (req, res) => {
 // `quotation_item_id` is carried through unchanged when a PR item that
 // originated from a quote's "Q" item is re-saved — it's how a product
 // created later at receiving time finds its way back to that quote.
+// A supplier-priced request (fuel) authorizes a maximum quantity of an
+// inventory item with no cost — the supplier's invoice sets the cost on the
+// PO — so its lines must be catalog products, keep a $0 cost instead of
+// falling back to the product's last cost, and may be part quantities.
+const REQUEST_TYPES = ['sale_items', 'internal_use', 'supplier_priced'];
+
 async function processPRItems(items, request_type) {
+  const supplierPriced = request_type === 'supplier_priced';
   const processedItems = [];
   for (const item of items) {
     const product = item.product_id ? (await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] })).rows[0] : null;
-    const unit_cost = parseFloat(item.unit_cost || (product ? product.cost : 0)) || 0;
-    const qty = parseInt(item.quantity || 1);
+    if (supplierPriced && !product) throw new Error('Supplier-priced requests need every item picked from inventory');
+    const unit_cost = supplierPriced ? 0 : parseFloat(item.unit_cost || (product ? product.cost : 0)) || 0;
+    const qty = supplierPriced ? Math.round((parseFloat(item.quantity) || 0) * 1000) / 1000 : parseInt(item.quantity || 1);
+    if (supplierPriced && qty <= 0) throw new Error('Enter the maximum quantity for each item');
     const item_type = item.item_type || (request_type === 'internal_use' ? 'internal' : 'sale');
     processedItems.push({
       product_id: item.product_id || null,
@@ -113,10 +123,12 @@ router.post('/', async (req, res) => {
     const { branch_id, employee_id, department, notes, required_date, request_type = 'sale_items',
             supplier_id, currency, is_online_purchase, tax_rate, tax_amount, items } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in purchase request' });
-    if (!['sale_items', 'internal_use'].includes(request_type)) return res.status(400).json({ error: 'Invalid request_type' });
+    if (!REQUEST_TYPES.includes(request_type)) return res.status(400).json({ error: 'Invalid request_type' });
 
     const pr_number = await nextNumber(db, 'purchase_requests', 'pr_number', 'PR-', 6);
-    const processedItems = await processPRItems(items, request_type);
+    let processedItems;
+    try { processedItems = await processPRItems(items, request_type); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
 
     const tx = await db.transaction('write');
     let committed = false;
@@ -163,9 +175,11 @@ router.put('/:id', async (req, res) => {
     const { branch_id, employee_id, department, notes, required_date, request_type = pr.request_type,
             supplier_id, currency, is_online_purchase, tax_rate, tax_amount, items } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in purchase request' });
-    if (!['sale_items', 'internal_use'].includes(request_type)) return res.status(400).json({ error: 'Invalid request_type' });
+    if (!REQUEST_TYPES.includes(request_type)) return res.status(400).json({ error: 'Invalid request_type' });
 
-    const processedItems = await processPRItems(items, request_type);
+    let processedItems;
+    try { processedItems = await processPRItems(items, request_type); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
 
     const tx = await db.transaction('write');
     let committed = false;
@@ -258,14 +272,17 @@ router.post('/:id/convert', async (req, res) => {
     const priced = prItems.map(item => ({ ...priceLine({ name: item.product_name, quantity: item.quantity, unit_cost: item.unit_cost, tax_option: item.tax_exempt ? 'none' : prTaxOption }, taxRate), total: item.total || 0 }));
     for (const line of priced) line.tax_amount = parseFloat((line.total * line.tax_rate / 100).toFixed(2));
     const totals = poTotals(priced);
+    // Fuel-style request: the PO starts at the authorized quantities with no
+    // cost; the supplier's invoice fills them in (see purchase-orders.js).
+    const supplierPriced = pr.request_type === 'supplier_priced';
 
     const tx = await db.transaction('write');
     let committed = false;
     try {
       const po_number = await nextNumber(tx, 'purchase_orders', 'po_number', 'PO-', 6);
       const poResult = await tx.execute({
-        sql: 'INSERT INTO purchase_orders (po_number, supplier_id, branch_id, employee_id, subtotal, tax_amount, total, notes, expected_date) VALUES (?,?,?,?,?,?,?,?,?)',
-        args: [po_number, supplier_id || null, pr.branch_id, pr.employee_id, totals.subtotal, totals.tax_amount, totals.total, poNotes || pr.notes, expected_date || pr.required_date || null]
+        sql: 'INSERT INTO purchase_orders (po_number, supplier_id, branch_id, employee_id, subtotal, tax_amount, total, notes, expected_date, supplier_priced) VALUES (?,?,?,?,?,?,?,?,?,?)',
+        args: [po_number, supplier_id || null, pr.branch_id, pr.employee_id, totals.subtotal, totals.tax_amount, totals.total, poNotes || pr.notes, expected_date || pr.required_date || null, supplierPriced ? 1 : 0]
       });
       const poId = Number(poResult.lastInsertRowid);
 
@@ -274,8 +291,8 @@ router.post('/:id/convert', async (req, res) => {
         // Internal-use items are added to PO but without a product link (won't update stock on receive)
         const productId = item.item_type === 'internal' ? null : item.product_id;
         await tx.execute({
-          sql: 'INSERT INTO purchase_order_items (po_id, product_id, product_name, sku, quantity_ordered, unit_cost, total, quotation_item_id, work_order_item_id, discount_amount, tax_option, tax_rate, tax_amount) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
-          args: [poId, productId, item.product_name, item.sku, item.quantity, item.unit_cost, item.total, item.quotation_item_id, item.work_order_item_id, item.discount_amount || 0, line.tax_option, line.tax_rate, line.tax_amount]
+          sql: 'INSERT INTO purchase_order_items (po_id, product_id, product_name, sku, quantity_ordered, unit_cost, total, quotation_item_id, work_order_item_id, discount_amount, tax_option, tax_rate, tax_amount, authorized_qty) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+          args: [poId, productId, item.product_name, item.sku, item.quantity, item.unit_cost, item.total, item.quotation_item_id, item.work_order_item_id, item.discount_amount || 0, line.tax_option, line.tax_rate, line.tax_amount, supplierPriced ? item.quantity : null]
         });
       }
 

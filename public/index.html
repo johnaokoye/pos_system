@@ -19079,10 +19079,10 @@ const App = {
       const requests = await this.api('GET', `/purchase-requests?${params}`);
       if (this.section !== 'purchasing' && this.section !== 'purchase-requests') return;
       const prStatusColor = { draft:'badge-warning', submitted:'badge-info', approved:'badge-teal', rejected:'badge-danger', converted:'badge-success' };
-      const typeLabel = { sale_items:'Sale Items', internal_use:'Internal Use' };
-      const typeBadge = { sale_items:'badge-info', internal_use:'badge-purple' };
+      const typeLabel = this._prTypeLabels;
+      const typeBadge = this._prTypeBadges;
       const statusTabs = ['all','draft','submitted','approved','rejected','converted'];
-      const typeFilters = ['all','sale_items','internal_use'];
+      const typeFilters = ['all', ...Object.keys(typeLabel)];
       c.innerHTML = `
         <div class="section-header">
           <h2>Purchasing</h2>
@@ -19174,6 +19174,7 @@ const App = {
             <div style="display:flex;gap:0;border:1px solid var(--border);border-radius:6px;overflow:hidden;width:fit-content">
               <button id="pr-type-sale" class="btn" style="border-radius:0;border:none;padding:8px 20px;background:var(--primary);color:#fff;font-weight:600" onclick="App._setPRType('sale_items')">Sale Items (for resale)</button>
               <button id="pr-type-internal" class="btn" style="border-radius:0;border:none;padding:8px 20px;background:var(--card);color:var(--text)" onclick="App._setPRType('internal_use')">Internal Use</button>
+              <button id="pr-type-supplier" class="btn" style="border-radius:0;border:none;padding:8px 20px;background:var(--card);color:var(--text)" onclick="App._setPRType('supplier_priced')">Fuel / Supplier-priced</button>
             </div>
             <p id="pr-type-hint" style="font-size:12px;color:var(--text-muted);margin-top:5px">Products that will be stocked and sold to customers.</p>
           </div>
@@ -19224,7 +19225,7 @@ const App = {
               <button class="btn btn-sm btn-outline" onclick="App.addPRItem()">+ Add Item</button>
             </div>
             <div style="display:grid;grid-template-columns:2fr 1.5fr 60px 90px 90px 50px 28px;gap:6px;padding:4px 0 4px 8px;font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase">
-              <span>Product</span><span>Item Name</span><span>Qty</span><span>Est. Cost</span><span>Item Type</span><span title="Local tax exempt">No Tax</span><span></span>
+              <span>Product</span><span>Item Name</span><span id="pr-qty-head">Qty</span><span>Est. Cost</span><span>Item Type</span><span title="Local tax exempt">No Tax</span><span></span>
             </div>
             <div id="pr-items"></div>
           </div>
@@ -19266,23 +19267,42 @@ const App = {
     });
   },
 
+  _prTypeLabels: { sale_items: 'Sale Items', internal_use: 'Internal Use', supplier_priced: 'Fuel / Supplier-priced' },
+  _prTypeBadges: { sale_items: 'badge-info', internal_use: 'badge-purple', supplier_priced: 'badge-warning' },
+
   _setPRType(type) {
     this._prRequestType = type;
-    const saleBtn = document.getElementById('pr-type-sale');
-    const internalBtn = document.getElementById('pr-type-internal');
-    const hint = document.getElementById('pr-type-hint');
-    if (type === 'sale_items') {
-      saleBtn.style.background = 'var(--primary)'; saleBtn.style.color = '#fff';
-      internalBtn.style.background = 'var(--card)'; internalBtn.style.color = 'var(--text)';
-      hint.textContent = 'Products that will be stocked and sold to customers.';
-    } else {
-      internalBtn.style.background = 'var(--primary)'; internalBtn.style.color = '#fff';
-      saleBtn.style.background = 'var(--card)'; saleBtn.style.color = 'var(--text)';
-      hint.textContent = 'Items for internal use — office supplies, equipment, consumables, etc. Will not enter product inventory.';
+    const buttons = { sale_items: 'pr-type-sale', internal_use: 'pr-type-internal', supplier_priced: 'pr-type-supplier' };
+    for (const [t, id] of Object.entries(buttons)) {
+      const btn = document.getElementById(id);
+      btn.style.background = t === type ? 'var(--primary)' : 'var(--card)';
+      btn.style.color = t === type ? '#fff' : 'var(--text)';
     }
+    document.getElementById('pr-type-hint').textContent = {
+      sale_items: 'Products that will be stocked and sold to customers.',
+      internal_use: 'Items for internal use — office supplies, equipment, consumables, etc. Will not enter product inventory.',
+      supplier_priced: 'Fuel and other items the supplier prices on delivery. Pick each item from inventory and enter the maximum quantity — no cost. Once approved, send the signed Authorization to Pump to the supplier; their invoice sets the cost on the PO.',
+    }[type];
     document.querySelectorAll('[id^="pri-itype-"]').forEach(sel => {
       sel.value = type === 'internal_use' ? 'internal' : 'sale';
     });
+    this._applyPRSupplierPriced();
+  },
+
+  // Supplier-priced lines carry no cost (it comes from the supplier's
+  // invoice) and their quantity is the maximum authorized, which may be a
+  // part quantity (litres/gallons).
+  _applyPRSupplierPriced() {
+    const on = this._prRequestType === 'supplier_priced';
+    document.querySelectorAll('[id^="pri-cost-"]').forEach(el => {
+      el.disabled = on;
+      if (on) el.value = '';
+      el.placeholder = on ? 'Invoice' : 'Est. Cost';
+    });
+    document.querySelectorAll('[id^="pri-qty-"]').forEach(el => { el.step = on ? 'any' : '1'; el.title = on ? 'Maximum quantity authorized' : ''; });
+    const qtyHead = document.getElementById('pr-qty-head');
+    if (qtyHead) qtyHead.textContent = on ? 'Max Qty' : 'Qty';
+    this.calcPRTotal();
   },
 
   _onPRSupplierChange() {
@@ -19335,6 +19355,7 @@ const App = {
     const prefillProduct = prefill && prefill.product_id ? (this._prAllProducts||[]).find(p => p.id === prefill.product_id) : null;
     const prefillLabel = prefillProduct ? `${prefillProduct.name} (${prefillProduct.sku||''})` : '';
     const defaultType = prefill ? prefill.item_type : ((this._prRequestType === 'internal_use') ? 'internal' : 'sale');
+    const supplierPriced = this._prRequestType === 'supplier_priced';
     const wrap = document.createElement('div');
     wrap.id = `pr-item-${idx}`;
     wrap.style.cssText = 'border-bottom:1px solid var(--border);padding:8px 0';
@@ -19348,8 +19369,8 @@ const App = {
           <div id="pri-prod-dd-${idx}" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
         </span>
         <input id="pri-name-${idx}" placeholder="Or type item name" value="${prefill&&!prefill.product_id?this.escapeAttr(prefill.product_name):''}" data-qi-id="${prefill&&prefill.quotation_item_id||''}" oninput="App.calcPRTotal()">
-        <input id="pri-qty-${idx}" type="number" min="1" value="${prefill?prefill.quantity:1}" placeholder="Qty" oninput="App.calcPRTotal()">
-        <input id="pri-cost-${idx}" type="number" step="0.01" value="${prefill?prefill.unit_cost:''}" placeholder="Est. Cost" oninput="App.calcPRTotal()">
+        <input id="pri-qty-${idx}" type="number" min="${supplierPriced?'0':'1'}" step="${supplierPriced?'any':'1'}" value="${prefill?prefill.quantity:1}" placeholder="Qty" ${supplierPriced?'title="Maximum quantity authorized"':''} oninput="App.calcPRTotal()">
+        <input id="pri-cost-${idx}" type="number" step="0.01" value="${prefill&&!supplierPriced?prefill.unit_cost:''}" placeholder="${supplierPriced?'Invoice':'Est. Cost'}" ${supplierPriced?'title="Cost comes from the supplier\'s invoice on the PO"':''} ${supplierPriced?'disabled':''} oninput="App.calcPRTotal()">
         <select id="pri-itype-${idx}" style="font-size:12px">
           <option value="sale" ${defaultType==='sale'?'selected':''}>Sale</option>
           <option value="internal" ${defaultType==='internal'?'selected':''}>Internal</option>
@@ -19394,7 +19415,7 @@ const App = {
     if (searchEl) searchEl.value = `${p.name} (${p.sku||''})`;
     if (dd) dd.style.display = 'none';
     document.getElementById(`pri-name-${idx}`).value = '';
-    document.getElementById(`pri-cost-${idx}`).value = p.cost || '';
+    if (this._prRequestType !== 'supplier_priced') document.getElementById(`pri-cost-${idx}`).value = p.cost || '';
     this.calcPRTotal();
   },
 
@@ -19441,6 +19462,7 @@ const App = {
     const taxRate = this._prIsLocalSupplier ? (this._prTaxRate || 0) : 0;
 
     const items = [];
+    let missingProduct = false;
     document.querySelectorAll('[id^="pri-qty-"]').forEach(qEl => {
       if (!qEl.closest('[id^="pr-item-"]')) return;
       const idx = qEl.id.split('-').pop();
@@ -19451,7 +19473,8 @@ const App = {
       const product_name = product_id ? (sel?.dataset.name || '') : nameInput;
       const sku = product_id ? (sel?.dataset.sku || '') : '';
       if (!product_id && !product_name) return;
-      const quantity = parseInt(qEl.value) || 1;
+      if (request_type === 'supplier_priced' && !product_id) missingProduct = true;
+      const quantity = request_type === 'supplier_priced' ? (parseFloat(qEl.value) || 0) : (parseInt(qEl.value) || 1);
       const unit_cost = parseFloat(document.getElementById(`pri-cost-${idx}`)?.value) || 0;
       const item_type = document.getElementById(`pri-itype-${idx}`)?.value || (request_type === 'internal_use' ? 'internal' : 'sale');
       const product_url = document.getElementById(`pri-url-${idx}`)?.value.trim() || null;
@@ -19460,6 +19483,8 @@ const App = {
       items.push({ product_id: product_id || null, product_name, sku, quantity, unit_cost, item_type, product_url, quotation_item_id, tax_exempt });
     });
     if (!items.length) { this.alert('Add at least one item', 'error'); return; }
+    if (missingProduct) { this.alert('Fuel / supplier-priced requests need every item picked from inventory', 'error'); return; }
+    if (request_type === 'supplier_priced' && items.some(i => !(i.quantity > 0))) { this.alert('Enter the maximum quantity for each item', 'error'); return; }
 
     const taxable = items.reduce((s, i) => s + (i.tax_exempt ? 0 : i.unit_cost * i.quantity), 0);
     const tax_amount = parseFloat((taxable * taxRate / 100).toFixed(2));
@@ -19494,8 +19519,9 @@ const App = {
   async viewPR(id) {
     const pr = await this.api('GET', `/purchase-requests/${id}`);
     const prStatusColor = { draft:'badge-warning', submitted:'badge-info', approved:'badge-teal', rejected:'badge-danger', converted:'badge-success' };
-    const typeLabel = { sale_items:'Sale Items', internal_use:'Internal Use' };
-    const typeBadge = { sale_items:'badge-info', internal_use:'badge-purple' };
+    const typeLabel = this._prTypeLabels;
+    const typeBadge = this._prTypeBadges;
+    const supplierPriced = pr.request_type === 'supplier_priced';
     const total = (pr.items || []).reduce((s, i) => s + (i.total || 0), 0);
     const saleItems = (pr.items||[]).filter(i => i.item_type !== 'internal');
     const internalItems = (pr.items||[]).filter(i => i.item_type === 'internal');
@@ -19506,9 +19532,9 @@ const App = {
         ${i.product_url ? `<br><a href="${i.product_url}" target="_blank" rel="noopener" style="font-size:11px;color:var(--accent);word-break:break-all">${i.product_url}</a>` : ''}
       </td>
       <td>${i.sku||'-'}</td>
-      <td>${i.quantity}</td>
-      <td>${this.fmt(i.unit_cost)}</td>
-      <td class="fw-600">${this.fmt(i.total)}</td>
+      <td>${i.quantity}${supplierPriced ? '<div style="font-size:11px;color:var(--text-muted)">max</div>' : ''}</td>
+      <td>${supplierPriced ? '<span style="color:var(--text-muted)">Per invoice</span>' : this.fmt(i.unit_cost)}</td>
+      <td class="fw-600">${supplierPriced ? '—' : this.fmt(i.total)}</td>
       <td style="font-size:12px;color:var(--text-muted)">${i.notes||''}</td>
     </tr>`).join('');
     this.showModal(`
@@ -19551,20 +19577,39 @@ const App = {
               <span>Sale items: <strong>${saleItems.length}</strong></span>
               <span>Internal items: <strong>${internalItems.length}</strong></span>
             </div>` : ''}
-          <div style="text-align:right;margin-top:10px;font-size:13px;line-height:1.9">
+          ${supplierPriced ? `<div style="margin-top:10px;padding:8px 12px;background:var(--bg-secondary,#f8f9fa);border-radius:6px;font-size:13px">
+            Quantities are the <strong>maximum</strong> the supplier may supply. ${['approved','converted','received'].includes(pr.status) ? 'Print or email the signed <strong>Authorization to Pump</strong> to the supplier; enter the cost from their invoice on the PO and attach the invoice.' : 'Once approved, the signed Authorization to Pump can be printed or emailed to the supplier.'}
+          </div>` : `<div style="text-align:right;margin-top:10px;font-size:13px;line-height:1.9">
             <div style="color:var(--text-muted)">Subtotal: <strong>${this.fmt(total)}</strong></div>
             ${pr.tax_amount > 0 ? `<div style="color:var(--text-muted)">Tax (${pr.tax_rate}% local): <strong>${this.fmt(pr.tax_amount)}</strong></div>` : ''}
             <div style="font-size:15px;font-weight:700;border-top:1px solid var(--border);padding-top:4px">Est. Total: ${this.fmt(total + (pr.tax_amount||0))}</div>
-          </div>
+          </div>`}
         </div>
         <div class="modal-footer">
           ${pr.status==='draft' ? `<button class="btn btn-secondary" onclick="App.closeModal();App.showPRForm(${pr.id})">Edit</button>` : ''}
           ${pr.status==='draft' ? `<button class="btn btn-primary" onclick="App.updatePRStatus(${pr.id},'submitted');App.closeModal()">Submit Request</button>` : ''}
           ${pr.status==='submitted' ? `<button class="btn btn-success" onclick="App.closeModal();App.approvePR(${pr.id})">Approve</button><button class="btn btn-danger" onclick="App.closeModal();App.rejectPR(${pr.id})">Reject</button>` : ''}
+          ${supplierPriced && ['approved','converted','received'].includes(pr.status) ? `<button class="btn btn-secondary" onclick="App.printPumpAuthorization(${pr.id})">🖨️ Print Authorization</button>
+            <button class="btn btn-secondary" onclick="App.emailPumpAuthorization(${pr.id},'${(pr.supplier_email||'').replace(/'/g,"\\'")}')">✉️ Email Authorization</button>` : ''}
           ${pr.status==='approved' ? `<button class="btn btn-teal" onclick="App.closeModal();App.showConvertPRtoPO(${pr.id})">Convert to PO</button>` : ''}
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
+  },
+
+  printPumpAuthorization(id) {
+    const win = window.open(`/api/email/pump-authorization-preview/${id}`, '_blank', 'width=820,height=700');
+    win.addEventListener('load', () => win.print());
+  },
+
+  emailPumpAuthorization(id, supplierEmail) {
+    this.showEmailModal('Email Authorization to Pump', supplierEmail, async (to, { as_pdf }) => {
+      this.closeModal();
+      try {
+        await this.api('POST', `/email/send-pump-authorization/${id}`, { to, as_pdf });
+        this.alert(`Authorization sent to ${to}`);
+      } catch(e) { this.alert(e.message, 'error'); }
+    }, { pdfOption: true });
   },
 
   async updatePRStatus(id, status) {
@@ -19624,6 +19669,7 @@ const App = {
     const total = (pr.items||[]).reduce((s,i) => s+(i.total||0), 0);
     const hasInternal = (pr.items||[]).some(i => i.item_type === 'internal');
     const hasSale = (pr.items||[]).some(i => i.item_type !== 'internal');
+    const supplierPriced = pr.request_type === 'supplier_priced';
     this.showModal(`
       <div class="modal" style="max-width:580px">
         <div class="modal-header"><span class="modal-title">Convert PR to Purchase Order</span><button class="modal-close">✕</button></div>
@@ -19642,16 +19688,18 @@ const App = {
                   <td>${i.product_name}</td>
                   <td><span style="font-size:11px;color:${i.item_type==='internal'?'var(--text-muted)':'var(--accent)'}">${i.item_type==='internal'?'Internal':'Sale'}</span></td>
                   <td>${i.quantity}</td>
-                  <td>${this.fmt(i.unit_cost)}</td>
+                  <td>${supplierPriced ? 'Per invoice' : this.fmt(i.unit_cost)}</td>
                 </tr>`).join('')}
               </tbody>
             </table>
           </div>
-          <div style="text-align:right;font-size:14px;font-weight:700;margin-bottom:14px">Est. Total: ${this.fmt(total)}</div>
+          ${supplierPriced ? `<div style="padding:8px 12px;background:#fff8e1;border-left:3px solid var(--warning);border-radius:0 6px 6px 0;font-size:13px;margin-bottom:12px">
+            The PO starts at the authorized maximum quantities with no cost. Enter the quantity and cost from the supplier's invoice and attach the invoice before sending it for approval.
+          </div>` : `<div style="text-align:right;font-size:14px;font-weight:700;margin-bottom:14px">Est. Total: ${this.fmt(total)}</div>`}
           <div class="form-group"><label>Supplier *</label>
             <select id="cpr-supplier" data-searchable>
               <option value="">-- Select Supplier --</option>
-              ${suppliers.map(s=>`<option value="${s.id}">${s.name}</option>`).join('')}
+              ${suppliers.map(s=>`<option value="${s.id}" ${pr.supplier_id===s.id?'selected':''}>${s.name}</option>`).join('')}
             </select>
           </div>
           <div class="input-row">
@@ -19764,8 +19812,9 @@ const App = {
   _poExistingItemRowHtml(item) {
     return `<div class="po-receive-row po-existing-item" data-item-id="${item.id}" data-product-id="${item.product_id||''}">
       <span style="flex:2;font-size:13px">${item.product_name}${item.sku?` <span style="color:var(--text-muted)">(${item.sku})</span>`:''}</span>
-      <input type="number" class="poi-existing-qty" min="0" step="any" value="${item.quantity_ordered}" style="width:70px" placeholder="Qty" oninput="App.calcPOTotal()">
-      <input type="number" class="poi-existing-cost" step="0.01" value="${item.unit_cost}" style="width:90px" placeholder="Unit Cost" oninput="App.calcPOTotal()">
+      <input type="number" class="poi-existing-qty" min="0" step="any" value="${item.quantity_ordered}" style="width:70px" placeholder="Qty" oninput="App.calcPOTotal()" ${item.authorized_qty != null ? `data-max="${item.authorized_qty}"` : ''}>
+      ${item.authorized_qty != null ? `<span class="poi-existing-max" style="font-size:11px;color:var(--text-muted);white-space:nowrap" title="Maximum authorized on the purchase request">max ${item.authorized_qty}</span>` : ''}
+      <input type="number" class="poi-existing-cost" step="0.01" value="${item.authorized_qty != null && !(item.unit_cost > 0) ? '' : item.unit_cost}" style="width:90px" placeholder="${item.authorized_qty != null ? 'Invoice cost' : 'Unit Cost'}" oninput="App.calcPOTotal()">
       ${this._poLineExtrasHtml('poi-existing', item.vendor_discount_percent != null ? `${item.vendor_discount_percent}%` : item.vendor_discount, item.tax_option || 'none', false)}
       <button class="btn btn-sm btn-danger" onclick="this.closest('.po-existing-item').remove();App.calcPOTotal()">✕</button>
     </div>`;
@@ -20027,7 +20076,15 @@ const App = {
       price(row, parseFloat(document.getElementById(`poi-qty-${idx}`)?.value) || 0, parseFloat(document.getElementById(`poi-cost-${idx}`)?.value) || 0, 'poi-new');
     });
     document.querySelectorAll('.po-existing-item').forEach(row => {
-      price(row, parseFloat(row.querySelector('.poi-existing-qty')?.value) || 0, parseFloat(row.querySelector('.poi-existing-cost')?.value) || 0, 'poi-existing');
+      const qtyEl = row.querySelector('.poi-existing-qty');
+      price(row, parseFloat(qtyEl?.value) || 0, parseFloat(row.querySelector('.poi-existing-cost')?.value) || 0, 'poi-existing');
+      // Fuel/supplier-priced line: warn (don't block) past the authorized maximum
+      const maxEl = row.querySelector('.poi-existing-max');
+      if (maxEl) {
+        const over = (parseFloat(qtyEl.value) || 0) > parseFloat(qtyEl.dataset.max);
+        maxEl.style.color = over ? 'var(--danger)' : 'var(--text-muted)';
+        maxEl.textContent = `${over ? '⚠️ over ' : ''}max ${qtyEl.dataset.max}`;
+      }
     });
     const r2 = n => Math.round(n * 100) / 100;
     const totalsEl = document.getElementById('po-totals');
@@ -20091,7 +20148,7 @@ const App = {
       this.can('payables') ? this.api('GET', `/payables/po/${id}`).catch(() => null) : null,
     ]);
     const statusColor = { draft:'badge-warning', sent:'badge-info', approved:'badge-teal', partial:'badge-purple', received:'badge-success', cancelled:'badge-danger' };
-    const docTypeLabel = { purchase_request:'Purchase Request', supplier_quotation:'Supplier Quotation', other:'Other' };
+    const docTypeLabel = this._poDocTypeLabels;
     const fileIcon = mime => {
       if (mime === 'application/pdf') return '📄';
       if (mime && mime.startsWith('image/')) return '🖼';
@@ -20108,6 +20165,10 @@ const App = {
       if (i.work_order_id) badges.push(`<a href="#" style="font-size:10px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewWorkOrder(${i.work_order_id})">WO ${i.wo_number}</a>`);
       return badges.length ? `<br>${badges.join(' &bull; ')}` : '';
     };
+    // Fuel / supplier-priced PO: invoiced cost on every line + the supplier's
+    // invoice attached are required (server enforces); over the authorized
+    // maximum quantity is only a warning.
+    const sp = po.supplier_priced ? this._poSupplierPricedCheck(po, attachments) : null;
     this.showModal(`
       <div class="modal" style="max-width:920px">
         <div class="modal-header">
@@ -20125,6 +20186,12 @@ const App = {
             <div><strong>Supplier:</strong> ${po.supplier_name||'-'}<br><strong>Contact:</strong> ${po.supplier_contact||'-'}<br><strong>Email:</strong> ${po.supplier_email||'-'}</div>
             <div><strong>Branch:</strong> ${po.branch_name||'-'}<br><strong>Created:</strong> ${this.fmtDate(po.created_at)}<br><strong>Expected:</strong> ${po.expected_date ? this.fmtDate(po.expected_date) : '-'}<br><strong>Vendor Order/Quote #:</strong> ${po.vendor_order_number || '-'}</div>
           </div>
+          ${sp ? `<div id="po-sp-check" style="border:1px solid ${sp.ready ? '#bbf7d0' : '#fde68a'};background:${sp.ready ? '#f0fdf4' : '#fffbeb'};border-radius:6px;padding:10px 12px;margin-bottom:14px;font-size:13px">
+            <strong>Fuel / supplier-priced PO</strong> — authorized on ${po.source_pr_number || 'the purchase request'}. Before it can be sent for approval:
+            <div style="margin-top:6px">${sp.costed ? '✅' : '⬜'} Invoiced cost entered on every line</div>
+            <div>${sp.invoice ? '✅' : '⬜'} Supplier's invoice attached (document type <em>Supplier Invoice</em>)</div>
+            ${sp.over.length ? `<div style="margin-top:6px;color:var(--danger)">⚠️ More than the authorized maximum: ${sp.over.map(i => `${this.escapeAttr(i.product_name)} — ${i.quantity_ordered} of max ${i.authorized_qty}`).join('; ')}</div>` : ''}
+          </div>` : ''}
           ${po.source_pr_id ? `<div style="font-size:12px;color:var(--text-muted);margin:-6px 0 12px">Converted from <a href="#" style="color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${po.source_pr_id})">${po.source_pr_number}</a></div>` : ''}
           <div class="table-wrap">
             <table>
@@ -20133,7 +20200,7 @@ const App = {
                 ${po.items.map(i => `<tr>
                   <td>${i.product_name}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on the originating quote line">-${this.fmt(i.discount_amount)} quoted</span>` : ''}${itemLinkBadges(i)}${(!i.product_id && i.quantity_received>0) ? `<br><button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="App.showLinkToInventory(${po.id},${i.id})">+ Add to Inventory</button>` : ''}</td>
                   <td>${i.sku||'-'}</td>
-                  <td>${i.quantity_ordered}</td>
+                  <td>${i.quantity_ordered}${i.authorized_qty != null ? `<div style="font-size:11px;color:${i.quantity_ordered > i.authorized_qty ? 'var(--danger)' : 'var(--text-muted)'}">${i.quantity_ordered > i.authorized_qty ? '⚠️ ' : ''}max ${i.authorized_qty}</div>` : ''}</td>
                   <td><span class="${i.quantity_received>=i.quantity_ordered?'color-success':'color-warning'}">${i.quantity_received||0}</span></td>
                   <td>${i.quantity_damaged>0 ? `<span class="color-danger">${i.quantity_damaged}</span>` : '-'}</td>
                   <td>${this.fmt(i.unit_cost)}</td>
@@ -20187,7 +20254,7 @@ const App = {
           <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:14px">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
               <span style="font-weight:700;font-size:14px">Attachments</span>
-              <button class="btn btn-sm btn-outline" onclick="App.showPOAttachForm(${po.id})">+ Attach Document</button>
+              <button class="btn btn-sm btn-outline" onclick="App.showPOAttachForm(${po.id}${po.supplier_priced ? ",'supplier_invoice'" : ''})">+ Attach Document</button>
             </div>
             <div id="po-attachments-list">
               ${attachments.length ? attachments.map(a => `
@@ -20205,11 +20272,11 @@ const App = {
         </div>
         <div class="modal-footer">
           ${po.status==='draft' ? `<button class="btn btn-outline" onclick="App.closeModal();App.showPOForm(${po.id})">Edit PO</button>` : ''}
-          ${po.status==='draft' ? `<button class="btn btn-secondary" onclick="App.updatePOStatus(${po.id},'sent')">Send for Approval</button>` : ''}
+          ${po.status==='draft' ? `<button class="btn btn-secondary" onclick="${sp && sp.over.length ? `if(!confirm('Some lines are over the authorized maximum quantity. Send for approval anyway?'))return;` : ''}App.updatePOStatus(${po.id},'sent')">Send for Approval</button>` : ''}
           ${po.status==='sent' && this.can('purchasing_approve') ? `<button class="btn btn-danger" onclick="App.showRejectPOModal(${po.id})">Reject</button>` : ''}
-          ${po.status==='sent' && this.can('purchasing_approve') ? `<button class="btn btn-primary" onclick="App.showApprovePOModal(${po.id})">Approve PO</button>` : ''}
+          ${po.status==='sent' && this.can('purchasing_approve') ? `<button class="btn btn-primary" onclick="${sp && sp.over.length ? `if(!confirm('Some lines are over the authorized maximum quantity. Approve anyway?'))return;` : ''}App.showApprovePOModal(${po.id})">Approve PO</button>` : ''}
           ${po.status!=='cancelled'&&po.status!=='received' ? `<button class="btn btn-danger" onclick="App.updatePOStatus(${po.id},'cancelled')">Cancel PO</button>` : ''}
-          ${(po.status==='draft'||po.status==='sent'||po.status==='approved'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-success" onclick="App.closeModal();App.showReceivePO(${po.id})">Receive Items</button>` : ''}
+          ${(po.supplier_priced ? (po.status==='approved'||po.status==='partial') : (po.status==='draft'||po.status==='sent'||po.status==='approved'||po.status==='partial')) && this.can('purchasing_receive') ? `<button class="btn btn-success" onclick="App.closeModal();App.showReceivePO(${po.id})">Receive Items</button>` : ''}
           ${(po.status==='received'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn" style="background:#f59e0b;color:#fff;border:none" onclick="App.closeModal();App.showProcessDamaged(${po.id})">⚠️ Process Damaged</button>` : ''}
           ${(po.status==='received'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-secondary" onclick="App.emailGRN(${po.id},'${(po.supplier_email||'').replace(/'/g,"\\'")}')">✉️ Email GRN</button>` : ''}
           ${po.status==='approved' ? `<button class="btn btn-secondary" onclick="App.printApprovedPO(${po.id})">🖨️ Print</button>` : ''}
@@ -20354,7 +20421,16 @@ const App = {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
-  showPOAttachForm(poId) {
+  _poDocTypeLabels: { purchase_request: 'Purchase Request', supplier_quotation: 'Supplier Quotation', supplier_invoice: 'Supplier Invoice', other: 'Other' },
+
+  _poSupplierPricedCheck(po, attachments) {
+    const costed = (po.items || []).every(i => Number(i.unit_cost) > 0);
+    const invoice = (attachments || []).some(a => a.document_type === 'supplier_invoice');
+    const over = (po.items || []).filter(i => i.authorized_qty != null && Number(i.quantity_ordered) > Number(i.authorized_qty));
+    return { costed, invoice, over, ready: costed && invoice };
+  },
+
+  showPOAttachForm(poId, defaultType = 'purchase_request') {
     this.showSecondaryModal(`
       <div class="modal" style="max-width:480px">
         <div class="modal-header"><span class="modal-title">Attach Document</span><button class="modal-close">✕</button></div>
@@ -20362,9 +20438,7 @@ const App = {
           <div class="form-group">
             <label>Document Type</label>
             <select id="att-doctype">
-              <option value="purchase_request">Purchase Request</option>
-              <option value="supplier_quotation">Supplier Quotation</option>
-              <option value="other">Other</option>
+              ${Object.entries(this._poDocTypeLabels).map(([v, l]) => `<option value="${v}" ${v === defaultType ? 'selected' : ''}>${l}</option>`).join('')}
             </select>
           </div>
           <div class="form-group">
@@ -20395,11 +20469,13 @@ const App = {
       const att = await res.json();
       this.closeSecondaryModal();
       this.alert('Document attached successfully');
+      // A fuel PO's checklist depends on its attachments — redraw it
+      if (document.getElementById('po-sp-check')) return this.viewPO(poId);
       // Refresh attachment list in-place
       const list = document.getElementById('po-attachments-list');
       if (list) {
         document.getElementById('po-att-empty')?.remove();
-        const docTypeLabel = { purchase_request:'Purchase Request', supplier_quotation:'Supplier Quotation', other:'Other' };
+        const docTypeLabel = this._poDocTypeLabels;
         const fileIcon = m => m==='application/pdf'?'📄':m&&m.startsWith('image/')?'🖼':m&&m.includes('word')?'📝':m&&m.includes('sheet')?'📊':'📎';
         const fmtBytes = b => b<1024?`${b} B`:b<1048576?`${(b/1024).toFixed(1)} KB`:`${(b/1048576).toFixed(1)} MB`;
         const div = document.createElement('div');
@@ -20425,6 +20501,7 @@ const App = {
     if (!confirm('Remove this attachment permanently?')) return;
     try {
       await this.api('DELETE', `/purchase-orders/${poId}/attachments/${attId}`);
+      if (document.getElementById('po-sp-check')) return this.viewPO(poId);
       document.getElementById(`po-att-${attId}`)?.remove();
       const list = document.getElementById('po-attachments-list');
       if (list && !list.querySelector('[id^="po-att-"]')) {
