@@ -2365,6 +2365,11 @@ async function _init() {
     'ALTER TABLE branch_transfer_items ADD COLUMN quantity_asked INTEGER',
     'ALTER TABLE branch_transfers ADD COLUMN sent_by INTEGER REFERENCES employees(id)',
     'ALTER TABLE branch_transfers ADD COLUMN sent_at DATETIME',
+    // Customer's purchase order number, printed on the Retail Tax Invoice
+    // (a blank write-in line when empty). Set on the quote or at the POS;
+    // a sale from a quote takes the quote's unless the cashier typed one.
+    'ALTER TABLE quotations ADD COLUMN po_number TEXT',
+    'ALTER TABLE transactions ADD COLUMN po_number TEXT',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

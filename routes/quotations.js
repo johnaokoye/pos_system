@@ -656,13 +656,13 @@ router.post('/', async (req, res) => {
       // POST /transactions' quote_id handling).
       const result = await tx.execute({ sql: `INSERT INTO quotations
         (quote_number,customer_id,employee_id,original_employee_id,branch_id,subtotal,tax_amount,discount_amount,total,notes,valid_until,quote_type,due_date,
-         delivery_required,delivery_cost,delivery_address,pickup_required,pickup_cost,operator_required,operator_fee,pickup_address,rate_plan)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         delivery_required,delivery_cost,delivery_address,pickup_required,pickup_cost,operator_required,operator_fee,pickup_address,rate_plan,po_number)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         args: [quote_number, customer_id||null, employee_id||null, employee_id||null, branch_id||null, subtotal, tax_amount, disc, total, notes||null, retailValidUntil||null, isRental ? 'rental' : (isSpecialProject ? 'special_project' : 'retail'), isRental ? due_date : null,
           isRental && delivery_required ? 1 : 0, isRental && delivery_required ? parseFloat(delivery_cost||0) : 0, isRental && delivery_required ? (delivery_address||null) : null,
           isRental && pickup_required ? 1 : 0, isRental && pickup_required ? parseFloat(pickup_cost||0) : 0,
           isRental && operator_required ? 1 : 0, isRental && operator_required ? parseFloat(operator_fee||0) : 0,
-          isRental && pickup_required ? String(pickup_address).trim() : null, ratePlan] });
+          isRental && pickup_required ? String(pickup_address).trim() : null, ratePlan, String(req.body.po_number || '').trim() || null] });
       const quoteId = Number(result.lastInsertRowid);
       if (isRental) {
         // No sources/branch-split concept for rentals — a rental quote only
@@ -739,12 +739,12 @@ router.put('/:id', async (req, res) => {
     let committed = false;
     try {
       await tx.execute({ sql: `UPDATE quotations SET customer_id=?, employee_id=?, branch_id=?, subtotal=?, tax_amount=?, discount_amount=?, total=?, notes=?, valid_until=?, due_date=?,
-        delivery_required=?, delivery_cost=?, delivery_address=?, pickup_required=?, pickup_cost=?, operator_required=?, operator_fee=?, pickup_address=?, rate_plan=? WHERE id=?`,
+        delivery_required=?, delivery_cost=?, delivery_address=?, pickup_required=?, pickup_cost=?, operator_required=?, operator_fee=?, pickup_address=?, rate_plan=?, po_number=? WHERE id=?`,
         args: [customer_id||null, employee_id||quote.employee_id||null, branch_id||null, subtotal, tax_amount, disc, total, notes||null, valid_until||null, isRental ? (due_date || quote.due_date) : null,
           isRental && delivery_required ? 1 : 0, isRental && delivery_required ? parseFloat(delivery_cost||0) : 0, isRental && delivery_required ? (delivery_address||null) : null,
           isRental && pickup_required ? 1 : 0, isRental && pickup_required ? parseFloat(pickup_cost||0) : 0,
           isRental && operator_required ? 1 : 0, isRental && operator_required ? parseFloat(operator_fee||0) : 0,
-          isRental && pickup_required ? String(pickup_address).trim() : null, ratePlan, quote.id] });
+          isRental && pickup_required ? String(pickup_address).trim() : null, ratePlan, String(req.body.po_number || '').trim() || null, quote.id] });
       await tx.execute({ sql: 'DELETE FROM quotation_items WHERE quote_id = ?', args: [quote.id] });
       if (isRental) {
         for (const item of processedItems) {
@@ -1011,7 +1011,7 @@ router.post('/:id/convert', async (req, res) => {
     const convTx = await db.transaction('write');
     let committed = false;
     try {
-      const result = await convTx.execute({ sql: 'INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,subtotal,tax_amount,discount_amount,total,payment_method,status,amount_tendered,change_amount,notes) VALUES (?,?,?,?,?,?,?,?,?,?,0,0,?)', args: [hold_number, quote.customer_id, employee_id||quote.employee_id||1, branch_id||quote.branch_id||null, quote.subtotal, quote.tax_amount, quote.discount_amount, quote.total, 'hold', 'hold', `Converted from quotation ${quote.quote_number}`] });
+      const result = await convTx.execute({ sql: 'INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,subtotal,tax_amount,discount_amount,total,payment_method,status,amount_tendered,change_amount,notes,po_number) VALUES (?,?,?,?,?,?,?,?,?,?,0,0,?,?)', args: [hold_number, quote.customer_id, employee_id||quote.employee_id||1, branch_id||quote.branch_id||null, quote.subtotal, quote.tax_amount, quote.discount_amount, quote.total, 'hold', 'hold', `Converted from quotation ${quote.quote_number}`, quote.po_number || null] });
       const txId = Number(result.lastInsertRowid);
 
       for (const item of items) {

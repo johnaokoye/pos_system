@@ -94,6 +94,28 @@ function receiptDocTitle(tx) {
   return 'Retail Tax Invoice';
 }
 
+// The invoice's "Bill To" lines after the (bold) customer name — account
+// code, then address. Mirrors App._billToLines() in public/index.html.
+function billToLines(tx) {
+  const cityLine = [tx.customer_city, [tx.customer_state, tx.customer_zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  return [tx.customer_number ? `Account #: ${tx.customer_number}` : '', tx.customer_address, cityLine].filter(Boolean);
+}
+
+function esc(v) {
+  return String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// Customer P.O. # — the sale's own, else a credit rental's.
+function txPoNumber(tx) {
+  return tx.po_number || tx.rental_po_number || '';
+}
+
+// Retail sales carry Customer / Manager signature lines; a rental's copies
+// have their own signatures.
+function wantsInvoiceSignatures(tx) {
+  return receiptDocTitle(tx) === 'Retail Tax Invoice';
+}
+
 function buildReceiptHtml(tx, s) {
   const storeName = s.store_name || 'My Store';
   const storeAddr = tx.branch_address
@@ -132,10 +154,23 @@ function buildReceiptHtml(tx, s) {
       ${storePhone ? `<div style="color:#ffffff;font-size:12px">${storePhone}</div>` : ''}
     </td></tr>
     <tr><td style="padding:20px 24px">
-      <div style="font-size:18px;font-weight:700;color:${BRAND.black};margin-bottom:4px">${receiptDocTitle(tx)}</div>
+      <div style="font-size:18px;font-weight:700;color:${BRAND.black};margin-bottom:12px">${receiptDocTitle(tx)}</div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-bottom:12px">
+        <tr>
+          <td valign="top" width="55%" style="border:1px solid #e8e8e8;border-radius:6px;padding:8px 10px">
+            <div style="font-size:11px;font-weight:700;color:#666;text-transform:uppercase;margin-bottom:4px">Bill To</div>
+            <div style="font-weight:700;font-size:14px;color:${BRAND.black}">${tx.customer_name || 'Cash Customer'}</div>
+            ${billToLines(tx).map(l => `<div>${esc(l)}</div>`).join('')}
+          </td>
+          <td valign="top" style="padding:2px 0 2px 12px;text-align:right">
+            <div><strong>Invoice #:</strong> ${tx.transaction_number}</div>
+            <div><strong>Date:</strong> ${new Date(tx.created_at).toLocaleString()}</div>
+            <div><strong>P.O. #:</strong> ${txPoNumber(tx) ? esc(txPoNumber(tx)) : '<span style="display:inline-block;width:90px;border-bottom:1px solid #999">&nbsp;</span>'}</div>
+            ${tx.source_quote_number ? `<div><strong>Quotation:</strong> ${tx.source_quote_number}</div>` : ''}
+          </td>
+        </tr>
+      </table>
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-bottom:16px">
-        <tr><td style="padding:2px 0"><strong>Transaction #:</strong> ${tx.transaction_number}</td><td style="text-align:right;padding:2px 0"><strong>Date:</strong> ${new Date(tx.created_at).toLocaleString()}</td></tr>
-        ${tx.customer_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Customer:</strong> ${tx.customer_name}</td></tr>` : ''}
         ${tx.created_by_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Created By:</strong> ${tx.created_by_name}</td></tr>` : ''}
         ${tx.employee_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Cashier:</strong> ${tx.employee_name}</td></tr>` : ''}
         <tr><td colspan="2" style="padding:2px 0"><strong>Payment:</strong> ${(tx.payment_method || '').replace('_',' ').toUpperCase()}</td></tr>
@@ -153,6 +188,13 @@ function buildReceiptHtml(tx, s) {
         <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">TOTAL</td><td style="font-size:16px;font-weight:700;color:${BRAND.black};text-align:right">${fmt(tx.total)}</td></tr>
         ${parseFloat(tx.change_amount) > 0 ? `<tr><td style="padding:3px 0;color:${BRAND.green}">Change</td><td style="text-align:right;color:${BRAND.green}">${fmt(tx.change_amount)}</td></tr>` : ''}
       </table>
+      ${wantsInvoiceSignatures(tx) ? `<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:48px;font-size:11px;color:#555">
+        <tr>
+          <td width="45%" style="border-top:1px solid #333;padding-top:6px;text-align:center">Customer Signature</td>
+          <td width="10%"></td>
+          <td width="45%" style="border-top:1px solid #333;padding-top:6px;text-align:center">Manager Signature</td>
+        </tr>
+      </table>` : ''}
       <div style="text-align:center;margin-top:20px;font-size:13px;color:#666;font-style:italic">${footer}</div>
     </td></tr>
   </table>
@@ -839,12 +881,13 @@ router.post('/send-receipt/:id', requireAuth, async (req, res) => {
 
   try {
     const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name,
+      c.customer_number, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
       e.first_name || ' ' || e.last_name as employee_name, cbe.first_name || ' ' || cbe.last_name as created_by_name,
       b.name as branch_name, b.address as branch_address, b.city as branch_city,
       b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone,
       q.id as source_quote_id, q.quote_number as source_quote_number,
       CASE WHEN ra.checkout_transaction_id = t.id THEN 'checkout' WHEN ra.settlement_transaction_id = t.id THEN 'settlement' END as rental_role,
-      ra.quotation_id as rental_quotation_id
+      ra.quotation_id as rental_quotation_id, ra.customer_po_number as rental_po_number
       FROM transactions t
       LEFT JOIN customers c ON t.customer_id = c.id
       LEFT JOIN employees e ON t.employee_id = e.id
@@ -2260,8 +2303,8 @@ function receiptPdfModel(tx, s) {
   return {
     store: pdfStore(s, tx),
     title: receiptDocTitle(tx).toUpperCase(), number: tx.transaction_number,
-    meta: [['Date', pdfDateTime(tx.created_at)], ['Quotation', tx.source_quote_number]],
-    party: { label: 'Customer', lines: [tx.customer_name] },
+    meta: [['Date', pdfDateTime(tx.created_at)], ['P.O. #', txPoNumber(tx) || '________________'], ['Quotation', tx.source_quote_number]],
+    party: { label: 'Bill To', boldFirst: true, lines: [tx.customer_name || 'Cash Customer', ...billToLines(tx)] },
     info: [['Created By', tx.created_by_name], ['Cashier', tx.employee_name], ['Payment', (tx.payment_method || '').replace('_', ' ').toUpperCase()]],
     tables: [{ columns: ITEM_COLUMNS, rows: (tx.items || []).map(i => {
       if (i.is_comment) return commentRowPdf(i.product_name, ITEM_COLUMNS.length);
@@ -2278,6 +2321,7 @@ function receiptPdfModel(tx, s) {
       { label: 'TOTAL', value: fmt(tx.total), style: 'grand' },
       parseFloat(tx.change_amount) > 0 ? { label: 'Change', value: fmt(tx.change_amount), style: 'muted' } : null,
     ],
+    signatures: wantsInvoiceSignatures(tx) ? [{ label: 'Customer Signature' }, { label: 'Manager Signature' }] : [],
     footer: s.receipt_footer || 'Thank you for your business!',
   };
 }

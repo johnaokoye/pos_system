@@ -2887,6 +2887,9 @@ const App = {
               <option value="">${this.escapeAttr(cashierName)} (cashier)</option>
             </select>
           </label>
+          <label style="color:var(--text-muted);display:flex;align-items:center;gap:6px;margin:0" title="The customer's purchase order number — printed on the Retail Tax Invoice. Leave blank for a write-in line.">P.O. #:
+            <input id="pos-po-number" value="${this.escapeAttr(this._ticketPoNumber || '')}" oninput="App._ticketPoNumber = this.value.trim() || null" placeholder="Customer P.O. (optional)" style="margin:0;padding:3px 6px;width:170px">
+          </label>
           <div id="active-quote-bar" style="display:none;background:#e8f0fe;border:1px solid #b3c8f7;border-radius:6px;padding:6px 10px;font-size:12px;align-items:center;gap:8px">
             <svg viewBox="0 0 24 24" fill="#1a73e8" width="14" height="14"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 1.5L18.5 9H13V3.5zM16 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-4H8V6h5v2z"/></svg>
             <span style="color:#1a73e8">Invoice: <strong id="active-quote-number"></strong></span>
@@ -4070,13 +4073,20 @@ const App = {
     sel.value = this._ticketSalesperson ? String(this._ticketSalesperson) : '';
   },
 
+  _renderTicketPoNumber() {
+    const el = document.getElementById('pos-po-number');
+    if (el) el.value = this._ticketPoNumber || '';
+  },
+
   clearCart() {
+    this._ticketPoNumber = null;
     this.cart = []; this.cartCustomer = null; this.cartDiscount = 0; this._storeCreditApplied = 0; this._cashBackApplied = 0; this.appliedPromoCode = null; this.autoAppliedPromo = null; this._availablePromos = []; this._returnCredit = null; this._activeQuoteId = null; this._ticketCreatedBy = null; this._ticketSalesperson = null; this.appliedDiscountCard = null; this._manualTaxExempt = null; this._manualTicketDiscount = false; this._manualTicketDiscountPct = null;
     this.renderCart();
     const aqBar = document.getElementById('active-quote-bar');
     if (aqBar) aqBar.style.display = 'none';
     this._renderCartCustomer();
     this._renderTicketSalesperson();
+    this._renderTicketPoNumber();
     const di = document.getElementById('discount-input');
     if (di) di.value = '';
     const dd = document.getElementById('discount-display');
@@ -4462,6 +4472,7 @@ const App = {
         store_credit_applied: this._storeCreditApplied || 0,
         cash_back_applied: this._cashBackApplied || 0,
         quote_id: this._activeQuoteId || null,
+        po_number: this._ticketPoNumber || null,
         tax_exempt: isTaxExempt ? 1 : 0,
         tax_exemption_number: isTaxExempt ? this.cartTaxExemptionNumber() : null,
         approval_code: approvalCode || null,
@@ -4527,6 +4538,7 @@ const App = {
         branch_id: this.posBranch?.id || null,
         items: cartItems,
         discount_amount: this.cartDiscount || 0,
+        po_number: this._ticketPoNumber || null,
         ...this._ticketDiscountSource(),
       });
       const customerName = this.cartCustomer ? `${this.cartCustomer.first_name} ${this.cartCustomer.last_name}` : 'Walk-in Customer';
@@ -4693,6 +4705,8 @@ const App = {
       this._ticketSalesperson = held.salesperson_id || null;
       this._ticketSalespersonName = held.salesperson_name || null;
       this._renderTicketSalesperson();
+      this._ticketPoNumber = held.po_number || null;
+      this._renderTicketPoNumber();
       if (held.customer_id) {
         this.cartCustomer = customer;
         if (this.section !== 'pos') return;
@@ -4869,6 +4883,8 @@ const App = {
       // The quote's salesperson started this sale (credit and receipt).
       this._ticketCreatedBy = quote.original_employee_id || quote.employee_id || null;
       this._renderTicketSalesperson();
+      this._ticketPoNumber = quote.po_number || null;
+      this._renderTicketPoNumber();
 
       if (quote.customer_id) {
         const customer = await this.api('GET', `/customers/${quote.customer_id}`);
@@ -4933,6 +4949,13 @@ const App = {
     return String(this.settings?.receipt_footer || fallback)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
       .replace(/\r?\n/g, '<br>');
+  },
+
+  // The invoice's "Bill To" lines after the (bold) customer name — account
+  // code, then address. Mirrors billToLines() in routes/email.js.
+  _billToLines(tx) {
+    const cityLine = [tx.customer_city, [tx.customer_state, tx.customer_zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+    return [tx.customer_number ? `Account #: ${tx.customer_number}` : '', tx.customer_address, cityLine].filter(Boolean);
   },
 
   _txDocTitle(tx) {
@@ -5080,6 +5103,8 @@ const App = {
     const phoneLine = tx.branch_phone || this.settings.store_phone || '';
 
     const isRental = !!tx.rental_agreement_number;
+    // Customer P.O. # — the sale's own, else a credit rental's.
+    const poNumber = tx.po_number || tx.rental_po_number || '';
     // The line items on this specific transaction only tell the financial
     // story (checkout = rental fee + deposit, settlement = duration
     // adjustment + deposit applied) — neither reliably names the physical
@@ -5192,6 +5217,12 @@ const App = {
       .meta label{font-weight:bold;text-transform:uppercase;font-size:10px;color:#555;display:block}
       table{width:100%;border-collapse:collapse}
       th{background:#f0f0f0;text-align:left;padding:8px;font-size:11px;text-transform:uppercase;color:#555}
+      .bill-row{display:flex;justify-content:space-between;gap:24px;margin-bottom:16px}
+      .bill-to{flex:0 1 55%;border:1px solid #ccc;border-radius:6px;padding:10px 12px;font-size:12px;line-height:1.5}
+      .bill-to .bill-name{font-weight:700;font-size:15px;color:#111}
+      .bill-row label{font-weight:bold;text-transform:uppercase;font-size:10px;color:#555;display:block}
+      .inv-ref{display:grid;grid-template-columns:auto auto;gap:6px 24px;align-content:start;font-size:12px}
+      .write-in{display:inline-block;width:120px;border-bottom:1px solid #333;height:14px}
       .totals{width:280px;margin-left:auto;margin-top:16px;font-size:13px}
       .totals tr td{padding:4px 0;border:none}
       .totals .total-row td{border-top:2px solid #111;font-size:16px;font-weight:700;padding-top:8px}
@@ -5209,17 +5240,26 @@ const App = {
       </div>
       <div class="doc-title">${this._txDocTitle(tx).toUpperCase()}</div>
     </div>
+    <div class="bill-row">
+      <div class="bill-to">
+        <label>Bill To</label>
+        <div class="bill-name">${this.escapeAttr(tx.customer_name || 'Cash Customer')}</div>
+        ${this._billToLines(tx).map(l => `<div>${this.escapeAttr(l)}</div>`).join('')}
+      </div>
+      <div class="inv-ref">
+        <div><label>Invoice #</label>${tx.transaction_number}</div>
+        <div><label>Date</label>${this.fmtDateTime(tx.created_at)}</div>
+        <div><label>P.O. #</label>${poNumber ? this.escapeAttr(poNumber) : '<span class="write-in"></span>'}</div>
+        ${tx.source_quote_number ? `<div><label>Quotation</label>${tx.source_quote_number}</div>` : ''}
+      </div>
+    </div>
     <div class="meta">
-      <div><label>Transaction #</label>${tx.transaction_number}</div>
-      <div><label>Date</label>${this.fmtDateTime(tx.created_at)}</div>
-      ${tx.customer_name ? `<div><label>Customer</label>${tx.customer_name}</div>` : ''}
       ${tx.rental_agreement_number ? `<div><label>Rental Agreement</label>${tx.rental_agreement_number}</div>` : ''}
       ${tx.created_by_name || tx.employee_name ? `<div><label>Created By</label>${tx.created_by_name || tx.employee_name}</div>` : ''}
       ${tx.salesperson_name ? `<div><label>Salesperson</label>${tx.salesperson_name}</div>` : ''}
       ${tx.employee_name ? `<div><label>Cashier</label>${tx.employee_name}</div>` : ''}
       ${rentedItemsLabel ? `<div><label>Item(s) Rented</label>${rentedItemsLabel}</div>` : ''}
       ${tx.rental_due_date ? `<div><label>Due Date</label>${this.fmtDate(tx.rental_due_date)}</div>` : ''}
-      ${tx.rental_po_number ? `<div><label>Customer PO</label>${tx.rental_po_number}</div>` : ''}
     </div>
     <table>
       <thead><tr><th>SKU</th><th>Item</th><th style="text-align:center">Qty</th>${isRental ? `<th style="text-align:center">Rented</th><th style="text-align:center">Returned</th><th style="text-align:center">Duration</th>` : ''}<th style="text-align:right">Unit Price</th>${hasLineDiscount ? '<th style="text-align:right">Discount</th>' : ''}<th style="text-align:right">Total</th></tr></thead>
@@ -5249,7 +5289,11 @@ const App = {
       <div style="flex:1;text-align:center"><div style="border-top:1px solid #333;padding-top:6px;font-size:11px;color:#555">Customer Signature</div></div>
       <div style="flex:1;text-align:center"><div style="border-top:1px solid #333;padding-top:6px;font-size:11px;color:#555">Rep Signature</div></div>
       <div style="flex:1;text-align:center"><div style="border-top:1px solid #333;padding-top:6px;font-size:11px;color:#555">Manager Signature</div></div>
-    </div>` : '')}
+    </div>` : `
+    <div style="display:flex;justify-content:space-between;margin-top:70px;gap:64px">
+      <div style="flex:1;text-align:center"><div style="border-top:1px solid #333;padding-top:6px;font-size:11px;color:#555">Customer Signature</div></div>
+      <div style="flex:1;text-align:center"><div style="border-top:1px solid #333;padding-top:6px;font-size:11px;color:#555">Manager Signature</div></div>
+    </div>`)}
     <div class="footer">${footer}</div>
     <script>window.onload=()=>{window.print()}<\/script>
     </body></html>`);
@@ -22624,7 +22668,10 @@ const App = {
             <div id="qt-rateplan-group" style="display:none;flex:1">${this._ratePlanSelectHtml('qt-rateplan', 'App._refreshQuoteRatePlan()', q && q.rate_plan)}</div>
             <div class="form-group"><label>Discount ($)</label><input id="qt-disc" type="number" step="0.01" value="${q?q.discount_amount:0}" oninput="App.calcQuoteTotal()"></div>
           </div>
-          <div class="form-group"><label>Notes</label><input id="qt-notes" value="${this.escapeAttr(q&&q.notes)}"></div>
+          <div class="input-row">
+            <div class="form-group" id="qt-po-group" style="flex:0 0 220px"><label>Customer P.O. #</label><input id="qt-po" value="${this.escapeAttr(q&&q.po_number)}" placeholder="Optional — prints on the invoice"></div>
+            <div class="form-group"><label>Notes</label><input id="qt-notes" value="${this.escapeAttr(q&&q.notes)}"></div>
+          </div>
           <div id="qt-retail-items-section" style="margin-bottom:10px">
             <div class="card-header"><span class="card-title">Items</span>
               <div style="display:flex;gap:6px">
@@ -22754,6 +22801,9 @@ const App = {
     // addQuoteCustomItem) — so anything that isn't specifically rental shows
     // the retail items section and the Valid Until field.
     if (retailSection) retailSection.style.display = type!=='rental' ? '' : 'none';
+    // A rental's customer P.O. is taken at checkout instead.
+    const poGroup = document.getElementById('qt-po-group');
+    if (poGroup) poGroup.style.display = type!=='rental' ? '' : 'none';
     // Retail's "+ Custom Item" is already a Q item; a Special Project's is a
     // labour/fee line, so Q items get their own button there.
     const qItemBtn = document.getElementById('qt-add-q-item-btn');
@@ -23672,7 +23722,7 @@ const App = {
     if (!items.length) { this.alert('Add at least one item', 'error'); return; }
     const isSpecialProject = this._quoteType === 'special_project';
     try {
-      const payload = { customer_id: customer_id||null, branch_id: branch_id||null, discount_amount, notes, valid_until: valid_until||null, items };
+      const payload = { customer_id: customer_id||null, branch_id: branch_id||null, discount_amount, notes, valid_until: valid_until||null, po_number: document.getElementById('qt-po')?.value.trim() || null, items };
       // Only on create — see the matching comment on the rental branch above.
       if (!this._editingQuoteId) payload.employee_id = this.currentUser.id;
       if (isSpecialProject && !this._editingQuoteId) payload.quote_type = 'special_project';
