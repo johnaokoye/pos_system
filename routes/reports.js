@@ -1016,6 +1016,108 @@ router.get('/gross-margin', requirePermission('reports'), async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Supplier item sales — what each supplier's items sold over a period, net
+// of returns. An item belongs to the supplier set on the product, or failing
+// that the supplier of the latest (non-cancelled) PO it was on; items with
+// neither are grouped as "No supplier". supplier_id narrows to one supplier
+// ('none' = the unattributed ones) and adds its per-item rows; period
+// (day/week/month/quarter/year) buckets the trend. Units are stock units;
+// cost is net units × the product's current cost, as in /gross-margin.
+const SUPPLIER_PERIOD_SQL = {
+  day: "date(l.at)",
+  week: "date(l.at, 'weekday 0', '-6 days')", // Monday the week starts on
+  month: "strftime('%Y-%m', l.at)",
+  quarter: "strftime('%Y', l.at) || '-Q' || ((CAST(strftime('%m', l.at) AS INTEGER) + 2) / 3)",
+  year: "strftime('%Y', l.at)",
+};
+router.get('/supplier-item-sales', requirePermission('reports'), async (req, res) => {
+  try {
+    const { start, end, branch_id, supplier_id } = req.query;
+    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+    const e = end || new Date().toISOString().slice(0, 10);
+    const period = SUPPLIER_PERIOD_SQL[req.query.period] ? req.query.period : 'month';
+    const tbf = branch_id ? ' AND t.branch_id = ?' : '';
+    const rbf = branch_id ? ' AND r.branch_id = ?' : '';
+    const bp = branch_id ? [branch_id] : [];
+
+    // Sale and return lines in range, each tagged with its item's supplier.
+    const base = `WITH lines AS (
+        SELECT ti.product_id, t.created_at AS at, ti.quantity * COALESCE(ti.units_per, 1) AS units, ti.total AS sales, 0 AS ret_units, 0 AS returns
+        FROM transaction_items ti JOIN transactions t ON t.id = ti.transaction_id
+        WHERE t.status = 'completed' AND ti.product_id IS NOT NULL AND date(t.created_at) BETWEEN date(?) AND date(?)${tbf}
+        UNION ALL
+        SELECT ri.product_id, r.created_at, 0, 0, ri.quantity * COALESCE(ti.units_per, 1), ri.total
+        FROM return_items ri JOIN returns r ON r.id = ri.return_id LEFT JOIN transaction_items ti ON ti.id = ri.transaction_item_id
+        WHERE r.status != 'cancelled' AND ri.product_id IS NOT NULL AND date(r.created_at) BETWEEN date(?) AND date(?)${rbf}
+      ),
+      attr AS (
+        SELECT p.id AS product_id, COALESCE(p.supplier_id, (
+          SELECT po.supplier_id FROM purchase_order_items poi JOIN purchase_orders po ON po.id = poi.po_id
+          WHERE poi.product_id = p.id AND po.status != 'cancelled' AND po.supplier_id IS NOT NULL
+          ORDER BY po.created_at DESC, po.id DESC LIMIT 1)) AS supplier_id
+        FROM products p WHERE p.id IN (SELECT DISTINCT product_id FROM lines)
+      ),
+      tagged AS (
+        SELECT l.*, a.supplier_id, p.cost FROM lines l JOIN attr a ON a.product_id = l.product_id JOIN products p ON p.id = l.product_id
+      )`;
+    const args = [s, e, ...bp, s, e, ...bp];
+    const sums = `COALESCE(SUM(l.units), 0) AS units, COALESCE(SUM(l.ret_units), 0) AS ret_units,
+      COALESCE(SUM(l.sales), 0) AS sales, COALESCE(SUM(l.returns), 0) AS returns,
+      COALESCE(SUM((l.units - l.ret_units) * COALESCE(l.cost, 0)), 0) AS cost`;
+    let sf = '', sp = [];
+    if (supplier_id === 'none') sf = ' WHERE l.supplier_id IS NULL';
+    else if (supplier_id) { sf = ' WHERE l.supplier_id = ?'; sp = [Number(supplier_id)]; }
+
+    const finish = r => {
+      r.sales = parseFloat(Number(r.sales).toFixed(2));
+      r.returns = parseFloat(Number(r.returns).toFixed(2));
+      r.net_units = Math.round((r.units - r.ret_units) * 1000) / 1000;
+      r.net_sales = parseFloat((r.sales - r.returns).toFixed(2));
+      r.cost = parseFloat(Number(r.cost).toFixed(2));
+      r.margin = parseFloat((r.net_sales - r.cost).toFixed(2));
+      r.margin_percent = r.net_sales > 0 ? parseFloat((r.margin / r.net_sales * 100).toFixed(1)) : null;
+      return r;
+    };
+
+    const { rows: bySupplier } = await db.execute({
+      sql: `${base} SELECT l.supplier_id, COALESCE(sup.name, 'No supplier') AS supplier_name, COUNT(DISTINCT l.product_id) AS items, ${sums}
+            FROM tagged l LEFT JOIN suppliers sup ON sup.id = l.supplier_id
+            GROUP BY l.supplier_id ORDER BY (SUM(l.sales) - SUM(l.returns)) DESC`,
+      args,
+    });
+    const { rows: byPeriod } = await db.execute({
+      sql: `${base} SELECT ${SUPPLIER_PERIOD_SQL[period]} AS period, ${sums}
+            FROM tagged l${sf} GROUP BY period ORDER BY period`,
+      args: [...args, ...sp],
+    });
+    let items = [], itemPeriods = [];
+    if (supplier_id) {
+      ({ rows: items } = await db.execute({
+        sql: `${base} SELECT l.product_id, p.sku, p.name AS product_name, ${sums}
+              FROM tagged l JOIN products p ON p.id = l.product_id${sf}
+              GROUP BY l.product_id ORDER BY (SUM(l.sales) - SUM(l.returns)) DESC`,
+        args: [...args, ...sp],
+      }));
+      // Net units per item per period — the item × time-frame grid.
+      ({ rows: itemPeriods } = await db.execute({
+        sql: `${base} SELECT l.product_id, ${SUPPLIER_PERIOD_SQL[period]} AS period,
+                ROUND(SUM(l.units - l.ret_units), 3) AS net_units, ROUND(SUM(l.sales - l.returns), 2) AS net_sales
+              FROM tagged l${sf} GROUP BY l.product_id, period`,
+        args: [...args, ...sp],
+      }));
+    }
+
+    const scope = supplier_id ? bySupplier.filter(r => supplier_id === 'none' ? r.supplier_id == null : String(r.supplier_id) === String(supplier_id)) : bySupplier;
+    const summary = finish(scope.reduce((t, r) => {
+      for (const k of ['units', 'ret_units', 'sales', 'returns', 'cost']) t[k] += Number(r[k]) || 0;
+      t.items += Number(r.items) || 0;
+      return t;
+    }, { items: 0, units: 0, ret_units: 0, sales: 0, returns: 0, cost: 0 }));
+
+    res.json({ start: s, end: e, period, summary, bySupplier: bySupplier.map(finish), byPeriod: byPeriod.map(finish), items: items.map(finish), itemPeriods });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Rental deposit breakdown — where every deposit taken in the period ended
 // up: still held on an open rental, used (consumed by rental fees / damage /
 // tax at return), refunded (cash / bank transfer / original card, or still

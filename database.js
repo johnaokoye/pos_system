@@ -3250,6 +3250,7 @@ async function _init() {
     'CREATE INDEX IF NOT EXISTS idx_layaway_payments_plan_id ON layaway_payments(plan_id)',
     'CREATE INDEX IF NOT EXISTS idx_products_category_id ON products(category_id)',
     'CREATE INDEX IF NOT EXISTS idx_purchase_order_items_po_id ON purchase_order_items(po_id)',
+    'CREATE INDEX IF NOT EXISTS idx_purchase_order_items_product_id ON purchase_order_items(product_id)',
     'CREATE INDEX IF NOT EXISTS idx_purchase_request_items_pr_id ON purchase_request_items(pr_id)',
     'CREATE INDEX IF NOT EXISTS idx_account_payments_customer_id ON account_payments(customer_id)',
     'CREATE UNIQUE INDEX IF NOT EXISTS idx_account_payments_external_id ON account_payments(external_id) WHERE external_id IS NOT NULL',
