@@ -125,11 +125,12 @@ function blankSignatureLabels(customerSigned = false) {
   return [customerSigned ? null : 'Customer Signature', 'Manager Signature'].filter(Boolean);
 }
 
-// "Bill To" box (email layout): bold name, account #, address.
-function billToBoxHtml(x) {
+// "Bill To" box (email layout): bold name, account #, address, then any
+// extra lines (e.g. a work order's phone and email).
+function billToBoxHtml(x, extra = []) {
   return `<div style="font-size:11px;font-weight:700;color:#666;text-transform:uppercase;margin-bottom:4px">Bill To</div>
             <div style="font-weight:700;font-size:14px;color:${BRAND.black}">${esc(x.customer_name || 'Cash Customer')}</div>
-            ${billToLines(x).map(l => `<div>${esc(l)}</div>`).join('')}`;
+            ${[...billToLines(x), ...extra.filter(Boolean)].map(l => `<div>${esc(l)}</div>`).join('')}`;
 }
 
 // P.O. # value, or a blank line to write one in.
@@ -139,11 +140,11 @@ function poValueHtml(po) {
 
 // Bill To box on the left, the document's reference lines ([label, html])
 // on the right.
-function billToRowHtml(x, refs) {
+function billToRowHtml(x, refs, extra = []) {
   return `<table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-bottom:12px">
         <tr>
           <td valign="top" width="55%" style="border:1px solid #e8e8e8;border-radius:6px;padding:8px 10px">
-            ${billToBoxHtml(x)}
+            ${billToBoxHtml(x, extra)}
           </td>
           <td valign="top" style="padding:2px 0 2px 12px;text-align:right">
             ${refs.filter(([, v]) => v != null && v !== '').map(([l, v]) => `<div><strong>${l}:</strong> ${v}</div>`).join('')}
@@ -1984,7 +1985,7 @@ ${print ? PRINT_PAGE_STYLE : ''}
           <div style="font-size:13px;color:#888;margin-top:2px">${wo.wo_number}</div>
         </div>
       </div>
-      ${billToRowHtml(wo, [['Invoice #', wo.wo_number], ['P.O. #', poValueHtml(wo.po_number)], ['Status', `${WO_STATUS_LABELS[wo.status] || wo.status}${wo.is_express ? ' (Express)' : ''}`], ['Opened', new Date(wo.created_at).toLocaleDateString()], ['Pickup Due', wo.pickup_due_date ? new Date(wo.pickup_due_date + 'T00:00:00').toLocaleDateString() : '']])}
+      ${billToRowHtml(wo, [['Invoice #', wo.wo_number], ['P.O. #', poValueHtml(wo.po_number)], ['Status', `${WO_STATUS_LABELS[wo.status] || wo.status}${wo.is_express ? ' (Express)' : ''}`], ['Opened', new Date(wo.created_at).toLocaleDateString()], ['Pickup Due', wo.pickup_due_date ? new Date(wo.pickup_due_date + 'T00:00:00').toLocaleDateString() : '']], [wo.customer_phone, wo.customer_email])}
       <div style="font-size:13px;color:#444;margin-bottom:16px">
         <strong>Description:</strong> ${wo.description}
         ${wo.item_label ? `<br><strong>Item:</strong> ${wo.item_label}` : ''}
@@ -2401,7 +2402,7 @@ function workOrderInvoicePdfModel(wo, s) {
     store: pdfStore(s, { branch_name: wo.branch_name }),
     title: 'SERVICE AND REPAIR TAX INVOICE', number: wo.wo_number,
     meta: [['P.O. #', wo.po_number || '________________'], ['Status', `${WO_STATUS_LABELS[wo.status] || wo.status}${wo.is_express ? ' (Express)' : ''}`], ['Opened', pdfDate(wo.created_at)], ['Pickup Due', wo.pickup_due_date ? pdfDate(wo.pickup_due_date) : '']],
-    party: { label: 'Bill To', boldFirst: true, lines: [wo.customer_name || 'Cash Customer', ...billToLines(wo)] },
+    party: { label: 'Bill To', boldFirst: true, lines: [wo.customer_name || 'Cash Customer', ...billToLines(wo), wo.customer_phone, wo.customer_email] },
     info: [['Description', wo.description], ['Item', wo.item_label], ['Item #', wo.item_serial]],
     tables: [
       { heading: 'Accessories Handed In', columns: [{ label: 'Accessory', width: 4 }, { label: 'Item #', width: 1.8 }],
