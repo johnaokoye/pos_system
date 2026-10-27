@@ -854,6 +854,8 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
 
       for (const { txItem, quantity, lineTotal, lineTax } of processedItems) {
         await retTx.execute({ sql: `INSERT INTO return_items (return_id,transaction_item_id,product_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?,?,?)`, args: [retId, txItem.id, txItem.product_id, txItem.product_name, txItem.sku, quantity, txItem.unit_price, lineTax, lineTotal] });
+        // Delivery and other lines with no product have no stock to put back.
+        if (!txItem.product_id) continue;
         // Returned quantity is in the line's unit; stock is in singles.
         const restock = stockUnits(quantity, txItem.units_per);
         await retTx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [restock, txItem.product_id] });
@@ -930,6 +932,7 @@ router.patch('/:id/void', requireAuth, async (req, res) => {
       await voidTxn.execute({ sql: "UPDATE transactions SET status='voided', voided_by=?, voided_at=CURRENT_TIMESTAMP, void_reason=? WHERE id=?", args: [authorizer.id, reason || null, req.params.id] });
       const { rows: items } = await voidTxn.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [req.params.id] });
       for (const item of items) {
+        if (!item.product_id) continue; // delivery/comment lines carry no stock
         const restock = stockUnits(item.quantity, item.units_per); // in stock units
         await voidTxn.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [restock, item.product_id] });
         if (tx.branch_id) {
