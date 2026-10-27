@@ -1131,6 +1131,34 @@ async function _init() {
       file_size INTEGER,
       uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // One row per PATCH /purchase-orders/:id/receive, so a receipt can be
+    // reversed as a unit (POST /:id/receipts/:rid/reverse): its lines, the
+    // A/P bill it raised, and each product's cost before it was received.
+    // Receipts from before this table existed aren't logged — that quantity
+    // is reversed per line instead (POST /:id/reverse-unlogged).
+    { sql: `CREATE TABLE IF NOT EXISTS po_receipts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      receipt_number TEXT UNIQUE NOT NULL,
+      po_id INTEGER NOT NULL REFERENCES purchase_orders(id),
+      branch_id INTEGER REFERENCES branches(id),
+      bill_id INTEGER REFERENCES ap_bills(id),
+      status TEXT NOT NULL DEFAULT 'received',
+      received_by INTEGER REFERENCES employees(id),
+      received_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      reversed_by INTEGER REFERENCES employees(id),
+      reversed_at DATETIME,
+      reverse_reason TEXT
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS po_receipt_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      receipt_id INTEGER NOT NULL REFERENCES po_receipts(id),
+      po_item_id INTEGER NOT NULL REFERENCES purchase_order_items(id),
+      product_id INTEGER REFERENCES products(id),
+      quantity REAL NOT NULL,
+      stock_units REAL NOT NULL DEFAULT 0,
+      prev_cost REAL,
+      new_cost REAL
+    )` },
     // Supporting documents on a quotation (retail, rental or Special
     // Project) — customer POs, supplier quotes, drawings/specs. Same
     // Cloudinary-or-local storage pattern as po_attachments.
@@ -3243,6 +3271,8 @@ async function _init() {
     'CREATE INDEX IF NOT EXISTS idx_supplier_import_batch_items_batch_id ON supplier_import_batch_items(batch_id)',
     'CREATE INDEX IF NOT EXISTS idx_ap_bills_supplier_id ON ap_bills(supplier_id)',
     'CREATE INDEX IF NOT EXISTS idx_ap_bills_po_id ON ap_bills(po_id)',
+    'CREATE INDEX IF NOT EXISTS idx_po_receipts_po_id ON po_receipts(po_id)',
+    'CREATE INDEX IF NOT EXISTS idx_po_receipt_items_receipt_id ON po_receipt_items(receipt_id)',
     'CREATE INDEX IF NOT EXISTS idx_ap_payments_supplier_id ON ap_payments(supplier_id)',
     'CREATE INDEX IF NOT EXISTS idx_ap_payment_allocations_bill_id ON ap_payment_allocations(bill_id)',
     'CREATE INDEX IF NOT EXISTS idx_ap_payment_allocations_payment_id ON ap_payment_allocations(payment_id)',

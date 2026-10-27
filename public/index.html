@@ -20742,6 +20742,24 @@ const App = {
             </div>
           </div>
 
+          ${(po.receipts || []).length || po.items.some(i => i.quantity_unlogged > 0) ? `
+          <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:14px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+              <span style="font-weight:700;font-size:14px">Receipts</span>
+              ${po.items.some(i => i.quantity_unlogged > 0) && ['received','partial'].includes(po.status) && this.can('purchasing_receive') ? `<button class="btn btn-sm btn-outline" title="Goods received before receipts were logged" onclick="App.showReverseUnloggedReceipt(${po.id})">↩ Reverse Earlier Receiving</button>` : ''}
+            </div>
+            ${(po.receipts || []).map(r => `
+              <div style="padding:8px 10px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px${r.status === 'reversed' ? ';opacity:.65' : ''}">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+                  <div style="font-size:13px"><span class="fw-600">${r.receipt_number}</span> · ${this.fmtDateTime(r.received_at)}${r.received_by_name ? ` · ${this.escapeAttr(r.received_by_name)}` : ''}${r.bill_number ? ` · A/P ${r.bill_number}${r.bill_status === 'void' ? ' (void)' : ''}` : ''}
+                    ${r.status === 'reversed' ? `<span class="badge-pill badge-danger" style="font-size:10px">Reversed</span>` : ''}</div>
+                  ${r.status === 'received' && ['received','partial'].includes(po.status) && this.can('purchasing_receive') ? `<button class="btn btn-sm btn-danger" onclick="App.showReversePOReceipt(${po.id}, ${r.id})">↩ Reverse</button>` : ''}
+                </div>
+                <div style="font-size:12px;color:var(--text-muted);margin-top:3px">${r.items.map(i => `${this.escapeAttr(i.product_name)} × ${i.quantity}`).join(' · ')}</div>
+                ${r.status === 'reversed' ? `<div style="font-size:12px;color:var(--text-muted);margin-top:3px">Reversed ${this.fmtDateTime(r.reversed_at)}${r.reversed_by_name ? ` by ${this.escapeAttr(r.reversed_by_name)}` : ''} — ${this.escapeAttr(r.reverse_reason)}</div>` : ''}
+              </div>`).join('')}
+          </div>` : ''}
+
           <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:14px">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
               <span style="font-weight:700;font-size:14px">Attachments</span>
@@ -21180,14 +21198,117 @@ const App = {
       </div>`);
   },
 
+  // Step 2 of receiving: read the counts back before stock moves, flagging
+  // lines left out and anything over what's still pending.
   async confirmReceivePO(poId, itemIds) {
-    const items = itemIds.map(id => ({ item_id: id, quantity_received: Number(document.getElementById(`recv-${id}`).value) || 0 })).filter(i => i.quantity_received > 0);
+    const po = await this.api('GET', `/purchase-orders/${poId}`);
+    const lines = itemIds.map(id => {
+      const i = po.items.find(x => x.id === id);
+      return { i, qty: Number(document.getElementById(`recv-${id}`).value) || 0, pending: i.quantity_ordered - (i.quantity_received || 0) };
+    });
+    const items = lines.filter(l => l.qty > 0).map(l => ({ item_id: l.i.id, quantity_received: l.qty }));
     if (!items.length) { this.alert('Enter at least one quantity', 'error'); return; }
+    this._pendingPOReceipt = { poId, items };
+    const flag = l => l.qty <= 0 ? '<span class="badge-pill badge-warning" style="font-size:10px">Not receiving</span>'
+      : l.qty > l.pending ? `<span class="badge-pill badge-danger" style="font-size:10px">Over by ${Math.round((l.qty - l.pending) * 1000) / 1000}</span>`
+      : l.qty < l.pending ? `<span class="badge-pill badge-info" style="font-size:10px">Short ${Math.round((l.pending - l.qty) * 1000) / 1000}</span>` : '';
+    this.showSecondaryModal(`
+      <div class="modal" style="max-width:640px">
+        <div class="modal-header"><span class="modal-title">Confirm Counts — ${po.po_number}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">Check these counts against what's physically here. Stock${po.supplier_id ? ' and the A/P bill' : ''} will be updated with exactly these quantities.</p>
+          <table class="data-table" style="width:100%">
+            <thead><tr><th>Item</th><th style="text-align:right">Pending</th><th style="text-align:right">Receiving</th><th></th></tr></thead>
+            <tbody>${lines.map(l => `<tr${l.qty <= 0 ? ' style="opacity:.6"' : ''}>
+              <td>${this.escapeAttr(l.i.product_name)}${l.i.purchase_unit ? ` <span style="font-size:11px;color:var(--text-muted)">(${this.escapeAttr(l.i.purchase_unit)})</span>` : ''}</td>
+              <td style="text-align:right">${l.pending}</td>
+              <td style="text-align:right;font-weight:700">${l.qty}</td>
+              <td>${flag(l)}</td></tr>`).join('')}</tbody>
+          </table>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeSecondaryModal()">Back — Change Counts</button>
+          <button class="btn btn-success" onclick="App.submitReceivePO()">Counts Are Correct — Receive</button>
+        </div>
+      </div>`);
+  },
+
+  async submitReceivePO() {
+    const { poId, items } = this._pendingPOReceipt || {};
+    if (!poId) return;
     try {
       await this.api('PATCH', `/purchase-orders/${poId}/receive`, { items });
+      this._pendingPOReceipt = null;
+      this.closeSecondaryModal();
       this.closeModal();
       this.alert('Items received and stock updated');
       this.renderPurchasing();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // Reverse one logged receipt (its A/P bill is voided with it), or — for
+  // goods received before receipts were logged — per-line quantities.
+  showReversePOReceipt(poId, receiptId) {
+    this.showSecondaryModal(`
+      <div class="modal" style="max-width:520px">
+        <div class="modal-header"><span class="modal-title">Reverse Receipt</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">The received stock comes back off the shelf, the product cost goes back to what it was, and the receipt's A/P bill is voided. The PO can then be received again.</p>
+          <div class="form-group"><label>Reason *</label><textarea id="rev-rcpt-reason" rows="2" placeholder="e.g. Counted wrong — received 12 instead of 10"></textarea></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeSecondaryModal()">Cancel</button>
+          <button class="btn btn-danger" onclick="App.confirmReversePOReceipt(${poId}, ${receiptId})">Reverse Receipt</button>
+        </div>
+      </div>`);
+  },
+
+  async confirmReversePOReceipt(poId, receiptId) {
+    const reason = document.getElementById('rev-rcpt-reason').value.trim();
+    if (!reason) { this.alert('Enter the reason for reversing this receipt', 'error'); return; }
+    try {
+      await this.api('POST', `/purchase-orders/${poId}/receipts/${receiptId}/reverse`, { reason });
+      this.closeSecondaryModal();
+      this.alert('Receipt reversed — the PO can be received again');
+      this.viewPO(poId);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async showReverseUnloggedReceipt(poId) {
+    const po = await this.api('GET', `/purchase-orders/${poId}`);
+    const lines = po.items.filter(i => i.quantity_unlogged > 0);
+    this.showSecondaryModal(`
+      <div class="modal" style="max-width:600px">
+        <div class="modal-header"><span class="modal-title">Reverse Earlier Receiving — ${po.po_number}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">These goods were received before receipts were logged. Enter how much to take back off each line. Their A/P bill isn't tied to a receipt, so void it in Accounts Payable yourself if needed before receiving again.</p>
+          ${lines.map(i => `
+            <div class="po-receive-row">
+              <div style="flex:1">
+                <div class="fw-600">${this.escapeAttr(i.product_name)}</div>
+                <div style="font-size:12px;color:var(--text-muted)">Received earlier: ${i.quantity_unlogged}${i.quantity_damaged ? ` | Damaged: ${i.quantity_damaged}` : ''}</div>
+              </div>
+              <input id="revu-${i.id}" type="number" min="0" step="any" max="${i.quantity_unlogged}" value="0" style="width:80px">
+            </div>`).join('')}
+          <div class="form-group" style="margin-top:14px"><label>Reason *</label><textarea id="revu-reason" rows="2"></textarea></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeSecondaryModal()">Cancel</button>
+          <button class="btn btn-danger" onclick="App.confirmReverseUnloggedReceipt(${po.id}, [${lines.map(i => i.id).join(',')}])">Reverse</button>
+        </div>
+      </div>`);
+  },
+
+  async confirmReverseUnloggedReceipt(poId, itemIds) {
+    const reason = document.getElementById('revu-reason').value.trim();
+    const items = itemIds.map(id => ({ item_id: id, quantity: Number(document.getElementById(`revu-${id}`).value) || 0 })).filter(i => i.quantity > 0);
+    if (!items.length) { this.alert('Enter at least one quantity to reverse', 'error'); return; }
+    if (!reason) { this.alert('Enter the reason for the reversal', 'error'); return; }
+    try {
+      await this.api('POST', `/purchase-orders/${poId}/reverse-unlogged`, { items, reason });
+      this.closeSecondaryModal();
+      this.alert('Receiving reversed — the PO can be received again');
+      this.viewPO(poId);
     } catch(e) { this.alert(e.message, 'error'); }
   },
 

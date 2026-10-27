@@ -9,7 +9,7 @@ const fs = require('fs');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
-const { autoBills, createBill, dueDateFor, today } = require('../lib/payables');
+const { autoBills, createBill, dueDateFor, today, PAID_SQL, round2 } = require('../lib/payables');
 const { resolveApprovalSignature } = require('../lib/signatures');
 const { getSetting } = require('../lib/settings');
 const { localTaxRate, defaultTaxOption, priceLine, poTotals, receivedValue, resolvePoCurrency, poRate, missingRate } = require('../lib/poLines');
@@ -95,7 +95,10 @@ router.get('/:id', async (req, res) => {
     const { rows: [po] } = await db.execute({ sql: PO_DETAIL_SELECT, args: [req.params.id] });
     if (!po) return res.status(404).json({ error: 'Not found' });
     const { rows: items } = await db.execute({ sql: PO_ITEMS_SELECT, args: [req.params.id] });
+    const unlogged = await unloggedReceived(db, po.id);
+    for (const i of items) i.quantity_unlogged = unlogged[i.id] || 0;
     po.items = items;
+    po.receipts = await poReceipts(po.id);
     res.json(po);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -389,12 +392,18 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
 
     const tx = await db.transaction('write');
     try {
-      let receiptValue = 0, receiptTax = 0;
+      let receiptValue = 0, receiptTax = 0, receiptId = null;
       for (const { item_id, quantity_received } of (items || [])) {
         const qty = Math.round((Number(quantity_received) || 0) * 1000) / 1000; // part quantities for measured units
         if (!qty || qty <= 0) continue;
-        const { rows: [item] } = await tx.execute({ sql: 'SELECT * FROM purchase_order_items WHERE id = ?', args: [item_id] });
+        const { rows: [item] } = await tx.execute({ sql: 'SELECT * FROM purchase_order_items WHERE id = ? AND po_id = ?', args: [item_id, req.params.id] });
         if (!item) continue;
+        // Logged as one receipt so it can be reversed as a unit later.
+        if (!receiptId) {
+          const receipt_number = await nextNumber(tx, 'po_receipts', 'receipt_number', 'RCV-', 6);
+          const r = await tx.execute({ sql: 'INSERT INTO po_receipts (receipt_number, po_id, branch_id, received_by) VALUES (?,?,?,?)', args: [receipt_number, po.id, po.branch_id || null, req.employee?.id || null] });
+          receiptId = Number(r.lastInsertRowid);
+        }
         const value = receivedValue(item, qty);
         receiptValue += value.goods;
         receiptTax += value.tax;
@@ -402,21 +411,27 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
         const netUnitCost = (item.quantity_ordered ? (Number(item.total) || 0) / item.quantity_ordered : (Number(item.unit_cost) || 0)) * rate;
         const newReceived = (item.quantity_received || 0) + qty;
         await tx.execute({ sql: 'UPDATE purchase_order_items SET quantity_received = ? WHERE id = ?', args: [newReceived, item_id] });
+        let singles = 0, prevCost = null, newCost = null;
         if (item.product_id) {
           // A line in another unit (lib/units.js) receives quantity × its size
           // in stock units; stock and cost are per stock unit.
           const per = Number(item.units_per) || 1;
-          const singles = stockUnits(qty, per);
+          singles = stockUnits(qty, per);
+          const { rows: [prod] } = await tx.execute({ sql: 'SELECT cost FROM products WHERE id = ?', args: [item.product_id] });
+          prevCost = prod ? prod.cost : null;
           await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [singles, item.product_id] });
           if (netUnitCost > 0) {
-            await tx.execute({ sql: 'UPDATE products SET cost = ? WHERE id = ?', args: [parseFloat((netUnitCost / per).toFixed(4)), item.product_id] });
+            newCost = parseFloat((netUnitCost / per).toFixed(4));
+            await tx.execute({ sql: 'UPDATE products SET cost = ? WHERE id = ?', args: [newCost, item.product_id] });
           }
           if (po.branch_id) {
             await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, po.branch_id, singles, item.product_id, singles] });
             await syncBinQty(tx, item.product_id, po.branch_id, singles);
           }
         }
+        await tx.execute({ sql: 'INSERT INTO po_receipt_items (receipt_id, po_item_id, product_id, quantity, stock_units, prev_cost, new_cost) VALUES (?,?,?,?,?,?,?)', args: [receiptId, item.id, item.product_id || null, qty, singles, prevCost, newCost] });
       }
+      if (!receiptId) throw new Error('Enter at least one quantity to receive');
 
       const { rows: poItems } = await tx.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ?', args: [req.params.id] });
       const allReceived = poItems.every(i => (i.quantity_received || 0) >= i.quantity_ordered);
@@ -440,13 +455,14 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
       if (receiptValue > 0 && autoBills(supplier)) {
         const tax = receiptTax;
         const billDate = today();
-        await createBill(tx, {
+        const billId = await createBill(tx, {
           supplier_id: po.supplier_id, po_id: po.id, branch_id: po.branch_id,
           bill_date: billDate, due_date: dueDateFor(supplier.payment_terms, billDate),
           amount: parseFloat(((receiptValue + tax) * rate).toFixed(2)),
           description: `Goods received on ${po.po_number}${po.currency ? ` (${po.currency} ${(receiptValue + tax).toFixed(2)} @ ${rate})` : ''}`,
           source: 'receipt', created_by: req.employee?.id,
         });
+        await tx.execute({ sql: 'UPDATE po_receipts SET bill_id = ? WHERE id = ?', args: [billId, receiptId] });
       }
       await tx.commit();
     } catch(e) {
@@ -458,6 +474,167 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
     const { rows: updatedItems } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ?', args: [req.params.id] });
     updated.items = updatedItems;
     res.json(updated);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Reversing receipts ──────────────────────────────────────
+// Takes received goods back off: stock out of the PO's branch, the line's
+// received count down, and the PO/PR status back to partial/approved so it
+// can be received again. Refused when the stock has since been sold or moved
+// (on hand < what's coming off) or when it would leave fewer received than
+// were already processed as damaged. lines: [{ item, qty, prevCost, newCost }].
+async function reverseReceivedLines(tx, po, lines, reference, reason) {
+  const need = {};
+  for (const { item, qty } of lines) {
+    const left = Math.round(((item.quantity_received || 0) - qty) * 1000) / 1000;
+    if (left < 0) throw new Error(`Only ${item.quantity_received || 0} of "${item.product_name}" is received`);
+    if (left < (item.quantity_damaged || 0)) throw new Error(`${item.quantity_damaged} of "${item.product_name}" were processed as damaged — that many must stay received`);
+    if (item.product_id) need[item.product_id] = (need[item.product_id] || 0) + stockUnits(qty, item.units_per);
+  }
+  const short = [];
+  for (const [productId, units] of Object.entries(need)) {
+    const { rows: [s] } = po.branch_id
+      ? await tx.execute({ sql: 'SELECT p.name, COALESCE(bi.stock_qty, 0) AS on_hand FROM products p LEFT JOIN branch_inventory bi ON bi.product_id = p.id AND bi.branch_id = ? WHERE p.id = ?', args: [po.branch_id, productId] })
+      : await tx.execute({ sql: 'SELECT name, stock_qty AS on_hand FROM products WHERE id = ?', args: [productId] });
+    if (s && Number(s.on_hand) < units) short.push(`${s.name} (on hand ${Number(s.on_hand)}, reversing ${units})`);
+  }
+  if (short.length) throw new Error(`Not enough stock on hand to reverse — it may have been sold or moved: ${short.join('; ')}`);
+
+  for (const { item, qty, prevCost, newCost } of lines) {
+    await tx.execute({ sql: 'UPDATE purchase_order_items SET quantity_received = ? WHERE id = ?', args: [Math.round(((item.quantity_received || 0) - qty) * 1000) / 1000, item.id] });
+    if (!item.product_id) continue;
+    const singles = stockUnits(qty, item.units_per);
+    await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty - ? WHERE id = ?', args: [singles, item.product_id] });
+    // Put the cost back to what it was before this receipt — unless a later
+    // receipt or an edit has changed it since.
+    if (prevCost != null && newCost != null) {
+      await tx.execute({ sql: 'UPDATE products SET cost = ? WHERE id = ? AND ABS(cost - ?) < 0.00005', args: [prevCost, item.product_id, newCost] });
+    }
+    if (po.branch_id) {
+      await tx.execute({ sql: 'UPDATE branch_inventory SET stock_qty = stock_qty - ?, updated_at = CURRENT_TIMESTAMP WHERE product_id = ? AND branch_id = ?', args: [singles, item.product_id, po.branch_id] });
+      await syncBinQty(tx, item.product_id, po.branch_id, -singles);
+    }
+    await tx.execute({ sql: 'INSERT INTO stock_movements (product_id, branch_id, quantity_change, type, reference, reason) VALUES (?,?,?,?,?,?)', args: [item.product_id, po.branch_id || null, -singles, 'receipt_reversed', reference, reason] });
+  }
+
+  const { rows: poItems } = await tx.execute({ sql: 'SELECT quantity_ordered, quantity_received FROM purchase_order_items WHERE po_id = ?', args: [po.id] });
+  const allReceived = poItems.every(i => (i.quantity_received || 0) >= i.quantity_ordered);
+  const anyReceived = poItems.some(i => (i.quantity_received || 0) > 0);
+  const newStatus = allReceived ? 'received' : anyReceived ? 'partial' : 'approved';
+  await tx.execute({ sql: 'UPDATE purchase_orders SET status = ?, received_at = ? WHERE id = ?', args: [newStatus, allReceived ? po.received_at : null, po.id] });
+  if (!allReceived) {
+    await tx.execute({ sql: `UPDATE purchase_requests SET status = 'converted' WHERE converted_to_po_id = ? AND status = 'received'`, args: [po.id] });
+  }
+}
+
+async function loadReversiblePO(id) {
+  const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [id] });
+  if (!po) return { error: [404, 'Not found'] };
+  if (!['received', 'partial'].includes(po.status)) return { error: [400, `Only a received or part-received PO can have a receipt reversed (this one is ${po.status})`] };
+  return { po };
+}
+
+// Each logged receipt on a PO with its lines (GET /:id attaches these).
+async function poReceipts(poId) {
+  const { rows: receipts } = await db.execute({
+    sql: `SELECT r.*, er.first_name || ' ' || er.last_name AS received_by_name, ev.first_name || ' ' || ev.last_name AS reversed_by_name,
+            b.bill_number, b.status AS bill_status
+          FROM po_receipts r
+          LEFT JOIN employees er ON er.id = r.received_by
+          LEFT JOIN employees ev ON ev.id = r.reversed_by
+          LEFT JOIN ap_bills b ON b.id = r.bill_id
+          WHERE r.po_id = ? ORDER BY r.id`,
+    args: [poId],
+  });
+  if (!receipts.length) return [];
+  const { rows: items } = await db.execute({
+    sql: `SELECT ri.*, poi.product_name, poi.purchase_unit FROM po_receipt_items ri JOIN purchase_order_items poi ON poi.id = ri.po_item_id
+          WHERE ri.receipt_id IN (SELECT id FROM po_receipts WHERE po_id = ?) ORDER BY ri.id`,
+    args: [poId],
+  });
+  for (const r of receipts) r.items = items.filter(i => i.receipt_id === r.id);
+  return receipts;
+}
+
+// Received quantity per line that no logged receipt accounts for — goods
+// received before receipts were logged.
+async function unloggedReceived(executor, poId) {
+  const { rows } = await executor.execute({
+    sql: `SELECT poi.id, COALESCE(poi.quantity_received, 0) - COALESCE((SELECT SUM(ri.quantity) FROM po_receipt_items ri JOIN po_receipts r ON r.id = ri.receipt_id
+            WHERE ri.po_item_id = poi.id AND r.status = 'received'), 0) AS unlogged
+          FROM purchase_order_items poi WHERE poi.po_id = ?`,
+    args: [poId],
+  });
+  return Object.fromEntries(rows.map(r => [r.id, Math.max(0, Math.round(Number(r.unlogged) * 1000) / 1000)]));
+}
+
+// Reverse one logged receipt. Its A/P bill is voided with it; a bill with
+// payments applied blocks the reversal until A/P voids those payments.
+router.post('/:id/receipts/:rid/reverse', requirePermission('purchasing_receive'), async (req, res) => {
+  try {
+    const reason = String(req.body.reason || '').trim();
+    if (!reason) return res.status(400).json({ error: 'Enter the reason for reversing this receipt' });
+    const { po, error } = await loadReversiblePO(req.params.id);
+    if (error) return res.status(error[0]).json({ error: error[1] });
+    const { rows: [receipt] } = await db.execute({ sql: 'SELECT * FROM po_receipts WHERE id = ? AND po_id = ?', args: [req.params.rid, po.id] });
+    if (!receipt) return res.status(404).json({ error: 'Receipt not found' });
+    if (receipt.status !== 'received') return res.status(400).json({ error: `${receipt.receipt_number} has already been reversed` });
+
+    const tx = await db.transaction('write');
+    try {
+      if (receipt.bill_id) {
+        const { rows: [bill] } = await tx.execute({ sql: `SELECT b.id, b.bill_number, b.status, ${PAID_SQL} AS paid FROM ap_bills b WHERE b.id = ?`, args: [receipt.bill_id] });
+        if (bill && bill.status !== 'void') {
+          if (round2(bill.paid) > 0) throw new Error(`A/P bill ${bill.bill_number} for this receipt has payments applied — void or reallocate those payments in Accounts Payable first`);
+          await tx.execute({ sql: "UPDATE ap_bills SET status = 'void', void_reason = ?, voided_by = ?, voided_at = CURRENT_TIMESTAMP WHERE id = ?", args: [`Receipt ${receipt.receipt_number} reversed: ${reason}`, req.employee?.id || null, bill.id] });
+        }
+      }
+      const { rows: rItems } = await tx.execute({ sql: 'SELECT * FROM po_receipt_items WHERE receipt_id = ?', args: [receipt.id] });
+      const lines = [];
+      for (const ri of rItems) {
+        const { rows: [item] } = await tx.execute({ sql: 'SELECT * FROM purchase_order_items WHERE id = ?', args: [ri.po_item_id] });
+        if (item) lines.push({ item, qty: ri.quantity, prevCost: ri.product_id ? ri.prev_cost : null, newCost: ri.product_id ? ri.new_cost : null });
+      }
+      await reverseReceivedLines(tx, po, lines, receipt.receipt_number, reason);
+      await tx.execute({ sql: "UPDATE po_receipts SET status = 'reversed', reversed_by = ?, reversed_at = CURRENT_TIMESTAMP, reverse_reason = ? WHERE id = ?", args: [req.employee?.id || null, reason, receipt.id] });
+      await tx.commit();
+    } catch(e) {
+      await tx.rollback();
+      return res.status(400).json({ error: e.message });
+    }
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Reverse goods received before receipts were logged, per line. Their A/P
+// bill isn't tied to a receipt, so it's left for A/P to void by hand.
+router.post('/:id/reverse-unlogged', requirePermission('purchasing_receive'), async (req, res) => {
+  try {
+    const reason = String(req.body.reason || '').trim();
+    if (!reason) return res.status(400).json({ error: 'Enter the reason for reversing this receipt' });
+    const { po, error } = await loadReversiblePO(req.params.id);
+    if (error) return res.status(error[0]).json({ error: error[1] });
+
+    const tx = await db.transaction('write');
+    try {
+      const unlogged = await unloggedReceived(tx, po.id);
+      const lines = [];
+      for (const { item_id, quantity } of (req.body.items || [])) {
+        const qty = Math.round((Number(quantity) || 0) * 1000) / 1000;
+        if (!(qty > 0)) continue;
+        const { rows: [item] } = await tx.execute({ sql: 'SELECT * FROM purchase_order_items WHERE id = ? AND po_id = ?', args: [item_id, po.id] });
+        if (!item) continue;
+        if (qty > (unlogged[item.id] || 0)) throw new Error(`Only ${unlogged[item.id] || 0} of "${item.product_name}" was received before receipts were logged`);
+        lines.push({ item, qty });
+      }
+      if (!lines.length) throw new Error('Enter at least one quantity to reverse');
+      await reverseReceivedLines(tx, po, lines, po.po_number, reason);
+      await tx.commit();
+    } catch(e) {
+      await tx.rollback();
+      return res.status(400).json({ error: e.message });
+    }
+    res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
