@@ -27,7 +27,7 @@ const PO_ITEMS_SELECT = `SELECT poi.*, q.quote_number, q.id as quotation_id, wo.
   LEFT JOIN work_orders wo ON woi.work_order_id = wo.id
   WHERE poi.po_id = ?`;
 
-const PO_DETAIL_SELECT = `SELECT po.*, s.name as supplier_name, s.contact_name as supplier_contact, s.email as supplier_email,
+const PO_DETAIL_SELECT = `SELECT po.*, s.name as supplier_name, s.contact_name as supplier_contact, s.email as supplier_email, s.email2 as supplier_email2,
   b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name,
   ea.first_name || ' ' || ea.last_name as approved_by_name,
   er.first_name || ' ' || er.last_name as rejected_by_name,
@@ -75,7 +75,7 @@ const upload = multer({
 
 router.get('/', async (req, res) => {
   try {
-    const { status, supplier_id, branch_id, start, end, limit = 100 } = req.query;
+    const { status, supplier_id, branch_id, start, end, q, limit = 100 } = req.query;
     let sql = `SELECT po.*, s.name as supplier_name, b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name FROM purchase_orders po LEFT JOIN suppliers s ON po.supplier_id = s.id LEFT JOIN branches b ON po.branch_id = b.id LEFT JOIN employees e ON po.employee_id = e.id WHERE 1=1`;
     const params = [];
     if (status) { sql += ' AND po.status = ?'; params.push(status); }
@@ -83,6 +83,14 @@ router.get('/', async (req, res) => {
     if (branch_id) { sql += ' AND po.branch_id = ?'; params.push(branch_id); }
     if (start) { sql += ' AND date(po.created_at) >= ?'; params.push(start); }
     if (end) { sql += ' AND date(po.created_at) <= ?'; params.push(end); }
+    // Free-text search: PO/vendor order number, supplier, notes, or any line's
+    // item name or SKU.
+    if (q && String(q).trim()) {
+      const like = `%${String(q).trim()}%`;
+      sql += ` AND (po.po_number LIKE ? OR s.name LIKE ? OR po.vendor_order_number LIKE ? OR po.notes LIKE ?
+        OR EXISTS (SELECT 1 FROM purchase_order_items poi WHERE poi.po_id = po.id AND (poi.product_name LIKE ? OR poi.sku LIKE ?)))`;
+      params.push(like, like, like, like, like, like);
+    }
     sql += ' ORDER BY po.created_at DESC LIMIT ?';
     params.push(parseInt(limit));
     const { rows } = await db.execute({ sql, args: params });

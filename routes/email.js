@@ -1381,9 +1381,34 @@ router.get('/po-pdf/:id', requireAuth, async (req, res) => {
 
 // Email the approved PO document (with the approver's signature) to the
 // supplier or anyone else who needs it.
+// Several addresses, as an array or one string split on commas/semicolons/
+// whitespace. Returns { list } or { error } naming the first bad address.
+function parseRecipients(value) {
+  const list = [...new Set((Array.isArray(value) ? value : String(value || '').split(/[,;\s]+/))
+    .map(a => String(a).trim()).filter(Boolean))];
+  const bad = list.find(a => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(a));
+  return bad ? { error: `"${bad}" isn't a valid email address` } : { list };
+}
+
+// The sender's own note (details/instructions) shown above the document in
+// the email body — or above the "attached as PDF" line.
+function emailMessageHtml(message) {
+  const text = String(message || '').trim();
+  if (!text) return '';
+  const safe = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+  return `<div style="max-width:760px;margin:16px auto;padding:14px 18px;background:#fffbe6;border:1px solid #f0d878;border-radius:6px;font-family:Arial,sans-serif;font-size:14px;line-height:1.5;color:#333">${safe}</div>`;
+}
+const withMessage = (html, message) => {
+  const note = emailMessageHtml(message);
+  return note ? html.replace(/(<body[^>]*>)/i, `$1${note}`) : html;
+};
+
 router.post('/send-po/:id', requireAuth, async (req, res) => {
-  const { to } = req.body;
-  if (!to) return res.status(400).json({ error: 'Recipient email is required' });
+  const to = parseRecipients(req.body.to);
+  if (to.error) return res.status(400).json({ error: to.error });
+  if (!to.list.length) return res.status(400).json({ error: 'Recipient email is required' });
+  const cc = parseRecipients(req.body.cc);
+  if (cc.error) return res.status(400).json({ error: `CC: ${cc.error}` });
   try {
     const po = await loadPoDocument(req.params.id);
     if (!po) return res.status(404).json({ error: 'Purchase order not found' });
@@ -1397,12 +1422,13 @@ router.post('/send-po/:id', requireAuth, async (req, res) => {
       const fromAddr = s.email_smtp_user || s.store_email || '';
       await transporter.sendMail({
         from: `"${fromName}" <${fromAddr}>`,
-        to,
-        subject: `Purchase Order ${po.po_number} from ${s.store_name || 'Our Store'}`,
+        to: to.list,
+        ...(cc.list.length ? { cc: cc.list } : {}),
+        subject: String(req.body.subject || '').trim() || `Purchase Order ${po.po_number} from ${s.store_name || 'Our Store'}`,
         // Signatures are login-only on this server — embed them in the email.
-        ...(await documentEmailContent(req.body.as_pdf, s, poPdfModel(po, s), inlineProtectedImages(buildApprovedPoHtml(po, s, origin)))),
+        ...(await documentEmailContent(req.body.as_pdf, s, poPdfModel(po, s), inlineProtectedImages(withMessage(buildApprovedPoHtml(po, s, origin), req.body.message)), { message: req.body.message })),
       });
-      res.json({ success: true, message: `Purchase order sent to ${to}` });
+      res.json({ success: true, message: `Purchase order sent to ${[...to.list, ...cc.list].join(', ')}` });
     } catch (e) {
       res.status(500).json({ error: `Failed to send email: ${e.message}` });
     }
@@ -2459,11 +2485,11 @@ router.post('/send-drawer-report/:id', requirePermission('drawers'), async (req,
 // Mail content for one document: the PDF + cover note when `asPdf`, else
 // the regular HTML email (`htmlContent` — a string, or the {html,
 // attachments} object inlineProtectedImages returns).
-async function documentEmailContent(asPdf, s, model, htmlContent) {
+async function documentEmailContent(asPdf, s, model, htmlContent, { message } = {}) {
   if (!asPdf) return typeof htmlContent === 'string' ? { html: htmlContent } : htmlContent;
   const pdf = await renderDocumentPdf(model);
   const filename = `${model.title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${model.number}.pdf`;
-  return { html: buildPdfCoverHtml(model, s), attachments: [{ filename, content: pdf, contentType: 'application/pdf' }] };
+  return { html: withMessage(buildPdfCoverHtml(model, s), message), attachments: [{ filename, content: pdf, contentType: 'application/pdf' }] };
 }
 
 module.exports = router;

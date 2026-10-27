@@ -19381,24 +19381,22 @@ const App = {
   },
 
   // ─── Purchasing (tabbed: Purchase Orders + Purchase Requests) ─
-  async renderPurchasing(activeTab) {
+  async renderPurchasing(activeTab, { keepFocus = false } = {}) {
     const tab = activeTab || this._purchasingTab || 'orders';
     this._purchasingTab = tab;
     const c = document.getElementById('content');
-    c.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    if (!keepFocus) c.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
 
     const tabBtn = (key, label) => `
       <button class="btn btn-sm ${tab===key?'btn-primary':'btn-outline'}"
         onclick="App.renderPurchasing('${key}')">${label}</button>`;
 
     if (tab === 'orders') {
-      const [orders, suppliers] = await Promise.all([
-        this.api('GET', '/purchase-orders?limit=100'),
-        this.api('GET', '/suppliers'),
-      ]);
+      const suppliers = await this.api('GET', '/suppliers');
       if (this.section !== 'purchasing' && this.section !== 'purchase-requests') return;
       const branches = this.currentUser.branches || [];
-      const statusColor = { draft:'badge-warning', sent:'badge-info', approved:'badge-teal', partial:'badge-purple', received:'badge-success', cancelled:'badge-danger' };
+      const f = this._poFilters ||= {};
+      const opt = (v, label, cur) => `<option value="${v}" ${String(cur || '') === String(v) ? 'selected' : ''}>${label}</option>`;
       c.innerHTML = `
         <div class="section-header">
           <h2>Purchasing</h2>
@@ -19413,32 +19411,28 @@ const App = {
           ${this.can('purchasing_approve') ? tabBtn('approvals','Approvals') : ''}
           ${this.can('purchase_requests') ? tabBtn('requests','Purchase Requests') : ''}
         </div>
-        <div class="card">
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>PO #</th><th>Supplier</th><th>Branch</th><th>Expected</th><th>Total</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
-              <tbody>
-                ${orders.length ? orders.map(po => `
-                  <tr>
-                    <td class="fw-600">${po.po_number}</td>
-                    <td>${po.supplier_name || '-'}</td>
-                    <td>${po.branch_name || '-'}</td>
-                    <td>${po.expected_date ? this.fmtDate(po.expected_date) : '-'}</td>
-                    <td class="fw-600">${this._fmtPO(po.total, po)}</td>
-                    <td><span class="badge-pill ${statusColor[po.status]||'badge-info'}">${po.status}</span></td>
-                    <td style="color:var(--text-muted)">${this.fmtDate(po.created_at)}</td>
-                    <td>
-                      <button class="btn btn-sm btn-secondary" onclick="App.viewPO(${po.id})">View</button>
-                      ${po.status==='sent' && this.can('purchasing_approve') ? `<button class="btn btn-sm btn-primary" onclick="App.showApprovePOModal(${po.id})">Approve</button>` : ''}
-                      ${(po.status==='approved'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-sm btn-success" onclick="App.showReceivePO(${po.id})">Receive</button>` : ''}
-                    </td>
-                  </tr>`).join('') : '<tr><td colspan="8" class="empty-state">No purchase orders yet</td></tr>'}
-              </tbody>
-            </table>
+        <div class="card" style="margin-bottom:12px;padding:12px 16px">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input id="pof-q" type="search" value="${this.escapeAttr(f.q || '')}" placeholder="Search PO #, supplier, vendor order #, item or SKU…" style="flex:1;min-width:220px" oninput="App._poFilterChanged(true)">
+            <select id="pof-status" style="width:150px" onchange="App._poFilterChanged()">
+              ${opt('', 'All statuses', f.status)}${opt('draft', 'Draft', f.status)}${opt('sent', 'Awaiting approval', f.status)}${opt('approved', 'Approved', f.status)}${opt('partial', 'Partially received', f.status)}${opt('received', 'Received', f.status)}${opt('cancelled', 'Cancelled', f.status)}
+            </select>
+            <select id="pof-supplier" data-searchable style="width:200px" onchange="App._poFilterChanged()">
+              <option value="">All suppliers</option>${suppliers.map(sp => opt(sp.id, this.escapeAttr(sp.name), f.supplier_id)).join('')}
+            </select>
+            ${branches.length > 1 ? `<select id="pof-branch" style="width:150px" onchange="App._poFilterChanged()"><option value="">All branches</option>${branches.map(b => opt(b.id, this.escapeAttr(b.name), f.branch_id)).join('')}</select>` : ''}
+            <input id="pof-start" type="date" value="${f.start || ''}" style="width:145px" title="Created from" onchange="App._poFilterChanged()">
+            <span style="color:var(--text-muted)">to</span>
+            <input id="pof-end" type="date" value="${f.end || ''}" style="width:145px" title="Created to" onchange="App._poFilterChanged()">
+            <button class="btn btn-sm btn-outline" onclick="App._poFilters={};App.renderPurchasing('orders')">Clear</button>
           </div>
+        </div>
+        <div class="card">
+          <div id="po-list"><div class="empty-state"><p>Loading...</p></div></div>
         </div>`;
       this._poSuppliers = suppliers;
       this._poBranches = branches;
+      this._loadPOList();
 
     } else if (tab === 'approvals') {
       // Tray of POs formally submitted ('sent') and awaiting an approve/reject
@@ -19488,10 +19482,15 @@ const App = {
       // Purchase Requests tab
       const filter = this._prFilter || 'all';
       const typeFilter = this._prTypeFilter || 'all';
+      const pf = this._prFilters ||= {};
       const params = new URLSearchParams({ limit: 200 });
       if (filter !== 'all') params.set('status', filter);
       if (typeFilter !== 'all') params.set('request_type', typeFilter);
+      for (const k of ['q', 'branch_id', 'start', 'end']) if (pf[k]) params.set(k, pf[k]);
+      const seq = (this._prListSeq = (this._prListSeq || 0) + 1);
       const requests = await this.api('GET', `/purchase-requests?${params}`);
+      if (seq !== this._prListSeq) return; // a newer search has replaced this one
+      const prBranches = this.currentUser.branches || [];
       if (this.section !== 'purchasing' && this.section !== 'purchase-requests') return;
       const prStatusColor = { draft:'badge-warning', submitted:'badge-info', approved:'badge-teal', rejected:'badge-danger', converted:'badge-success' };
       const typeLabel = this._prTypeLabels;
@@ -19520,6 +19519,14 @@ const App = {
               ${typeFilters.map(t=>`<button class="btn btn-sm ${typeFilter===t?'btn-primary':'btn-outline'}" onclick="App._prTypeFilter='${t}';App.renderPurchasing('requests')">${t==='all'?'All Types':typeLabel[t]||t}</button>`).join('')}
             </div>
           </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px;padding-bottom:10px">
+            <input id="prf-q" type="search" value="${this.escapeAttr(pf.q || '')}" placeholder="Search PR #, item, SKU, department, requester, supplier, PO #…" style="flex:1;min-width:220px" oninput="App._prFilterChanged(true)">
+            ${prBranches.length > 1 ? `<select id="prf-branch" style="width:150px" onchange="App._prFilterChanged()"><option value="">All branches</option>${prBranches.map(b => `<option value="${b.id}" ${String(pf.branch_id || '') === String(b.id) ? 'selected' : ''}>${this.escapeAttr(b.name)}</option>`).join('')}</select>` : ''}
+            <input id="prf-start" type="date" value="${pf.start || ''}" style="width:145px" title="Created from" onchange="App._prFilterChanged()">
+            <span style="color:var(--text-muted)">to</span>
+            <input id="prf-end" type="date" value="${pf.end || ''}" style="width:145px" title="Created to" onchange="App._prFilterChanged()">
+            <button class="btn btn-sm btn-outline" onclick="App._prFilters={};App._prFilter='all';App._prTypeFilter='all';App.renderPurchasing('requests')">Clear</button>
+          </div>
         </div>
         <div class="card" style="border-radius:0 0 8px 8px">
           <div class="table-wrap">
@@ -19543,12 +19550,69 @@ const App = {
                       ${pr.status==='approved'?`<button class="btn btn-sm btn-teal" onclick="App.showConvertPRtoPO(${pr.id})">Convert to PO</button>`:''}
                       ${pr.converted_po_number?`<span style="font-size:12px;color:var(--text-muted)">→ ${this._prConvertedPOLink(pr)}</span>`:''}
                     </td>
-                  </tr>`).join('') : `<tr><td colspan="8" class="empty-state">No purchase requests${filter!=='all'?' with status "'+filter+'"':''}</td></tr>`}
+                  </tr>`).join('') : `<tr><td colspan="8" class="empty-state">No purchase requests${filter!=='all'?' with status "'+filter+'"':''}${Object.values(pf).some(Boolean)?' matching these filters':''}</td></tr>`}
               </tbody>
             </table>
           </div>
         </div>`;
+      // Typing in the search box re-renders the tab — put the cursor back.
+      if (keepFocus) { const q = document.getElementById('prf-q'); if (q) { q.focus(); q.setSelectionRange(q.value.length, q.value.length); } }
     }
+  },
+
+  // Purchase Orders / Requests list filters: read the bar into
+  // this._poFilters / this._prFilters (kept while you move around) and reload
+  // just the list — typing in the search box waits a moment first.
+  _poFilterChanged(typing) {
+    const v = id => document.getElementById(id)?.value || '';
+    this._poFilters = { q: v('pof-q').trim(), status: v('pof-status'), supplier_id: v('pof-supplier'), branch_id: v('pof-branch'), start: v('pof-start'), end: v('pof-end') };
+    clearTimeout(this._poFilterTimer);
+    this._poFilterTimer = setTimeout(() => this._loadPOList(), typing ? 300 : 0);
+  },
+
+  async _loadPOList() {
+    const f = this._poFilters || {};
+    const params = new URLSearchParams({ limit: 200 });
+    for (const k of ['q', 'status', 'supplier_id', 'branch_id', 'start', 'end']) if (f[k]) params.set(k, f[k]);
+    const seq = (this._poListSeq = (this._poListSeq || 0) + 1);
+    let orders;
+    try { orders = await this.api('GET', `/purchase-orders?${params}`); }
+    catch(e) { const el = document.getElementById('po-list'); if (el) el.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    const el = document.getElementById('po-list');
+    if (!el || seq !== this._poListSeq) return; // a newer search has replaced this one
+    const statusColor = { draft:'badge-warning', sent:'badge-info', approved:'badge-teal', partial:'badge-purple', received:'badge-success', cancelled:'badge-danger' };
+    const filtered = Object.values(f).some(Boolean);
+    el.innerHTML = `
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>PO #</th><th>Supplier</th><th>Branch</th><th>Expected</th><th>Total</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+          <tbody>
+            ${orders.length ? orders.map(po => `
+              <tr>
+                <td class="fw-600">${po.po_number}${po.vendor_order_number ? `<div style="font-size:11px;font-weight:400;color:var(--text-muted)">Vendor # ${this.escapeAttr(po.vendor_order_number)}</div>` : ''}</td>
+                <td>${this.escapeAttr(po.supplier_name || '-')}</td>
+                <td>${po.branch_name || '-'}</td>
+                <td>${po.expected_date ? this.fmtDate(po.expected_date) : '-'}</td>
+                <td class="fw-600">${this._fmtPO(po.total, po)}</td>
+                <td><span class="badge-pill ${statusColor[po.status]||'badge-info'}">${po.status}</span></td>
+                <td style="color:var(--text-muted)">${this.fmtDate(po.created_at)}</td>
+                <td>
+                  <button class="btn btn-sm btn-secondary" onclick="App.viewPO(${po.id})">View</button>
+                  ${po.status==='sent' && this.can('purchasing_approve') ? `<button class="btn btn-sm btn-primary" onclick="App.showApprovePOModal(${po.id})">Approve</button>` : ''}
+                  ${(po.status==='approved'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-sm btn-success" onclick="App.showReceivePO(${po.id})">Receive</button>` : ''}
+                </td>
+              </tr>`).join('') : `<tr><td colspan="8" class="empty-state">${filtered ? 'No purchase orders match these filters' : 'No purchase orders yet'}</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+      ${orders.length >= 200 ? '<div style="font-size:12px;color:var(--text-muted);padding:8px 12px">Showing the latest 200 — search or filter to narrow it down.</div>' : ''}`;
+  },
+
+  _prFilterChanged(typing) {
+    const v = id => document.getElementById(id)?.value || '';
+    this._prFilters = { q: v('prf-q').trim(), branch_id: v('prf-branch'), start: v('prf-start'), end: v('prf-end') };
+    clearTimeout(this._prFilterTimer);
+    this._prFilterTimer = setTimeout(() => this.renderPurchasing('requests', { keepFocus: typing }), typing ? 300 : 0);
   },
 
   // ─── Purchase Requests ────────────────────────────────────
@@ -20944,7 +21008,7 @@ const App = {
           ${(po.status==='received'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-secondary" onclick="App.emailGRN(${po.id},'${(po.supplier_email||'').replace(/'/g,"\\'")}')">✉️ Email GRN</button>` : ''}
           <button class="btn btn-secondary" onclick="App.printApprovedPO(${po.id})">🖨️ Print</button>
           <a class="btn btn-secondary" href="/api/email/po-pdf/${po.id}" download="${po.po_number}.pdf" style="text-decoration:none">⬇️ Download PDF</a>
-          ${po.status==='approved' ? `<button class="btn btn-secondary" onclick="App.emailApprovedPO(${po.id},'${(po.supplier_email||'').replace(/'/g,"\\'")}')">✉️ Email PO</button>` : ''}
+          ${po.status==='approved' ? `<button class="btn btn-secondary" onclick="App.emailApprovedPO(${po.id})">✉️ Email PO</button>` : ''}
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
@@ -21298,14 +21362,61 @@ const App = {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
-  emailApprovedPO(id, supplierEmail) {
-    this.showEmailModal('Email Purchase Order', supplierEmail, async (to, { as_pdf }) => {
-      this.closeModal();
-      try {
-        await this.api('POST', `/email/send-po/${id}`, { to, as_pdf });
-        this.alert(`Purchase order sent to ${to}`);
-      } catch(e) { this.alert(e.message, 'error'); }
-    }, { pdfOption: true });
+  // Email an approved PO to one or more addresses (the supplier's Email and
+  // Email 2 filled in), with optional CC, subject and a message for
+  // delivery details or instructions shown above the PO.
+  async emailApprovedPO(id) {
+    const po = await this.api('GET', `/purchase-orders/${id}`);
+    const to = [po.supplier_email, po.supplier_email2].filter(Boolean).join(', ');
+    let pdfDefault = false;
+    try { pdfDefault = localStorage.getItem('pos_email_as_pdf') === '1'; } catch(e) {}
+    this.showSecondaryModal(`
+      <div class="modal" style="max-width:560px">
+        <div class="modal-header"><span class="modal-title">Email Purchase Order — ${po.po_number}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label>To *</label>
+            <input id="poe-to" value="${this.escapeAttr(to)}" placeholder="orders@supplier.com, accounts@supplier.com">
+            <div style="font-size:11px;color:var(--text-muted);margin-top:3px">Separate several addresses with commas.</div>
+          </div>
+          <div class="form-group"><label>CC</label><input id="poe-cc" placeholder="Optional — e.g. our receiving team"></div>
+          <div class="form-group"><label>Subject</label><input id="poe-subject" value="${this.escapeAttr(`Purchase Order ${po.po_number} from ${this.settings?.store_name || 'Our Store'}`)}"></div>
+          <div class="form-group">
+            <label>Message</label>
+            <textarea id="poe-message" rows="5" placeholder="Delivery details or instructions — e.g. Deliver to the Drax Hall warehouse Mon–Fri 8am–3pm; call ahead on 876-…; include the PO number on your invoice."></textarea>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:3px">Shown above the purchase order in the email.</div>
+          </div>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+            <input type="checkbox" id="poe-pdf" ${pdfDefault ? 'checked' : ''} style="width:16px;height:16px;margin:0">
+            Attach as PDF <span style="color:var(--text-muted);font-size:12px">(instead of in the email body)</span>
+          </label>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeSecondaryModal()">Cancel</button>
+          <button class="btn btn-primary" id="poe-send" onclick="App.sendApprovedPOEmail(${po.id})">Send</button>
+        </div>
+      </div>`);
+  },
+
+  async sendApprovedPOEmail(id) {
+    const val = k => document.getElementById(k)?.value.trim() || '';
+    const split = v => v.split(/[,;\s]+/).filter(Boolean);
+    const to = split(val('poe-to')), cc = split(val('poe-cc'));
+    if (!to.length) { this.alert('Enter at least one email address', 'error'); return; }
+    const bad = [...to, ...cc].find(a => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(a));
+    if (bad) { this.alert(`"${bad}" isn't a valid email address`, 'error'); return; }
+    const as_pdf = !!document.getElementById('poe-pdf')?.checked;
+    try { localStorage.setItem('pos_email_as_pdf', as_pdf ? '1' : '0'); } catch(e) {}
+    const btn = document.getElementById('poe-send');
+    if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+    try {
+      const r = await this.api('POST', `/email/send-po/${id}`, { to, cc, subject: val('poe-subject'), message: document.getElementById('poe-message')?.value || '', as_pdf });
+      this.closeSecondaryModal();
+      this.alert(r.message || 'Purchase order sent');
+    } catch(e) {
+      this.alert(e.message, 'error');
+      if (btn) { btn.disabled = false; btn.textContent = 'Send'; }
+    }
   },
 
   // Letter-size print of the invoice (see _printServerDocument) — available

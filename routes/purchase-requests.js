@@ -55,7 +55,7 @@ router.post('/departments', async (req, res) => {
 
 router.get('/', async (req, res) => {
   try {
-    const { status, request_type, branch_id, employee_id, start, end, limit = 100 } = req.query;
+    const { status, request_type, branch_id, employee_id, start, end, q, limit = 100 } = req.query;
     let sql = PR_SELECT + ' WHERE 1=1';
     const params = [];
     if (status) { sql += ' AND pr.status = ?'; params.push(status); }
@@ -64,6 +64,15 @@ router.get('/', async (req, res) => {
     if (employee_id) { sql += ' AND pr.employee_id = ?'; params.push(employee_id); }
     if (start) { sql += ' AND date(pr.created_at) >= ?'; params.push(start); }
     if (end) { sql += ' AND date(pr.created_at) <= ?'; params.push(end); }
+    // Free-text search: PR number, department, notes, requester, supplier, the
+    // PO it became, or any line's item name or SKU.
+    if (q && String(q).trim()) {
+      const like = `%${String(q).trim()}%`;
+      sql += ` AND (pr.pr_number LIKE ? OR pr.department LIKE ? OR pr.notes LIKE ? OR (e.first_name || ' ' || e.last_name) LIKE ?
+        OR s.name LIKE ? OR po.po_number LIKE ?
+        OR EXISTS (SELECT 1 FROM purchase_request_items pri WHERE pri.pr_id = pr.id AND (pri.product_name LIKE ? OR pri.sku LIKE ?)))`;
+      params.push(like, like, like, like, like, like, like, like);
+    }
     sql += ' ORDER BY pr.created_at DESC LIMIT ?';
     params.push(parseInt(limit));
     const { rows } = await db.execute({ sql, args: params });
