@@ -25,6 +25,7 @@ async function logStatus(executor, workOrderId, status, comment, employeeId) {
 }
 
 const WO_LIST_SELECT = `SELECT wo.*, c.first_name || ' ' || c.last_name as customer_name, c.phone as customer_phone, c.email as customer_email,
+  c.customer_number, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
   e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name,
   cb.first_name || ' ' || cb.last_name as completed_by_name,
   (SELECT first_name || ' ' || last_name FROM employees WHERE id = wo.returned_to_customer_by) as returned_to_customer_by_name,
@@ -511,6 +512,17 @@ router.patch('/:id', requirePermission('work_orders'), async (req, res) => {
     if (description != null && description.trim() !== wo.description) {
       await logStatus(db, req.params.id, wo.status, `Description updated: ${description.trim()}`, employee_id);
     }
+    const { rows: [updated] } = await db.execute({ sql: `${WO_LIST_SELECT} WHERE wo.id = ?`, args: [req.params.id] });
+    res.json(updated);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Customer P.O. # for the invoice — editable at any stage (often given at pickup).
+router.patch('/:id/po-number', requirePermission('work_orders'), async (req, res) => {
+  try {
+    const { rows: [wo] } = await db.execute({ sql: 'SELECT id FROM work_orders WHERE id = ?', args: [req.params.id] });
+    if (!wo) return res.status(404).json({ error: 'Not found' });
+    await db.execute({ sql: 'UPDATE work_orders SET po_number = ? WHERE id = ?', args: [String(req.body.po_number || '').trim() || null, req.params.id] });
     const { rows: [updated] } = await db.execute({ sql: `${WO_LIST_SELECT} WHERE wo.id = ?`, args: [req.params.id] });
     res.json(updated);
   } catch(e) { res.status(500).json({ error: e.message }); }

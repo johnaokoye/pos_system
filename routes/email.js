@@ -110,10 +110,55 @@ function txPoNumber(tx) {
   return tx.po_number || tx.rental_po_number || '';
 }
 
+// Customer columns every invoice's Bill To box reads (alias c = customers).
+const BILL_TO_COLS = `c.customer_number, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip`;
+
 // Retail sales carry Customer / Manager signature lines; a rental's copies
 // have their own signatures.
 function wantsInvoiceSignatures(tx) {
   return receiptDocTitle(tx) === 'Retail Tax Invoice';
+}
+
+// Blank signature lines on an invoice: the customer's (unless they already
+// signed digitally) and the manager's.
+function blankSignatureLabels(customerSigned = false) {
+  return [customerSigned ? null : 'Customer Signature', 'Manager Signature'].filter(Boolean);
+}
+
+// "Bill To" box (email layout): bold name, account #, address.
+function billToBoxHtml(x) {
+  return `<div style="font-size:11px;font-weight:700;color:#666;text-transform:uppercase;margin-bottom:4px">Bill To</div>
+            <div style="font-weight:700;font-size:14px;color:${BRAND.black}">${esc(x.customer_name || 'Cash Customer')}</div>
+            ${billToLines(x).map(l => `<div>${esc(l)}</div>`).join('')}`;
+}
+
+// P.O. # value, or a blank line to write one in.
+function poValueHtml(po) {
+  return po ? esc(po) : '<span style="display:inline-block;width:90px;border-bottom:1px solid #999">&nbsp;</span>';
+}
+
+// Bill To box on the left, the document's reference lines ([label, html])
+// on the right.
+function billToRowHtml(x, refs) {
+  return `<table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-bottom:12px">
+        <tr>
+          <td valign="top" width="55%" style="border:1px solid #e8e8e8;border-radius:6px;padding:8px 10px">
+            ${billToBoxHtml(x)}
+          </td>
+          <td valign="top" style="padding:2px 0 2px 12px;text-align:right">
+            ${refs.filter(([, v]) => v != null && v !== '').map(([l, v]) => `<div><strong>${l}:</strong> ${v}</div>`).join('')}
+          </td>
+        </tr>
+      </table>`;
+}
+
+function signatureLinesHtml(labels) {
+  if (!labels.length) return '';
+  return `<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:48px;font-size:11px;color:#555">
+        <tr>
+          ${labels.map((l, i) => `${i ? '<td width="8%"></td>' : ''}<td style="border-top:1px solid #333;padding-top:6px;text-align:center">${l}</td>`).join('')}
+        </tr>
+      </table>`;
 }
 
 function buildReceiptHtml(tx, s) {
@@ -155,21 +200,7 @@ function buildReceiptHtml(tx, s) {
     </td></tr>
     <tr><td style="padding:20px 24px">
       <div style="font-size:18px;font-weight:700;color:${BRAND.black};margin-bottom:12px">${receiptDocTitle(tx)}</div>
-      <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-bottom:12px">
-        <tr>
-          <td valign="top" width="55%" style="border:1px solid #e8e8e8;border-radius:6px;padding:8px 10px">
-            <div style="font-size:11px;font-weight:700;color:#666;text-transform:uppercase;margin-bottom:4px">Bill To</div>
-            <div style="font-weight:700;font-size:14px;color:${BRAND.black}">${tx.customer_name || 'Cash Customer'}</div>
-            ${billToLines(tx).map(l => `<div>${esc(l)}</div>`).join('')}
-          </td>
-          <td valign="top" style="padding:2px 0 2px 12px;text-align:right">
-            <div><strong>Invoice #:</strong> ${tx.transaction_number}</div>
-            <div><strong>Date:</strong> ${new Date(tx.created_at).toLocaleString()}</div>
-            <div><strong>P.O. #:</strong> ${txPoNumber(tx) ? esc(txPoNumber(tx)) : '<span style="display:inline-block;width:90px;border-bottom:1px solid #999">&nbsp;</span>'}</div>
-            ${tx.source_quote_number ? `<div><strong>Quotation:</strong> ${tx.source_quote_number}</div>` : ''}
-          </td>
-        </tr>
-      </table>
+      ${billToRowHtml(tx, [['Invoice #', tx.transaction_number], ['Date', new Date(tx.created_at).toLocaleString()], ['P.O. #', poValueHtml(txPoNumber(tx))], ['Quotation', tx.source_quote_number]])}
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-bottom:16px">
         ${tx.created_by_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Created By:</strong> ${tx.created_by_name}</td></tr>` : ''}
         ${tx.employee_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Cashier:</strong> ${tx.employee_name}</td></tr>` : ''}
@@ -188,13 +219,7 @@ function buildReceiptHtml(tx, s) {
         <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">TOTAL</td><td style="font-size:16px;font-weight:700;color:${BRAND.black};text-align:right">${fmt(tx.total)}</td></tr>
         ${parseFloat(tx.change_amount) > 0 ? `<tr><td style="padding:3px 0;color:${BRAND.green}">Change</td><td style="text-align:right;color:${BRAND.green}">${fmt(tx.change_amount)}</td></tr>` : ''}
       </table>
-      ${wantsInvoiceSignatures(tx) ? `<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:48px;font-size:11px;color:#555">
-        <tr>
-          <td width="45%" style="border-top:1px solid #333;padding-top:6px;text-align:center">Customer Signature</td>
-          <td width="10%"></td>
-          <td width="45%" style="border-top:1px solid #333;padding-top:6px;text-align:center">Manager Signature</td>
-        </tr>
-      </table>` : ''}
+      ${wantsInvoiceSignatures(tx) ? signatureLinesHtml(blankSignatureLabels()) : ''}
       <div style="text-align:center;margin-top:20px;font-size:13px;color:#666;font-style:italic">${footer}</div>
     </td></tr>
   </table>
@@ -454,11 +479,9 @@ function buildRentalInvoiceHtml(agreement, tx, s, origin) {
       ${storePhone ? `<div style="color:#ffffff;font-size:12px">${storePhone}</div>` : ''}
     </td></tr>
     <tr><td style="padding:20px 24px">
-      <div style="font-size:18px;font-weight:700;color:${BRAND.black};margin-bottom:4px">Rental Agreement</div>
+      <div style="font-size:18px;font-weight:700;color:${BRAND.black};margin-bottom:12px">Rental Agreement</div>
+      ${billToRowHtml(agreement, [['Invoice #', tx.transaction_number], ['Date', new Date(tx.created_at).toLocaleString()], ['P.O. #', poValueHtml(agreement.customer_po_number)], ['Rental Agreement', agreement.agreement_number]])}
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-bottom:16px">
-        <tr><td style="padding:2px 0"><strong>Transaction #:</strong> ${tx.transaction_number}</td><td style="text-align:right;padding:2px 0"><strong>Date:</strong> ${new Date(tx.created_at).toLocaleString()}</td></tr>
-        ${agreement.customer_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Customer:</strong> ${agreement.customer_name}</td></tr>` : ''}
-        <tr><td colspan="2" style="padding:2px 0"><strong>Rental Agreement:</strong> ${agreement.agreement_number}</td></tr>
         ${tx.created_by_name || tx.employee_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Created By:</strong> ${tx.created_by_name || tx.employee_name}</td></tr>` : ''}
         ${tx.employee_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Cashier:</strong> ${tx.employee_name}</td></tr>` : ''}
         <tr><td colspan="2" style="padding:2px 0"><strong>Item(s) Rented:</strong> ${rentedItemsLabel || '—'}</td></tr>
@@ -483,6 +506,7 @@ function buildRentalInvoiceHtml(agreement, tx, s, origin) {
         <tr><td style="padding:3px 0;color:#666">Payment</td><td style="text-align:right;color:#666">${(tx.payment_method || '').replace('_',' ').toUpperCase()}</td></tr>
       </table>
       ${sigBlock(issueSignatures, returnSignatures)}
+      ${signatureLinesHtml(blankSignatureLabels(!!agreement.issue_customer_signature))}
       <div style="text-align:center;margin-top:20px;font-size:13px;color:#666;font-style:italic">${footer}</div>
     </td></tr>
   </table>
@@ -610,11 +634,7 @@ function buildRentalSummaryHtml(agreement, s) {
     </td></tr>
     <tr><td style="padding:20px 24px">
       <div style="font-size:18px;font-weight:700;color:${BRAND.black};margin-bottom:12px">Rental Tax Invoice</div>
-      <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-bottom:16px">
-        <tr><td style="padding:2px 0"><strong>Agreement #:</strong> ${agreement.agreement_number}</td>${agreement.customer_name ? `<td style="text-align:right;padding:2px 0"><strong>Customer:</strong> ${agreement.customer_name}</td>` : ''}</tr>
-        <tr><td style="padding:2px 0"><strong>Checked Out:</strong> ${agreement.checkout_datetime ? new Date(agreement.checkout_datetime).toLocaleString() : '—'}</td><td style="text-align:right;padding:2px 0"><strong>Due Date:</strong> ${agreement.due_date}</td></tr>
-        <tr><td colspan="2" style="padding:2px 0"><strong>Returned:</strong> ${agreement.returned_at ? new Date(agreement.returned_at).toLocaleString() : 'Not yet returned'}</td></tr>
-      </table>
+      ${billToRowHtml(agreement, [['Agreement #', agreement.agreement_number], ['P.O. #', poValueHtml(agreement.customer_po_number)], ['Checked Out', agreement.checkout_datetime ? new Date(agreement.checkout_datetime).toLocaleString() : '—'], ['Due Date', agreement.due_date], ['Returned', agreement.returned_at ? new Date(agreement.returned_at).toLocaleString() : 'Not yet returned']])}
       <div style="font-size:12px;font-weight:700;text-transform:uppercase;color:#666;border-bottom:1px solid #e8e8e8;padding-bottom:4px;margin-bottom:6px">Items Rented</div>
       <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:12px">
         <thead><tr style="background:#f9fafb"><th style="padding:6px 8px;text-align:left;font-size:11px;color:#666;border-bottom:1px solid #e8e8e8">Item</th><th style="padding:6px 8px;text-align:center;font-size:11px;color:#666;border-bottom:1px solid #e8e8e8">Qty</th><th style="padding:6px 8px;text-align:center;font-size:11px;color:#666;border-bottom:1px solid #e8e8e8">Rate</th><th style="padding:6px 8px;text-align:right;font-size:11px;color:#666;border-bottom:1px solid #e8e8e8">Original Fee</th><th style="padding:6px 8px;text-align:right;font-size:11px;color:#666;border-bottom:1px solid #e8e8e8">Final Fee</th><th style="padding:6px 8px;text-align:right;font-size:11px;color:#666;border-bottom:1px solid #e8e8e8">Damage Fee</th></tr></thead>
@@ -632,6 +652,7 @@ function buildRentalSummaryHtml(agreement, s) {
       </table>
       ${dispositionLine ? `<div style="margin-top:8px;padding:8px 12px;background:#f5f5f5;border-left:3px solid #555;font-size:12px;border-radius:4px">${dispositionLine}</div>` : ''}` : ''}
       ${sigRow}
+      ${signatureLinesHtml(blankSignatureLabels(!!agreement.issue_customer_signature))}
       <div style="text-align:center;margin-top:20px;font-size:13px;color:#666;font-style:italic">${footerHtml(s)}</div>
     </td></tr>
   </table>
@@ -880,8 +901,7 @@ router.post('/send-receipt/:id', requireAuth, async (req, res) => {
   if (!to) return res.status(400).json({ error: 'Recipient email is required' });
 
   try {
-    const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name,
-      c.customer_number, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
+    const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, ${BILL_TO_COLS},
       e.first_name || ' ' || e.last_name as employee_name, cbe.first_name || ' ' || cbe.last_name as created_by_name,
       b.name as branch_name, b.address as branch_address, b.city as branch_city,
       b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone,
@@ -1040,7 +1060,7 @@ router.post('/send-rental-summary/:id', requireAuth, async (req, res) => {
   const { to } = req.body;
   if (!to) return res.status(400).json({ error: 'Recipient email is required' });
   try {
-    const { rows: [agreement] } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name,
+    const { rows: [agreement] } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name, ${BILL_TO_COLS},
       b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone,
       co.payment_method as checkout_payment_method, co.subtotal as checkout_subtotal, co.tax_amount as checkout_tax_amount, co.discount_amount as checkout_discount_amount, co.total as checkout_total, co.created_at as checkout_created_at,
       se.total as settlement_total, se.payment_method as settlement_payment_method, se.amount_tendered as settlement_amount_tendered, se.change_amount as settlement_change_amount, se.created_at as settlement_created_at,
@@ -1094,7 +1114,7 @@ router.post('/send-rental-invoice/:id', requireAuth, async (req, res) => {
   const { to } = req.body;
   if (!to) return res.status(400).json({ error: 'Recipient email is required' });
   try {
-    const { rows: [agreement] } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name, c.email as customer_email,
+    const { rows: [agreement] } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name, c.email as customer_email, ${BILL_TO_COLS},
       b.name as branch_name,
       ise.first_name || ' ' || ise.last_name as issue_security_employee_name,
       rse.first_name || ' ' || rse.last_name as return_security_employee_name,
@@ -1896,7 +1916,7 @@ router.post('/send-work-order-ready/:id', requireAuth, async (req, res) => {
 // item sourcing) for the management UI; this only needs items, so it re-queries
 // directly rather than importing that route's private helpers.
 async function loadWorkOrderForInvoice(id) {
-  const { rows: [wo] } = await db.execute({ sql: `SELECT wo.*, c.first_name || ' ' || c.last_name as customer_name, c.phone as customer_phone, c.email as customer_email, b.name as branch_name
+  const { rows: [wo] } = await db.execute({ sql: `SELECT wo.*, c.first_name || ' ' || c.last_name as customer_name, c.phone as customer_phone, c.email as customer_email, ${BILL_TO_COLS}, b.name as branch_name
     FROM work_orders wo
     LEFT JOIN customers c ON wo.customer_id = c.id
     LEFT JOIN branches b ON wo.branch_id = b.id
@@ -1963,15 +1983,8 @@ ${print ? PRINT_PAGE_STYLE : ''}
           <div style="font-size:20px;font-weight:700;color:${BRAND.black}">SERVICE AND REPAIR TAX INVOICE</div>
           <div style="font-size:13px;color:#888;margin-top:2px">${wo.wo_number}</div>
         </div>
-        <div style="text-align:right;font-size:13px;color:#444">
-          <div><strong>Status:</strong> ${WO_STATUS_LABELS[wo.status] || wo.status}${wo.is_express ? ' (Express)' : ''}</div>
-          <div><strong>Opened:</strong> ${new Date(wo.created_at).toLocaleDateString()}</div>
-          ${wo.pickup_due_date ? `<div><strong>Pickup Due:</strong> ${new Date(wo.pickup_due_date + 'T00:00:00').toLocaleDateString()}</div>` : ''}
-        </div>
       </div>
-      ${wo.customer_name ? `<div style="background:#f9fafb;border:1px solid #e8e8e8;border-radius:6px;padding:12px;margin-bottom:16px;font-size:13px">
-        <strong>Customer:</strong><br>${wo.customer_name}${wo.customer_phone ? `<br>${wo.customer_phone}` : ''}${wo.customer_email ? `<br>${wo.customer_email}` : ''}
-      </div>` : ''}
+      ${billToRowHtml(wo, [['Invoice #', wo.wo_number], ['P.O. #', poValueHtml(wo.po_number)], ['Status', `${WO_STATUS_LABELS[wo.status] || wo.status}${wo.is_express ? ' (Express)' : ''}`], ['Opened', new Date(wo.created_at).toLocaleDateString()], ['Pickup Due', wo.pickup_due_date ? new Date(wo.pickup_due_date + 'T00:00:00').toLocaleDateString() : '']])}
       <div style="font-size:13px;color:#444;margin-bottom:16px">
         <strong>Description:</strong> ${wo.description}
         ${wo.item_label ? `<br><strong>Item:</strong> ${wo.item_label}` : ''}
@@ -2009,6 +2022,7 @@ ${print ? PRINT_PAGE_STYLE : ''}
         <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">BALANCE DUE</td><td style="font-size:16px;font-weight:700;color:${BRAND.black};text-align:right">${fmt(balanceDue)}${wo.final_transaction_id ? ' <span style="color:${BRAND.green};font-size:11px;font-weight:400">(paid)</span>' : ''}</td></tr>
       </table>
       ${wo.estimate_notes ? `<div style="margin-top:16px;font-size:13px;color:#444"><strong>Estimate Notes:</strong> ${wo.estimate_notes}</div>` : ''}
+      ${signatureLinesHtml(blankSignatureLabels())}
       <div style="text-align:center;margin-top:20px;font-size:13px;color:#666;font-style:italic">${footer}</div>
     </td></tr>
   </table>
@@ -2321,7 +2335,7 @@ function receiptPdfModel(tx, s) {
       { label: 'TOTAL', value: fmt(tx.total), style: 'grand' },
       parseFloat(tx.change_amount) > 0 ? { label: 'Change', value: fmt(tx.change_amount), style: 'muted' } : null,
     ],
-    signatures: wantsInvoiceSignatures(tx) ? [{ label: 'Customer Signature' }, { label: 'Manager Signature' }] : [],
+    signatures: wantsInvoiceSignatures(tx) ? blankSignatureLabels().map(label => ({ label })) : [],
     footer: s.receipt_footer || 'Thank you for your business!',
   };
 }
@@ -2338,8 +2352,8 @@ function rentalInvoicePdfModel(agreement, tx, s) {
   return {
     store: pdfStore(s, { ...tx, branch_name: agreement.branch_name }),
     title: 'RENTAL AGREEMENT', number: tx.transaction_number,
-    meta: [['Date', pdfDateTime(tx.created_at)], ['Agreement', agreement.agreement_number]],
-    party: { label: 'Customer', lines: [agreement.customer_name] },
+    meta: [['Date', pdfDateTime(tx.created_at)], ['P.O. #', agreement.customer_po_number || '________________'], ['Agreement', agreement.agreement_number]],
+    party: { label: 'Bill To', boldFirst: true, lines: [agreement.customer_name || 'Cash Customer', ...billToLines(agreement)] },
     info: [
       ['Created By', tx.created_by_name || tx.employee_name], ['Cashier', tx.employee_name],
       ['Item(s) Rented', (agreement.items || []).filter(i => !i.parent_item_id).map(i => `${i.product_name} x${i.quantity}`).join(', ') || '-'],
@@ -2369,6 +2383,7 @@ function rentalInvoicePdfModel(agreement, tx, s) {
       sig('Issued - Security', agreement.issue_security_employee_name, agreement.issue_security_signature, agreement.issue_security_confirmed_at),
       sig('Returned - Security', agreement.return_security_employee_name, agreement.return_security_signature, agreement.return_security_confirmed_at),
       sig('Returned - Driver', agreement.return_driver_employee_name, agreement.return_driver_signature, agreement.return_driver_confirmed_at),
+      ...blankSignatureLabels(!!agreement.issue_customer_signature).map(label => ({ label })),
     ].filter(Boolean),
     footer: s.receipt_footer || 'Thank you for your business!',
   };
@@ -2385,8 +2400,8 @@ function workOrderInvoicePdfModel(wo, s) {
   return {
     store: pdfStore(s, { branch_name: wo.branch_name }),
     title: 'SERVICE AND REPAIR TAX INVOICE', number: wo.wo_number,
-    meta: [['Status', `${WO_STATUS_LABELS[wo.status] || wo.status}${wo.is_express ? ' (Express)' : ''}`], ['Opened', pdfDate(wo.created_at)], ['Pickup Due', wo.pickup_due_date ? pdfDate(wo.pickup_due_date) : '']],
-    party: { label: 'Customer', lines: [wo.customer_name, wo.customer_phone, wo.customer_email] },
+    meta: [['P.O. #', wo.po_number || '________________'], ['Status', `${WO_STATUS_LABELS[wo.status] || wo.status}${wo.is_express ? ' (Express)' : ''}`], ['Opened', pdfDate(wo.created_at)], ['Pickup Due', wo.pickup_due_date ? pdfDate(wo.pickup_due_date) : '']],
+    party: { label: 'Bill To', boldFirst: true, lines: [wo.customer_name || 'Cash Customer', ...billToLines(wo)] },
     info: [['Description', wo.description], ['Item', wo.item_label], ['Item #', wo.item_serial]],
     tables: [
       { heading: 'Accessories Handed In', columns: [{ label: 'Accessory', width: 4 }, { label: 'Item #', width: 1.8 }],
@@ -2403,6 +2418,7 @@ function workOrderInvoicePdfModel(wo, s) {
       { label: `BALANCE DUE${wo.final_transaction_id ? ' (paid)' : ''}`, value: fmt(balanceDue), style: 'grand' },
     ],
     notes: [wo.estimate_notes ? `Estimate Notes: ${wo.estimate_notes}` : ''],
+    signatures: blankSignatureLabels().map(label => ({ label })),
     footer: s.receipt_footer || 'Thank you for your business!',
   };
 }
@@ -2412,8 +2428,8 @@ function rentalSummaryPdfModel(agreement, s) {
   return {
     store: pdfStore(s, agreement),
     title: 'RENTAL TAX INVOICE', number: agreement.agreement_number,
-    meta: [['Checked Out', agreement.checkout_datetime ? pdfDateTime(agreement.checkout_datetime) : '-'], ['Due Date', pdfDate(agreement.due_date)], ['Returned', agreement.returned_at ? pdfDateTime(agreement.returned_at) : 'Not yet returned']],
-    party: { label: 'Customer', lines: [agreement.customer_name] },
+    meta: [['P.O. #', agreement.customer_po_number || '________________'], ['Checked Out', agreement.checkout_datetime ? pdfDateTime(agreement.checkout_datetime) : '-'], ['Due Date', pdfDate(agreement.due_date)], ['Returned', agreement.returned_at ? pdfDateTime(agreement.returned_at) : 'Not yet returned']],
+    party: { label: 'Bill To', boldFirst: true, lines: [agreement.customer_name || 'Cash Customer', ...billToLines(agreement)] },
     tables: [{ heading: 'Items Rented',
       columns: [{ label: 'Item', width: 3 }, { label: 'Qty', width: 0.6, align: 'center' }, { label: 'Rate', width: 2, align: 'center' }, { label: 'Original Fee', width: 1.2, align: 'right' }, { label: 'Final Fee', width: 1.2, align: 'right' }, { label: 'Damage Fee', width: 1.2, align: 'right' }],
       rows: f.items.map(i => ({ indent: i.child, cells: [i.name, i.quantity, i.rate, i.originalFee, i.finalFee, i.damageFee], sub: i.sku })) }],
@@ -2422,7 +2438,7 @@ function rentalSummaryPdfModel(agreement, s) {
       ...(f.settlementRows.length ? [{ label: 'Return Settlement', style: 'heading' }, ...f.settlementRows.map(([label, value]) => ({ label, value })), { label: f.balanceLabel, value: f.balanceDisplay, style: 'grand' }] : []),
     ],
     notes: [f.dispositionLine],
-    signatures: f.signatures.map(([label, name, image, at]) => ({ label, name, image, signedAt: at ? pdfDateTime(at) : '' })),
+    signatures: [...f.signatures.map(([label, name, image, at]) => ({ label, name, image, signedAt: at ? pdfDateTime(at) : '' })), ...blankSignatureLabels(!!agreement.issue_customer_signature).map(label => ({ label }))],
     footer: s.receipt_footer || 'Thank you for your business!',
   };
 }

@@ -215,7 +215,7 @@ router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
   try {
     await runScheduledPauses(req.params.id);
     const { rows: [agreement] } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name,
-      c.phone as customer_phone, c.email as customer_email, c.customer_type,
+      c.phone as customer_phone, c.email as customer_email, c.customer_type, c.customer_number,
       c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
       b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone,
       e.first_name || ' ' || e.last_name as employee_name,
@@ -634,7 +634,7 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
       // checkout_date/checkout_datetime are NOT written here anymore — the
       // rental clock only starts once the item is actually issued/dispatched
       // (PATCH .../issue), which writes those same two columns for real.
-      await tx.execute({ sql: `UPDATE rental_agreements SET checkout_transaction_id = ?, deposit_total = ?, status = 'awaiting_issue', employee_id = ?, customer_po_number = ?, pickup_cost_charged = ? WHERE id = ?`, args: [checkoutTxId, depositTotal, finalizeEmployeeId || null, isCredit ? customer_po_number.trim() : null, pickupCost, req.params.id] });
+      await tx.execute({ sql: `UPDATE rental_agreements SET checkout_transaction_id = ?, deposit_total = ?, status = 'awaiting_issue', employee_id = ?, customer_po_number = ?, pickup_cost_charged = ? WHERE id = ?`, args: [checkoutTxId, depositTotal, finalizeEmployeeId || null, String(customer_po_number || '').trim() || null, pickupCost, req.params.id] });
       await tx.commit();
       committed = true;
       if (isCredit) { try { await runCreditCheck(agreement.customer_id); } catch(e) {} }

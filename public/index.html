@@ -4958,6 +4958,43 @@ const App = {
     return [tx.customer_number ? `Account #: ${tx.customer_number}` : '', tx.customer_address, cityLine].filter(Boolean);
   },
 
+  // Printed invoices (letter popups): Bill To box at the top left, the
+  // document's reference fields ([label, html]) beside it — P.O. # among
+  // them, a write-in line when empty (_poValueHtml) — and blank signature
+  // lines at the bottom (_invoiceSignatureLinesHtml).
+  _billToPrintCss: `
+      .bill-row{display:flex;justify-content:space-between;gap:24px;margin-bottom:16px}
+      .bill-to{flex:0 1 55%;border:1px solid #ccc;border-radius:6px;padding:10px 12px;font-size:12px;line-height:1.5}
+      .bill-to .bill-name{font-weight:700;font-size:15px;color:#111}
+      .bill-row label{font-weight:bold;text-transform:uppercase;font-size:10px;color:#555;display:block}
+      .inv-ref{display:grid;grid-template-columns:auto auto;gap:6px 24px;align-content:start;font-size:12px}
+      .write-in{display:inline-block;width:120px;border-bottom:1px solid #333;height:14px}`,
+
+  _billToPrintHtml(x, refs) {
+    return `<div class="bill-row">
+      <div class="bill-to">
+        <label>Bill To</label>
+        <div class="bill-name">${this.escapeAttr(x.customer_name || 'Cash Customer')}</div>
+        ${this._billToLines(x).map(l => `<div>${this.escapeAttr(l)}</div>`).join('')}
+      </div>
+      <div class="inv-ref">
+        ${refs.filter(([, v]) => v != null && v !== '').map(([l, v]) => `<div><label>${l}</label>${v}</div>`).join('')}
+      </div>
+    </div>`;
+  },
+
+  _poValueHtml(po) {
+    return po ? this.escapeAttr(po) : '<span class="write-in"></span>';
+  },
+
+  // Customer (unless they already signed digitally) and Manager.
+  _invoiceSignatureLinesHtml(customerSigned = false) {
+    const labels = [customerSigned ? null : 'Customer Signature', 'Manager Signature'].filter(Boolean);
+    return `<div style="display:flex;justify-content:space-between;margin-top:70px;gap:64px">
+      ${labels.map(l => `<div style="flex:1;text-align:center"><div style="border-top:1px solid #333;padding-top:6px;font-size:11px;color:#555">${l}</div></div>`).join('')}
+    </div>`;
+  },
+
   _txDocTitle(tx) {
     // A rental's checkout invoice is the Rental Agreement (the Full Summary
     // is the Rental Tax Invoice). A Special Project invoice that includes a
@@ -5217,12 +5254,7 @@ const App = {
       .meta label{font-weight:bold;text-transform:uppercase;font-size:10px;color:#555;display:block}
       table{width:100%;border-collapse:collapse}
       th{background:#f0f0f0;text-align:left;padding:8px;font-size:11px;text-transform:uppercase;color:#555}
-      .bill-row{display:flex;justify-content:space-between;gap:24px;margin-bottom:16px}
-      .bill-to{flex:0 1 55%;border:1px solid #ccc;border-radius:6px;padding:10px 12px;font-size:12px;line-height:1.5}
-      .bill-to .bill-name{font-weight:700;font-size:15px;color:#111}
-      .bill-row label{font-weight:bold;text-transform:uppercase;font-size:10px;color:#555;display:block}
-      .inv-ref{display:grid;grid-template-columns:auto auto;gap:6px 24px;align-content:start;font-size:12px}
-      .write-in{display:inline-block;width:120px;border-bottom:1px solid #333;height:14px}
+      ${this._billToPrintCss}
       .totals{width:280px;margin-left:auto;margin-top:16px;font-size:13px}
       .totals tr td{padding:4px 0;border:none}
       .totals .total-row td{border-top:2px solid #111;font-size:16px;font-weight:700;padding-top:8px}
@@ -5240,19 +5272,7 @@ const App = {
       </div>
       <div class="doc-title">${this._txDocTitle(tx).toUpperCase()}</div>
     </div>
-    <div class="bill-row">
-      <div class="bill-to">
-        <label>Bill To</label>
-        <div class="bill-name">${this.escapeAttr(tx.customer_name || 'Cash Customer')}</div>
-        ${this._billToLines(tx).map(l => `<div>${this.escapeAttr(l)}</div>`).join('')}
-      </div>
-      <div class="inv-ref">
-        <div><label>Invoice #</label>${tx.transaction_number}</div>
-        <div><label>Date</label>${this.fmtDateTime(tx.created_at)}</div>
-        <div><label>P.O. #</label>${poNumber ? this.escapeAttr(poNumber) : '<span class="write-in"></span>'}</div>
-        ${tx.source_quote_number ? `<div><label>Quotation</label>${tx.source_quote_number}</div>` : ''}
-      </div>
-    </div>
+    ${this._billToPrintHtml(tx, [['Invoice #', tx.transaction_number], ['Date', this.fmtDateTime(tx.created_at)], ['P.O. #', this._poValueHtml(poNumber)], ['Quotation', tx.source_quote_number]])}
     <div class="meta">
       ${tx.rental_agreement_number ? `<div><label>Rental Agreement</label>${tx.rental_agreement_number}</div>` : ''}
       ${tx.created_by_name || tx.employee_name ? `<div><label>Created By</label>${tx.created_by_name || tx.employee_name}</div>` : ''}
@@ -5284,16 +5304,12 @@ const App = {
         </tr>`).join('')}</tbody>
       </table>
     </div>` : ''}
-    ${signatureBlocks.length ? this._signatureRowsHtml(issueSignatures, returnSignatures) : (tx.rental_agreement_number ? `
+    ${signatureBlocks.length ? this._signatureRowsHtml(issueSignatures, returnSignatures) + this._invoiceSignatureLinesHtml(issueSignatures.some(([l]) => l === 'Customer Signature')) : (tx.rental_agreement_number ? `
     <div style="display:flex;justify-content:space-between;margin-top:70px;gap:24px">
       <div style="flex:1;text-align:center"><div style="border-top:1px solid #333;padding-top:6px;font-size:11px;color:#555">Customer Signature</div></div>
       <div style="flex:1;text-align:center"><div style="border-top:1px solid #333;padding-top:6px;font-size:11px;color:#555">Rep Signature</div></div>
       <div style="flex:1;text-align:center"><div style="border-top:1px solid #333;padding-top:6px;font-size:11px;color:#555">Manager Signature</div></div>
-    </div>` : `
-    <div style="display:flex;justify-content:space-between;margin-top:70px;gap:64px">
-      <div style="flex:1;text-align:center"><div style="border-top:1px solid #333;padding-top:6px;font-size:11px;color:#555">Customer Signature</div></div>
-      <div style="flex:1;text-align:center"><div style="border-top:1px solid #333;padding-top:6px;font-size:11px;color:#555">Manager Signature</div></div>
-    </div>`)}
+    </div>` : this._invoiceSignatureLinesHtml())}
     <div class="footer">${footer}</div>
     <script>window.onload=()=>{window.print()}<\/script>
     </body></html>`);
@@ -8529,6 +8545,7 @@ const App = {
       .totals tr td{padding:3px 0;border:none}
       .totals .total-row td{border-top:2px solid #111;font-size:15px;font-weight:700;padding-top:6px}
       .disposition{margin-top:8px;padding:8px 12px;background:#f5f5f5;border-left:3px solid #555;font-size:12px;border-radius:4px}
+      ${this._billToPrintCss}
       .footer{margin-top:32px;font-size:11px;color:#777;border-top:1px solid #ddd;padding-top:10px;text-align:center}
       @page { size: letter; margin: 0.75in; }
       @media print{body{padding:0}}
@@ -8543,9 +8560,8 @@ const App = {
       </div>
       <div class="doc-title">RENTAL TAX INVOICE</div>
     </div>
+    ${this._billToPrintHtml(a, [['Agreement #', a.agreement_number], ['P.O. #', this._poValueHtml(a.customer_po_number)]])}
     <div class="meta">
-      <div><label>Agreement #</label>${a.agreement_number}</div>
-      ${a.customer_name ? `<div><label>Customer</label>${a.customer_name}</div>` : ''}
       <div><label>Checked Out</label>${a.checkout_datetime ? this.fmtDateTime(a.checkout_datetime) : '—'}</div>
       <div><label>Due Date</label>${this.fmtDate(a.due_date)}</div>
       <div><label>Returned</label>${a.returned_at ? this.fmtDateTime(a.returned_at) : 'Not yet returned'}</div>
@@ -8572,6 +8588,7 @@ const App = {
         ${signedAt ? `<div style="font-size:9px;color:#888">${this.fmtDateTime(signedAt)}</div>` : ''}
       </div>`).join('')}
     </div>` : ''}
+    ${this._invoiceSignatureLinesHtml(!!a.issue_customer_signature)}
     <div class="footer">${footer}</div>
     <script>window.onload=()=>{window.print()}<\/script>
     </body></html>`);
@@ -10231,7 +10248,7 @@ const App = {
           </div>
           <div id="rf-change-info" style="display:none;font-size:13px;font-weight:600;text-align:right;margin:-6px 0 8px"></div>
           <div id="rf-po-block" style="display:none;border:1px solid var(--border);border-radius:6px;padding:10px;margin-top:4px">
-            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;margin-bottom:6px">Customer PO — required for credit account rentals</div>
+            <div id="rf-po-heading" style="font-size:11px;color:var(--text-muted);text-transform:uppercase;margin-bottom:6px">Customer PO — required for credit account rentals</div>
             <div class="form-group" style="margin-bottom:8px"><label style="font-size:11px">PO Number</label><input id="rf-po-number" placeholder="Customer's purchase order #" value="${a.customer_po_number || ''}"></div>
             <div class="form-group" style="margin-bottom:0">
               <label style="font-size:11px">PO Document</label>
@@ -10251,7 +10268,11 @@ const App = {
   _toggleRentalPOFields() {
     const method = document.getElementById('rf-paymethod')?.value;
     const block = document.getElementById('rf-po-block');
-    if (block) block.style.display = method === 'credit' ? 'block' : 'none';
+    // Any rental can carry the customer's P.O. (printed on its invoices); a
+    // credit account rental must.
+    if (block) block.style.display = 'block';
+    const poHeading = document.getElementById('rf-po-heading');
+    if (poHeading) poHeading.textContent = method === 'credit' ? 'Customer PO — required for credit account rentals' : 'Customer PO (optional)';
     // Amount Tendered only makes sense for tender types actually handed
     // over at the counter — card settles for the exact total, credit isn't
     // tendered at all.
@@ -11287,6 +11308,12 @@ const App = {
               <div style="text-align:right;margin-top:4px"><button class="btn btn-sm btn-primary" onclick="App.saveWODescription(${wo.id})">Save</button></div>
             </div>
           </div>
+          <div class="form-group">
+            <label style="display:flex;justify-content:space-between;align-items:center">Customer P.O. #
+              ${this.can('work_orders') ? `<button type="button" class="btn btn-sm btn-outline" onclick="App.editWOPoNumber(${wo.id}, '${this.escapeAttr(wo.po_number || '').replace(/'/g, "\\'")}')">Edit</button>` : ''}
+            </label>
+            <div>${wo.po_number ? this.escapeAttr(wo.po_number) : '<span style="color:var(--text-muted)">None — the invoice prints a blank line</span>'}</div>
+          </div>
           ${this._woIntakeSectionHtml(wo)}
 
           <div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:13px">
@@ -11375,6 +11402,15 @@ const App = {
     if (!description) { this.alert('Description cannot be empty', 'error'); return; }
     try {
       await this.api('PATCH', `/work-orders/${id}`, { description, item_serial: document.getElementById('wo-serial-input').value.trim(), employee_id: this.currentUser.id });
+      await this.viewWorkOrder(id);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async editWOPoNumber(id, current) {
+    const po = prompt("Customer's P.O. number (leave blank to clear):", current || '');
+    if (po === null) return;
+    try {
+      await this.api('PATCH', `/work-orders/${id}/po-number`, { po_number: po.trim() });
       await this.viewWorkOrder(id);
     } catch(e) { this.alert(e.message, 'error'); }
   },

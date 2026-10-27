@@ -2370,6 +2370,7 @@ async function _init() {
     // a sale from a quote takes the quote's unless the cashier typed one.
     'ALTER TABLE quotations ADD COLUMN po_number TEXT',
     'ALTER TABLE transactions ADD COLUMN po_number TEXT',
+    'ALTER TABLE work_orders ADD COLUMN po_number TEXT',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
