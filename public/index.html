@@ -6428,11 +6428,11 @@ const App = {
 
     const detailsPanel = `
       <div class="input-row">
-        <div class="form-group"><label>SKU *</label><input id="pf-sku" value="${p.sku||''}" placeholder="PROD-001"></div>
-        <div class="form-group"><label>Barcode</label><input id="pf-barcode" value="${p.barcode||''}" placeholder="0001234567890"></div>
+        <div class="form-group"><label>SKU *</label><input id="pf-sku" value="${this.escapeAttr(p.sku)}" placeholder="PROD-001"></div>
+        <div class="form-group"><label>Barcode</label><input id="pf-barcode" value="${this.escapeAttr(p.barcode)}" placeholder="0001234567890"></div>
       </div>
-      <div class="form-group"><label>Name *</label><input id="pf-name" value="${p.name||''}"></div>
-      <div class="form-group"><label>Description</label><input id="pf-desc" value="${p.description||''}"></div>
+      <div class="form-group"><label>Name *</label><input id="pf-name" value="${this.escapeAttr(p.name)}"></div>
+      <div class="form-group"><label>Description</label><input id="pf-desc" value="${this.escapeAttr(p.description)}"></div>
       <div class="form-group"><label>Detailed Description <span style="font-size:11px;color:var(--text-muted);font-weight:400">(shown on the website)</span></label><textarea id="pf-long-desc" rows="5" placeholder="Features, specifications, what's included, care/usage notes…">${this.escapeAttr(p.long_description)}</textarea></div>
       <div class="input-row-3">
         <div class="form-group"><label>Category</label>
@@ -6444,8 +6444,8 @@ const App = {
         <div class="form-group"><label>Brand</label>
           <select id="pf-brand">
             <option value="">— None —</option>
-            ${brands.map(b => `<option value="${b.name}" ${p.brand===b.name?'selected':''}>${b.name}</option>`).join('')}
-            ${p.brand && !brands.some(b => b.name === p.brand) ? `<option value="${p.brand}" selected>${p.brand} (not in Brands list)</option>` : ''}
+            ${brands.map(b => `<option value="${this.escapeAttr(b.name)}" ${p.brand===b.name?'selected':''}>${this.escapeAttr(b.name)}</option>`).join('')}
+            ${p.brand && !brands.some(b => b.name === p.brand) ? `<option value="${this.escapeAttr(p.brand)}" selected>${this.escapeAttr(p.brand)} (not in Brands list)</option>` : ''}
           </select>
         </div>
       </div>
@@ -6948,7 +6948,7 @@ const App = {
         </div>
         <div class="modal-body">
           <div class="input-row">
-            <div class="form-group"><label>SKU *</label><input id="sf-sku" value="${s.sku||''}" placeholder="SVC-001"></div>
+            <div class="form-group"><label>SKU *</label><input id="sf-sku" value="${this.escapeAttr(s.sku)}" placeholder="SVC-001"></div>
             <div class="form-group"><label>Unit / Billing Type</label>
               <select id="sf-unit">
                 <option value="">— None —</option>
@@ -6956,8 +6956,8 @@ const App = {
               </select>
             </div>
           </div>
-          <div class="form-group"><label>Name *</label><input id="sf-name" value="${s.name||''}"></div>
-          <div class="form-group"><label>Description</label><input id="sf-desc" value="${s.description||''}"></div>
+          <div class="form-group"><label>Name *</label><input id="sf-name" value="${this.escapeAttr(s.name)}"></div>
+          <div class="form-group"><label>Description</label><input id="sf-desc" value="${this.escapeAttr(s.description)}"></div>
           <div class="form-group"><label>Category</label>
             <select id="sf-cat"><option value="">— None —</option>${categories.map(c => `<option value="${c.id}" ${s.category_id==c.id?'selected':''}>${c.name}</option>`).join('')}</select>
           </div>
@@ -7781,16 +7781,16 @@ const App = {
         </div>
         <div class="modal-body">
           <div class="input-row">
-            <div class="form-group"><label>SKU *</label><input id="rf-sku" value="${p.sku||''}" placeholder="RENT-001"></div>
+            <div class="form-group"><label>SKU *</label><input id="rf-sku" value="${this.escapeAttr(p.sku)}" placeholder="RENT-001"></div>
             <div class="form-group"><label>Category</label>
               <select id="rf-cat"><option value="">— None —</option>${categories.map(c => `<option value="${c.id}" ${p.category_id==c.id?'selected':''}>${c.name}</option>`).join('')}</select>
             </div>
           </div>
-          <div class="form-group"><label>Name *</label><input id="rf-name" value="${p.name||''}"></div>
-          <div class="form-group"><label>Description</label><input id="rf-desc" value="${p.description||''}"></div>
+          <div class="form-group"><label>Name *</label><input id="rf-name" value="${this.escapeAttr(p.name)}"></div>
+          <div class="form-group"><label>Description</label><input id="rf-desc" value="${this.escapeAttr(p.description)}"></div>
           <div class="form-group"><label>Detailed Description <span style="font-size:11px;color:var(--text-muted);font-weight:400">(shown on the website)</span></label><textarea id="rf-long-desc" rows="5" placeholder="Features, specifications, what's included, care/usage notes…">${this.escapeAttr(p.long_description)}</textarea></div>
           <div class="input-row-3">
-            <div class="form-group"><label>Brand</label><input id="rf-brand" value="${p.brand||''}"></div>
+            <div class="form-group"><label>Brand</label><input id="rf-brand" value="${this.escapeAttr(p.brand)}"></div>
             <div class="form-group"><label>Model Number</label><input id="rf-model" value="${p.model_number||''}"></div>
             <div class="form-group"><label>Size</label><input id="rf-size" value="${p.size||''}"></div>
           </div>
@@ -12892,8 +12892,8 @@ const App = {
 
   _varTypeRowHtml(name, values, idx) {
     return `<div class="var-type-row">
-      <input placeholder="Attribute (e.g. Size)" value="${name}" class="var-type-name" style="flex:0 0 130px">
-      <input placeholder="Values, comma-separated (e.g. S, M, L, XL)" value="${values}" class="var-type-values" style="flex:1">
+      <input placeholder="Attribute (e.g. Size)" value="${this.escapeAttr(name)}" class="var-type-name" style="flex:0 0 130px">
+      <input placeholder="Values, comma-separated (e.g. S, M, L, XL)" value="${this.escapeAttr(values)}" class="var-type-values" style="flex:1">
       <button class="btn btn-danger btn-sm" onclick="this.closest('.var-type-row').remove()">✕</button>
     </div>`;
   },
@@ -12988,8 +12988,8 @@ const App = {
     row.dataset.editing = '1';
     const v = this._panelVariations?.find(x => x.id === variationId) || {};
     row.innerHTML = `
-      <td><input id="vei-name" value="${v.name||''}" style="width:110px"></td>
-      <td><input id="vei-sku" value="${v.sku||''}" style="width:100px;font-family:monospace;font-size:12px"></td>
+      <td><input id="vei-name" value="${this.escapeAttr(v.name)}" style="width:110px"></td>
+      <td><input id="vei-sku" value="${this.escapeAttr(v.sku)}" style="width:100px;font-family:monospace;font-size:12px"></td>
       <td colspan="2"><div style="display:flex;gap:4px"><input type="number" id="vei-price" value="${v.price??''}" placeholder="base" style="width:75px" step="0.01" title="Fixed price (blank = base + modifier)"><input type="number" id="vei-modifier" value="${v.price_modifier??0}" style="width:65px" step="0.01" placeholder="+0.00" title="Price modifier"></div></td>
       <td><input type="number" id="vei-cost" value="${v.cost??''}" style="width:70px" step="0.01" placeholder="—"></td>
       <td><input type="number" id="vei-stock" value="${v.stock_qty??0}" style="width:60px" min="0"></td>
@@ -14635,7 +14635,7 @@ const App = {
               <hr style="margin:12px 0">
               <strong style="font-size:12px;color:var(--text-muted);text-transform:uppercase">Reference 1 (Main)</strong>
               <div class="input-row" style="margin-top:6px">
-                <div class="form-group"><label>Name</label><input id="cf-ref-name" value="${c.rental_reference_name||''}"></div>
+                <div class="form-group"><label>Name</label><input id="cf-ref-name" value="${this.escapeAttr(c.rental_reference_name)}"></div>
                 <div class="form-group"><label>Phone</label><input id="cf-ref-phone" value="${c.rental_reference_phone||''}"></div>
               </div>
               <div class="input-row">
@@ -14654,14 +14654,14 @@ const App = {
               <hr style="margin:12px 0">
               <strong style="font-size:12px;color:var(--text-muted);text-transform:uppercase">Reference 2</strong>
               <div class="input-row" style="margin-top:6px">
-                <div class="form-group"><label>Name</label><input id="cf-ref2-name" value="${c.rental_reference2_name||''}"></div>
+                <div class="form-group"><label>Name</label><input id="cf-ref2-name" value="${this.escapeAttr(c.rental_reference2_name)}"></div>
                 <div class="form-group"><label>Phone</label><input id="cf-ref2-phone" value="${c.rental_reference2_phone||''}"></div>
               </div>
               <div class="form-group"><label>Relationship</label><input id="cf-ref2-relationship" value="${c.rental_reference2_relationship||''}" placeholder="e.g. Employer, Family, Friend"></div>
               <hr style="margin:12px 0">
               <strong style="font-size:12px;color:var(--text-muted);text-transform:uppercase">Reference 3</strong>
               <div class="input-row" style="margin-top:6px">
-                <div class="form-group"><label>Name</label><input id="cf-ref3-name" value="${c.rental_reference3_name||''}"></div>
+                <div class="form-group"><label>Name</label><input id="cf-ref3-name" value="${this.escapeAttr(c.rental_reference3_name)}"></div>
                 <div class="form-group"><label>Phone</label><input id="cf-ref3-phone" value="${c.rental_reference3_phone||''}"></div>
               </div>
               <div class="form-group"><label>Relationship</label><input id="cf-ref3-relationship" value="${c.rental_reference3_relationship||''}" placeholder="e.g. Employer, Family, Friend"></div>
@@ -17926,11 +17926,11 @@ const App = {
             </div>
           </div>`}
           <div class="input-row">
-            <div class="form-group"><label>First Name *</label><input id="ef-first" value="${emp.first_name||''}"></div>
-            <div class="form-group"><label>Last Name *</label><input id="ef-last" value="${emp.last_name||''}"></div>
+            <div class="form-group"><label>First Name *</label><input id="ef-first" value="${this.escapeAttr(emp.first_name)}"></div>
+            <div class="form-group"><label>Last Name *</label><input id="ef-last" value="${this.escapeAttr(emp.last_name)}"></div>
           </div>
           <div class="input-row">
-            <div class="form-group"><label>Username *</label><input id="ef-user" value="${emp.username||''}"></div>
+            <div class="form-group"><label>Username *</label><input id="ef-user" value="${this.escapeAttr(emp.username)}"></div>
             <div class="form-group"><label>PIN *</label><input type="password" id="ef-pin" placeholder="${id ? 'Leave blank to keep' : 'Enter PIN'}" maxlength="6"></div>
           </div>
           <div style="border-top:1px solid var(--border);margin:8px 0 12px;padding-top:12px">
@@ -18279,7 +18279,7 @@ const App = {
             <table>
               <thead><tr><th>Name</th><th>Products</th><th>Actions</th></tr></thead>
               <tbody id="cat-table-body">
-                ${categories.map(c => `<tr><td class="fw-600">${c.name}</td><td style="text-align:center">${c.product_count}</td><td><button class="btn btn-secondary btn-sm" onclick="App.showCategoryForm(${c.id},'${c.name}','${c.description||''}')">Edit</button></td></tr>`).join('')}
+                ${categories.map(c => `<tr><td class="fw-600">${c.name}</td><td style="text-align:center">${c.product_count}</td><td><button class="btn btn-secondary btn-sm" onclick="App.showCategoryForm(${c.id},'${this.escapeAttr(c.name).replace(/'/g,"\\'")}','${this.escapeAttr(c.description).replace(/'/g,"\\'")}')">Edit</button></td></tr>`).join('')}
               </tbody>
             </table>
           </div>
@@ -18891,7 +18891,7 @@ const App = {
                 <td style="padding:10px 16px;color:var(--text-secondary,#6b7280);font-size:13px">${c.description || '—'}</td>
                 <td style="padding:10px 16px;text-align:center;font-size:13px">${c.product_count}</td>
                 <td style="padding:10px 16px;text-align:right">
-                  <button class="btn btn-secondary btn-sm" onclick="App.showCategoryForm(${c.id},'${(c.name||'').replace(/'/g,"\\'")}','${(c.description||'').replace(/'/g,"\\'")}',true)">Edit</button>
+                  <button class="btn btn-secondary btn-sm" onclick="App.showCategoryForm(${c.id},'${this.escapeAttr(c.name).replace(/'/g,"\\'")}','${this.escapeAttr(c.description).replace(/'/g,"\\'")}',true)">Edit</button>
                 </td>
               </tr>`).join('') : '<tr><td colspan="4" style="padding:24px;text-align:center;color:var(--text-secondary,#6b7280)">No categories yet</td></tr>'}
             </tbody>
@@ -18906,8 +18906,8 @@ const App = {
       <div class="modal" style="max-width:380px">
         <div class="modal-header"><span class="modal-title">${id ? 'Edit Category' : 'Add Category'}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
-          <div class="form-group"><label>Name *</label><input id="catf-name" value="${name||''}"></div>
-          <div class="form-group"><label>Description</label><input id="catf-desc" value="${desc||''}"></div>
+          <div class="form-group"><label>Name *</label><input id="catf-name" value="${this.escapeAttr(name)}"></div>
+          <div class="form-group"><label>Description</label><input id="catf-desc" value="${this.escapeAttr(desc)}"></div>
         </div>
         <div class="modal-footer">
           ${id ? `<button class="btn btn-danger" onclick="App.deleteCategory(${id},${fromInventory})">Delete</button>` : ''}
@@ -18960,7 +18960,7 @@ const App = {
                 <td style="padding:10px 16px;color:var(--text-secondary,#6b7280);font-size:13px">${b.description || '—'}</td>
                 <td style="padding:10px 16px;text-align:center;font-size:13px">${b.product_count}</td>
                 <td style="padding:10px 16px;text-align:right">
-                  <button class="btn btn-secondary btn-sm" onclick="App.showBrandForm(${b.id},'${(b.name||'').replace(/'/g,"\\'")}','${(b.description||'').replace(/'/g,"\\'")}')">Edit</button>
+                  <button class="btn btn-secondary btn-sm" onclick="App.showBrandForm(${b.id},'${this.escapeAttr(b.name).replace(/'/g,"\\'")}','${this.escapeAttr(b.description).replace(/'/g,"\\'")}')">Edit</button>
                 </td>
               </tr>`).join('') : '<tr><td colspan="4" style="padding:24px;text-align:center;color:var(--text-secondary,#6b7280)">No brands yet</td></tr>'}
             </tbody>
@@ -18975,8 +18975,8 @@ const App = {
       <div class="modal" style="max-width:380px">
         <div class="modal-header"><span class="modal-title">${id ? 'Edit Brand' : 'Add Brand'}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
-          <div class="form-group"><label>Name *</label><input id="brandf-name" value="${name||''}"></div>
-          <div class="form-group"><label>Description</label><input id="brandf-desc" value="${desc||''}"></div>
+          <div class="form-group"><label>Name *</label><input id="brandf-name" value="${this.escapeAttr(name)}"></div>
+          <div class="form-group"><label>Description</label><input id="brandf-desc" value="${this.escapeAttr(desc)}"></div>
         </div>
         <div class="modal-footer">
           ${id ? `<button class="btn btn-danger" onclick="App.deleteBrand(${id})">Delete</button>` : ''}
@@ -25143,7 +25143,7 @@ const App = {
         <div class="modal-header"><span class="modal-title">${id ? 'Edit' : 'New'} Branch</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <div class="input-row">
-            <div class="form-group"><label>Branch Name *</label><input id="bf-name" value="${b.name||''}"></div>
+            <div class="form-group"><label>Branch Name *</label><input id="bf-name" value="${this.escapeAttr(b.name)}"></div>
             <div class="form-group"><label>Manager</label><input id="bf-manager" value="${b.manager||''}"></div>
           </div>
           <div class="form-group"><label>Address</label><input id="bf-addr" value="${b.address||''}"></div>
@@ -25946,8 +25946,8 @@ const App = {
       <div class="modal" style="max-width:600px">
         <div class="modal-header"><span class="modal-title">${id ? 'Edit' : 'New'} Security Group</span><button class="modal-close" onclick="App.closeModal()">✕</button></div>
         <div class="modal-body" style="max-height:70vh;overflow-y:auto">
-          <div class="form-group"><label>Group Name *</label><input id="sg-name" value="${g.name||''}"></div>
-          <div class="form-group"><label>Description</label><input id="sg-desc" value="${g.description||''}"></div>
+          <div class="form-group"><label>Group Name *</label><input id="sg-name" value="${this.escapeAttr(g.name)}"></div>
+          <div class="form-group"><label>Description</label><input id="sg-desc" value="${this.escapeAttr(g.description)}"></div>
           <div class="form-group">
             <label>Branch Access</label>
             <label class="perm-item" style="padding:10px 12px;border:1px solid var(--border);border-radius:6px;display:flex;align-items:flex-start;gap:10px;cursor:pointer;margin-top:6px">
