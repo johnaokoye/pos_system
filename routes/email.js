@@ -2,12 +2,13 @@ const express = require('express');
 const router = express.Router();
 const nodemailer = require('nodemailer');
 const { db } = require('../database');
-const { requireAuth, requirePermission, can } = require('../lib/permissions');
+const { requireAuth, requirePermission, requireAnyPermission, can } = require('../lib/permissions');
 const { inlineProtectedImages } = require('../lib/protectedUploads');
 const { rentalQuoteSummary, attachRentalRates, attachRateBasis, rentalWindow, rateBasisLabel } = require('../lib/rentals');
 const { renderDocumentPdf } = require('../lib/documentPdf');
 const { paymentAllocations } = require('../lib/legacyInvoices');
 const { loadDrawerSession } = require('../lib/drawerReport');
+const { paymentReceipt } = require('../lib/customerPayments');
 
 // Brand palette for every email sent out (receipts, quotes, invoices,
 // statements, notices): green header with a yellow accent stripe, black
@@ -333,6 +334,57 @@ function buildReturnReceiptHtml(ret, s) {
         <tr><td style="padding:3px 0">Tax</td><td style="text-align:right">${fmt(ret.tax_amount)}</td></tr>
         <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
         <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">${resolutionLabel.toUpperCase()} TOTAL</td><td style="font-size:16px;font-weight:700;color:#dc2626;text-align:right">${fmt(ret.total)}</td></tr>
+      </table>
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body>
+</html>`;
+}
+
+// Customer account payment receipt (lib/customerPayments.js paymentReceipt).
+function paymentMethodLabel(m) {
+  return String(m || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function buildPaymentReceiptHtml(p, s) {
+  const storeName = s.store_name || 'My Store';
+  const storeAddr = p.branch_address
+    ? `${p.branch_address}${p.branch_city ? ', ' + p.branch_city : ''}${p.branch_state ? ' ' + p.branch_state : ''}${p.branch_zip ? ' ' + p.branch_zip : ''}`
+    : s.store_address || '';
+  const rows = (p.applied || []).map(a => `
+    <tr>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${esc(a.invoice_number)}<br><span style="color:#888;font-size:11px">${a.invoice_date ? new Date(a.invoice_date).toLocaleDateString() : ''}</span></td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(a.amount)}</td>
+    </tr>`).join('');
+
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Payment Receipt ${esc(p.payment_number)}</title></head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
+<tr><td align="center">
+  <table width="480" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+    ${docHeader(storeName, p.branch_name, storeAddr, p.branch_phone || s.store_phone, 'Payment Receipt', `Ref: ${esc(p.payment_number)}`)}
+    <tr><td style="padding:0 24px 20px">
+      ${docRow('Date', new Date(p.created_at).toLocaleString())}
+      ${docRow('Customer', esc(p.customer_name))}
+      ${p.customer_number ? docRow('Account #', esc(p.customer_number)) : ''}
+      ${docRow('Payment Method', esc(paymentMethodLabel(p.payment_method)))}
+      ${p.reference ? docRow('Reference', esc(p.reference)) : ''}
+      ${p.employee_name ? docRow('Received By', esc(p.employee_name)) : ''}
+      ${p.notes ? docRow('Notes', esc(p.notes)) : ''}
+      <div style="height:12px"></div>
+      ${rows ? `<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px">
+        <thead><tr style="background:#f9fafb"><th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Applied To Invoice</th><th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Amount</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>` : ''}
+      <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-top:12px">
+        ${p.unapplied > 0.005 ? `<tr><td style="padding:3px 0">Held on account (not yet applied to an invoice)</td><td style="text-align:right">${fmt(p.unapplied)}</td></tr>` : ''}
+        <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
+        <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">AMOUNT RECEIVED</td><td style="font-size:16px;font-weight:700;color:#16a34a;text-align:right">${fmt(p.amount)}</td></tr>
+        <tr><td style="padding:8px 0 0">Account balance as of ${new Date().toLocaleDateString()}</td><td style="padding:8px 0 0;text-align:right;font-weight:600">${fmt(p.account_balance)}</td></tr>
       </table>
     </td></tr>
   </table>
@@ -1009,6 +1061,31 @@ router.post('/send-return-receipt/:id', requireAuth, async (req, res) => {
         html: buildReturnReceiptHtml(ret, s),
       });
       res.json({ success: true, message: `Return receipt sent to ${to}` });
+    } catch (e) {
+      res.status(500).json({ error: `Failed to send email: ${e.message}` });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Email a customer account payment receipt.
+router.post('/send-payment-receipt/:id', requireAnyPermission('transactions', 'pos_receive_payment'), async (req, res) => {
+  const { to } = req.body;
+  if (!to) return res.status(400).json({ error: 'Recipient email is required' });
+  try {
+    const p = await paymentReceipt(req.params.id);
+    if (!p || (req.employee?.is_salesperson && p.employee_id !== req.employee.id)) return res.status(404).json({ error: 'Payment not found' });
+    const s = await getSettings();
+    try {
+      const transporter = createTransporter(s);
+      const fromName = s.email_from_name || s.store_name || 'POS System';
+      const fromAddr = s.email_smtp_user || s.store_email || '';
+      await transporter.sendMail({
+        from: `"${fromName}" <${fromAddr}>`,
+        to,
+        subject: `Payment Receipt - ${p.payment_number} from ${s.store_name || 'Our Store'}`,
+        html: buildPaymentReceiptHtml(p, s),
+      });
+      res.json({ success: true, message: `Payment receipt sent to ${to}` });
     } catch (e) {
       res.status(500).json({ error: `Failed to send email: ${e.message}` });
     }

@@ -11,7 +11,7 @@ const { resolveUnit, lineName, parseQty, stockUnits } = require('../lib/units');
 const { isSerialNumberProduct, serialNumberLabel, serialNumberOf, serialClashError } = require('../lib/serialNumber');
 const { checkDiscountEligibility } = require('./promotions');
 const { allocateTicketDiscount, returnedDiscountShare } = require('../lib/ticketDiscount');
-const { UNAPPLIED_SQL } = require('../lib/customerPayments');
+const { UNAPPLIED_SQL, paymentReceipt } = require('../lib/customerPayments');
 
 // Mirrors availableCashBack() in public/index.html — the frontend uses this
 // same formula to decide whether to show the Cash Back bar; this copy is the
@@ -332,6 +332,16 @@ router.get('/customer-payments', requirePermission('transactions'), async (req, 
     args.push(parseInt(limit) || 200);
     const { rows } = await db.execute({ sql, args });
     res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// One payment's receipt (lib/customerPayments.js paymentReceipt) — from the
+// Customer Payments view, or the POS right after Receive Payment.
+router.get('/customer-payments/:id', requireAnyPermission('transactions', 'pos_receive_payment'), async (req, res) => {
+  try {
+    const receipt = await paymentReceipt(req.params.id);
+    if (!receipt || (req.employee?.is_salesperson && receipt.employee_id !== req.employee.id)) return res.status(404).json({ error: 'Payment not found' });
+    res.json(receipt);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

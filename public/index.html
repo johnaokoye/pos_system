@@ -3216,6 +3216,7 @@ const App = {
       this.closeModal();
       this.alert(`Payment ${p.payment_number} received: ${this.fmt(p.amount)} from ${p.customer_name}${p.unapplied > 0.005 ? ' (on account)' : ''}. Balance now ${this.fmt(p.balance_after)}.`);
       if (this.cartCustomer?.id === p.customer_id) this.setCartCustomer(p.customer_id);
+      this.showPaymentReceipt(p.id);
     } catch (e) { if (btn) btn.disabled = false; this.alert(e.message, 'error'); }
   },
 
@@ -15784,7 +15785,7 @@ const App = {
     const method = m => String(m || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
     const total = rows.reduce((t, r) => t + (Number(r.amount) || 0), 0);
     return `<table>
-      <thead><tr><th>Payment #</th><th>Date/Time</th><th>Customer</th><th>Branch</th><th>Method</th><th>Reference</th><th>Amount</th><th>Applied To</th><th>On Account</th><th>Received By</th><th>Notes</th></tr></thead>
+      <thead><tr><th>Payment #</th><th>Date/Time</th><th>Customer</th><th>Branch</th><th>Method</th><th>Reference</th><th>Amount</th><th>Applied To</th><th>On Account</th><th>Received By</th><th>Notes</th><th></th></tr></thead>
       <tbody>${rows.map(r => `<tr>
         <td class="fw-600" style="font-family:monospace;white-space:nowrap">${this.escapeAttr(r.payment_number)}</td>
         <td style="white-space:nowrap">${this.fmtDateTime(r.created_at)}</td>
@@ -15797,8 +15798,9 @@ const App = {
         <td${r.unapplied > 0.005 ? ' style="color:var(--warning);font-weight:600"' : ''}>${r.unapplied > 0.005 ? this.fmt(r.unapplied) : '—'}</td>
         <td>${this.escapeAttr(r.employee_name || '—')}</td>
         <td style="font-size:12px;color:var(--text-muted)">${this.escapeAttr(r.notes || '')}</td>
+        <td><button class="btn btn-outline btn-sm" style="white-space:nowrap" onclick="App.showPaymentReceipt(${r.id})" title="View, print or email the payment receipt">🧾 Receipt</button></td>
       </tr>`).join('')}</tbody>
-      <tfoot><tr><td colspan="6" class="fw-600" style="text-align:right">${rows.length} payment${rows.length === 1 ? '' : 's'} — Total</td><td class="fw-600">${this.fmt(total)}</td><td colspan="4"></td></tr></tfoot>
+      <tfoot><tr><td colspan="6" class="fw-600" style="text-align:right">${rows.length} payment${rows.length === 1 ? '' : 's'} — Total</td><td class="fw-600">${this.fmt(total)}</td><td colspan="5"></td></tr></tfoot>
     </table>`;
   },
 
@@ -16330,6 +16332,67 @@ const App = {
           <button class="btn btn-primary" onclick="window.print()">🖨️ Print</button>
         </div>
       </div>`);
+  },
+
+  // Customer account payment receipt (GET /transactions/customer-payments/:id)
+  // — from the Customer Payments view, or straight after POS Receive Payment.
+  async showPaymentReceipt(paymentId) {
+    let p;
+    try { p = await this.api('GET', `/transactions/customer-payments/${paymentId}`); }
+    catch(e) { this.alert(e.message, 'error'); return; }
+    const storeName = this.settings.store_name || 'My Store';
+    const method = String(p.payment_method || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    const esc = v => this.escapeAttr(v ?? '');
+    this._paymentReceipt = p;
+    this.showModal(`
+      <div class="modal" style="max-width:400px">
+        <div class="modal-header">
+          <span class="modal-title">Payment Receipt</span>
+          <button class="modal-close" onclick="App.closeModal()">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="receipt">
+            <div class="receipt-store" style="text-align:center;font-weight:700;font-size:15px;margin-bottom:6px">${esc(storeName)}</div>
+            ${this._printLogoTag(36)}
+            <div class="receipt-title">PAYMENT RECEIPT</div>
+            ${p.branch_name ? `<div style="text-align:center;font-size:12px;color:#444;font-weight:600">${esc(p.branch_name)}</div>` : ''}
+            <hr>
+            <div class="receipt-row"><span>Payment #:</span><span>${esc(p.payment_number)}</span></div>
+            <div class="receipt-row"><span>Date:</span><span>${this.fmtDateTime(p.created_at)}</span></div>
+            <div class="receipt-row"><span>Customer:</span><span>${esc(p.customer_name)}</span></div>
+            ${p.customer_number ? `<div class="receipt-row"><span>Account #:</span><span>${esc(p.customer_number)}</span></div>` : ''}
+            <div class="receipt-row"><span>Method:</span><span>${esc(method)}</span></div>
+            ${p.reference ? `<div class="receipt-row"><span>Reference:</span><span>${esc(p.reference)}</span></div>` : ''}
+            ${p.employee_name ? `<div class="receipt-row"><span>Received By:</span><span>${esc(p.employee_name)}</span></div>` : ''}
+            ${p.notes ? `<div class="receipt-row"><span style="flex-shrink:0">Notes:</span><span style="text-align:right;white-space:pre-wrap;overflow-wrap:anywhere">${esc(p.notes)}</span></div>` : ''}
+            ${p.applied.length ? `<hr><div style="font-size:11px;font-weight:700;color:#555;margin-bottom:4px">APPLIED TO</div>
+            ${p.applied.map(a => `<div class="receipt-row"><span>${esc(a.invoice_number)} <span style="font-size:11px;color:#555">${a.invoice_date ? this.fmtDate(a.invoice_date) : ''}</span></span><span>${this.fmt(a.amount)}</span></div>`).join('')}` : ''}
+            ${p.unapplied > 0.005 ? `<div class="receipt-row"><span>Held on account</span><span>${this.fmt(p.unapplied)}</span></div>` : ''}
+            <hr>
+            <div class="receipt-row receipt-total"><span>AMOUNT RECEIVED</span><span>${this.fmt(p.amount)}</span></div>
+            <div class="receipt-row" style="margin-top:6px"><span>Account Balance</span><span>${this.fmt(p.account_balance)}</span></div>
+            <div style="font-size:11px;color:#555">as of ${this.fmtDate(new Date().toISOString())}</div>
+            <hr>
+          </div>
+        </div>
+        <div class="modal-footer no-print">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+          <button class="btn btn-secondary" onclick="App.emailPaymentReceipt()">✉️ Email</button>
+          <button class="btn btn-primary" onclick="window.print()">🖨️ Print</button>
+        </div>
+      </div>`);
+  },
+
+  emailPaymentReceipt() {
+    const p = this._paymentReceipt;
+    if (!p) return;
+    this.showEmailModal('Email Payment Receipt', p.customer_email || '', async (to) => {
+      this.closeModal();
+      try {
+        await this.api('POST', `/email/send-payment-receipt/${p.id}`, { to });
+        this.alert(`Payment receipt sent to ${to}`);
+      } catch(e) { this.alert(e.message, 'error'); }
+    });
   },
 
   emailReturnReceipt(retId, customerEmail) {
