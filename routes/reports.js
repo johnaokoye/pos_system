@@ -1118,6 +1118,87 @@ router.get('/supplier-item-sales', requirePermission('reports'), async (req, res
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Items sold — per-item units and sales over a period, net of returns, for
+// the Inventory Reports screen. Same sale/return line basis as
+// /supplier-item-sales (stock units; returns counted on the day processed;
+// cost = net units × current cost). type 'stock' (default) keeps to the
+// Retail Inventory items — no services, rentals or non-inventory — 'all'
+// takes every product. on_hand is the branch's stock when branch_id is set,
+// otherwise the global stock_qty. Reachable from Reports or Inventory.
+router.get('/items-sold', requireAnyPermission('reports', 'inventory'), async (req, res) => {
+  try {
+    const { start, end, branch_id, category_id, brand, q } = req.query;
+    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+    const e = end || new Date().toISOString().slice(0, 10);
+    const tbf = branch_id ? ' AND t.branch_id = ?' : '';
+    const rbf = branch_id ? ' AND r.branch_id = ?' : '';
+    const bp = branch_id ? [branch_id] : [];
+
+    let pf = '';
+    const pp = [];
+    if (req.query.type !== 'all') pf += ' AND COALESCE(p.is_service, 0) = 0 AND COALESCE(p.is_rental, 0) = 0 AND COALESCE(p.is_non_inventory, 0) = 0';
+    if (category_id === 'none') pf += ' AND p.category_id IS NULL';
+    else if (category_id) { pf += ' AND p.category_id = ?'; pp.push(Number(category_id)); }
+    if (brand) { pf += ' AND p.brand = ?'; pp.push(brand); }
+    if (q && q.trim()) {
+      const like = `%${q.trim()}%`;
+      pf += ' AND (p.name LIKE ? OR p.sku LIKE ? OR p.barcode LIKE ?)';
+      pp.push(like, like, like);
+    }
+    const onHand = branch_id
+      ? '(SELECT bi.stock_qty FROM branch_inventory bi WHERE bi.product_id = p.id AND bi.branch_id = ?)'
+      : 'p.stock_qty';
+
+    const { rows } = await db.execute({
+      sql: `WITH lines AS (
+          SELECT ti.product_id, t.id AS tx_id, ti.quantity * COALESCE(ti.units_per, 1) AS units, ti.total AS sales, 0 AS ret_units, 0 AS returns
+          FROM transaction_items ti JOIN transactions t ON t.id = ti.transaction_id
+          WHERE t.status = 'completed' AND ti.product_id IS NOT NULL AND date(t.created_at) BETWEEN date(?) AND date(?)${tbf}
+          UNION ALL
+          SELECT ri.product_id, NULL, 0, 0, ri.quantity * COALESCE(ti.units_per, 1), ri.total
+          FROM return_items ri JOIN returns r ON r.id = ri.return_id LEFT JOIN transaction_items ti ON ti.id = ri.transaction_item_id
+          WHERE r.status != 'cancelled' AND ri.product_id IS NOT NULL AND date(r.created_at) BETWEEN date(?) AND date(?)${rbf}
+        )
+        SELECT p.id AS product_id, p.sku, p.name AS product_name, COALESCE(c.name, 'Uncategorized') AS category_name, p.brand,
+          COUNT(DISTINCT l.tx_id) AS sales_count,
+          COALESCE(SUM(l.units), 0) AS units, COALESCE(SUM(l.ret_units), 0) AS ret_units,
+          COALESCE(SUM(l.sales), 0) AS sales, COALESCE(SUM(l.returns), 0) AS returns,
+          COALESCE(SUM((l.units - l.ret_units) * COALESCE(p.cost, 0)), 0) AS cost,
+          ${onHand} AS on_hand
+        FROM lines l JOIN products p ON p.id = l.product_id LEFT JOIN categories c ON c.id = p.category_id
+        WHERE 1=1${pf}
+        GROUP BY p.id
+        ORDER BY SUM(l.units - l.ret_units) DESC, SUM(l.sales - l.returns) DESC`,
+      args: [s, e, ...bp, s, e, ...bp, ...bp, ...pp],
+    });
+
+    const items = rows.map(r => {
+      const net_units = Math.round((r.units - r.ret_units) * 1000) / 1000;
+      const net_sales = parseFloat((r.sales - r.returns).toFixed(2));
+      const cost = parseFloat(Number(r.cost).toFixed(2));
+      const margin = parseFloat((net_sales - cost).toFixed(2));
+      return {
+        ...r,
+        sales: parseFloat(Number(r.sales).toFixed(2)),
+        returns: parseFloat(Number(r.returns).toFixed(2)),
+        net_units, net_sales, cost, margin,
+        margin_percent: net_sales > 0 ? parseFloat((margin / net_sales * 100).toFixed(1)) : null,
+        avg_price: r.units > 0 ? parseFloat((r.sales / r.units).toFixed(2)) : null,
+        on_hand: r.on_hand == null ? null : Number(r.on_hand),
+      };
+    });
+    const summary = items.reduce((t, r) => {
+      for (const k of ['units', 'ret_units', 'net_units', 'sales', 'returns', 'net_sales', 'cost', 'margin']) t[k] += Number(r[k]) || 0;
+      return t;
+    }, { items: items.length, units: 0, ret_units: 0, net_units: 0, sales: 0, returns: 0, net_sales: 0, cost: 0, margin: 0 });
+    for (const k of ['sales', 'returns', 'net_sales', 'cost', 'margin']) summary[k] = parseFloat(summary[k].toFixed(2));
+    for (const k of ['units', 'ret_units', 'net_units']) summary[k] = Math.round(summary[k] * 1000) / 1000;
+    summary.margin_percent = summary.net_sales > 0 ? parseFloat((summary.margin / summary.net_sales * 100).toFixed(1)) : null;
+
+    res.json({ start: s, end: e, summary, items });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Rental deposit breakdown — where every deposit taken in the period ended
 // up: still held on an open rental, used (consumed by rental fees / damage /
 // tax at return), refunded (cash / bank transfer / original card, or still
