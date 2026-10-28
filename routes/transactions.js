@@ -216,6 +216,51 @@ router.get('/', requireTransactionsList, async (req, res) => {
 });
 
 // Returns list for the Transactions screen's "Returns" view — each opens its
+// Exchange (resolution 'replacement') returns whose credit hasn't been spent
+// yet — the credit is spent by the one non-voided sale carrying the return as
+// source_return_id. Until then it waits in POS Hold Recall for any cashier,
+// so a return processed by someone without POS access (or a browser that
+// closed before the replacement was rung up) isn't lost. Must stay above
+// GET /:id, like /returns below.
+const EXCHANGE_SPENT_SQL = `EXISTS (SELECT 1 FROM transactions st WHERE st.source_return_id = r.id AND st.status != 'voided')`;
+router.get('/pending-exchanges', requirePermission('pos'), async (req, res) => {
+  try {
+    const { customer_id } = req.query;
+    let sql = `SELECT r.id, r.return_number, r.created_at, r.total, r.customer_id, r.branch_id, r.notes,
+      t.transaction_number as original_transaction_number,
+      c.first_name || ' ' || c.last_name as customer_name, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name,
+      (SELECT GROUP_CONCAT(ri.product_name, ', ') FROM return_items ri WHERE ri.return_id = r.id) as item_names
+      FROM returns r
+      LEFT JOIN transactions t ON r.original_transaction_id = t.id
+      LEFT JOIN customers c ON r.customer_id = c.id
+      LEFT JOIN employees e ON r.employee_id = e.id
+      LEFT JOIN branches b ON r.branch_id = b.id
+      WHERE r.resolution = 'replacement' AND r.status != 'cancelled' AND NOT ${EXCHANGE_SPENT_SQL}`;
+    const args = [];
+    if (customer_id) { sql += ' AND r.customer_id = ?'; args.push(customer_id); }
+    sql += ' ORDER BY r.created_at DESC LIMIT 100';
+    const { rows } = await db.execute({ sql, args });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// The exchange credit a sale may use from source_return_id, or an error
+// message: the return must be an uncancelled exchange whose credit no other
+// sale has spent, for the same customer. Checked before the sale and again
+// inside its write transaction so two tills can't spend it twice.
+async function exchangeCreditError(conn, returnId, customerId) {
+  const { rows: [ret] } = await conn.execute({
+    sql: `SELECT r.id, r.return_number, r.resolution, r.status, r.customer_id, r.total, ${EXCHANGE_SPENT_SQL} as spent FROM returns r WHERE r.id = ?`,
+    args: [returnId],
+  });
+  if (!ret) return { error: 'That return credit no longer exists' };
+  if (ret.resolution !== 'replacement') return { error: `Return ${ret.return_number} wasn't processed as an exchange, so it has no credit to apply` };
+  if (ret.status === 'cancelled') return { error: `Return ${ret.return_number} was cancelled` };
+  if (ret.spent) return { error: `The credit from return ${ret.return_number} has already been used on another sale` };
+  if (ret.customer_id && Number(ret.customer_id) !== Number(customerId)) return { error: `The credit from return ${ret.return_number} belongs to another customer — select that customer on the ticket` };
+  return { ret };
+}
+
 // return receipt (GET /returns/:id) to reprint or email. Same date/branch/
 // customer filters as the sales list, plus the return or original sale
 // number; a salesperson only sees returns of sales that are theirs. Must
@@ -498,6 +543,13 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       });
     }
     tax_amount = parseFloat(tax_amount.toFixed(2));
+    // An exchange's return credit rides in as the (after-tax) discount —
+    // only from a pending exchange return, and never more than it's worth.
+    if (source_return_id) {
+      const { error, ret } = await exchangeCreditError(db, source_return_id, customer_id);
+      if (error) return res.status(400).json({ error });
+      disc = Math.min(disc, parseFloat(ret.total));
+    }
     const storeCredit = parseFloat(store_credit_applied || 0);
 
     // Server-side clamp against the customer's actual eligibility right now
@@ -550,6 +602,10 @@ router.post('/', requirePermission('pos'), async (req, res) => {
     const tx = await db.transaction('write');
     let committed = false;
     try {
+      if (source_return_id) {
+        const { error } = await exchangeCreditError(tx, source_return_id, customer_id);
+        if (error) throw new Error(error);
+      }
       const txSource = req.apiKey ? 'online' : 'pos';
       const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,created_by,salesperson_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,promotion_code,promotion_name,total,payment_method,amount_tendered,change_amount,is_credit,notes,source_return_id,store_credit_applied,cash_back_applied,tax_exempt,tax_exemption_number,approval_code,source,discount_pre_tax,po_number) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id || null, employee_id || 1, createdBy, salespersonId, branch_id || null, drawer_session_id || null, subtotal, tax_amount, disc, promotion_code || null, promotion_name || null, total, method, tendered, change > 0 ? change : 0, isCredit ? 1 : 0, notes || null, source_return_id || null, storeCredit > 0 ? storeCredit : 0, cashBack > 0 ? cashBack : 0, isTaxExempt, tax_exemption_number || null, finalApprovalCode, txSource, discountPreTax, poNumber] });
       const txId = Number(txResult.lastInsertRowid);

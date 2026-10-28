@@ -4567,14 +4567,18 @@ const App = {
     // did the assessment — keeps cash handling with the cashier/drawer, same
     // as the pending-rentals flow below.
     const woUrl = customerId ? `/work-orders?view=awaiting_payment&customer_id=${customerId}` : '/work-orders?view=awaiting_payment&limit=50';
+    // Exchange returns whose replacement hasn't been rung up yet — e.g. the
+    // return was processed by someone without POS access.
+    const exchangesUrl = customerId ? `/transactions/pending-exchanges?customer_id=${customerId}` : '/transactions/pending-exchanges';
     try {
-      const [held, pendingRentals, pendingRentalBalances, pendingWOs] = await Promise.all([
+      const [held, pendingRentals, pendingRentalBalances, pendingWOs, pendingExchanges] = await Promise.all([
         this.api('GET', ordersUrl),
         this.can('rentals') ? this.api('GET', rentalsUrl).catch(() => []) : Promise.resolve([]),
         this.can('rentals') ? this.api('GET', rentalBalanceUrl).catch(() => []) : Promise.resolve([]),
         this.can('work_orders') ? this.api('GET', woUrl).catch(() => []) : Promise.resolve([]),
+        this.api('GET', exchangesUrl).catch(() => []),
       ]).then(([h, pr, ...rest]) => [h, pr.filter(r => !r.quotation_id), ...rest]);
-      if (!held.length && !pendingRentals.length && !pendingRentalBalances.length && !pendingWOs.length) {
+      if (!held.length && !pendingRentals.length && !pendingRentalBalances.length && !pendingWOs.length && !pendingExchanges.length) {
         this.alert(customerId ? `No held orders for ${this.cartCustomer.first_name} ${this.cartCustomer.last_name}` : 'No held orders', 'info');
         return;
       }
@@ -4583,6 +4587,7 @@ const App = {
         ...pendingRentals.map(r => ({ type: 'rental', created_at: r.created_at, data: r })),
         ...pendingRentalBalances.map(r => ({ type: 'rental_balance', created_at: r.returned_at || r.created_at, data: r })),
         ...pendingWOs.map(w => ({ type: 'work_order', created_at: w.created_at, data: w })),
+        ...pendingExchanges.map(r => ({ type: 'exchange', created_at: r.created_at, data: r })),
       ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
       this.showModal(`
         <div class="modal">
@@ -4623,6 +4628,16 @@ const App = {
                     Balance Due: <strong>${this.fmt(r.balance_due)}</strong> &bull; returned ${new Date(r.returned_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}
                   </div>
                   ${this._recallMetaLine(r.employee_name, r.branch_name)}
+                </div>`)(entry.data) : entry.type === 'exchange' ? (r => `
+                <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px;cursor:pointer;transition:background 0.15s" onmouseover="this.style.background='#f0f4ff'" onmouseout="this.style.background=''" onclick="App.recallExchange(${r.id})">
+                  <div style="display:flex;justify-content:space-between;align-items:center">
+                    <strong style="font-size:14px">${this.escapeAttr(r.customer_name || 'Walk-in Customer')} <span class="badge-pill badge-info" style="font-size:10px;margin-left:4px">EXCHANGE</span></strong>
+                    <span style="font-size:12px;color:var(--text-muted);font-family:monospace">${r.return_number}</span>
+                  </div>
+                  <div style="font-size:13px;color:var(--text-muted);margin-top:3px">
+                    Credit: <strong>${this.fmt(r.total)}</strong> &bull; returned ${this.escapeAttr(r.item_names || '')} from ${r.original_transaction_number || '—'} &bull; ${this.fmtDateTime(r.created_at)}
+                  </div>
+                  ${this._recallMetaLine(r.employee_name, r.branch_name).replace('Held by', 'Returned by')}
                 </div>`)(entry.data) : (w => `
                 <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px;cursor:pointer;transition:background 0.15s" onmouseover="this.style.background='#f0f4ff'" onmouseout="this.style.background=''" onclick="App.closeModal();${w.status==='intake' ? `App.showWOAssessmentFeeModal(${w.id})` : w.status==='pending_deposit' ? `App.showWODepositModal(${w.id})` : `App.showWOFinalPaymentModal(${w.id})`}">
                   <div style="display:flex;justify-content:space-between;align-items:center">
@@ -4745,13 +4760,14 @@ const App = {
 
   async updateHoldBadge() {
     try {
-      const [held, pendingRentals, pendingRentalBalances, pendingWOs] = await Promise.all([
+      const [held, pendingRentals, pendingRentalBalances, pendingWOs, pendingExchanges] = await Promise.all([
         this.api('GET', '/transactions?status=hold&limit=50'),
         this.can('rentals') ? this.api('GET', '/rentals/agreements?view=pending').catch(() => []) : Promise.resolve([]),
         this.can('rentals') ? this.api('GET', '/rentals/agreements?view=awaiting_payment&limit=50').catch(() => []) : Promise.resolve([]),
         this.can('work_orders') ? this.api('GET', '/work-orders?view=awaiting_payment&limit=50').catch(() => []) : Promise.resolve([]),
+        this.api('GET', '/transactions/pending-exchanges').catch(() => []),
       ]).then(([h, pr, ...rest]) => [h, pr.filter(r => !r.quotation_id), ...rest]);
-      const count = held.length + pendingRentals.length + pendingRentalBalances.length + pendingWOs.length;
+      const count = held.length + pendingRentals.length + pendingRentalBalances.length + pendingWOs.length + pendingExchanges.length;
       const badge = document.getElementById('hold-count-badge');
       if (!badge) return;
       if (count > 0) {
@@ -16173,26 +16189,16 @@ const App = {
         items, resolution, notes, employee_id: this.currentUser?.id || null, override_pin
       });
       document.getElementById('return-overlay')?.remove();
-      if (resolution === 'replacement') {
-        const tx = this._retTx;
-        this._returnCredit = { id: ret.id, amount: ret.total, return_number: ret.return_number };
-        this.cartDiscount = ret.total;
-        if (tx?.customer_id) {
-          try {
-            const cust = await this.api('GET', `/customers/${tx.customer_id}`);
-            this.cartCustomer = cust;
-          } catch(e) {}
-        }
-        this.alert(`Return ${ret.return_number} processed. Return credit $${ret.total.toFixed(2)} applied to cart.`, 'success');
-        await this.showSection('pos');
-        const di = document.getElementById('discount-input');
-        if (di) di.value = ret.total.toFixed(2);
-        const dd = document.getElementById('discount-display');
-        if (dd) dd.textContent = `-${this.fmt(ret.total)}`;
-        if (tx?.customer_id && this.cartCustomer) {
-          this._renderCartCustomer();
-        }
-        this.renderCart();
+      if (resolution === 'replacement' && this.can('pos')) {
+        await this._startExchange({ ...ret, customer_id: ret.customer_id ?? this._retTx?.customer_id });
+        this.alert(`Return ${ret.return_number} processed. Return credit ${this.fmt(ret.total)} applied to cart.`, 'success');
+      } else if (resolution === 'replacement') {
+        // No POS access here — the credit waits in POS Hold Recall for a
+        // cashier to ring up the replacement.
+        this.alert(`Return ${ret.return_number} processed. The ${this.fmt(ret.total)} exchange credit is waiting in POS → Hold Recall for a cashier to ring up the replacement.`, 'success');
+        if (this.section === 'transactions') this.loadTransactions();
+        const fullRet = await this.api('GET', `/transactions/returns/${ret.id}`);
+        this.showReturnReceipt(fullRet);
       } else {
         const resLabel = resolution === 'credit_note' ? 'Credit note issued' : 'Refund processed';
         this.alert(`${resLabel} — ${ret.return_number} · ${this.fmt(ret.total)}`, 'success');
@@ -16206,6 +16212,40 @@ const App = {
       if (btn) { btn.disabled = false; btn.textContent = 'Process Return'; }
       // A wrong PIN is cleared so the manager can re-enter it.
       if (pinInput && /PIN/.test(e.message)) { pinInput.value = ''; pinInput.focus(); }
+      this.alert(e.message, 'error');
+    }
+  },
+
+  // Opens the POS on an exchange's return credit: the return's customer on
+  // the ticket and its total as the (after-tax) discount. The server only
+  // accepts it from a pending exchange (GET /transactions/pending-exchanges).
+  async _startExchange(ret) {
+    this._returnCredit = { id: ret.id, amount: parseFloat(ret.total), return_number: ret.return_number };
+    this.cartDiscount = this._returnCredit.amount;
+    if (ret.customer_id) {
+      try { this.cartCustomer = await this.api('GET', `/customers/${ret.customer_id}`); } catch(e) {}
+    }
+    await this.showSection('pos');
+    const di = document.getElementById('discount-input');
+    if (di) di.value = this._returnCredit.amount.toFixed(2);
+    const dd = document.getElementById('discount-display');
+    if (dd) dd.textContent = `-${this.fmt(this._returnCredit.amount)}`;
+    if (this.cartCustomer) this._renderCartCustomer();
+    this.renderCart();
+  },
+
+  // Hold Recall → a pending exchange: start a fresh ticket on its credit.
+  async recallExchange(returnId) {
+    try {
+      const pending = await this.api('GET', '/transactions/pending-exchanges');
+      const ret = pending.find(r => r.id === returnId);
+      if (!ret) { this.alert('That exchange credit has already been used', 'warning'); this.updateHoldBadge(); return; }
+      if (this.cart.length && !confirm('Starting this exchange will replace your current cart. Continue?')) return;
+      this.closeModal();
+      this.clearCart();
+      await this._startExchange(ret);
+      this.alert(`Exchange credit ${this.fmt(ret.total)} from ${ret.return_number} applied — ring up the replacement.`, 'success');
+    } catch(e) {
       this.alert(e.message, 'error');
     }
   },
