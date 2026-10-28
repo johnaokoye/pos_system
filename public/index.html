@@ -3079,22 +3079,23 @@ const App = {
   // are listed too, and can be applied to invoices here.
   async showReceivePaymentModal() {
     if (!this.currentDrawerSession) { this.alert('Open a cash drawer before receiving a payment', 'error'); return; }
-    let owing = [];
-    try { owing = await this.api('GET', '/customers?active=1&owing=1'); } catch (e) { this.alert(e.message, 'error'); return; }
-    const preset = this.cartCustomer && owing.find(c => c.id === this.cartCustomer.id) ? this.cartCustomer.id : null;
+    // The ticket's customer comes in already chosen; anyone else is found
+    // with the server-side customer search (name, business name, account #,
+    // phone or email), each result showing what they owe.
+    const preset = this.cartCustomer || null;
     this._custPickerOnSelect = { ...(this._custPickerOnSelect || {}), 'rp-customer': c => this._rpLoad(c?.id || null) };
     this.showModal(`
       <div class="modal" style="max-width:760px">
         <div class="modal-header"><span class="modal-title">Receive Payment</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
-          <div class="form-group"><label>Customer</label>${this._customerPickerHtml('rp-customer', owing, preset, { placeholder: `Search ${owing.length.toLocaleString()} customer${owing.length === 1 ? '' : 's'} with a balance…` })}</div>
+          <div class="form-group"><label>Customer</label>${this._customerPickerHtml('rp-customer', preset ? [preset] : [], preset?.id, { placeholder: 'Search by name, account #, phone or email…', remote: '&owing_first=1', allowAdd: false, showBalance: true })}</div>
           <div id="rp-body"><p style="font-size:13px;color:var(--text-muted)">Choose the customer who is paying.</p></div>
         </div>
         <div class="modal-footer" id="rp-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
         </div>
       </div>`);
-    if (preset) this._rpLoad(preset);
+    if (preset) this._rpLoad(preset.id);
   },
 
   async _rpLoad(customerId, keep = {}) {
@@ -3154,6 +3155,16 @@ const App = {
   _rpRender() {
     const { summary, mode } = this._rp;
     const c = summary.customer;
+    // Nothing owing and no earlier payment left to apply — say so rather
+    // than offering a payment the server will refuse.
+    if (!(Number(c.account_balance) > 0.005) && !summary.open_payments.length) {
+      document.getElementById('rp-body').innerHTML = `<div style="padding:12px 14px;border:1px solid var(--border);border-radius:6px;font-size:13px">
+        <strong>${this.escapeAttr(`${c.first_name || ''} ${c.last_name || ''}`.trim())}</strong> has nothing owing on account (balance ${this.fmt(c.account_balance)}), so there's no payment to receive.
+        ${c.customer_type !== 'credit' ? '<div style="margin-top:6px;color:var(--text-muted)">This is a cash customer — payments on account are only for credit customers.</div>' : ''}
+      </div>`;
+      this._rpFooter('');
+      return;
+    }
     const methods = [['cash', 'Cash'], ['credit_card', 'Credit Card'], ['debit_card', 'Debit Card'], ['check', 'Cheque'], ['direct_deposit', 'Direct Deposit']];
     document.getElementById('rp-body').innerHTML = `
       <div style="display:flex;gap:20px;flex-wrap:wrap;font-size:13px;padding:10px 12px;border:1px solid var(--border);border-radius:6px;margin-bottom:12px">
@@ -12512,9 +12523,9 @@ const App = {
   // remote (a query-string suffix, '' for none) searches the server as you
   // type instead of filtering `customers`, which then only needs to hold the
   // preselected customer, if any.
-  _customerPickerHtml(id, customers, selectedId, { placeholder = 'Search customer…', emptyLabel = '', remote = null } = {}) {
+  _customerPickerHtml(id, customers, selectedId, { placeholder = 'Search customer…', emptyLabel = '', remote = null, allowAdd = true, showBalance = false } = {}) {
     this._custPickerLists = this._custPickerLists || {};
-    this._custPickerLists[id] = { customers: customers || [], emptyLabel, remote };
+    this._custPickerLists[id] = { customers: customers || [], emptyLabel, remote, allowAdd, showBalance };
     const sel = selectedId != null && selectedId !== '' ? (customers || []).find(c => String(c.id) === String(selectedId)) : null;
     if (!this._custPickerListenerBound) {
       this._custPickerListenerBound = true;
@@ -12543,7 +12554,7 @@ const App = {
       : '';
     let matches;
     if (cfg.remote != null) {
-      if (dd.style.display === 'none') { dd.innerHTML = this._addCustomerRowHtml(id) + noneRow + '<div style="padding:10px;color:var(--text-muted);font-size:13px">Searching…</div>'; dd.style.display = ''; }
+      if (dd.style.display === 'none') { dd.innerHTML = (cfg.allowAdd ? this._addCustomerRowHtml(id) : '') + noneRow + '<div style="padding:10px;color:var(--text-muted);font-size:13px">Searching…</div>'; dd.style.display = ''; }
       let rows;
       try { rows = await this._customerSearch(id, query, cfg.remote); }
       catch (e) { dd.innerHTML = `<div style="padding:10px;color:var(--danger);font-size:13px">${this.escapeAttr(e.message)}</div>`; return; }
@@ -12552,12 +12563,15 @@ const App = {
       matches = rows;
     } else {
       matches = cfg.customers.filter(c =>
-        !query || `${c.first_name} ${c.last_name} ${c.customer_number || ''} ${c.phone || ''} ${c.email || ''}`.toLowerCase().includes(query));
+        !query || `${c.first_name} ${c.last_name} ${c.business_name || ''} ${c.customer_number || ''} ${c.phone || ''} ${c.email || ''}`.toLowerCase().includes(query));
     }
     const esc = v => this.escapeAttr(v ?? '');
-    dd.innerHTML = this._addCustomerRowHtml(id) + noneRow + (matches.length
+    const balance = c => !cfg.showBalance ? '' : Number(c.account_balance) > 0.005
+      ? `<span style="margin-left:auto;padding-left:12px;white-space:nowrap;font-size:12px;color:var(--danger);font-weight:600">owes ${this.fmt(c.account_balance)}</span>`
+      : '<span style="margin-left:auto;padding-left:12px;white-space:nowrap;font-size:12px;font-weight:400;color:var(--text-muted)">nothing owing</span>';
+    dd.innerHTML = (cfg.allowAdd ? this._addCustomerRowHtml(id) : '') + noneRow + (matches.length
       ? matches.slice(0, 50).map(c => `<div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text)" onclick="App._selectCustomerPicker('${id}',${c.id})">
-          <div><strong>${esc(c.first_name)} ${esc(c.last_name)}</strong><span style="color:var(--text-muted);font-size:12px;margin-left:4px">${esc(c.customer_number)}</span></div>
+          <div style="display:flex;align-items:baseline;width:100%"><span><strong>${esc(c.first_name)} ${esc(c.last_name)}</strong><span style="color:var(--text-muted);font-size:12px;margin-left:4px">${esc(c.customer_number)}</span></span>${balance(c)}</div>
         </div>`).join('')
       : '<div style="padding:10px;color:var(--text-muted);font-size:13px">No customers found</div>');
     dd.style.display = '';

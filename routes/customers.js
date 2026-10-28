@@ -271,7 +271,9 @@ router.get('/', requireAuth, async (req, res) => {
       const { rows: [n] } = await db.execute({ sql: sql.replace('SELECT *', 'SELECT COUNT(*) AS n'), args: params });
       total = Number(n.n);
     }
-    sql += ` ORDER BY last_name, first_name${paged ? ', id' : ''}`;
+    // ?owing_first=1 (POS Receive Payment search): customers with a balance
+    // come first, so a common name doesn't bury the one who's paying.
+    sql += ` ORDER BY ${req.query.owing_first ? 'CASE WHEN account_balance > 0.005 THEN 0 ELSE 1 END, ' : ''}last_name, first_name${paged ? ', id' : ''}`;
     if (limit && !(paged && rentalType)) { sql += ' LIMIT ? OFFSET ?'; params.push(limit, offset); }
     let { rows } = await db.execute({ sql, args: params });
     if (paged && rentalType) {
