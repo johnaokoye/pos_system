@@ -15468,9 +15468,10 @@ const App = {
       <div class="section-header">
         <h2>Transactions ${this.currentUser.is_salesperson ? '<span style="font-size:12px;font-weight:normal;color:var(--text-muted);border:1px solid var(--border);border-radius:4px;padding:2px 8px;margin-left:8px;vertical-align:middle">My Sales Only</span>' : ''}</h2>
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
-          <select id="tx-view" style="width:120px" onchange="App._txViewChanged()" title="Sales, or the returns made against them">
+          <select id="tx-view" style="width:170px" onchange="App._txViewChanged()" title="Sales, the returns made against them, or payments received on customer accounts">
             <option value="sales">Sales</option>
             <option value="returns">Returns</option>
+            <option value="payments">Customer Payments</option>
           </select>
           <label style="font-size:13px;text-transform:none;color:var(--text)">From</label>
           <input type="date" id="tx-start" value="${weekAgo}" style="width:150px">
@@ -15756,11 +15757,49 @@ const App = {
   // Transactions screen "Sales / Returns" switch. Returns use the same date,
   // branch, number and customer boxes; the sales-only filters are hidden.
   _txViewChanged() {
-    const returns = document.getElementById('tx-view')?.value === 'returns';
-    ['tx-status', 'tx-source', 'tx-cashier', 'tx-credited'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = returns ? 'none' : ''; });
+    const view = document.getElementById('tx-view')?.value;
+    ['tx-status', 'tx-source', 'tx-cashier', 'tx-credited'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = view === 'sales' ? '' : 'none'; });
     const num = document.getElementById('tx-number');
-    if (num) num.placeholder = returns ? 'Return # or Tx #…' : 'Tx # search…';
+    if (num) num.placeholder = view === 'returns' ? 'Return # or Tx #…' : view === 'payments' ? 'Payment # or reference…' : 'Tx # search…';
     this.loadTransactions();
+  },
+
+  // Customer Payments view — account payments received at the POS
+  // (GET /transactions/customer-payments).
+  async loadCustomerPaymentsList() {
+    const params = new URLSearchParams();
+    const val = id => (document.getElementById(id)?.value || '').trim();
+    if (val('tx-start')) params.set('start', val('tx-start'));
+    if (val('tx-end')) params.set('end', val('tx-end'));
+    if (val('tx-branch')) params.set('branch_id', val('tx-branch'));
+    if (val('tx-number')) params.set('number', val('tx-number'));
+    if (val('tx-customer')) params.set('customer_name', val('tx-customer'));
+    const rows = await this.api('GET', `/transactions/customer-payments?${params}`);
+    const el = document.getElementById('tx-table');
+    if (el) el.innerHTML = this.buildCustomerPaymentsTable(rows);
+  },
+
+  buildCustomerPaymentsTable(rows) {
+    if (!rows.length) return '<div class="empty-state"><p>No customer payments found for these dates</p></div>';
+    const method = m => String(m || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    const total = rows.reduce((t, r) => t + (Number(r.amount) || 0), 0);
+    return `<table>
+      <thead><tr><th>Payment #</th><th>Date/Time</th><th>Customer</th><th>Branch</th><th>Method</th><th>Reference</th><th>Amount</th><th>Applied To</th><th>On Account</th><th>Received By</th><th>Notes</th></tr></thead>
+      <tbody>${rows.map(r => `<tr>
+        <td class="fw-600" style="font-family:monospace;white-space:nowrap">${this.escapeAttr(r.payment_number)}</td>
+        <td style="white-space:nowrap">${this.fmtDateTime(r.created_at)}</td>
+        <td>${this.escapeAttr(r.customer_name || '—')}${r.customer_number ? `<div style="font-size:11px;color:var(--text-muted);font-family:monospace">${this.escapeAttr(r.customer_number)}</div>` : ''}</td>
+        <td>${this.escapeAttr(r.branch_name || '—')}</td>
+        <td>${this.escapeAttr(method(r.payment_method))}</td>
+        <td>${this.escapeAttr(r.reference || '—')}</td>
+        <td class="fw-600">${this.fmt(r.amount)}</td>
+        <td style="font-size:12px;font-family:monospace">${this.escapeAttr(r.applied_to || '—')}</td>
+        <td${r.unapplied > 0.005 ? ' style="color:var(--warning);font-weight:600"' : ''}>${r.unapplied > 0.005 ? this.fmt(r.unapplied) : '—'}</td>
+        <td>${this.escapeAttr(r.employee_name || '—')}</td>
+        <td style="font-size:12px;color:var(--text-muted)">${this.escapeAttr(r.notes || '')}</td>
+      </tr>`).join('')}</tbody>
+      <tfoot><tr><td colspan="6" class="fw-600" style="text-align:right">${rows.length} payment${rows.length === 1 ? '' : 's'} — Total</td><td class="fw-600">${this.fmt(total)}</td><td colspan="4"></td></tr></tfoot>
+    </table>`;
   },
 
   async loadReturnsList() {
@@ -15842,6 +15881,7 @@ const App = {
 
   async loadTransactions() {
     if (document.getElementById('tx-view')?.value === 'returns') return this.loadReturnsList();
+    if (document.getElementById('tx-view')?.value === 'payments') return this.loadCustomerPaymentsList();
     const start = document.getElementById('tx-start').value;
     const end = document.getElementById('tx-end').value;
     const branch = document.getElementById('tx-branch').value;

@@ -11,6 +11,7 @@ const { resolveUnit, lineName, parseQty, stockUnits } = require('../lib/units');
 const { isSerialNumberProduct, serialNumberLabel, serialNumberOf, serialClashError } = require('../lib/serialNumber');
 const { checkDiscountEligibility } = require('./promotions');
 const { allocateTicketDiscount, returnedDiscountShare } = require('../lib/ticketDiscount');
+const { UNAPPLIED_SQL } = require('../lib/customerPayments');
 
 // Mirrors availableCashBack() in public/index.html — the frontend uses this
 // same formula to decide whether to show the Cash Back bar; this copy is the
@@ -289,6 +290,45 @@ router.get('/returns', requirePermission('transactions'), async (req, res) => {
     if (number) { sql += ' AND (r.return_number LIKE ? OR t.transaction_number LIKE ?)'; args.push(`%${number}%`, `%${number}%`); }
     if (req.employee?.is_salesperson) { sql += ` AND (t.employee_id = ? OR ${CREDITED_SQL} = ?)`; args.push(req.employee.id, req.employee.id); }
     sql += ' ORDER BY r.created_at DESC LIMIT ?';
+    args.push(parseInt(limit) || 200);
+    const { rows } = await db.execute({ sql, args });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Customer account payments received (POS Receive Payment) for the
+// Transactions screen's "Customer Payments" view — money taken in, so
+// write-offs and legacy credit notes (also account_payments rows) are left
+// out. applied_to lists the invoices each payment went to (credit sales and
+// legacy invoices); unapplied is what's still on account. Same date/branch/
+// customer filters as the sales list; a salesperson only sees payments they
+// took. Must stay above GET /:id.
+router.get('/customer-payments', requirePermission('transactions'), async (req, res) => {
+  try {
+    const { start, end, branch_id, customer_name, number, payment_method, limit = 200 } = req.query;
+    let sql = `SELECT p.id, p.payment_number, p.created_at, p.amount, p.payment_method, p.payment_mode, p.reference, p.notes, p.customer_id,
+      ${UNAPPLIED_SQL.replace(/\bap\./g, 'p.')} AS unapplied,
+      c.first_name || ' ' || c.last_name as customer_name, c.customer_number,
+      e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name,
+      (SELECT GROUP_CONCAT(x.num, ', ') FROM (
+        SELECT t.transaction_number AS num FROM payment_allocations pa JOIN transactions t ON t.id = pa.transaction_id WHERE pa.payment_id = p.id
+        UNION ALL
+        SELECT li.invoice_number FROM legacy_invoice_allocations lia JOIN ar_legacy_invoices li ON li.id = lia.legacy_invoice_id WHERE lia.payment_id = p.id
+      ) x) AS applied_to
+      FROM account_payments p
+      LEFT JOIN customers c ON p.customer_id = c.id
+      LEFT JOIN employees e ON p.employee_id = e.id
+      LEFT JOIN branches b ON p.branch_id = b.id
+      WHERE p.payment_method NOT IN ('writeoff', 'credit_note')`;
+    const args = [];
+    if (start) { sql += ' AND date(p.created_at) >= date(?)'; args.push(start); }
+    if (end) { sql += ' AND date(p.created_at) <= date(?)'; args.push(end); }
+    if (branch_id) { sql += ' AND p.branch_id = ?'; args.push(branch_id); }
+    if (payment_method) { sql += ' AND p.payment_method = ?'; args.push(payment_method); }
+    if (customer_name) { sql += " AND ((c.first_name || ' ' || c.last_name) LIKE ? OR c.customer_number LIKE ?)"; args.push(`%${customer_name}%`, `%${customer_name}%`); }
+    if (number) { sql += ' AND (p.payment_number LIKE ? OR p.reference LIKE ?)'; args.push(`%${number}%`, `%${number}%`); }
+    if (req.employee?.is_salesperson) { sql += ' AND p.employee_id = ?'; args.push(req.employee.id); }
+    sql += ' ORDER BY p.created_at DESC LIMIT ?';
     args.push(parseInt(limit) || 200);
     const { rows } = await db.execute({ sql, args });
     res.json(rows);
