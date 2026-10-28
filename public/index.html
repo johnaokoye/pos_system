@@ -16378,9 +16378,82 @@ const App = {
         <div class="modal-footer no-print">
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
           <button class="btn btn-secondary" onclick="App.emailPaymentReceipt()">✉️ Email</button>
-          <button class="btn btn-primary" onclick="window.print()">🖨️ Print</button>
+          <button class="btn btn-secondary" onclick="window.print()" title="Narrow receipt for the receipt printer">🖨️ Normal</button>
+          <button class="btn btn-primary" onclick="App.printPaymentReceiptLetter()" title="Full-page letter-size receipt">🖨️ Letter</button>
         </div>
       </div>`);
+  },
+
+  // Letter-size print of the payment receipt open in the modal — same
+  // popup-window approach as printReceiptLetter, with the invoices' Bill To box.
+  printPaymentReceiptLetter() {
+    const p = this._paymentReceipt;
+    if (!p) return;
+    const win = window.open('', '_blank', 'width=850,height=1000');
+    if (!win) { this.alert('Your browser blocked the print popup — allow popups for this site and try again', 'warning'); return; }
+    const esc = v => this.escapeAttr(v ?? '');
+    const storeName = this.settings.store_name || 'My Store';
+    const addressLine = p.branch_address || this.settings.store_address || '';
+    const cityLine = p.branch_address ? `${p.branch_city ? ', ' + p.branch_city : ''}${p.branch_state ? ' ' + p.branch_state : ''}${p.branch_zip ? ' ' + p.branch_zip : ''}` : '';
+    const phoneLine = p.branch_phone || this.settings.store_phone || '';
+    const method = String(p.payment_method || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    const td = 'padding:8px;border-bottom:1px solid #e8e8e8';
+    win.document.write(`<!DOCTYPE html><html><head><title>Payment Receipt – ${esc(p.payment_number)}</title>
+    <style>
+      body{font-family:Arial,sans-serif;font-size:13px;margin:0;padding:48px;color:#111}
+      .header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px}
+      .store h1{font-size:20px;margin:0 0 2px}
+      .store div{font-size:12px;color:#555}
+      .doc-title{font-size:22px;font-weight:700;text-align:right;color:#333}
+      .meta{display:flex;gap:32px;margin-bottom:20px;font-size:12px}
+      .meta div{line-height:1.6}
+      .meta label{font-weight:bold;text-transform:uppercase;font-size:10px;color:#555;display:block}
+      table{width:100%;border-collapse:collapse}
+      th{background:#f0f0f0;text-align:left;padding:8px;font-size:11px;text-transform:uppercase;color:#555}
+      ${this._billToPrintCss}
+      .totals{width:320px;margin-left:auto;margin-top:16px;font-size:13px}
+      .totals tr td{padding:4px 0;border:none}
+      .totals .total-row td{border-top:2px solid #111;font-size:16px;font-weight:700;padding-top:8px}
+      .footer{margin-top:32px;font-size:11px;color:#777;border-top:1px solid #ddd;padding-top:10px;text-align:center}
+      @page { size: letter; margin: 0.75in; }
+      @media print{body{padding:0}}
+    </style></head><body>
+    <div style="text-align:center;font-weight:700;font-size:20px;margin-bottom:16px">${esc(storeName)}</div>
+    <div class="header">
+      <div class="store">
+        ${this._printLogoTag(50)}
+        ${p.branch_name ? `<h1>${esc(p.branch_name)}</h1>` : ''}
+        ${addressLine ? `<div>${esc(addressLine)}${esc(cityLine)}</div>` : ''}
+        ${phoneLine ? `<div>${esc(phoneLine)}</div>` : ''}
+      </div>
+      <div class="doc-title">PAYMENT RECEIPT</div>
+    </div>
+    ${this._billToPrintHtml(p, [['Payment #', esc(p.payment_number)], ['Date', this.fmtDateTime(p.created_at)], ['Method', esc(method)], ['Reference', p.reference ? esc(p.reference) : '']])}
+    <div class="meta">
+      ${p.employee_name ? `<div><label>Received By</label>${esc(p.employee_name)}</div>` : ''}
+      ${p.notes ? `<div><label>Notes</label><span style="white-space:pre-wrap">${esc(p.notes)}</span></div>` : ''}
+    </div>
+    ${p.applied.length ? `<table>
+      <thead><tr><th>Applied To Invoice</th><th>Invoice Date</th><th style="text-align:right">Amount Applied</th></tr></thead>
+      <tbody>${p.applied.map(a => `<tr>
+        <td style="${td};font-weight:600">${esc(a.invoice_number)}</td>
+        <td style="${td}">${a.invoice_date ? this.fmtDate(a.invoice_date) : '—'}</td>
+        <td style="${td};text-align:right">${this.fmt(a.amount)}</td>
+      </tr>`).join('')}</tbody>
+    </table>` : '<div style="font-size:13px;color:#555;padding:8px 0">Received on account — not yet applied to an invoice.</div>'}
+    <table class="totals">
+      ${p.applied.length ? `<tr><td>Applied to invoices</td><td style="text-align:right">${this.fmt(p.amount - p.unapplied)}</td></tr>` : ''}
+      ${p.unapplied > 0.005 ? `<tr><td>Held on account</td><td style="text-align:right">${this.fmt(p.unapplied)}</td></tr>` : ''}
+      <tr class="total-row"><td>AMOUNT RECEIVED</td><td style="text-align:right">${this.fmt(p.amount)}</td></tr>
+      <tr><td style="padding-top:10px">Account Balance <span style="font-size:11px;color:#555">as of ${this.fmtDate(new Date().toISOString())}</span></td><td style="text-align:right;padding-top:10px;font-weight:600">${this.fmt(p.account_balance)}</td></tr>
+    </table>
+    <div style="display:flex;justify-content:flex-end;margin-top:70px">
+      <div style="width:280px;text-align:center"><div style="border-top:1px solid #333;padding-top:6px;font-size:11px;color:#555">Received By</div></div>
+    </div>
+    <div class="footer">${this._receiptFooterHtml('Thank you!')}</div>
+    <script>window.onload=()=>{window.print()}<\/script>
+    </body></html>`);
+    win.document.close();
   },
 
   emailPaymentReceipt() {
