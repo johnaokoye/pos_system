@@ -318,6 +318,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .receipt hr { border: none; border-top: 1px dashed #000; margin: 6px 0; }
 .receipt-row { display: flex; justify-content: space-between; gap: 4px; }
 .receipt-row span:last-child { white-space: nowrap; }
+/* Text values that may be long (a company name, a reference) wrap under
+   their own column instead of running off the receipt. */
+.receipt-row.wrap span:first-child { flex-shrink: 0; }
+.receipt-row.wrap span:last-child { white-space: normal; text-align: right; overflow-wrap: anywhere; }
 .receipt-total { font-weight: bold; font-size: 13px; }
 /* Name on its own line, then "qty x price ... total" beneath it, with a gap
    between items so each one reads as a block on the narrow paper. */
@@ -16359,19 +16363,18 @@ const App = {
             <hr>
             <div class="receipt-row"><span>Payment #:</span><span>${esc(p.payment_number)}</span></div>
             <div class="receipt-row"><span>Date:</span><span>${this.fmtDateTime(p.created_at)}</span></div>
-            <div class="receipt-row"><span>Customer:</span><span>${esc(p.customer_name)}</span></div>
+            <div class="receipt-row wrap"><span>Customer:</span><span>${esc(p.customer_name)}</span></div>
             ${p.customer_number ? `<div class="receipt-row"><span>Account #:</span><span>${esc(p.customer_number)}</span></div>` : ''}
-            <div class="receipt-row"><span>Method:</span><span>${esc(method)}</span></div>
-            ${p.reference ? `<div class="receipt-row"><span>Reference:</span><span>${esc(p.reference)}</span></div>` : ''}
-            ${p.employee_name ? `<div class="receipt-row"><span>Received By:</span><span>${esc(p.employee_name)}</span></div>` : ''}
-            ${p.notes ? `<div class="receipt-row"><span style="flex-shrink:0">Notes:</span><span style="text-align:right;white-space:pre-wrap;overflow-wrap:anywhere">${esc(p.notes)}</span></div>` : ''}
+            <div class="receipt-row wrap"><span>Method:</span><span>${esc(method)}</span></div>
+            ${p.reference ? `<div class="receipt-row wrap"><span>Reference:</span><span>${esc(p.reference)}</span></div>` : ''}
+            ${p.employee_name ? `<div class="receipt-row wrap"><span>Received By:</span><span>${esc(p.employee_name)}</span></div>` : ''}
+            ${p.notes ? `<div class="receipt-row wrap"><span>Notes:</span><span style="white-space:pre-wrap">${esc(p.notes)}</span></div>` : ''}
             ${p.applied.length ? `<hr><div style="font-size:11px;font-weight:700;color:#555;margin-bottom:4px">APPLIED TO</div>
-            ${p.applied.map(a => `<div class="receipt-row"><span>${esc(a.invoice_number)} <span style="font-size:11px;color:#555">${a.invoice_date ? this.fmtDate(a.invoice_date) : ''}</span></span><span>${this.fmt(a.amount)}</span></div>`).join('')}` : ''}
+            ${p.applied.map(a => `<div class="receipt-row" style="margin-bottom:3px"><span>${esc(a.invoice_number)}${a.invoice_date ? `<div style="font-size:11px;color:#555">Invoice date ${this.fmtDate(a.invoice_date)}</div>` : ''}</span><span>${this.fmt(a.amount)}</span></div>`).join('')}` : ''}
             ${p.unapplied > 0.005 ? `<div class="receipt-row"><span>Held on account</span><span>${this.fmt(p.unapplied)}</span></div>` : ''}
             <hr>
             <div class="receipt-row receipt-total"><span>AMOUNT RECEIVED</span><span>${this.fmt(p.amount)}</span></div>
-            <div class="receipt-row" style="margin-top:6px"><span>Account Balance</span><span>${this.fmt(p.account_balance)}</span></div>
-            <div style="font-size:11px;color:#555">as of ${this.fmtDate(new Date().toISOString())}</div>
+            <div class="receipt-row" style="margin-top:6px"><span>Account Balance<div style="font-size:11px;color:#555">as of ${this.fmtDate(new Date().toISOString())}</div></span><span>${this.fmt(p.account_balance)}</span></div>
             <hr>
           </div>
         </div>
