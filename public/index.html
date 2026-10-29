@@ -20505,8 +20505,8 @@ const App = {
       </td>
       <td>${i.sku||'-'}</td>
       <td>${i.quantity}${supplierPriced ? '<div style="font-size:11px;color:var(--text-muted)">max</div>' : ''}</td>
-      <td>${supplierPriced ? '<span style="color:var(--text-muted)">Per invoice</span>' : this.fmt(i.unit_cost)}</td>
-      <td class="fw-600">${supplierPriced ? '—' : this.fmt(i.total)}</td>
+      <td>${supplierPriced ? '<span style="color:var(--text-muted)">Per invoice</span>' : this._fmtPR(i.unit_cost, pr)}</td>
+      <td class="fw-600">${supplierPriced ? '—' : this._fmtPR(i.total, pr)}</td>
       <td style="font-size:12px;color:var(--text-muted)">${i.notes||''}</td>
     </tr>`).join('');
     this.showModal(`
@@ -20552,9 +20552,9 @@ const App = {
           ${supplierPriced ? `<div style="margin-top:10px;padding:8px 12px;background:var(--bg-secondary,#f8f9fa);border-radius:6px;font-size:13px">
             Quantities are the <strong>maximum</strong> the supplier may supply. ${['approved','converted','received'].includes(pr.status) ? 'Print or email the signed <strong>Authorization to Pump</strong> to the supplier; enter the cost from their invoice on the PO and attach the invoice.' : 'Once approved, the signed Authorization to Pump can be printed or emailed to the supplier.'}
           </div>` : `<div style="text-align:right;margin-top:10px;font-size:13px;line-height:1.9">
-            <div style="color:var(--text-muted)">Subtotal: <strong>${this.fmt(total)}</strong></div>
-            ${pr.tax_amount > 0 ? `<div style="color:var(--text-muted)">Tax (${pr.tax_rate}% local): <strong>${this.fmt(pr.tax_amount)}</strong></div>` : ''}
-            <div style="font-size:15px;font-weight:700;border-top:1px solid var(--border);padding-top:4px">Est. Total: ${this.fmt(total + (pr.tax_amount||0))}</div>
+            <div style="color:var(--text-muted)">Subtotal: <strong>${this._fmtPR(total, pr)}</strong></div>
+            ${pr.tax_amount > 0 ? `<div style="color:var(--text-muted)">Tax (${pr.tax_rate}% local): <strong>${this._fmtPR(pr.tax_amount, pr)}</strong></div>` : ''}
+            <div style="font-size:15px;font-weight:700;border-top:1px solid var(--border);padding-top:4px">Est. Total: ${this._fmtPR(total + (pr.tax_amount||0), pr)}</div>
           </div>`}
           <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:14px">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -20761,14 +20761,14 @@ const App = {
                   <td>${i.product_name}</td>
                   <td><span style="font-size:11px;color:${i.item_type==='sale'?'var(--accent)':'var(--text-muted)'}">${{ internal: 'Internal', service: 'Service' }[i.item_type] || 'Sale'}</span></td>
                   <td>${i.quantity}</td>
-                  <td>${supplierPriced ? 'Per invoice' : this.fmt(i.unit_cost)}</td>
+                  <td>${supplierPriced ? 'Per invoice' : this._fmtPR(i.unit_cost, pr)}</td>
                 </tr>`).join('')}
               </tbody>
             </table>
           </div>
           ${supplierPriced ? `<div style="padding:8px 12px;background:#fff8e1;border-left:3px solid var(--warning);border-radius:0 6px 6px 0;font-size:13px;margin-bottom:12px">
             The PO starts at the authorized maximum quantities with no cost. Enter the quantity and cost from the supplier's invoice and attach the invoice before sending it for approval.
-          </div>` : `<div style="text-align:right;font-size:14px;font-weight:700;margin-bottom:14px">Est. Total: ${this.fmt(total)}</div>`}
+          </div>` : `<div style="text-align:right;font-size:14px;font-weight:700;margin-bottom:14px">Est. Total: ${this._fmtPR(total, pr)}</div>`}
           <div class="form-group"><label>Supplier *</label>
             <select id="cpr-supplier" data-searchable>
               <option value="">-- Select Supplier --</option>
@@ -20924,6 +20924,11 @@ const App = {
     const code = (po && po.currency) || this._baseCurrency();
     try { return new Intl.NumberFormat('en-US', { style: 'currency', currency: code, currencyDisplay: po && po.currency ? 'code' : 'symbol' }).format(n || 0); }
     catch (e) { return `${code} ${(Number(n) || 0).toFixed(2)}`; }
+  },
+  // An amount on a purchase request, in the request's own currency.
+  _fmtPR(n, pr) {
+    const code = pr && pr.currency;
+    return !code || code === this._baseCurrency() ? this.fmt(n) : this._fmtPO(n, { currency: code });
   },
   // A base-currency amount (A/P figures) on a foreign-currency PO: shown in
   // the PO's currency at its rate, with the base amount alongside.
