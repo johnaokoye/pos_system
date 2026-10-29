@@ -24637,28 +24637,16 @@ const App = {
       </div>
       <div id="ar-list">
         <div class="card">
-          <div class="card-header"><span class="card-title">Credit Accounts</span><button class="btn btn-sm btn-primary" onclick="App.showEnableCreditModal()">Enable Credit for Customer</button></div>
+          <div class="card-header"><span class="card-title">Credit Accounts</span>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input type="search" id="ar-acct-q" placeholder="Search name, business, account #, phone, email…" autocomplete="off" style="width:280px;font-size:13px" oninput="App._arAcctSearch(this.value)">
+              <button class="btn btn-sm btn-primary" onclick="App.showEnableCreditModal()">Enable Credit for Customer</button>
+            </div>
+          </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Customer</th><th>Credit Limit</th><th>Balance</th><th>Invoiced</th><th>Paid</th><th>Available</th><th>Actions</th></tr></thead>
-              <tbody>
-                ${accounts.length ? accounts.map(a => {
-                  const avail = Math.max(0, (a.credit_limit||0) - (a.account_balance||0));
-                  const pct = a.credit_limit > 0 ? Math.min(100, (a.account_balance / a.credit_limit) * 100) : 0;
-                  const color = pct >= 90 ? 'var(--danger)' : pct >= 70 ? 'var(--warning)' : 'var(--success)';
-                  return `<tr>
-                    <td><div class="fw-600">${a.first_name} ${a.last_name}</div><div style="font-size:11px;color:var(--text-muted)">${a.customer_number}</div></td>
-                    <td>${this.fmt(a.credit_limit||0)}</td>
-                    <td><div class="fw-600 color-danger">${this.fmt(a.account_balance||0)}</div><div class="aging-bar"><div class="aging-fill" style="width:${pct}%;background:${color}"></div></div></td>
-                    <td>${this.fmt(a.total_invoiced||0)}</td>
-                    <td>${this.fmt(a.total_paid||0)}</td>
-                    <td class="${avail > 0 ? 'color-success' : 'color-danger'}">${this.fmt(avail)}</td>
-                    <td>
-                      ${this.can('accounts_writeoff') && a.account_balance > 0 ? `<button class="btn btn-sm btn-danger" onclick="App.showWriteoffModal(${a.id},'${a.first_name} ${a.last_name}',${a.account_balance||0})">Write Off</button>` : ''}
-                      <button class="btn btn-sm btn-secondary" onclick="App.viewCustomerAccount(${a.id})">Details</button>
-                    </td>
-                  </tr>`;}).join('') : '<tr><td colspan="7" class="empty-state">No credit accounts. Enable credit for a customer to get started.</td></tr>'}
-              </tbody>
+              <thead id="ar-acct-head"></thead>
+              <tbody id="ar-acct-body"></tbody>
             </table>
           </div>
         </div>
@@ -24697,15 +24685,24 @@ const App = {
                 <div id="ar-cust-dd" style="display:none;position:absolute;top:100%;left:0;min-width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
               </div>
               <span id="ar-stmt-btn"></span>
-              <button id="ar-sort-btn" class="btn btn-sm btn-secondary" onclick="App._arToggleSort()">&#x2193; Newest First</button>
             </div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:0 0 10px">
+            <input type="search" id="ar-pay-q" placeholder="Search payment #, reference, customer, account #, method, employee…" autocomplete="off" style="flex:1;min-width:240px;font-size:13px" oninput="App._arPaySearch(this.value)">
+            <input type="date" id="ar-pay-start" title="From" style="width:145px" onchange="App._arPay.start=this.value;App._loadARPayments(App._arCustomerId)">
+            <span style="color:var(--text-muted)">to</span>
+            <input type="date" id="ar-pay-end" title="To" style="width:145px" onchange="App._arPay.end=this.value;App._loadARPayments(App._arCustomerId)">
+            <button class="btn btn-sm btn-outline" onclick="App._arPayClear()">Clear</button>
           </div>
           <div id="ar-payments-table"><div class="empty-state"><p>Loading payments...</p></div></div>
         </div>
       </div>`;
     this._arCustomers = null;
-    this._arSortDir = 'desc';
     this._arCustomerId = '';
+    this._arAccounts = accounts;
+    this._arAcct = { q: '', key: 'balance', dir: 'desc' };
+    this._renderARAccounts();
+    this._arPay = { q: '', start: '', end: '', sortBy: 'date', dir: 'desc' };
     this._loadARPayments();
     document.addEventListener('click', (e) => {
       if (!e.target.closest('#ar-cust-search') && !e.target.closest('#ar-cust-dd')) {
@@ -24715,23 +24712,27 @@ const App = {
     });
   },
 
-  async _loadARPayments(customerId = '', sortDir) {
-    if (sortDir !== undefined) this._arSortDir = sortDir;
+  async _loadARPayments(customerId = '') {
     this._arCustomerId = customerId;
+    const f = this._arPay || (this._arPay = { q: '', start: '', end: '', sortBy: 'date', dir: 'desc' });
 
     if (!this._arCustomers) {
       try { this._arCustomers = await this.api('GET', '/accounts'); } catch(e) { this._arCustomers = []; }
     }
 
-    let url = `/accounts/payments?limit=200&sort=${this._arSortDir}`;
-    if (customerId) url += `&customer_id=${customerId}`;
-    const payments = await this.api('GET', url);
+    const limit = 500;
+    const qs = new URLSearchParams({ limit, sort: f.dir, sort_by: f.sortBy });
+    if (customerId) qs.set('customer_id', customerId);
+    if (f.q) qs.set('q', f.q);
+    if (f.start) qs.set('start', f.start);
+    if (f.end) qs.set('end', f.end);
+    const seq = (this._arPaySeq = (this._arPaySeq || 0) + 1);
+    const payments = await this.api('GET', `/accounts/payments?${qs}`);
+    if (seq !== this._arPaySeq) return; // a newer search is on its way
 
     const el = document.getElementById('ar-payments-table');
     if (!el) return;
 
-    const sortBtn = document.getElementById('ar-sort-btn');
-    if (sortBtn) sortBtn.innerHTML = this._arSortDir === 'desc' ? '&#x2193; Newest First' : '&#x2191; Oldest First';
 
     const stmtBtn = document.getElementById('ar-stmt-btn');
     if (stmtBtn) stmtBtn.innerHTML = customerId
@@ -24747,7 +24748,8 @@ const App = {
     el.innerHTML = `
       <div class="table-wrap">
         <table>
-          <thead><tr><th></th><th>Payment #</th><th>Customer</th><th>Amount</th><th>Method</th><th>Employee</th><th>Date</th></tr></thead>
+          <thead><tr><th></th>${[['number','Payment #'],['customer','Customer'],['amount','Amount'],['method','Method'],['employee','Employee'],['date','Date']]
+            .map(([k, l]) => this._arSortTh(l, k, f.sortBy, f.dir, `App._arPaySort('${k}')`)).join('')}</tr></thead>
           <tbody>
             ${payments.length ? payments.map(p => `
               <tr>
@@ -24755,7 +24757,7 @@ const App = {
                   <button class="btn btn-sm" style="padding:1px 6px;font-size:11px;line-height:1.4" onclick="App._togglePaymentAllocs(${p.id},this)" title="Show invoice allocations">&#9654;</button>
                 </td>
                 <td class="fw-600">${p.payment_number}</td>
-                <td>${p.customer_name||'-'} <small style="color:var(--text-muted)">${p.customer_number||''}</small></td>
+                <td>${this.escapeAttr(p.customer_name||'-')} <small style="color:var(--text-muted)">${p.customer_number||''}</small>${p.business_name ? `<div style="font-size:11px;color:var(--text-muted)">${this.escapeAttr(p.business_name)}</div>` : ''}${p.reference ? `<div style="font-size:11px;color:var(--text-muted)">Ref: ${this.escapeAttr(p.reference)}</div>` : ''}</td>
                 <td class="fw-600 color-success">${this.fmt(p.amount)}${p.unapplied > 0.005 ? `<div style="font-size:11px;font-weight:400;color:var(--text-muted)">${this.fmt(p.unapplied)} not yet applied</div>` : ''}</td>
                 <td><span class="badge-pill badge-info">${p.payment_method}</span></td>
                 <td>${p.employee_name||'-'}</td>
@@ -24763,14 +24765,78 @@ const App = {
               </tr>
               <tr id="pmt-allocs-${p.id}" style="display:none;background:var(--bg-secondary,var(--bg))">
                 <td colspan="7" style="padding:0 0 0 40px;border-top:none"></td>
-              </tr>`).join('') : '<tr><td colspan="7" class="empty-state">No payments recorded</td></tr>'}
+              </tr>`).join('') : `<tr><td colspan="7" class="empty-state">${f.q || f.start || f.end || customerId ? 'No payments match these filters' : 'No payments recorded'}</td></tr>`}
           </tbody>
         </table>
-      </div>`;
+      </div>
+      ${payments.length >= limit ? `<p style="font-size:12px;color:var(--text-muted);margin:8px 0 0">Showing the first ${limit} — search, pick a customer or set dates to narrow it down.</p>` : ''}`;
   },
 
-  _arToggleSort() {
-    this._loadARPayments(this._arCustomerId || '', this._arSortDir === 'desc' ? 'asc' : 'desc');
+  // Sortable column header: click to sort, click again to reverse.
+  _arSortTh(label, key, curKey, dir, onclick) {
+    const arrow = key === curKey ? (dir === 'asc' ? ' ▲' : ' ▼') : '';
+    return `<th style="cursor:pointer;user-select:none;white-space:nowrap" title="Sort by ${label}" onclick="${onclick}">${label}<span style="color:var(--primary)">${arrow}</span></th>`;
+  },
+  _arPaySort(key) {
+    const f = this._arPay;
+    // Text columns start A→Z; dates and amounts start largest/newest first.
+    f.dir = f.sortBy === key ? (f.dir === 'asc' ? 'desc' : 'asc') : (['date', 'amount'].includes(key) ? 'desc' : 'asc');
+    f.sortBy = key;
+    this._loadARPayments(this._arCustomerId || '');
+  },
+  _arPaySearch(text) {
+    clearTimeout(this._arPayTimer);
+    this._arPayTimer = setTimeout(() => { this._arPay.q = text.trim(); this._loadARPayments(this._arCustomerId || ''); }, 300);
+  },
+  _arPayClear() {
+    this._arPay = { q: '', start: '', end: '', sortBy: 'date', dir: 'desc' };
+    ['ar-pay-q', 'ar-pay-start', 'ar-pay-end'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+    this._loadARPayments('');
+  },
+
+  // Credit Accounts tab: filtered and sorted in the browser.
+  _arAcctSearch(text) {
+    this._arAcct.q = text.trim().toLowerCase();
+    this._renderARAccounts();
+  },
+  _arAcctSort(key) {
+    const a = this._arAcct;
+    a.dir = a.key === key ? (a.dir === 'asc' ? 'desc' : 'asc') : (key === 'customer' ? 'asc' : 'desc');
+    a.key = key;
+    this._renderARAccounts();
+  },
+  _renderARAccounts() {
+    const head = document.getElementById('ar-acct-head');
+    const body = document.getElementById('ar-acct-body');
+    if (!head || !body) return;
+    const { q, key, dir } = this._arAcct;
+    const avail = a => Math.max(0, (a.credit_limit || 0) - (a.account_balance || 0));
+    const name = a => `${a.first_name || ''} ${a.last_name || ''}`.trim();
+    const val = {
+      customer: a => name(a).toLowerCase(), limit: a => a.credit_limit || 0, balance: a => a.account_balance || 0,
+      invoiced: a => a.total_invoiced || 0, paid: a => a.total_paid || 0, available: avail,
+    }[key];
+    const rows = (this._arAccounts || [])
+      .filter(a => !q || [name(a), a.business_name, a.customer_number, a.phone, a.email].some(v => String(v || '').toLowerCase().includes(q)))
+      .sort((x, y) => { const p = val(x), r = val(y); return (p < r ? -1 : p > r ? 1 : 0) * (dir === 'asc' ? 1 : -1); });
+    head.innerHTML = `<tr>${[['customer','Customer'],['limit','Credit Limit'],['balance','Balance'],['invoiced','Invoiced'],['paid','Paid'],['available','Available']]
+      .map(([k, l]) => this._arSortTh(l, k, key, dir, `App._arAcctSort('${k}')`)).join('')}<th>Actions</th></tr>`;
+    body.innerHTML = rows.length ? rows.map(a => {
+      const pct = a.credit_limit > 0 ? Math.min(100, (a.account_balance / a.credit_limit) * 100) : 0;
+      const color = pct >= 90 ? 'var(--danger)' : pct >= 70 ? 'var(--warning)' : 'var(--success)';
+      return `<tr>
+        <td><div class="fw-600">${this.escapeAttr(name(a))}</div><div style="font-size:11px;color:var(--text-muted)">${a.customer_number}${a.business_name ? ` · ${this.escapeAttr(a.business_name)}` : ''}</div></td>
+        <td>${this.fmt(a.credit_limit||0)}</td>
+        <td><div class="fw-600 color-danger">${this.fmt(a.account_balance||0)}</div><div class="aging-bar"><div class="aging-fill" style="width:${pct}%;background:${color}"></div></div></td>
+        <td>${this.fmt(a.total_invoiced||0)}</td>
+        <td>${this.fmt(a.total_paid||0)}</td>
+        <td class="${avail(a) > 0 ? 'color-success' : 'color-danger'}">${this.fmt(avail(a))}</td>
+        <td>
+          ${this.can('accounts_writeoff') && a.account_balance > 0 ? `<button class="btn btn-sm btn-danger" onclick="App.showWriteoffModal(${a.id},'${this.escapeAttr(name(a)).replace(/'/g, "\\'")}',${a.account_balance||0})">Write Off</button>` : ''}
+          <button class="btn btn-sm btn-secondary" onclick="App.viewCustomerAccount(${a.id})">Details</button>
+        </td>
+      </tr>`;
+    }).join('') : `<tr><td colspan="7" class="empty-state">${q ? 'No credit accounts match that search' : 'No credit accounts. Enable credit for a customer to get started.'}</td></tr>`;
   },
 
   showStatementModal(customerId) {
@@ -24877,6 +24943,7 @@ const App = {
     }
     const matches = (this._arCustomers || []).filter(c =>
       `${c.first_name} ${c.last_name}`.toLowerCase().includes(q) ||
+      (c.business_name || '').toLowerCase().includes(q) ||
       (c.customer_number || '').toLowerCase().includes(q)
     ).slice(0, 12);
     if (!matches.length) {

@@ -16,7 +16,7 @@ router.use(requirePermission('accounts'));
 // AR summary - all credit-enabled customers with balances
 router.get('/', async (req, res) => {
   try {
-    const { rows: customers } = await db.execute({ sql: `SELECT c.id, c.customer_number, c.first_name, c.last_name, c.email, c.phone, c.credit_limit, c.account_balance, c.credit_enabled, COUNT(DISTINCT t.id) as credit_invoices, COALESCE(SUM(CASE WHEN t.status = 'completed' AND t.payment_method = 'credit' THEN t.total ELSE 0 END), 0) as total_invoiced, COALESCE((SELECT SUM(p.amount) FROM account_payments p WHERE p.customer_id = c.id), 0) as total_paid FROM customers c LEFT JOIN transactions t ON c.id = t.customer_id AND t.payment_method = 'credit' AND t.status = 'completed' WHERE c.credit_enabled = 1 AND c.active = 1 GROUP BY c.id ORDER BY c.account_balance DESC, c.last_name`, args: [] });
+    const { rows: customers } = await db.execute({ sql: `SELECT c.id, c.customer_number, c.first_name, c.last_name, c.business_name, c.email, c.phone, c.credit_limit, c.account_balance, c.credit_enabled, COUNT(DISTINCT t.id) as credit_invoices, COALESCE(SUM(CASE WHEN t.status = 'completed' AND t.payment_method = 'credit' THEN t.total ELSE 0 END), 0) as total_invoiced, COALESCE((SELECT SUM(p.amount) FROM account_payments p WHERE p.customer_id = c.id), 0) as total_paid FROM customers c LEFT JOIN transactions t ON c.id = t.customer_id AND t.payment_method = 'credit' AND t.status = 'completed' WHERE c.credit_enabled = 1 AND c.active = 1 GROUP BY c.id ORDER BY c.account_balance DESC, c.last_name`, args: [] });
     res.json(customers);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -272,13 +272,25 @@ router.get('/statement/:customer_id', async (req, res) => {
 // List payments
 router.get('/payments', async (req, res) => {
   try {
-    const { customer_id, start, end, limit = 200, sort = 'desc' } = req.query;
-    let sql = `SELECT p.*, CASE WHEN p.payment_method = 'writeoff' THEN 0 ELSE ${UNAPPLIED_SQL.replace(/\bap\./g, 'p.')} END AS unapplied, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name FROM account_payments p LEFT JOIN customers c ON p.customer_id = c.id LEFT JOIN employees e ON p.employee_id = e.id LEFT JOIN branches b ON p.branch_id = b.id WHERE 1=1`;
+    const { customer_id, start, end, limit = 200, sort = 'desc', sort_by = 'date', q } = req.query;
+    let sql = `SELECT p.*, CASE WHEN p.payment_method = 'writeoff' THEN 0 ELSE ${UNAPPLIED_SQL.replace(/\bap\./g, 'p.')} END AS unapplied, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.business_name, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name FROM account_payments p LEFT JOIN customers c ON p.customer_id = c.id LEFT JOIN employees e ON p.employee_id = e.id LEFT JOIN branches b ON p.branch_id = b.id WHERE 1=1`;
     const params = [];
     if (customer_id) { sql += ' AND p.customer_id = ?'; params.push(customer_id); }
     if (start) { sql += ' AND date(p.created_at) >= ?'; params.push(start); }
     if (end) { sql += ' AND date(p.created_at) <= ?'; params.push(end); }
-    sql += ` ORDER BY p.created_at ${sort === 'asc' ? 'ASC' : 'DESC'} LIMIT ?`;
+    // Free-text search: payment #, reference, method, customer (name,
+    // business, number) or the employee who took it.
+    if (q && String(q).trim()) {
+      const like = `%${String(q).trim()}%`;
+      sql += ` AND (p.payment_number LIKE ? OR p.reference LIKE ? OR p.payment_method LIKE ?
+        OR (c.first_name || ' ' || c.last_name) LIKE ? OR c.business_name LIKE ? OR c.customer_number LIKE ?
+        OR (e.first_name || ' ' || e.last_name) LIKE ?)`;
+      params.push(like, like, like, like, like, like, like);
+    }
+    const sortCol = { date: 'p.created_at', amount: 'p.amount', number: 'p.payment_number', method: 'p.payment_method',
+      customer: "LOWER(c.first_name || ' ' || c.last_name)", employee: "LOWER(e.first_name || ' ' || e.last_name)" }[sort_by] || 'p.created_at';
+    const dir = sort === 'asc' ? 'ASC' : 'DESC';
+    sql += ` ORDER BY ${sortCol} ${dir}, p.created_at ${dir}, p.id ${dir} LIMIT ?`;
     params.push(parseInt(limit));
     const { rows } = await db.execute({ sql, args: params });
     res.json(rows);
