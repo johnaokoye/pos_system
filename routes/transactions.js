@@ -270,7 +270,7 @@ async function exchangeCreditError(conn, returnId, customerId) {
 router.get('/returns', requirePermission('transactions'), async (req, res) => {
   try {
     const { start, end, branch_id, customer_name, number, resolution, limit = 200 } = req.query;
-    let sql = `SELECT r.id, r.return_number, r.created_at, r.resolution, r.subtotal, r.tax_amount, r.total, r.notes,
+    let sql = `SELECT r.id, r.return_number, r.created_at, r.resolution, r.status, r.customer_id, r.subtotal, r.tax_amount, r.total, r.notes,
       t.id as original_transaction_id, t.transaction_number as original_transaction_number,
       c.first_name || ' ' || c.last_name as customer_name, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name,
       oe.first_name || ' ' || oe.last_name as override_by_name,
