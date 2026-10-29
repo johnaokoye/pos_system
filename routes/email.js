@@ -1851,7 +1851,7 @@ router.get('/statement-preview/:customer_id', requireAuth, async (req, res) => {
     const { start, end } = req.query;
     const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.customer_id] });
     if (!customer) return res.status(404).send('<p>Customer not found</p>');
-    let sql = `SELECT p.*, e.first_name || ' ' || e.last_name as employee_name FROM account_payments p LEFT JOIN employees e ON p.employee_id = e.id WHERE p.customer_id = ?`;
+    let sql = `SELECT p.*, e.first_name || ' ' || e.last_name as employee_name, (SELECT COALESCE(SUM(scu.amount), 0) FROM store_credit_uses scu WHERE scu.payment_id = p.id) AS store_credit_used FROM account_payments p LEFT JOIN employees e ON p.employee_id = e.id WHERE p.customer_id = ?`;
     const params = [req.params.customer_id];
     if (start) { sql += ' AND date(p.created_at) >= ?'; params.push(start); }
     if (end)   { sql += ' AND date(p.created_at) <= ?'; params.push(end); }
@@ -1859,7 +1859,7 @@ router.get('/statement-preview/:customer_id', requireAuth, async (req, res) => {
     const { rows: payments } = await db.execute({ sql, args: params });
     for (const p of payments) {
       p.allocations = await paymentAllocations(db, p.id);
-      p.unapplied = p.payment_method === 'writeoff' ? 0 : Math.max(0, parseFloat((p.amount - p.allocations.reduce((s, a) => s + a.amount, 0)).toFixed(2)));
+      p.unapplied = p.payment_method === 'writeoff' ? 0 : Math.max(0, parseFloat((p.amount - p.allocations.reduce((s, a) => s + a.amount, 0) - (Number(p.store_credit_used) || 0)).toFixed(2)));
     }
     const s = await getSettings();
     const origin = `${req.protocol}://${req.get('host')}`;
@@ -1885,7 +1885,7 @@ function buildArDetailHtml(d, s, origin) {
   const typeName = { T: 'Invoice', P: 'Payment', C: 'Credit note', W: 'Write-off' };
   const rows = d.invoices.map(inv => {
     const invRow = `<tr style="background:#fafafa">
-      ${td(`<strong>${esc(inv.number)}</strong>`)}${td(esc(inv.number))}${td(`T${inv.kind === 'legacy' ? ' <span style="color:#888;font-size:10px">legacy</span>' : ''}`)}
+      ${td(`<strong>${esc(inv.number)}</strong>`)}${td(esc(inv.number))}${td(inv.kind === 'store_credit' ? 'S <span style="color:#888;font-size:10px">store credit used</span>' : `T${inv.kind === 'legacy' ? ' <span style="color:#888;font-size:10px">legacy</span>' : ''}`)}
       ${td(dt(inv.date))}${td(dt(inv.due_date))}${td(esc(inv.reference || ''))}
       ${td(money(inv.amount), 'text-align:right')}${td(inv.age_days, 'text-align:right')}
       ${td(`<strong>${money(inv.balance_due)}</strong>`, 'text-align:right')}</tr>`;
@@ -1937,7 +1937,7 @@ function buildArDetailHtml(d, s, origin) {
     <tbody>${rows || `<tr><td colspan="9" style="padding:10px;color:#888;text-align:center">No open invoices</td></tr>`}${credits}</tbody>
   </table>
   <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px"><tr>
-    <td style="font-size:10px;color:#666">Type: T = invoice, P = payment, C = credit note, W = write-off. Age = days since the document date. Payments and credit notes are shown under the invoice they were applied to.</td>
+    <td style="font-size:10px;color:#666">Type: T = invoice, S = sale paid with store credit, P = payment, C = credit note, W = write-off. Age = days since the document date. Payments and credit notes are shown under the invoice they were applied to.</td>
     <td style="text-align:right;font-size:13px;white-space:nowrap"><strong>Customer open document balance: ${money(t.balance)}</strong></td>
   </tr></table>
 </body></html>`;
@@ -1978,7 +1978,7 @@ router.post('/send-statement/:customer_id', requireAuth, async (req, res) => {
   try {
     const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.customer_id] });
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
-    let sql = `SELECT p.*, e.first_name || ' ' || e.last_name as employee_name FROM account_payments p LEFT JOIN employees e ON p.employee_id = e.id WHERE p.customer_id = ?`;
+    let sql = `SELECT p.*, e.first_name || ' ' || e.last_name as employee_name, (SELECT COALESCE(SUM(scu.amount), 0) FROM store_credit_uses scu WHERE scu.payment_id = p.id) AS store_credit_used FROM account_payments p LEFT JOIN employees e ON p.employee_id = e.id WHERE p.customer_id = ?`;
     const params = [req.params.customer_id];
     if (start) { sql += ' AND date(p.created_at) >= ?'; params.push(start); }
     if (end)   { sql += ' AND date(p.created_at) <= ?'; params.push(end); }
@@ -1986,7 +1986,7 @@ router.post('/send-statement/:customer_id', requireAuth, async (req, res) => {
     const { rows: payments } = await db.execute({ sql, args: params });
     for (const p of payments) {
       p.allocations = await paymentAllocations(db, p.id);
-      p.unapplied = p.payment_method === 'writeoff' ? 0 : Math.max(0, parseFloat((p.amount - p.allocations.reduce((s, a) => s + a.amount, 0)).toFixed(2)));
+      p.unapplied = p.payment_method === 'writeoff' ? 0 : Math.max(0, parseFloat((p.amount - p.allocations.reduce((s, a) => s + a.amount, 0) - (Number(p.store_credit_used) || 0)).toFixed(2)));
     }
     const s = await getSettings();
     const origin = `${req.protocol}://${req.get('host')}`;

@@ -175,8 +175,12 @@ router.get('/payments-feed', async (req, res) => {
   try {
     const sinceId = parseInt(req.query.since_id) || 0;
     const limit = Math.min(1000, parseInt(req.query.limit) || 500);
-    const { rows } = await db.execute({ sql: `SELECT ap.id, ap.payment_number, ap.customer_id, ap.amount, ap.payment_method, ap.payment_mode, ap.reference, ap.notes, ap.created_at
-      FROM account_payments ap WHERE ap.id > ? ORDER BY ap.id LIMIT ?`, args: [sinceId, limit] });
+    // return_id / return_number / return_tax mark a credit note made by a
+    // return (lib/returnCreditNotes.js) — Books books those; a credit note
+    // without return_id is a legacy one Books entered itself.
+    const { rows } = await db.execute({ sql: `SELECT ap.id, ap.payment_number, ap.customer_id, ap.amount, ap.payment_method, ap.payment_mode, ap.reference, ap.notes, ap.created_at,
+        ap.return_id, r.return_number, r.tax_amount AS return_tax
+      FROM account_payments ap LEFT JOIN returns r ON r.id = ap.return_id WHERE ap.id > ? ORDER BY ap.id LIMIT ?`, args: [sinceId, limit] });
     res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -265,7 +269,7 @@ router.get('/statement/:customer_id', async (req, res) => {
     const { start, end } = req.query;
     const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.customer_id] });
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
-    let sql = `SELECT p.*, e.first_name || ' ' || e.last_name as employee_name
+    let sql = `SELECT p.*, e.first_name || ' ' || e.last_name as employee_name, (SELECT COALESCE(SUM(scu.amount), 0) FROM store_credit_uses scu WHERE scu.payment_id = p.id) AS store_credit_used
                FROM account_payments p LEFT JOIN employees e ON p.employee_id = e.id
                WHERE p.customer_id = ?`;
     const params = [req.params.customer_id];
@@ -275,7 +279,7 @@ router.get('/statement/:customer_id', async (req, res) => {
     const { rows: payments } = await db.execute({ sql, args: params });
     for (const p of payments) {
       p.allocations = await paymentAllocations(db, p.id);
-      p.unapplied = p.payment_method === 'writeoff' ? 0 : Math.max(0, parseFloat((p.amount - p.allocations.reduce((s, a) => s + a.amount, 0)).toFixed(2)));
+      p.unapplied = p.payment_method === 'writeoff' ? 0 : Math.max(0, parseFloat((p.amount - p.allocations.reduce((s, a) => s + a.amount, 0) - (Number(p.store_credit_used) || 0)).toFixed(2)));
     }
     res.json({ customer, payments, period: { start: start || null, end: end || null } });
   } catch(e) { res.status(500).json({ error: e.message }); }

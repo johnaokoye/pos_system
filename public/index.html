@@ -25146,7 +25146,7 @@ const App = {
         <tbody>
           ${d.invoices.map(i => { const [sl, sc] = status(i); return `
             <tr style="background:var(--bg-secondary,#f8f9fa)">
-              <td class="fw-600">${i.kind === 'sale' ? `<a href="#" style="color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.viewTransaction(${i.id})">${this.escapeAttr(i.number)}</a>` : `${this.escapeAttr(i.number)} <span class="badge-pill badge-secondary" style="font-size:10px">Legacy</span>`}</td>
+              <td class="fw-600">${i.kind === 'legacy' ? `${this.escapeAttr(i.number)} <span class="badge-pill badge-secondary" style="font-size:10px">Legacy</span>` : `<a href="#" style="color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.viewTransaction(${i.id})">${this.escapeAttr(i.number)}</a>${i.kind === 'store_credit' ? ' <span class="badge-pill badge-purple" style="font-size:10px">Store credit used</span>' : ''}`}</td>
               <td>${dt(i.date)}</td><td>${dt(i.due_date)}</td>
               <td>${i.reference ? this.escapeAttr(i.reference) : '<span style="color:var(--text-muted)">—</span>'}</td>
               <td style="text-align:right">${this.fmt(i.amount)}</td>

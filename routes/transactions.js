@@ -12,7 +12,7 @@ const { isSerialNumberProduct, serialNumberLabel, serialNumberOf, serialClashErr
 const { checkDiscountEligibility } = require('./promotions');
 const { allocateTicketDiscount, returnedDiscountShare } = require('../lib/ticketDiscount');
 const { UNAPPLIED_SQL, paymentReceipt } = require('../lib/customerPayments');
-const { recordReturnCreditNote } = require('../lib/returnCreditNotes');
+const { recordReturnCreditNote, useStoreCredit } = require('../lib/returnCreditNotes');
 
 // Mirrors availableCashBack() in public/index.html — the frontend uses this
 // same formula to decide whether to show the Cash Back bar; this copy is the
@@ -706,7 +706,10 @@ router.post('/', requirePermission('pos'), async (req, res) => {
           // here moves the balance back toward zero, clamped so it can't
           // cross into positive (the frontend already caps storeCredit at
           // the available |balance|, this is defense-in-depth only).
-          await tx.execute({ sql: 'UPDATE customers SET account_balance = MIN(0, account_balance + ?) WHERE id = ?', args: [storeCredit, customer_id] });
+          // Only a credit (negative) balance is drawn on — one the customer
+          // owes on is left alone rather than clamped to zero.
+          await tx.execute({ sql: 'UPDATE customers SET account_balance = CASE WHEN account_balance < 0 THEN MIN(0, account_balance + ?) ELSE account_balance END WHERE id = ?', args: [storeCredit, customer_id] });
+          await useStoreCredit(tx, { customerId: customer_id, transactionId: txId, amount: storeCredit });
         }
         if (cashBack > 0 && cashBackCard) {
           // Consume points proportionally to the dollar amount actually

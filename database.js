@@ -2381,6 +2381,15 @@ async function _init() {
     'ALTER TABLE purchase_orders ADD COLUMN internal_notes TEXT',
     // A credit note made by a return (lib/returnCreditNotes.js).
     'ALTER TABLE account_payments ADD COLUMN return_id INTEGER REFERENCES returns(id)',
+    // Store credit spent on a sale, and which credit note / payment it came
+    // out of (lib/returnCreditNotes.js useStoreCredit).
+    `CREATE TABLE IF NOT EXISTS store_credit_uses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      payment_id INTEGER NOT NULL REFERENCES account_payments(id),
+      transaction_id INTEGER NOT NULL REFERENCES transactions(id),
+      amount REAL NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`,
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
@@ -2407,6 +2416,17 @@ async function _init() {
       }
     }
   } catch(e) { console.error('[db] return credit-note backfill:', e.message); }
+
+  // One-time (after the credit notes above): store credit spent before
+  // store_credit_uses existed comes out of the customer's open credits.
+  try {
+    const { rows: spent } = await db.execute(`SELECT t.id, t.customer_id, t.store_credit_applied FROM transactions t
+      WHERE t.store_credit_applied > 0 AND t.customer_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM store_credit_uses s WHERE s.transaction_id = t.id) ORDER BY t.id`);
+    if (spent.length) {
+      const { useStoreCredit } = require('./lib/returnCreditNotes');
+      for (const t of spent) await useStoreCredit(db, { customerId: t.customer_id, transactionId: t.id, amount: t.store_credit_applied });
+    }
+  } catch(e) { console.error('[db] store credit backfill:', e.message); }
 
   // One-time: the GCT in bills entered before ap_bills.tax_amount existed.
   // A receipt bill gets its received lines' tax exactly (as receiving now
