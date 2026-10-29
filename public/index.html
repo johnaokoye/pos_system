@@ -25132,6 +25132,7 @@ const App = {
       b.supplier_id = po.supplier_id;
       b.branch_id = po.branch_id;
       b.amount = billing.unbilled || '';
+      b.tax_amount = billing.unbilled_tax || '';
       b.description = `Goods received on ${po.po_number}`;
     }
     this._apBillSuppliers = suppliers;
@@ -25154,6 +25155,7 @@ const App = {
             <div class="form-group"><label>Due Date</label><input id="bf-ap-due" type="date" value="${b.due_date || ''}"><div id="bf-ap-terms" style="font-size:11px;color:var(--text-muted);margin-top:3px"></div></div>
             <div class="form-group"><label>Amount *</label><input id="bf-ap-amount" type="number" step="0.01" min="0" value="${b.amount ?? ''}"></div>
           </div>
+          <div class="form-group"><label>GCT Included</label><input id="bf-ap-tax" type="number" step="0.01" min="0" value="${b.tax_amount || ''}" placeholder="0.00" style="max-width:180px"><div style="font-size:11px;color:var(--text-muted);margin-top:3px">The GCT on the vendor's invoice, already in the amount — it's claimed as input tax.</div></div>
           <div class="form-group"><label>Description</label><input id="bf-ap-desc" value="${this.escapeAttr(b.description)}" placeholder="e.g. Electricity for September"></div>
           ${bill && bill.paid > 0 ? `<p style="font-size:12px;color:var(--text-muted)">${this.fmt(bill.paid)} has already been paid on this bill, so the vendor can't be changed and the amount can't go below that.</p>` : ''}
         </div>
@@ -25194,7 +25196,10 @@ const App = {
     if (!poId) return;
     const billing = await this.api('GET', `/payables/po/${poId}`).catch(() => null);
     const amt = document.getElementById('bf-ap-amount');
-    if (billing && !amt.value) amt.value = billing.unbilled || '';
+    if (billing && !amt.value) {
+      amt.value = billing.unbilled || '';
+      document.getElementById('bf-ap-tax').value = billing.unbilled_tax || '';
+    }
     if (billing && billing.unbilled === 0) this.alert('Everything received on this PO has already been billed', 'warning');
   },
 
@@ -25218,11 +25223,13 @@ const App = {
       bill_date: document.getElementById('bf-ap-date').value,
       due_date: document.getElementById('bf-ap-due').value || null,
       amount: parseFloat(document.getElementById('bf-ap-amount').value),
+      tax_amount: parseFloat(document.getElementById('bf-ap-tax').value) || 0,
       description: document.getElementById('bf-ap-desc').value.trim(),
       branch_id: this._apBillBranchId,
     };
     if (!data.supplier_id) return this.alert('Choose a vendor', 'error');
     if (!(data.amount > 0)) return this.alert('Enter the bill amount', 'error');
+    if (data.tax_amount < 0 || data.tax_amount > data.amount) return this.alert('GCT must be between zero and the bill amount', 'error');
     try {
       const saved = id ? await this.api('PUT', `/payables/bills/${id}`, data) : await this.api('POST', '/payables/bills', data);
       this.alert(id ? 'Bill updated' : `Bill ${saved.bill_number} entered`);
@@ -25266,7 +25273,7 @@ const App = {
           ${b.description ? `<p style="font-size:13px;margin-bottom:14px">${this.escapeAttr(b.description)}</p>` : ''}
           ${b.status === 'void' ? `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:10px 12px;margin-bottom:14px;font-size:13px;color:#991b1b"><strong>Void:</strong> ${this.escapeAttr(b.void_reason)}</div>` : ''}
           <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px">
-            <div class="card" style="padding:10px;text-align:center"><div style="font-size:18px;font-weight:700">${this.fmt(b.amount)}</div><div style="font-size:11px;color:var(--text-muted)">Amount</div></div>
+            <div class="card" style="padding:10px;text-align:center"><div style="font-size:18px;font-weight:700">${this.fmt(b.amount)}</div><div style="font-size:11px;color:var(--text-muted)">Amount${b.tax_amount > 0 ? ` (incl. GCT ${this.fmt(b.tax_amount)})` : ''}</div></div>
             <div class="card" style="padding:10px;text-align:center"><div style="font-size:18px;font-weight:700">${this.fmt(b.paid)}</div><div style="font-size:11px;color:var(--text-muted)">Paid</div></div>
             <div class="card" style="padding:10px;text-align:center"><div style="font-size:18px;font-weight:700;${b.balance > 0 ? 'color:var(--danger)' : ''}">${this.fmt(b.balance)}</div><div style="font-size:11px;color:var(--text-muted)">Balance</div></div>
           </div>

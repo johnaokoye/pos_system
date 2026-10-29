@@ -2371,10 +2371,34 @@ async function _init() {
     'ALTER TABLE quotations ADD COLUMN po_number TEXT',
     'ALTER TABLE transactions ADD COLUMN po_number TEXT',
     'ALTER TABLE work_orders ADD COLUMN po_number TEXT',
+    // GCT included in a bill's amount (input tax, base currency) — RetailPOS
+    // Books posts it to GCT Recoverable instead of Inventory. NULL = a bill
+    // from before the column, filled in once below.
+    'ALTER TABLE ap_bills ADD COLUMN tax_amount REAL',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
   }
+
+  // One-time: the GCT in bills entered before ap_bills.tax_amount existed.
+  // A receipt bill gets its received lines' tax exactly (as receiving now
+  // works it out); any other PO bill the PO's tax share of its amount;
+  // a bill with no PO none (edit it to enter the GCT).
+  try {
+    await db.execute(`UPDATE ap_bills SET tax_amount = (
+      SELECT ROUND(SUM(ri.quantity * COALESCE(i.tax_amount, 0) / i.quantity_ordered)
+               * CASE WHEN COALESCE(po.currency, '') <> '' THEN COALESCE(po.exchange_rate, 0) ELSE 1 END, 2)
+      FROM po_receipts r JOIN po_receipt_items ri ON ri.receipt_id = r.id
+      JOIN purchase_order_items i ON i.id = ri.po_item_id AND i.quantity_ordered > 0
+      JOIN purchase_orders po ON po.id = r.po_id
+      WHERE r.bill_id = ap_bills.id)
+      WHERE tax_amount IS NULL AND EXISTS (SELECT 1 FROM po_receipts r WHERE r.bill_id = ap_bills.id)`);
+    await db.execute(`UPDATE ap_bills SET tax_amount = COALESCE((
+      SELECT ROUND(ap_bills.amount * po.tax_amount / po.total, 2) FROM purchase_orders po
+      WHERE po.id = ap_bills.po_id AND po.total > 0 AND po.tax_amount > 0), 0)
+      WHERE tax_amount IS NULL`);
+    await db.execute('UPDATE ap_bills SET tax_amount = amount WHERE tax_amount > amount');
+  } catch(e) {}
 
   // Starting opportunity lead types (more are added from the form).
   for (const name of ['Bid', 'Email', 'WhatsApp', 'Website', 'Site visit']) {

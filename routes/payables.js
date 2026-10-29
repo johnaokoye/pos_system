@@ -26,6 +26,7 @@ const billSelect = `SELECT b.*, s.name AS supplier_name, s.supplier_number, po.p
 
 function decorateBill(b, asOf) {
   b.paid = round2(b.paid);
+  b.tax_amount = round2(b.tax_amount);
   b.balance = b.status === 'void' ? 0 : round2(b.amount - b.paid);
   b.display_status = b.status === 'void' ? 'void'
     : b.balance <= 0 ? 'paid'
@@ -79,6 +80,9 @@ async function validateBill(body, billId) {
   const amount = round2(body.amount);
   if (!body.supplier_id) return 'Vendor is required';
   if (!(amount > 0)) return 'Amount must be greater than zero';
+  const tax = round2(body.tax_amount);
+  if (tax < 0) return 'GCT cannot be negative';
+  if (tax > amount) return 'GCT cannot be more than the bill amount';
   if (!/^\d{4}-\d{2}-\d{2}$/.test(body.bill_date || '')) return 'Bill date is required';
   if (body.due_date && !/^\d{4}-\d{2}-\d{2}$/.test(body.due_date)) return 'Due date is invalid';
   const invoiceNo = String(body.vendor_invoice_number || '').trim();
@@ -128,10 +132,13 @@ router.put('/bills/:id', requirePermission('payables_bills'), async (req, res) =
     if (err) return res.status(400).json({ error: err });
     const amount = round2(body.amount);
     if (amount < round2(bill.paid)) return res.status(400).json({ error: `Amount cannot be less than the ${round2(bill.paid).toFixed(2)} already paid` });
+    // A caller that doesn't send the GCT keeps what the bill has.
+    const tax = body.tax_amount === undefined ? round2(bill.tax_amount) : round2(body.tax_amount);
+    if (tax > amount) return res.status(400).json({ error: 'GCT cannot be more than the bill amount' });
     await db.execute({
-      sql: 'UPDATE ap_bills SET supplier_id=?, vendor_invoice_number=?, po_id=?, branch_id=?, bill_date=?, due_date=?, amount=?, description=? WHERE id=?',
+      sql: 'UPDATE ap_bills SET supplier_id=?, vendor_invoice_number=?, po_id=?, branch_id=?, bill_date=?, due_date=?, amount=?, tax_amount=?, description=? WHERE id=?',
       args: [body.supplier_id, String(body.vendor_invoice_number || '').trim() || null, body.po_id || null, body.branch_id || null,
-        body.bill_date, body.due_date || bill.due_date, amount, body.description || null, bill.id],
+        body.bill_date, body.due_date || bill.due_date, amount, tax, body.description || null, bill.id],
     });
     const { rows: [updated] } = await db.execute({ sql: `${billSelect} WHERE b.id = ?`, args: [bill.id] });
     res.json(decorateBill(updated, today()));

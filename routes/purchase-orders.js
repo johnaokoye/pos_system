@@ -467,6 +467,7 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
           supplier_id: po.supplier_id, po_id: po.id, branch_id: po.branch_id,
           bill_date: billDate, due_date: dueDateFor(supplier.payment_terms, billDate),
           amount: parseFloat(((receiptValue + tax) * rate).toFixed(2)),
+          tax_amount: parseFloat((tax * rate).toFixed(2)),
           description: `Goods received on ${po.po_number}${po.currency ? ` (${po.currency} ${(receiptValue + tax).toFixed(2)} @ ${rate})` : ''}`,
           source: 'receipt', created_by: req.employee?.id,
         });
