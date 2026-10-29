@@ -2114,6 +2114,11 @@ async function _init() {
     )`,
     'CREATE INDEX IF NOT EXISTS idx_product_units_barcode ON product_units(barcode)',
     'ALTER TABLE products ADD COLUMN base_unit_id INTEGER REFERENCES units_of_measure(id)',
+    // A purchase request line's unit of measure (lib/units.js) — quantity and
+    // cost are per that unit; carried onto the PO line on convert.
+    'ALTER TABLE purchase_request_items ADD COLUMN uom_id INTEGER REFERENCES units_of_measure(id)',
+    'ALTER TABLE purchase_request_items ADD COLUMN purchase_unit TEXT',
+    'ALTER TABLE purchase_request_items ADD COLUMN units_per REAL DEFAULT 1',
     'ALTER TABLE transaction_items ADD COLUMN uom_id INTEGER',
     'ALTER TABLE quotation_items ADD COLUMN uom_id INTEGER',
     'ALTER TABLE layaway_plan_items ADD COLUMN uom_id INTEGER',

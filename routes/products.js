@@ -6,12 +6,12 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
-const { requireAuth, requirePermission, can } = require('../lib/permissions');
+const { requireAuth, requirePermission, requireAnyPermission, can } = require('../lib/permissions');
 const { getOutstandingQty, getOutOfServiceQty } = require('../lib/rentalAvailability');
 const { mergeProducts } = require('../lib/productMerge');
 const { HAS_ISSUE_SQL, ISSUE_LABEL_SQL, rowsToCsv } = require('../lib/productIssues');
 const { getSetting } = require('../lib/settings');
-const { EACH, unitsByProduct, unitLabel } = require('../lib/units');
+const { EACH, unitsByProduct, unitLabel, productUnits } = require('../lib/units');
 
 // CSV cells for money/quantity fields often carry currency symbols, thousands
 // separators, or stray whitespace (e.g. "$15.00", "1,000") — bare parseFloat/
@@ -1096,6 +1096,29 @@ async function saveProductUnits(productId, body) {
   } catch (e) { await tx.rollback(); throw e; }
   return null;
 }
+
+// Adds one alternate unit to an item from a purchase request or PO line
+// (e.g. Case = 24 when the supplier only sells by the case), so purchasing
+// staff can order in it without inventory edit rights. Order-only: no
+// price or barcode — those stay on the product form. Returns the item's
+// units in the same shape as GET /products.
+router.post('/:id/units', requireAnyPermission('inventory_edit', 'inventory_units', 'pr_create', 'purchasing_create'), async (req, res) => {
+  try {
+    const { rows: [product] } = await db.execute({ sql: 'SELECT id, name, base_unit_id, is_service, is_rental, (SELECT COUNT(*) FROM product_variations v WHERE v.product_id = products.id) AS variations FROM products WHERE id = ?', args: [req.params.id] });
+    if (!product) return res.status(404).json({ error: 'Item not found' });
+    if (product.is_service || product.is_rental || Number(product.variations) > 0) return res.status(400).json({ error: `${product.name} can only be ordered in its stock unit` });
+    const { rows: [uom] } = await db.execute({ sql: 'SELECT id, name, active FROM units_of_measure WHERE id = ?', args: [Number(req.body.unit_id) || 0] });
+    if (!uom || !uom.active) return res.status(400).json({ error: 'Choose a unit' });
+    if (uom.id === product.base_unit_id || (!product.base_unit_id && uom.name.toLowerCase() === 'each')) return res.status(400).json({ error: `${uom.name} is already ${product.name}'s stock unit` });
+    const factor = Math.round(Number(req.body.factor) * 10000) / 10000;
+    if (!(factor > 0)) return res.status(400).json({ error: `Enter how many stock units are in one ${uom.name}` });
+    if ((await productUnits(db, product.id)).some(u => u.unit_id === uom.id)) return res.status(400).json({ error: `${product.name} already has a ${uom.name} unit` });
+    await db.execute({ sql: 'INSERT INTO product_units (product_id, unit_id, factor, price, barcode) VALUES (?,?,?,NULL,NULL)', args: [product.id, uom.id, factor] });
+    const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [product.id] });
+    await attachUnits([row]);
+    res.status(201).json({ unit_id: uom.id, units: row.units, base_unit_name: row.base_unit_name, base_unit_abbr: row.base_unit_abbr });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 // POST create product
 // Create/edit/delete are shared by three different frontend forms — Inventory,

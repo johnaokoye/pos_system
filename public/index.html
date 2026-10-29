@@ -3726,6 +3726,94 @@ const App = {
     });
   },
 
+  // Purchase request / PO line unit dropdown: the item's stock unit and
+  // alternate units, plus "+ Add unit…" for anyone who raises PRs or POs
+  // (POST /products/:id/units) — so they can order by the case or drum
+  // without inventory edit rights.
+  _canAddOrderUnit(p) {
+    return !!p && !(p.is_service || p.is_rental || p.has_variations > 0)
+      && ['inventory_edit', 'inventory_units', 'pr_create', 'purchasing_create'].some(k => this.can(k));
+  },
+
+  _orderUnitOptionsHtml(p, choice) {
+    const choices = this._unitChoices(p, 'buy');
+    const selected = choice && !choice.isBase ? String(choice.uom_id) : '';
+    return choices.map(c => { const v = c.isBase ? '' : String(c.uom_id); return `<option value="${v}" ${v === selected ? 'selected' : ''}>${this.escapeAttr(c.label || c.name)}</option>`; }).join('')
+      + (this._canAddOrderUnit(p) ? '<option value="__add">+ Add unit…</option>' : '');
+  },
+
+  // Asks for a new order unit for p (an existing unit or a brand-new one,
+  // and how many stock units it holds), saves it on the item, updates
+  // p.units in place and resolves the new _unitChoices() entry — or null.
+  async _addOrderUnit(p) {
+    const uoms = await this.api('GET', '/units').catch(() => []);
+    const taken = new Set([p.base_unit_id, ...(p.units || []).map(u => u.unit_id)].filter(Boolean).map(Number));
+    const avail = uoms.filter(u => u.active && !taken.has(Number(u.id)) && (p.base_unit_id || String(u.name).toLowerCase() !== 'each'));
+    const stockName = p.base_unit_name || 'Each';
+    const canNew = this.can('settings') || this.can('inventory_units') || this.can('pr_create') || this.can('purchasing_create');
+    return new Promise(resolve => {
+      this._orderUnitResolve = choice => { this._orderUnitResolve = null; this.closeSecondaryModal(); resolve(choice); };
+      this.showSecondaryModal(`
+        <div class="modal" style="max-width:440px">
+          <div class="modal-header"><span class="modal-title">Add a unit — ${this.escapeAttr(p.name)}</span><button class="modal-close" onclick="App._orderUnitResolve && App._orderUnitResolve(null)">✕</button></div>
+          <div class="modal-body">
+            <div class="form-group"><label>Unit</label>
+              <select id="ou-unit" onchange="document.getElementById('ou-new').style.display = this.value === '__new' ? '' : 'none'">
+                ${avail.map(u => `<option value="${u.id}">${this.escapeAttr(u.name)}${u.abbreviation ? ` (${this.escapeAttr(u.abbreviation)})` : ''}</option>`).join('')}
+                ${canNew ? `<option value="__new" ${avail.length ? '' : 'selected'}>+ New unit…</option>` : ''}
+              </select>
+            </div>
+            <div id="ou-new" style="display:${avail.length || !canNew ? 'none' : ''};padding:10px;background:var(--bg);border-radius:6px;margin-bottom:12px">
+              <div style="display:grid;grid-template-columns:2fr 1fr;gap:8px">
+                <div class="form-group" style="margin:0"><label>Name</label><input id="ou-name" placeholder="e.g. Drum"></div>
+                <div class="form-group" style="margin:0"><label>Abbreviation</label><input id="ou-abbr" placeholder="e.g. dr"></div>
+              </div>
+              <label style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:13px;cursor:pointer"><input type="checkbox" id="ou-decimal" style="width:16px;height:16px"> Measured unit — allows part quantities (e.g. 2.5)</label>
+            </div>
+            <div class="form-group"><label>How many ${this.escapeAttr(stockName)} in one?</label><input id="ou-factor" type="number" min="0" step="any" placeholder="e.g. 24"></div>
+            <div style="font-size:12px;color:var(--text-muted)">Saved on the item for ordering. Its selling price and barcode, if it's sold this way, are set on the product form.</div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="App._orderUnitResolve(null)">Cancel</button>
+            <button class="btn btn-primary" id="ou-save" onclick="App._saveOrderUnit(${p.id})">Add Unit</button>
+          </div>
+        </div>`);
+      this._orderUnitProduct = p;
+      const overlay = document.getElementById('secondary-modal-overlay');
+      overlay?.addEventListener('keydown', e => { if (e.key === 'Escape') this._orderUnitResolve?.(null); });
+      overlay?.addEventListener('click', e => { if (e.target === overlay) this._orderUnitResolve?.(null); });
+      setTimeout(() => document.getElementById('ou-factor')?.focus(), 0);
+    });
+  },
+
+  async _saveOrderUnit(productId) {
+    const p = this._orderUnitProduct;
+    if (!p || p.id !== productId) return;
+    let unitId = document.getElementById('ou-unit').value;
+    const factor = parseFloat(document.getElementById('ou-factor').value);
+    if (!unitId) { this.alert('Choose a unit', 'error'); return; }
+    if (!(factor > 0)) { this.alert(`Enter how many ${p.base_unit_name || 'Each'} are in one`, 'error'); return; }
+    const btn = document.getElementById('ou-save');
+    if (btn) btn.disabled = true;
+    try {
+      if (unitId === '__new') {
+        const name = document.getElementById('ou-name').value.trim();
+        if (!name) { this.alert('Name the new unit', 'error'); return; }
+        const u = await this.api('POST', '/units', { name, abbreviation: document.getElementById('ou-abbr').value.trim(), allow_decimal: document.getElementById('ou-decimal').checked });
+        unitId = u.id;
+      }
+      const r = await this.api('POST', `/products/${productId}/units`, { unit_id: Number(unitId), factor });
+      p.units = r.units;
+      // The same item may be loaded in other lists (POS, PO/PR pickers).
+      for (const list of [this.allProducts, this._poProducts, this._prAllProducts]) {
+        const other = (list || []).find(x => x.id === productId);
+        if (other && other !== p) other.units = r.units;
+      }
+      this._orderUnitResolve?.(this._unitChoices(p, 'buy').find(c => !c.isBase && Number(c.uom_id) === Number(r.unit_id)) || null);
+    } catch (e) { this.alert(e.message, 'error'); }
+    finally { if (btn) btn.disabled = false; }
+  },
+
   // Unit fields for a cart line recalled from a held ticket or quote line.
   _recalledUnitFields(item, product) {
     const choice = item.uom_id != null ? this._unitChoiceFor(product, item.uom_id) : null;
@@ -20141,8 +20229,8 @@ const App = {
             <div class="card-header"><span class="card-title">Items</span>
               <button class="btn btn-sm btn-outline" onclick="App.addPRItem()">+ Add Item</button>
             </div>
-            <div style="display:grid;grid-template-columns:2fr 1.5fr 60px 90px 90px 50px 28px;gap:6px;padding:4px 0 4px 8px;font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase">
-              <span>Product</span><span>Item Name</span><span id="pr-qty-head">Qty</span><span>Est. Cost</span><span>Item Type</span><span title="Local tax exempt">No Tax</span><span></span>
+            <div style="display:grid;grid-template-columns:2fr 1.5fr 100px 60px 90px 90px 50px 28px;gap:6px;padding:4px 0 4px 8px;font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase">
+              <span>Product</span><span>Item Name</span><span title="Unit of measure to order in">Unit</span><span id="pr-qty-head">Qty</span><span>Est. Cost</span><span>Item Type</span><span title="Local tax exempt">No Tax</span><span></span>
             </div>
             <div id="pr-items"></div>
           </div>
@@ -20227,7 +20315,7 @@ const App = {
       if (on) el.value = '';
       el.placeholder = on ? 'Invoice' : 'Est. Cost';
     });
-    document.querySelectorAll('[id^="pri-qty-"]').forEach(el => { el.step = on ? 'any' : '1'; el.title = on ? 'Maximum quantity authorized' : ''; });
+    document.querySelectorAll('[id^="pri-qty-"]').forEach(el => { el.step = on || el.dataset.measured ? 'any' : '1'; el.title = on ? 'Maximum quantity authorized' : ''; });
     const qtyHead = document.getElementById('pr-qty-head');
     if (qtyHead) qtyHead.textContent = on ? 'Max Qty' : 'Qty';
     this.calcPRTotal();
@@ -20289,7 +20377,7 @@ const App = {
     wrap.id = `pr-item-${idx}`;
     wrap.style.cssText = 'border-bottom:1px solid var(--border);padding:8px 0';
     wrap.innerHTML = `
-      <div style="display:grid;grid-template-columns:2fr 1.5fr 60px 90px 90px 50px 28px;gap:6px;align-items:center">
+      <div style="display:grid;grid-template-columns:2fr 1.5fr 100px 60px 90px 90px 50px 28px;gap:6px;align-items:center">
         <span class="pri-prod-search-wrap" style="position:relative">
           <input type="text" id="pri-prod-search-${idx}" placeholder="${isService ? 'Service — not an inventory item' : 'Search product (optional)…'}" ${isService ? 'disabled' : ''} autocomplete="off" style="width:100%"
             value="${this.escapeAttr(prefillLabel)}"
@@ -20298,6 +20386,7 @@ const App = {
           <div id="pri-prod-dd-${idx}" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
         </span>
         <input id="pri-name-${idx}" placeholder="${isService ? 'Describe the service' : 'Or type item name'}" value="${prefill&&!prefill.product_id?this.escapeAttr(prefill.product_name):''}" data-qi-id="${prefill&&prefill.quotation_item_id||''}" oninput="App.calcPRTotal()">
+        <select id="pri-unit-${idx}" style="font-size:12px" onchange="App._onPRUnitChange(${idx})" title="Unit of measure to order in" disabled><option value="">—</option></select>
         <input id="pri-qty-${idx}" type="number" min="${supplierPriced?'0':'1'}" step="${supplierPriced?'any':'1'}" value="${prefill?prefill.quantity:1}" placeholder="Qty" ${supplierPriced?'title="Maximum quantity authorized"':''} oninput="App.calcPRTotal()">
         <input id="pri-cost-${idx}" type="number" step="0.01" value="${prefill&&!supplierPriced?prefill.unit_cost:''}" placeholder="${supplierPriced?'Invoice':'Est. Cost'}" ${supplierPriced?'title="Cost comes from the supplier\'s invoice on the PO"':''} ${supplierPriced?'disabled':''} oninput="App.calcPRTotal()">
         <select id="pri-itype-${idx}" style="font-size:12px" onchange="App._onPRItemTypeChange(${idx})" title="Service = non-physical (e.g. a promotional video, design work, a subscription): no product, no stock">
@@ -20321,6 +20410,44 @@ const App = {
         </div>
       </div>`;
     container.appendChild(wrap);
+    if (prefillProduct && !isService) this._setPRLineUnits(idx, prefillProduct, this._unitChoiceFor(prefillProduct, prefill.uom_id ?? prefillProduct.base_unit_id ?? null, 'buy'));
+  },
+
+  // A PR line's unit dropdown (lib/units.js), like a PO line's: the item's
+  // units plus "+ Add unit…"; a free-typed item or service has none.
+  _setPRLineUnits(idx, p, choice) {
+    const unitSel = document.getElementById(`pri-unit-${idx}`);
+    if (!unitSel) return;
+    unitSel.innerHTML = p ? this._orderUnitOptionsHtml(p, choice) : '<option value="">—</option>';
+    unitSel.disabled = !p || unitSel.options.length < 2;
+    unitSel.dataset.prev = unitSel.value;
+    const qty = document.getElementById(`pri-qty-${idx}`);
+    // A measured unit (yards, kg…) takes part quantities.
+    const measured = !!choice?.allow_decimal || (!choice && !!p?.base_unit_decimal);
+    if (qty) {
+      qty.dataset.measured = measured ? '1' : '';
+      const part = measured || this._prRequestType === 'supplier_priced';
+      qty.step = part ? 'any' : '1'; qty.min = part ? '0' : '1';
+    }
+  },
+
+  // A new unit sets the line's estimated cost to the unit's size × the
+  // item's cost (not on a supplier-priced request — its cost comes later).
+  async _onPRUnitChange(idx) {
+    const hidden = document.getElementById(`pri-prod-${idx}`);
+    const p = (this._prAllProducts || []).find(x => String(x.id) === hidden?.value);
+    const unitSel = document.getElementById(`pri-unit-${idx}`);
+    if (!p || !unitSel) return;
+    let choice;
+    if (unitSel.value === '__add') {
+      choice = await this._addOrderUnit(p);
+      if (!choice) { unitSel.value = unitSel.dataset.prev || ''; return; }
+    } else {
+      choice = this._unitChoiceFor(p, unitSel.value ? Number(unitSel.value) : (p.base_unit_id || null), 'buy');
+    }
+    this._setPRLineUnits(idx, p, choice);
+    if (this._prRequestType !== 'supplier_priced') document.getElementById(`pri-cost-${idx}`).value = ((p.cost || 0) * (choice?.factor || 1)).toFixed(2);
+    this.calcPRTotal();
   },
 
   // Service = a non-physical purchase (promotional video, design work…):
@@ -20336,6 +20463,7 @@ const App = {
       if (hidden.value && !name.value) name.value = hidden.dataset.name || search.value.replace(/\s*\([^)]*\)$/, '');
       hidden.value = ''; delete hidden.dataset.name; delete hidden.dataset.sku;
       search.value = '';
+      this._setPRLineUnits(idx, null, null);
     }
     search.disabled = isService;
     search.placeholder = isService ? 'Service — not an inventory item' : 'Search product (optional)…';
@@ -20362,7 +20490,7 @@ const App = {
     dd.style.display = '';
   },
 
-  _selectPRProdOption(idx, productId) {
+  async _selectPRProdOption(idx, productId) {
     const p = (this._prAllProducts || []).find(x => x.id === productId);
     if (!p) return;
     const hidden = document.getElementById(`pri-prod-${idx}`);
@@ -20372,7 +20500,10 @@ const App = {
     if (searchEl) searchEl.value = `${p.name} (${p.sku||''})`;
     if (dd) dd.style.display = 'none';
     document.getElementById(`pri-name-${idx}`).value = '';
-    if (this._prRequestType !== 'supplier_priced') document.getElementById(`pri-cost-${idx}`).value = p.cost || '';
+    // An item with alternate units asks which one to order in (lib/units.js).
+    const choice = (await this._pickUnit(p, 'buy')) || this._unitChoices(p, 'buy')[0];
+    this._setPRLineUnits(idx, p, choice);
+    if (this._prRequestType !== 'supplier_priced') document.getElementById(`pri-cost-${idx}`).value = p.cost ? ((p.cost || 0) * (choice?.factor || 1)).toFixed(2) : '';
     this.calcPRTotal();
   },
 
@@ -20432,13 +20563,15 @@ const App = {
       const details = document.getElementById(`pri-notes-${idx}`)?.value.trim() || null;
       if (!product_id && !product_name) { if (details) unnamedService = true; return; }
       if (request_type === 'supplier_priced' && !product_id) missingProduct = true;
-      const quantity = request_type === 'supplier_priced' ? (parseFloat(qEl.value) || 0) : (parseInt(qEl.value) || 1);
+      const unitVal = product_id ? document.getElementById(`pri-unit-${idx}`)?.value : '';
+      const uom_id = unitVal && unitVal !== '__add' ? Number(unitVal) : null;
+      const quantity = request_type === 'supplier_priced' || qEl.step === 'any' ? (parseFloat(qEl.value) || 0) : (parseInt(qEl.value) || 1);
       const unit_cost = parseFloat(document.getElementById(`pri-cost-${idx}`)?.value) || 0;
       const item_type = document.getElementById(`pri-itype-${idx}`)?.value || (request_type === 'internal_use' ? 'internal' : 'sale');
       const product_url = document.getElementById(`pri-url-${idx}`)?.value.trim() || null;
       const quotation_item_id = nameEl?.dataset.qiId || null;
       const tax_exempt = this._prIsLocalSupplier && document.getElementById(`pri-taxfree-${idx}`)?.checked ? 1 : 0;
-      items.push({ product_id: product_id || null, product_name, sku, quantity, unit_cost, item_type, product_url, quotation_item_id, tax_exempt, notes: details });
+      items.push({ product_id: product_id || null, product_name, sku, quantity, unit_cost, item_type, product_url, quotation_item_id, tax_exempt, notes: details, uom_id });
     });
     if (unnamedService) { this.alert('Give each line a name — e.g. "Promotional video" — the details go underneath', 'error'); return; }
     if (!items.length) { this.alert('Add at least one item', 'error'); return; }
@@ -21074,15 +21207,15 @@ const App = {
     this.calcPOTotal();
   },
 
-  // Fills a PO line's unit dropdown (lib/units.js) — shown only for an item
-  // with alternate units — and selects `choice` (null = the stock unit).
+  // Fills a PO line's unit dropdown (lib/units.js) — shown for an item with
+  // alternate units, or when the user can add one — and selects `choice`
+  // (null = the stock unit).
   _setPOLineUnits(idx, p, choice) {
     const unitSel = document.getElementById(`poi-unit-${idx}`);
     if (!unitSel) return;
-    const choices = this._unitChoices(p, 'buy');
-    unitSel.innerHTML = choices.map(c => `<option value="${c.isBase ? '' : c.uom_id}">${this.escapeAttr(c.label || c.name)}</option>`).join('');
-    unitSel.style.display = choices.length > 1 ? '' : 'none';
-    unitSel.value = choice && !choice.isBase ? String(choice.uom_id) : '';
+    unitSel.innerHTML = this._orderUnitOptionsHtml(p, choice);
+    unitSel.style.display = unitSel.options.length > 1 ? '' : 'none';
+    unitSel.dataset.prev = unitSel.value;
   },
 
   // Searchable replacement for what used to be a plain <select> scoped to
@@ -21120,10 +21253,17 @@ const App = {
 
   // A PO line's unit sets its default cost — the unit's size × the stock
   // unit's cost; quantity and cost are then per that unit.
-  _onPOUnitChange(idx) {
+  async _onPOUnitChange(idx) {
     const hidden = document.getElementById(`poi-prod-${idx}`);
     const p = (this._poProducts || []).find(x => String(x.id) === hidden?.value);
-    const val = document.getElementById(`poi-unit-${idx}`)?.value;
+    const unitSel = document.getElementById(`poi-unit-${idx}`);
+    if (unitSel?.value === '__add') {
+      const added = p ? await this._addOrderUnit(p) : null;
+      if (!added) { unitSel.value = unitSel.dataset.prev || ''; return; }
+      this._setPOLineUnits(idx, p, added);
+    }
+    if (unitSel) unitSel.dataset.prev = unitSel.value;
+    const val = unitSel?.value;
     const choice = p ? this._unitChoiceFor(p, val ? Number(val) : (p.base_unit_id || null), 'buy') : null;
     if (p) document.getElementById(`poi-cost-${idx}`).value = ((p.cost || 0) * (choice?.factor || 1)).toFixed(2);
     this.calcPOTotal();

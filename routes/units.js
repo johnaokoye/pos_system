@@ -5,7 +5,9 @@ const { requireAuth, requireAnyPermission } = require('../lib/permissions');
 
 // Units of measure (lib/units.js). Listing is open to any signed-in user —
 // the product form, POS and quotes all need the names; managing the list
-// needs inventory_units (or settings), like categories and brands.
+// needs inventory_units (or settings), like categories and brands. Adding a
+// unit is also open to whoever creates purchase requests or POs, so a new
+// one (e.g. Drum) can be set up while ordering in it.
 router.get('/', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.execute({ sql: `SELECT u.*,
@@ -22,7 +24,7 @@ const fields = body => ({
   active: body.active === undefined ? 1 : (body.active ? 1 : 0),
 });
 
-router.post('/', requireAnyPermission('settings', 'inventory_units'), async (req, res) => {
+router.post('/', requireAnyPermission('settings', 'inventory_units', 'pr_create', 'purchasing_create'), async (req, res) => {
   const f = fields(req.body);
   if (!f.name) return res.status(400).json({ error: 'Name required' });
   try {

@@ -5,6 +5,7 @@ const { requirePermission, can } = require('../lib/permissions');
 const { resolveApprovalSignature } = require('../lib/signatures');
 const { nextNumber } = require('../lib/nextNumber');
 const { localTaxRate, defaultTaxOption, priceLine, poTotals, resolvePoCurrency } = require('../lib/poLines');
+const { resolvePurchaseUnit, lineName } = require('../lib/units');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -116,13 +117,17 @@ async function processPRItems(items, request_type) {
     if (service && !String(item.product_name || '').trim()) throw new Error('Describe each service line');
     const product = item.product_id && !service ? (await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] })).rows[0] : null;
     if (supplierPriced && !product) throw new Error('Supplier-priced requests need every item picked from inventory');
-    const unit_cost = supplierPriced ? 0 : parseFloat(item.unit_cost || (product ? product.cost : 0)) || 0;
-    const qty = supplierPriced ? Math.round((parseFloat(item.quantity) || 0) * 1000) / 1000 : parseInt(item.quantity || 1);
+    // A catalog item can be requested in one of its units of measure
+    // (lib/units.js): quantity and cost are then per that unit.
+    const unit = await resolvePurchaseUnit(db, product, item.uom_id);
+    const unit_cost = supplierPriced ? 0 : parseFloat(item.unit_cost || (product ? (product.cost || 0) * unit.units_per : 0)) || 0;
+    const qty = supplierPriced || unit.allow_decimal ? Math.round((parseFloat(item.quantity) || 0) * 1000) / 1000 : parseInt(item.quantity || 1);
+    if (!supplierPriced && !(qty > 0)) throw new Error(`Enter a quantity for ${item.product_name || (product ? product.name : 'each item')}`);
     if (supplierPriced && qty <= 0) throw new Error('Enter the maximum quantity for each item');
     const item_type = ['sale', 'internal', 'service'].includes(item.item_type) ? item.item_type : (request_type === 'internal_use' ? 'internal' : 'sale');
     processedItems.push({
       product_id: service ? null : (item.product_id || null),
-      product_name: service ? String(item.product_name).trim() : (item.product_name || (product ? product.name : 'Unknown')),
+      product_name: service ? String(item.product_name).trim() : product ? lineName(item.product_name || product.name, unit) : (item.product_name || 'Unknown'),
       sku: service ? '' : (item.sku || (product ? product.sku : '')),
       quantity: qty,
       unit_cost,
@@ -131,6 +136,9 @@ async function processPRItems(items, request_type) {
       notes: item.notes || null,
       quotation_item_id: item.quotation_item_id || null,
       tax_exempt: item.tax_exempt ? 1 : 0,
+      uom_id: unit.uom_id ?? null,
+      purchase_unit: unit.purchase_unit,
+      units_per: unit.units_per,
       total: parseFloat((unit_cost * qty).toFixed(2))
     });
   }
@@ -161,8 +169,8 @@ router.post('/', async (req, res) => {
       const prId = Number(result.lastInsertRowid);
       for (const item of processedItems) {
         await tx.execute({
-          sql: 'INSERT INTO purchase_request_items (pr_id, product_id, product_name, sku, quantity, unit_cost, item_type, product_url, notes, total, quotation_item_id, tax_exempt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-          args: [prId, item.product_id, item.product_name, item.sku, item.quantity, item.unit_cost, item.item_type, item.product_url, item.notes, item.total, item.quotation_item_id, item.tax_exempt]
+          sql: 'INSERT INTO purchase_request_items (pr_id, product_id, product_name, sku, quantity, unit_cost, item_type, product_url, notes, total, quotation_item_id, tax_exempt, uom_id, purchase_unit, units_per) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+          args: [prId, item.product_id, item.product_name, item.sku, item.quantity, item.unit_cost, item.item_type, item.product_url, item.notes, item.total, item.quotation_item_id, item.tax_exempt, item.uom_id, item.purchase_unit, item.units_per]
         });
       }
       await tx.commit();
@@ -213,8 +221,8 @@ router.put('/:id', async (req, res) => {
       await tx.execute({ sql: 'DELETE FROM purchase_request_items WHERE pr_id = ?', args: [pr.id] });
       for (const item of processedItems) {
         await tx.execute({
-          sql: 'INSERT INTO purchase_request_items (pr_id, product_id, product_name, sku, quantity, unit_cost, item_type, product_url, notes, total, quotation_item_id, tax_exempt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-          args: [pr.id, item.product_id, item.product_name, item.sku, item.quantity, item.unit_cost, item.item_type, item.product_url, item.notes, item.total, item.quotation_item_id, item.tax_exempt]
+          sql: 'INSERT INTO purchase_request_items (pr_id, product_id, product_name, sku, quantity, unit_cost, item_type, product_url, notes, total, quotation_item_id, tax_exempt, uom_id, purchase_unit, units_per) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+          args: [pr.id, item.product_id, item.product_name, item.sku, item.quantity, item.unit_cost, item.item_type, item.product_url, item.notes, item.total, item.quotation_item_id, item.tax_exempt, item.uom_id, item.purchase_unit, item.units_per]
         });
       }
       await tx.commit();
@@ -313,8 +321,8 @@ router.post('/:id/convert', async (req, res) => {
         // Internal-use and service items are added to PO but without a product link (won't update stock on receive)
         const productId = item.item_type === 'internal' || item.item_type === 'service' ? null : item.product_id;
         await tx.execute({
-          sql: 'INSERT INTO purchase_order_items (po_id, product_id, product_name, sku, quantity_ordered, unit_cost, total, quotation_item_id, work_order_item_id, discount_amount, tax_option, tax_rate, tax_amount, authorized_qty, item_type, notes, product_url) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-          args: [poId, productId, item.product_name, item.sku, item.quantity, item.unit_cost, item.total, item.quotation_item_id, item.work_order_item_id, item.discount_amount || 0, line.tax_option, line.tax_rate, line.tax_amount, supplierPriced ? item.quantity : null, item.item_type === 'service' ? 'service' : null, item.notes || null, item.product_url || null]
+          sql: 'INSERT INTO purchase_order_items (po_id, product_id, product_name, sku, quantity_ordered, unit_cost, total, quotation_item_id, work_order_item_id, discount_amount, tax_option, tax_rate, tax_amount, authorized_qty, item_type, notes, product_url, purchase_unit, units_per, uom_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+          args: [poId, productId, item.product_name, item.sku, item.quantity, item.unit_cost, item.total, item.quotation_item_id, item.work_order_item_id, item.discount_amount || 0, line.tax_option, line.tax_rate, line.tax_amount, supplierPriced ? item.quantity : null, item.item_type === 'service' ? 'service' : null, item.notes || null, item.product_url || null, item.purchase_unit || null, Number(item.units_per) || 1, item.uom_id ?? null]
         });
       }
 
