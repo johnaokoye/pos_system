@@ -5,6 +5,7 @@ const { db } = require('../database');
 const { requireAuth, requirePermission, requireAnyPermission, can } = require('../lib/permissions');
 const { customerArDetail, customerStatement } = require('../lib/arDetail');
 const { inlineProtectedImages } = require('../lib/protectedUploads');
+const { orderLineUnit } = require('../lib/units');
 const { rentalQuoteSummary, attachRentalRates, attachRateBasis, rentalWindow, rateBasisLabel } = require('../lib/rentals');
 const { renderDocumentPdf } = require('../lib/documentPdf');
 const { loadDrawerSession } = require('../lib/drawerReport');
@@ -1324,8 +1325,9 @@ function buildGrnHtml(po, s) {
     const good = (i.quantity_received || 0) - damaged;
     return `
     <tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}${i.item_type === 'service' ? ' <span style="color:#888;font-size:11px">(service)</span>' : ''}<br><span style="color:#888;font-size:11px">${i.sku || ''}</span>${i.notes ? `<div style="color:#555;font-size:11px;margin-top:2px">${i.notes}</div>` : ''}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${orderLineUnit(i).name}${i.item_type === 'service' ? ' <span style="color:#888;font-size:11px">(service)</span>' : ''}<br><span style="color:#888;font-size:11px">${i.sku || ''}</span>${i.notes ? `<div style="color:#555;font-size:11px;margin-top:2px">${i.notes}</div>` : ''}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${i.quantity_ordered}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${orderLineUnit(i).unit}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${i.quantity_received || 0}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center;${damaged > 0 ? 'color:#dc2626;font-weight:600' : ''}">${damaged}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center;font-weight:600">${good}</td>
@@ -1362,6 +1364,7 @@ function buildGrnHtml(po, s) {
         <thead><tr style="background:#f9fafb">
           <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Item</th>
           <th style="padding:8px;text-align:center;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Ordered</th>
+          <th style="padding:8px;text-align:center;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Unit</th>
           <th style="padding:8px;text-align:center;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Received</th>
           <th style="padding:8px;text-align:center;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Damaged</th>
           <th style="padding:8px;text-align:center;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Good</th>
@@ -1392,8 +1395,9 @@ function buildApprovedPoHtml(po, s, origin, { print = false } = {}) {
 
   const rows = (po.items || []).map(i => `
     <tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}${i.item_type === 'service' ? ' <span style="color:#888;font-size:11px">(service)</span>' : ''}<br><span style="color:#888;font-size:11px">${i.sku || ''}</span>${i.notes ? `<div style="color:#555;font-size:11px;margin-top:2px">${i.notes}</div>` : ''}${i.product_url ? `<div style="font-size:11px;margin-top:2px;word-break:break-all"><a href="${i.product_url}" style="color:#2563eb">${i.product_url}</a></div>` : ''}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${orderLineUnit(i).name}${i.item_type === 'service' ? ' <span style="color:#888;font-size:11px">(service)</span>' : ''}<br><span style="color:#888;font-size:11px">${i.sku || ''}</span>${i.notes ? `<div style="color:#555;font-size:11px;margin-top:2px">${i.notes}</div>` : ''}${i.product_url ? `<div style="font-size:11px;margin-top:2px;word-break:break-all"><a href="${i.product_url}" style="color:#2563eb">${i.product_url}</a></div>` : ''}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${i.quantity_ordered}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${orderLineUnit(i).unit}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${pfmt(i.unit_cost)}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${i.vendor_discount > 0 ? `−${pfmt(i.vendor_discount)}${i.vendor_discount_percent != null ? ` (${i.vendor_discount_percent}%)` : ''}` : '—'}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${i.tax_option === 'local' ? `GCT ${i.tax_rate}%` : 'No tax'}</td>
@@ -1436,6 +1440,7 @@ ${print ? PRINT_PAGE_STYLE : ''}
         <thead><tr style="background:#f9fafb">
           <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Item</th>
           <th style="padding:8px;text-align:center;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Qty</th>
+          <th style="padding:8px;text-align:center;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Unit</th>
           <th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Unit Cost</th>
           <th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Discount</th>
           <th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Tax</th>
@@ -1603,8 +1608,9 @@ function buildPumpAuthorizationHtml(pr, s, origin) {
   const absUrl = (path) => !path ? null : (/^https?:\/\//.test(path) ? path : (origin ? `${origin}${path}` : path));
   const rows = (pr.items || []).map(i => `
     <tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku || ''}</span></td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${orderLineUnit(i).name}<br><span style="color:#888;font-size:11px">${i.sku || ''}</span></td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center;font-weight:600">${i.quantity}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${orderLineUnit(i).unit}</td>
     </tr>`).join('');
   return `<!DOCTYPE html>
 <html>
@@ -1639,6 +1645,7 @@ function buildPumpAuthorizationHtml(pr, s, origin) {
         <thead><tr style="background:#f9fafb">
           <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Item</th>
           <th style="padding:8px;text-align:center;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Maximum Qty</th>
+          <th style="padding:8px;text-align:center;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Unit</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
@@ -1668,8 +1675,8 @@ function pumpAuthorizationPdfModel(pr, s) {
     title: 'AUTHORIZATION TO PUMP', number: pr.pr_number,
     meta: [['Approved', pdfDate(pr.approved_at)], ['Branch', pr.branch_name], ['Department', pr.department], ['Requested by', pr.employee_name]],
     party: { label: 'Supplier', lines: [pr.supplier_name, pr.supplier_contact, pr.supplier_email] },
-    tables: [{ columns: [{ label: 'Item', width: 5 }, { label: 'Maximum Qty', width: 1.4, align: 'center' }],
-      rows: (pr.items || []).map(i => ({ cells: [i.product_name, i.quantity], sub: i.sku || '' })) }],
+    tables: [{ columns: [{ label: 'Item', width: 4 }, { label: 'Maximum Qty', width: 1.4, align: 'center' }, { label: 'Unit', width: 1.2, align: 'center' }],
+      rows: (pr.items || []).map(i => ({ cells: [orderLineUnit(i).name, i.quantity, orderLineUnit(i).unit], sub: i.sku || '' })) }],
     totals: [],
     notes: [`You are authorized to supply the items above, up to the maximum quantity shown. Please return your invoice showing the quantity supplied and the amount, quoting ${pr.pr_number}.`, pr.notes ? `Notes: ${pr.notes}` : ''],
     signatures: pr.approval_signature ? [{ label: 'Authorized By', name: pr.approved_by_name || '', signedAt: pdfDateTime(pr.approved_at), image: pr.approval_signature }] : [],
@@ -2312,12 +2319,12 @@ function poPdfModel(po, s) {
     title: poUnapprovedLabel(po) ? `PURCHASE ORDER - ${poUnapprovedLabel(po).replace('—', '-')}` : 'PURCHASE ORDER', number: po.po_number,
     meta: [['Approved', pdfDate(po.approved_at)], ['Branch', po.branch_name], ['Vendor Order #', po.vendor_order_number], ['Currency', po.currency]],
     party: { label: 'Supplier', lines: [po.supplier_name, po.supplier_contact, po.supplier_email] },
-    tables: [{ columns: [{ label: 'Item', width: 3.6 }, { label: 'Qty', width: 0.8, align: 'center' }, { label: 'Unit Cost', width: 1.2, align: 'right' }, { label: 'Discount', width: 1.3, align: 'right' }, { label: 'Tax', width: 1.1, align: 'right' }, { label: 'Total', width: 1.3, align: 'right' }],
+    tables: [{ columns: [{ label: 'Item', width: 3 }, { label: 'Qty', width: 0.7, align: 'center' }, { label: 'Unit', width: 1.1, align: 'center' }, { label: 'Unit Cost', width: 1.1, align: 'right' }, { label: 'Discount', width: 1.3, align: 'right' }, { label: 'Tax', width: 1.1, align: 'right' }, { label: 'Total', width: 1.3, align: 'right' }],
       rows: (po.items || []).map(i => ({
-        cells: [i.product_name, i.quantity_ordered, pfmt(i.unit_cost),
+        cells: [orderLineUnit(i).name, i.quantity_ordered, orderLineUnit(i).unit, pfmt(i.unit_cost),
           i.vendor_discount > 0 ? `-${pfmt(i.vendor_discount)}${i.vendor_discount_percent != null ? ` (${i.vendor_discount_percent}%)` : ''}` : '-',
           i.tax_option === 'local' ? `GCT ${i.tax_rate}%` : 'No tax', pfmt(i.total)],
-        sub: [i.item_type === 'service' ? 'Service' : '', i.sku, i.purchase_unit && Number(i.units_per) > 1 ? `Per ${i.purchase_unit} of ${i.units_per}` : '', i.notes, i.product_url].filter(Boolean).join(' · '),
+        sub: [i.item_type === 'service' ? 'Service' : '', i.sku, i.notes, i.product_url].filter(Boolean).join(' · '),
       })) }],
     totals: [
       discounts > 0 ? { label: 'Vendor discounts', value: `-${pfmt(discounts)}`, style: 'green' } : null,
@@ -2338,10 +2345,10 @@ function grnPdfModel(po, s) {
     title: 'GOODS RECEIVED NOTE', number: po.po_number,
     meta: [['Date', new Date().toLocaleDateString()], ['Branch', po.branch_name]],
     party: { label: 'Supplier', lines: [po.supplier_name, po.supplier_contact, po.supplier_email] },
-    tables: [{ columns: [{ label: 'Item', width: 4 }, { label: 'Ordered', width: 1, align: 'center' }, { label: 'Received', width: 1, align: 'center' }, { label: 'Damaged', width: 1, align: 'center' }, { label: 'Good', width: 1, align: 'center' }],
+    tables: [{ columns: [{ label: 'Item', width: 3.4 }, { label: 'Ordered', width: 1, align: 'center' }, { label: 'Unit', width: 1.1, align: 'center' }, { label: 'Received', width: 1, align: 'center' }, { label: 'Damaged', width: 1, align: 'center' }, { label: 'Good', width: 1, align: 'center' }],
       rows: (po.items || []).map(i => {
         const damaged = i.quantity_damaged || 0;
-        return { cells: [i.product_name, i.quantity_ordered, i.quantity_received || 0, damaged, (i.quantity_received || 0) - damaged], sub: i.sku || '' };
+        return { cells: [orderLineUnit(i).name, i.quantity_ordered, orderLineUnit(i).unit, i.quantity_received || 0, damaged, (i.quantity_received || 0) - damaged], sub: i.sku || '' };
       }) }],
     notes: [po.notes ? `Notes: ${po.notes}` : ''],
   };

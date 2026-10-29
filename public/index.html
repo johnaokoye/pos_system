@@ -3726,6 +3726,19 @@ const App = {
     });
   },
 
+  // A PR / PO line split for the Item and Unit columns, like
+  // orderLineUnit() in lib/units.js: { name, unit } — the name without the
+  // "(Case of 24)" it was saved with, and the unit it's ordered in.
+  _orderLineUnit(line) {
+    const name = String(line.product_name || '');
+    if (line.item_type === 'service') return { name, unit: '—' };
+    const per = Number(line.units_per) || 1;
+    const m = line.purchase_unit ? name.match(/^(.*) \(([^()]*)\)$/) : null;
+    if (m && m[2].toLowerCase().startsWith(String(line.purchase_unit).toLowerCase())) return { name: m[1], unit: m[2] };
+    if (!line.purchase_unit) return { name, unit: 'Each' };
+    return { name, unit: Number.isInteger(per) && per > 1 ? `${line.purchase_unit} of ${per}` : line.purchase_unit };
+  },
+
   // Purchase request / PO line unit dropdown: the item's stock unit and
   // alternate units, plus "+ Add unit…" for anyone who raises PRs or POs
   // (POST /products/:id/units) — so they can order by the case or drum
@@ -20635,11 +20648,12 @@ const App = {
     const hasUrls = (pr.items||[]).some(i => i.product_url);
     const renderItemRows = items => items.map(i => `<tr>
       <td>
-        ${i.product_name}${i.item_type==='internal'?'<span style="font-size:10px;margin-left:4px;color:var(--text-muted)">[internal]</span>':''}${i.item_type==='service'?' <span class="badge-pill badge-info" style="font-size:10px">Service</span>':''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on the originating quote line">-${this.fmt(i.discount_amount)} quoted</span>` : ''}${i.tax_exempt ? ' <span class="badge-pill badge-teal" style="font-size:10px">Tax exempt</span>' : ''}
+        ${this._orderLineUnit(i).name}${i.item_type==='internal'?'<span style="font-size:10px;margin-left:4px;color:var(--text-muted)">[internal]</span>':''}${i.item_type==='service'?' <span class="badge-pill badge-info" style="font-size:10px">Service</span>':''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on the originating quote line">-${this.fmt(i.discount_amount)} quoted</span>` : ''}${i.tax_exempt ? ' <span class="badge-pill badge-teal" style="font-size:10px">Tax exempt</span>' : ''}
         ${i.product_url ? `<br><a href="${i.product_url}" target="_blank" rel="noopener" style="font-size:11px;color:var(--accent);word-break:break-all">${i.product_url}</a>` : ''}
       </td>
       <td>${i.sku||'-'}</td>
       <td>${i.quantity}${supplierPriced ? '<div style="font-size:11px;color:var(--text-muted)">max</div>' : ''}</td>
+      <td>${this.escapeAttr(this._orderLineUnit(i).unit)}</td>
       <td>${supplierPriced ? '<span style="color:var(--text-muted)">Per invoice</span>' : this._fmtPR(i.unit_cost, pr)}</td>
       <td class="fw-600">${supplierPriced ? '—' : this._fmtPR(i.total, pr)}</td>
       <td style="font-size:12px;color:var(--text-muted)">${i.notes||''}</td>
@@ -20676,7 +20690,7 @@ const App = {
           ${pr.rejection_reason ? `<div style="padding:8px 12px;background:#fff3f3;border-left:3px solid var(--danger);border-radius:0 6px 6px 0;font-size:13px;margin-bottom:12px"><strong>Rejection Reason:</strong> ${pr.rejection_reason}</div>` : ''}
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Item</th><th>SKU</th><th>Qty</th><th>Est. Cost</th><th>Total</th><th>Notes</th></tr></thead>
+              <thead><tr><th>Item</th><th>SKU</th><th>Qty</th><th>Unit</th><th>Est. Cost</th><th>Total</th><th>Notes</th></tr></thead>
               <tbody>${renderItemRows(pr.items||[])}</tbody>
             </table>
           </div>
@@ -21509,12 +21523,13 @@ const App = {
           ${po.source_pr_id ? `<div style="font-size:12px;color:var(--text-muted);margin:-6px 0 12px">Converted from <a href="#" style="color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${po.source_pr_id})">${po.source_pr_number}</a>${po.source_pr_attachments > 0 ? ` · 📎 ${po.source_pr_attachments} document${po.source_pr_attachments > 1 ? 's' : ''} on the request` : ''}</div>` : ''}
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Product</th><th>SKU</th><th>Ordered</th><th>Received</th><th>Damaged</th><th>Unit Cost</th><th>Vendor Disc.</th><th>Tax</th><th>Total</th></tr></thead>
+              <thead><tr><th>Product</th><th>SKU</th><th>Ordered</th><th>Unit</th><th>Received</th><th>Damaged</th><th>Unit Cost</th><th>Vendor Disc.</th><th>Tax</th><th>Total</th></tr></thead>
               <tbody>
                 ${po.items.map(i => `<tr>
-                  <td>${i.product_name}${i.item_type === 'service' ? ' <span class="badge-pill badge-info" style="font-size:10px">Service</span>' : ''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on the originating quote line">-${this._fmtPO(i.discount_amount, po)} quoted</span>` : ''}${i.notes ? `<div style="font-size:11px;color:var(--text-muted);max-width:280px">${this.escapeAttr(i.notes)}</div>` : ''}${i.product_url ? `<div style="font-size:11px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="${this.escapeAttr(i.product_url)}" target="_blank" rel="noopener" style="color:var(--primary)">🔗 ${this.escapeAttr(i.product_url)}</a></div>` : ''}${itemLinkBadges(i)}${(!i.product_id && i.item_type !== 'service' && i.quantity_received>0) ? `<br><button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="App.showLinkToInventory(${po.id},${i.id})">+ Add to Inventory</button>` : ''}</td>
+                  <td>${this._orderLineUnit(i).name}${i.item_type === 'service' ? ' <span class="badge-pill badge-info" style="font-size:10px">Service</span>' : ''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on the originating quote line">-${this._fmtPO(i.discount_amount, po)} quoted</span>` : ''}${i.notes ? `<div style="font-size:11px;color:var(--text-muted);max-width:280px">${this.escapeAttr(i.notes)}</div>` : ''}${i.product_url ? `<div style="font-size:11px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="${this.escapeAttr(i.product_url)}" target="_blank" rel="noopener" style="color:var(--primary)">🔗 ${this.escapeAttr(i.product_url)}</a></div>` : ''}${itemLinkBadges(i)}${(!i.product_id && i.item_type !== 'service' && i.quantity_received>0) ? `<br><button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="App.showLinkToInventory(${po.id},${i.id})">+ Add to Inventory</button>` : ''}</td>
                   <td>${i.sku||'-'}</td>
                   <td>${i.quantity_ordered}${i.authorized_qty != null ? `<div style="font-size:11px;color:${i.quantity_ordered > i.authorized_qty ? 'var(--danger)' : 'var(--text-muted)'}">${i.quantity_ordered > i.authorized_qty ? '⚠️ ' : ''}max ${i.authorized_qty}</div>` : ''}</td>
+                  <td>${this.escapeAttr(this._orderLineUnit(i).unit)}</td>
                   <td><span class="${i.quantity_received>=i.quantity_ordered?'color-success':'color-warning'}">${i.quantity_received||0}</span></td>
                   <td>${i.quantity_damaged>0 ? `<span class="color-danger">${i.quantity_damaged}</span>` : '-'}</td>
                   <td>${this._fmtPO(i.unit_cost, po)}</td>
