@@ -26,7 +26,7 @@ router.get('/aging', async (req, res) => {
   try {
     const { rows: aging } = await db.execute({ sql: `
       SELECT c.id, c.customer_number, c.first_name || ' ' || c.last_name as customer_name,
-        c.email, c.phone, c.account_balance,
+        c.business_name, c.email, c.phone, c.account_balance,
         COALESCE(SUM(CASE WHEN CAST(julianday('now') - julianday(t.created_at) AS INTEGER) <= 30
           THEN MAX(0, t.total - COALESCE(alloc.total_allocated, 0)) ELSE 0 END), 0) as current_30,
         COALESCE(SUM(CASE WHEN CAST(julianday('now') - julianday(t.created_at) AS INTEGER) BETWEEN 31 AND 60

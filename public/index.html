@@ -24653,22 +24653,13 @@ const App = {
       </div>
       <div id="ar-aging" style="display:none">
         <div class="card">
-          <div class="card-header"><span class="card-title">AR Aging Report</span></div>
+          <div class="card-header"><span class="card-title">AR Aging Report</span>
+            <input type="search" id="ar-aging-q" placeholder="Search name, business, account #, phone, email…" autocomplete="off" style="width:280px;font-size:13px" oninput="App._arAgingSearch(this.value)">
+          </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Customer</th><th>Balance</th><th>Current (0-30)</th><th>31-60 Days</th><th>61-90 Days</th><th>90+ Days</th><th title="Payments received on account but not yet applied to the invoices aged here">Unapplied Payments</th></tr></thead>
-              <tbody>
-                ${aging.length ? aging.map(a => `
-                  <tr>
-                    <td><div class="fw-600">${a.customer_name}</div><div style="font-size:11px;color:var(--text-muted)">${a.customer_number||''} ${a.email||''}</div></td>
-                    <td class="fw-600 color-danger">${this.fmt(a.account_balance||0)}</td>
-                    <td class="color-success">${this.fmt(a.current_30||0)}</td>
-                    <td class="${a.days_31_60 > 0 ? 'color-warning' : ''}">${this.fmt(a.days_31_60||0)}</td>
-                    <td class="${a.days_61_90 > 0 ? 'color-warning' : ''}">${this.fmt(a.days_61_90||0)}</td>
-                    <td class="${a.over_90 > 0 ? 'color-danger fw-600' : ''}">${this.fmt(a.over_90||0)}</td>
-                    <td class="${a.unapplied_credit > 0 ? 'color-success' : ''}">${a.unapplied_credit > 0 ? `−${this.fmt(a.unapplied_credit)}` : '—'}</td>
-                  </tr>`).join('') : '<tr><td colspan="7" class="empty-state">No aging data</td></tr>'}
-              </tbody>
+              <thead id="ar-aging-head"></thead>
+              <tbody id="ar-aging-body"></tbody>
             </table>
           </div>
         </div>
@@ -24702,6 +24693,9 @@ const App = {
     this._arAccounts = accounts;
     this._arAcct = { q: '', key: 'balance', dir: 'desc' };
     this._renderARAccounts();
+    this._arAgingRows = aging;
+    this._arAging = { q: '', key: 'balance', dir: 'desc' };
+    this._renderARAging();
     this._arPay = { q: '', start: '', end: '', sortBy: 'date', dir: 'desc' };
     this._loadARPayments();
     document.addEventListener('click', (e) => {
@@ -24792,6 +24786,43 @@ const App = {
     this._arPay = { q: '', start: '', end: '', sortBy: 'date', dir: 'desc' };
     ['ar-pay-q', 'ar-pay-start', 'ar-pay-end'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
     this._loadARPayments('');
+  },
+
+  // Aging Report tab: filtered and sorted in the browser, like Credit Accounts.
+  _arAgingSearch(text) {
+    this._arAging.q = text.trim().toLowerCase();
+    this._renderARAging();
+  },
+  _arAgingSort(key) {
+    const a = this._arAging;
+    a.dir = a.key === key ? (a.dir === 'asc' ? 'desc' : 'asc') : (key === 'customer' ? 'asc' : 'desc');
+    a.key = key;
+    this._renderARAging();
+  },
+  _renderARAging() {
+    const head = document.getElementById('ar-aging-head');
+    const body = document.getElementById('ar-aging-body');
+    if (!head || !body) return;
+    const { q, key, dir } = this._arAging;
+    const col = { customer: a => String(a.customer_name || '').toLowerCase(), balance: 'account_balance', current: 'current_30',
+      d31: 'days_31_60', d61: 'days_61_90', d90: 'over_90', unapplied: 'unapplied_credit' }[key];
+    const val = typeof col === 'function' ? col : a => Number(a[col]) || 0;
+    const rows = (this._arAgingRows || [])
+      .filter(a => !q || [a.customer_name, a.business_name, a.customer_number, a.phone, a.email].some(v => String(v || '').toLowerCase().includes(q)))
+      .sort((x, y) => { const p = val(x), r = val(y); return (p < r ? -1 : p > r ? 1 : 0) * (dir === 'asc' ? 1 : -1); });
+    head.innerHTML = `<tr>${[['customer','Customer'],['balance','Balance'],['current','Current (0-30)'],['d31','31-60 Days'],['d61','61-90 Days'],['d90','90+ Days']]
+      .map(([k, l]) => this._arSortTh(l, k, key, dir, `App._arAgingSort('${k}')`)).join('')}${this._arSortTh('Unapplied Payments', 'unapplied', key, dir, "App._arAgingSort('unapplied')")
+      .replace('title="Sort by Unapplied Payments"', 'title="Payments received on account but not yet applied to the invoices aged here — click to sort"')}</tr>`;
+    body.innerHTML = rows.length ? rows.map(a => `
+      <tr>
+        <td><div class="fw-600">${this.escapeAttr(a.customer_name)}</div><div style="font-size:11px;color:var(--text-muted)">${a.customer_number||''}${a.business_name ? ` · ${this.escapeAttr(a.business_name)}` : ''} ${this.escapeAttr(a.email||'')}</div></td>
+        <td class="fw-600 color-danger">${this.fmt(a.account_balance||0)}</td>
+        <td class="color-success">${this.fmt(a.current_30||0)}</td>
+        <td class="${a.days_31_60 > 0 ? 'color-warning' : ''}">${this.fmt(a.days_31_60||0)}</td>
+        <td class="${a.days_61_90 > 0 ? 'color-warning' : ''}">${this.fmt(a.days_61_90||0)}</td>
+        <td class="${a.over_90 > 0 ? 'color-danger fw-600' : ''}">${this.fmt(a.over_90||0)}</td>
+        <td class="${a.unapplied_credit > 0 ? 'color-success' : ''}">${a.unapplied_credit > 0 ? `−${this.fmt(a.unapplied_credit)}` : '—'}</td>
+      </tr>`).join('') : `<tr><td colspan="7" class="empty-state">${q ? 'No customers match that search' : 'No aging data'}</td></tr>`;
   },
 
   // Credit Accounts tab: filtered and sorted in the browser.
