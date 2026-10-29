@@ -87,9 +87,9 @@ router.get('/', async (req, res) => {
     // item name or SKU.
     if (q && String(q).trim()) {
       const like = `%${String(q).trim()}%`;
-      sql += ` AND (po.po_number LIKE ? OR s.name LIKE ? OR po.vendor_order_number LIKE ? OR po.notes LIKE ?
+      sql += ` AND (po.po_number LIKE ? OR s.name LIKE ? OR po.vendor_order_number LIKE ? OR po.notes LIKE ? OR po.internal_notes LIKE ?
         OR EXISTS (SELECT 1 FROM purchase_order_items poi WHERE poi.po_id = po.id AND (poi.product_name LIKE ? OR poi.sku LIKE ?)))`;
-      params.push(like, like, like, like, like, like);
+      params.push(like, like, like, like, like, like, like);
     }
     sql += ' ORDER BY po.created_at DESC LIMIT ?';
     params.push(parseInt(limit));
@@ -141,7 +141,7 @@ router.post('/', async (req, res) => {
     const tx = await db.transaction('write');
     let committed = false;
     try {
-      const result = await tx.execute({ sql: 'INSERT INTO purchase_orders (po_number,supplier_id,branch_id,employee_id,subtotal,tax_amount,total,notes,expected_date,vendor_order_number,currency,exchange_rate) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', args: [po_number, supplier_id||null, branch_id||null, employee_id||null, subtotal, tax_amount, total, notes||null, expected_date||null, vendor_order_number||null, cur.currency, cur.exchange_rate] });
+      const result = await tx.execute({ sql: 'INSERT INTO purchase_orders (po_number,supplier_id,branch_id,employee_id,subtotal,tax_amount,total,notes,internal_notes,expected_date,vendor_order_number,currency,exchange_rate) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [po_number, supplier_id||null, branch_id||null, employee_id||null, subtotal, tax_amount, total, notes||null, String(req.body.internal_notes || '').trim() || null, expected_date||null, vendor_order_number||null, cur.currency, cur.exchange_rate] });
       const poId = Number(result.lastInsertRowid);
       for (const item of processedItems) {
         await tx.execute({ sql: 'INSERT INTO purchase_order_items (po_id,product_id,product_name,sku,quantity_ordered,unit_cost,total,vendor_discount,vendor_discount_percent,tax_option,tax_rate,tax_amount,purchase_unit,units_per,uom_id,product_url) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [poId, item.product_id, item.product_name, item.sku, item.quantity_ordered, item.unit_cost, item.total, item.vendor_discount, item.vendor_discount_percent, item.tax_option, item.tax_rate, item.tax_amount, item.purchase_unit || null, item.units_per || 1, item.uom_id ?? null, item.product_url] });
@@ -325,8 +325,9 @@ router.put('/:id', async (req, res) => {
       }
       const { subtotal, tax_amount, total } = poTotals(priced);
       await tx.execute({
-        sql: 'UPDATE purchase_orders SET supplier_id = ?, branch_id = ?, notes = ?, expected_date = ?, vendor_order_number = ?, subtotal = ?, tax_amount = ?, total = ?, currency = ?, exchange_rate = ? WHERE id = ?',
-        args: [supplier_id || po.supplier_id, branch_id || null, notes ?? po.notes, expected_date || null, vendor_order_number || null, subtotal, tax_amount, total, cur.currency, cur.exchange_rate, req.params.id],
+        sql: 'UPDATE purchase_orders SET supplier_id = ?, branch_id = ?, notes = ?, internal_notes = ?, expected_date = ?, vendor_order_number = ?, subtotal = ?, tax_amount = ?, total = ?, currency = ?, exchange_rate = ? WHERE id = ?',
+        args: [supplier_id || po.supplier_id, branch_id || null, notes ?? po.notes,
+          req.body.internal_notes === undefined ? po.internal_notes : (String(req.body.internal_notes || '').trim() || null), expected_date || null, vendor_order_number || null, subtotal, tax_amount, total, cur.currency, cur.exchange_rate, req.params.id],
       });
       await tx.commit();
       committed = true;

@@ -19899,7 +19899,7 @@ const App = {
               <tbody>
                 ${orders.length ? orders.map(po => `
                   <tr>
-                    <td class="fw-600">${po.po_number}</td>
+                    <td class="fw-600">${po.po_number}${this._internalNotesSnippet(po.internal_notes)}</td>
                     <td>${po.supplier_name || '-'}</td>
                     <td>${po.branch_name || '-'}</td>
                     <td class="fw-600">${this._fmtPO(po.total, po)}</td>
@@ -19972,7 +19972,7 @@ const App = {
               <tbody>
                 ${requests.length ? requests.map(pr => `
                   <tr>
-                    <td class="fw-600">${pr.pr_number}${pr.attachment_count > 0 ? ` <span title="${pr.attachment_count} document${pr.attachment_count > 1 ? 's' : ''} attached" style="font-weight:400;font-size:12px;color:var(--text-muted)">📎${pr.attachment_count}</span>` : ''}</td>
+                    <td class="fw-600">${pr.pr_number}${pr.attachment_count > 0 ? ` <span title="${pr.attachment_count} document${pr.attachment_count > 1 ? 's' : ''} attached" style="font-weight:400;font-size:12px;color:var(--text-muted)">📎${pr.attachment_count}</span>` : ''}${this._internalNotesSnippet(pr.internal_notes)}</td>
                     <td><span class="badge-pill ${typeBadge[pr.request_type]||'badge-info'}" style="font-size:11px">${typeLabel[pr.request_type]||pr.request_type||'Sale Items'}</span></td>
                     <td>${pr.branch_name||'-'}</td>
                     <td>${pr.department||'-'}</td>
@@ -20026,7 +20026,7 @@ const App = {
           <tbody>
             ${orders.length ? orders.map(po => `
               <tr>
-                <td class="fw-600">${po.po_number}${po.vendor_order_number ? `<div style="font-size:11px;font-weight:400;color:var(--text-muted)">Vendor # ${this.escapeAttr(po.vendor_order_number)}</div>` : ''}</td>
+                <td class="fw-600">${po.po_number}${po.vendor_order_number ? `<div style="font-size:11px;font-weight:400;color:var(--text-muted)">Vendor # ${this.escapeAttr(po.vendor_order_number)}</div>` : ''}${this._internalNotesSnippet(po.internal_notes)}</td>
                 <td>${this.escapeAttr(po.supplier_name || '-')}</td>
                 <td>${po.branch_name || '-'}</td>
                 <td>${po.expected_date ? this.fmtDate(po.expected_date) : '-'}</td>
@@ -20120,8 +20120,9 @@ const App = {
               </select>
             </div>
             <div class="form-group"><label>Required By Date</label><input id="pr-date" type="date" value="${pr&&pr.required_date?String(pr.required_date).slice(0,10):''}"></div>
-            <div class="form-group"><label>Notes / Reason</label><input id="pr-notes" placeholder="Reason for request..." value="${this.escapeAttr(pr&&pr.notes)}"></div>
+            <div class="form-group"><label>Notes <span style="font-weight:400;color:var(--text-muted);font-size:12px">(copied to the PO for the supplier)</span></label><input id="pr-notes" placeholder="Delivery or supplier instructions..." value="${this.escapeAttr(pr&&pr.notes)}"></div>
           </div>
+          ${this._internalNotesInput('pr-internal-notes', pr && pr.internal_notes)}
 
           <div style="display:flex;align-items:center;gap:16px;margin-bottom:12px;padding:10px 12px;background:var(--bg);border-radius:6px">
             <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:500;margin:0">
@@ -20450,6 +20451,7 @@ const App = {
     try {
       const payload = {
         branch_id: branch_id||null, department: department||null, notes: notes||null,
+        internal_notes: document.getElementById('pr-internal-notes').value.trim() || null,
         required_date: required_date||null, request_type,
         supplier_id: supplier_id||null, currency: currency||null,
         is_online_purchase, tax_rate: taxRate, tax_amount, items
@@ -20536,6 +20538,7 @@ const App = {
               ${pr.converted_po_number ? `<strong>Converted to:</strong> <span class="color-success fw-600">${this._prConvertedPOLink(pr)}</span>` : ''}
             </div>
           </div>
+          ${this._internalNotesHtml(pr.internal_notes)}
           ${pr.notes ? `<div style="padding:8px 12px;background:var(--bg-secondary,#f8f9fa);border-radius:6px;font-size:13px;margin-bottom:12px"><strong>Notes:</strong> ${pr.notes}</div>` : ''}
           ${pr.rejection_reason ? `<div style="padding:8px 12px;background:#fff3f3;border-left:3px solid var(--danger);border-radius:0 6px 6px 0;font-size:13px;margin-bottom:12px"><strong>Rejection Reason:</strong> ${pr.rejection_reason}</div>` : ''}
           <div class="table-wrap">
@@ -20689,10 +20692,12 @@ const App = {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
-  approvePR(id) {
+  async approvePR(id) {
+    const pr = await this.api('GET', `/purchase-requests/${id}`).catch(() => null);
     this._showApprovalDialog({
-      title: 'Approve Purchase Request',
+      title: `Approve Purchase Request${pr ? ` ${pr.pr_number}` : ''}`,
       intro: 'Your signature is recorded on the approved request.',
+      context: pr ? (this._internalNotesHtml(pr.internal_notes) || '<p style="font-size:12px;color:var(--text-muted)">No internal notes on this request.</p>') : '',
       approve: async (signature) => {
         await this.api('PATCH', `/purchase-requests/${id}/status`, { status: 'approved', signature });
         this.closeModal();
@@ -20747,6 +20752,7 @@ const App = {
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:10px">
             Converting <strong>${pr.pr_number}</strong> will create a new Purchase Order with all items below.
           </p>
+          ${this._internalNotesHtml(pr.internal_notes)}
           ${hasInternal ? `<div style="padding:8px 12px;background:#fff8e1;border-left:3px solid var(--warning);border-radius:0 6px 6px 0;font-size:13px;margin-bottom:12px">
             <strong>Note:</strong> Internal-use items will be included on the PO but <em>will not update product stock levels</em> when received.
           </div>` : ''}
@@ -20847,7 +20853,8 @@ const App = {
             <div class="form-group"><label>Expected Date</label><input id="po-date" type="date" value="${po&&po.expected_date?String(po.expected_date).slice(0,10):''}"></div>
             <div class="form-group"><label>Vendor Order/Quote #</label><input id="po-vendor-order" placeholder="e.g. Amazon order #" value="${this.escapeAttr(po&&po.vendor_order_number)}"></div>
           </div>
-          <div class="form-group"><label>Notes</label><input id="po-notes" value="${this.escapeAttr(po&&po.notes)}"></div>
+          <div class="form-group"><label>Notes <span style="font-weight:400;color:var(--text-muted);font-size:12px">(printed on the PO for the supplier)</span></label><input id="po-notes" value="${this.escapeAttr(po&&po.notes)}"></div>
+          ${this._internalNotesInput('po-internal-notes', po && po.internal_notes)}
           <div style="margin-bottom:10px">
             <div class="card-header"><span class="card-title">Items</span>
               <div style="display:flex;gap:8px">
@@ -20924,6 +20931,22 @@ const App = {
     const code = (po && po.currency) || this._baseCurrency();
     try { return new Intl.NumberFormat('en-US', { style: 'currency', currency: code, currencyDisplay: po && po.currency ? 'code' : 'symbol' }).format(n || 0); }
     catch (e) { return `${code} ${(Number(n) || 0).toFixed(2)}`; }
+  },
+  // A PR/PO's internal notes — what it's for, for the approver. Never on
+  // anything the supplier sees.
+  _internalNotesHtml(text, style = 'margin-bottom:12px') {
+    if (!text) return '';
+    return `<div style="padding:8px 12px;background:#fffbeb;border-left:3px solid var(--warning,#d97706);border-radius:0 6px 6px 0;font-size:13px;${style}">
+      <strong>🔒 Internal notes</strong> <span style="font-size:11px;color:var(--text-muted)">— not sent to the supplier</span>
+      <div style="white-space:pre-wrap;margin-top:2px">${this.escapeAttr(text)}</div></div>`;
+  },
+  // One-line preview of internal notes under a list row's number.
+  _internalNotesSnippet(text) {
+    if (!text) return '';
+    return `<div style="font-size:11px;font-weight:400;color:var(--text-muted);max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${this.escapeAttr(text)}">🔒 ${this.escapeAttr(text)}</div>`;
+  },
+  _internalNotesInput(id, value) {
+    return `<div class="form-group"><label>Internal Notes <span style="font-weight:400;color:var(--text-muted);font-size:12px">— what this is for, for the approver; not sent to the supplier</span></label><textarea id="${id}" rows="2" placeholder="e.g. Restock for the Smith job / replacing the damaged cutter at Drax Hall">${this.escapeAttr(value || '')}</textarea></div>`;
   },
   // An amount on a purchase request, in the request's own currency.
   _fmtPR(n, pr) {
@@ -21243,6 +21266,7 @@ const App = {
     const branch_id = document.getElementById('po-branch').value;
     const expected_date = document.getElementById('po-date').value;
     const notes = document.getElementById('po-notes').value;
+    const internal_notes = document.getElementById('po-internal-notes').value.trim() || null;
     const vendor_order_number = document.getElementById('po-vendor-order').value.trim() || null;
     const items = [];
     let discountError = false;
@@ -21273,11 +21297,11 @@ const App = {
     const exchange_rate = currency !== this._baseCurrency() ? (parseFloat(document.getElementById('po-rate').value) || null) : null;
     try {
       if (editId) {
-        await this.api('PUT', `/purchase-orders/${editId}`, { supplier_id, branch_id: branch_id||null, notes, expected_date: expected_date||null, vendor_order_number, items, currency, exchange_rate });
+        await this.api('PUT', `/purchase-orders/${editId}`, { supplier_id, branch_id: branch_id||null, notes, internal_notes, expected_date: expected_date||null, vendor_order_number, items, currency, exchange_rate });
         this.closeModal();
         this.alert('Purchase order updated');
       } else {
-        await this.api('POST', '/purchase-orders', { supplier_id, branch_id: branch_id||null, notes, expected_date: expected_date||null, vendor_order_number, items, currency, exchange_rate });
+        await this.api('POST', '/purchase-orders', { supplier_id, branch_id: branch_id||null, notes, internal_notes, expected_date: expected_date||null, vendor_order_number, items, currency, exchange_rate });
         this.closeModal();
         this.alert('Purchase order created');
       }
@@ -21334,6 +21358,8 @@ const App = {
             <div><strong>Supplier:</strong> ${po.supplier_name||'-'}<br><strong>Contact:</strong> ${po.supplier_contact||'-'}<br><strong>Email:</strong> ${po.supplier_email||'-'}</div>
             <div><strong>Branch:</strong> ${po.branch_name||'-'}<br><strong>Created:</strong> ${this.fmtDate(po.created_at)}<br><strong>Expected:</strong> ${po.expected_date ? this.fmtDate(po.expected_date) : '-'}<br><strong>Vendor Order/Quote #:</strong> ${po.vendor_order_number || '-'}${po.currency ? `<br><strong>Currency:</strong> ${po.currency} @ ${po.exchange_rate ? `${po.exchange_rate} ${this._baseCurrency()}` : '<span style="color:var(--danger)">no exchange rate — edit the PO to add it</span>'}` : ''}</div>
           </div>
+          ${this._internalNotesHtml(po.internal_notes)}
+          ${po.notes ? `<div style="padding:8px 12px;background:var(--bg-secondary,#f8f9fa);border-radius:6px;font-size:13px;margin-bottom:12px"><strong>Notes</strong> <span style="font-size:11px;color:var(--text-muted)">(printed for the supplier)</span><div style="white-space:pre-wrap">${this.escapeAttr(po.notes)}</div></div>` : ''}
           ${sp ? `<div id="po-sp-check" style="border:1px solid ${sp.ready ? '#bbf7d0' : '#fde68a'};background:${sp.ready ? '#f0fdf4' : '#fffbeb'};border-radius:6px;padding:10px 12px;margin-bottom:14px;font-size:13px">
             <strong>Fuel / supplier-priced PO</strong> — authorized on ${po.source_pr_number || 'the purchase request'}. Before it can be sent for approval:
             <div style="margin-top:6px">${sp.costed ? '✅' : '⬜'} Invoiced cost entered on every line</div>
@@ -21721,7 +21747,7 @@ const App = {
   // one click; "Draw a new signature" replaces it. `approve(signature)` makes
   // the approval call — `signature` is a newly drawn PNG data URL, or
   // undefined to use the saved one (lib/signatures.js resolveApprovalSignature).
-  async _showApprovalDialog({ title, intro = '', approveLabel = 'Approve', approve }) {
+  async _showApprovalDialog({ title, intro = '', context = '', approveLabel = 'Approve', approve }) {
     let saved = null;
     try { saved = (await this.api('GET', '/employees/me/signature')).approval_signature; } catch (e) {}
     this._approval = { approve, drawing: !saved };
@@ -21731,6 +21757,7 @@ const App = {
         <div class="modal-header"><span class="modal-title">${title}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           ${intro ? `<p style="font-size:13px;color:var(--text-muted);margin-top:0">${intro}</p>` : ''}
+          ${context}
           <div id="approval-saved" style="display:${saved ? '' : 'none'}">
             <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">Your signature will be applied to the approved document${me ? ` as <strong>${this.escapeAttr(me)}</strong>` : ''}:</div>
             ${saved ? `<div style="border:1px solid var(--border);border-radius:6px;background:#fff;padding:8px;text-align:center"><img src="${this.escapeAttr(saved)}" alt="Your signature" style="max-height:90px;max-width:100%"></div>` : ''}
@@ -21772,9 +21799,11 @@ const App = {
     return `<div style="margin-top:6px"><img src="${this.escapeAttr(path)}" alt="${label}" style="max-height:56px;max-width:220px;background:#fff;border:1px solid var(--border);border-radius:4px;padding:2px 6px"></div>`;
   },
 
-  showApprovePOModal(id) {
+  async showApprovePOModal(id) {
+    const po = await this.api('GET', `/purchase-orders/${id}`).catch(() => null);
     this._showApprovalDialog({
-      title: 'Approve Purchase Order',
+      title: `Approve Purchase Order${po ? ` ${po.po_number}` : ''}`,
+      context: po ? (this._internalNotesHtml(po.internal_notes) || '<p style="font-size:12px;color:var(--text-muted)">No internal notes on this PO.</p>') : '',
       intro: 'Your signature is recorded on the approved PO and appears on its printed, emailed and PDF copies.',
       approve: async (signature) => {
         await this.api('PATCH', `/purchase-orders/${id}/approve`, { signature });

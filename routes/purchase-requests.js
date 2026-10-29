@@ -68,10 +68,10 @@ router.get('/', async (req, res) => {
     // PO it became, or any line's item name or SKU.
     if (q && String(q).trim()) {
       const like = `%${String(q).trim()}%`;
-      sql += ` AND (pr.pr_number LIKE ? OR pr.department LIKE ? OR pr.notes LIKE ? OR (e.first_name || ' ' || e.last_name) LIKE ?
+      sql += ` AND (pr.pr_number LIKE ? OR pr.department LIKE ? OR pr.notes LIKE ? OR pr.internal_notes LIKE ? OR (e.first_name || ' ' || e.last_name) LIKE ?
         OR s.name LIKE ? OR po.po_number LIKE ?
         OR EXISTS (SELECT 1 FROM purchase_request_items pri WHERE pri.pr_id = pr.id AND (pri.product_name LIKE ? OR pri.sku LIKE ?)))`;
-      params.push(like, like, like, like, like, like, like, like);
+      params.push(like, like, like, like, like, like, like, like, like);
     }
     sql += ' ORDER BY pr.created_at DESC LIMIT ?';
     params.push(parseInt(limit));
@@ -153,8 +153,8 @@ router.post('/', async (req, res) => {
     let committed = false;
     try {
       const result = await tx.execute({
-        sql: 'INSERT INTO purchase_requests (pr_number, branch_id, employee_id, department, notes, required_date, request_type, supplier_id, currency, is_online_purchase, tax_rate, tax_amount) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-        args: [pr_number, branch_id||null, employee_id||null, department||null, notes||null, required_date||null,
+        sql: 'INSERT INTO purchase_requests (pr_number, branch_id, employee_id, department, notes, internal_notes, required_date, request_type, supplier_id, currency, is_online_purchase, tax_rate, tax_amount) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        args: [pr_number, branch_id||null, employee_id||null, department||null, notes||null, String(req.body.internal_notes || '').trim() || null, required_date||null,
                request_type, supplier_id||null, currency||null, is_online_purchase?1:0,
                parseFloat(tax_rate)||0, parseFloat(tax_amount)||0]
       });
@@ -204,8 +204,9 @@ router.put('/:id', async (req, res) => {
     let committed = false;
     try {
       await tx.execute({
-        sql: 'UPDATE purchase_requests SET branch_id=?, employee_id=?, department=?, notes=?, required_date=?, request_type=?, supplier_id=?, currency=?, is_online_purchase=?, tax_rate=?, tax_amount=? WHERE id=?',
-        args: [branch_id||null, employee_id||pr.employee_id||null, department||null, notes||null, required_date||null,
+        sql: 'UPDATE purchase_requests SET branch_id=?, employee_id=?, department=?, notes=?, internal_notes=?, required_date=?, request_type=?, supplier_id=?, currency=?, is_online_purchase=?, tax_rate=?, tax_amount=? WHERE id=?',
+        args: [branch_id||null, employee_id||pr.employee_id||null, department||null, notes||null,
+          req.body.internal_notes === undefined ? pr.internal_notes : (String(req.body.internal_notes || '').trim() || null), required_date||null,
                request_type, supplier_id||null, currency||null, is_online_purchase?1:0,
                parseFloat(tax_rate)||0, parseFloat(tax_amount)||0, pr.id]
       });
@@ -302,8 +303,8 @@ router.post('/:id/convert', async (req, res) => {
     try {
       const po_number = await nextNumber(tx, 'purchase_orders', 'po_number', 'PO-', 6);
       const poResult = await tx.execute({
-        sql: 'INSERT INTO purchase_orders (po_number, supplier_id, branch_id, employee_id, subtotal, tax_amount, total, notes, expected_date, supplier_priced, currency, exchange_rate) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-        args: [po_number, supplier_id || null, pr.branch_id, pr.employee_id, totals.subtotal, totals.tax_amount, totals.total, poNotes || pr.notes, expected_date || pr.required_date || null, supplierPriced ? 1 : 0, cur.currency, cur.exchange_rate]
+        sql: 'INSERT INTO purchase_orders (po_number, supplier_id, branch_id, employee_id, subtotal, tax_amount, total, notes, internal_notes, expected_date, supplier_priced, currency, exchange_rate) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        args: [po_number, supplier_id || null, pr.branch_id, pr.employee_id, totals.subtotal, totals.tax_amount, totals.total, poNotes || pr.notes, pr.internal_notes || null, expected_date || pr.required_date || null, supplierPriced ? 1 : 0, cur.currency, cur.exchange_rate]
       });
       const poId = Number(poResult.lastInsertRowid);
 

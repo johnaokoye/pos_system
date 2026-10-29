@@ -2375,6 +2375,10 @@ async function _init() {
     // Books posts it to GCT Recoverable instead of Inventory. NULL = a bill
     // from before the column, filled in once below.
     'ALTER TABLE ap_bills ADD COLUMN tax_amount REAL',
+    // What a request / PO is for, for the approver — kept off everything the
+    // supplier sees (unlike notes, which print on the PO and pump authorization).
+    'ALTER TABLE purchase_requests ADD COLUMN internal_notes TEXT',
+    'ALTER TABLE purchase_orders ADD COLUMN internal_notes TEXT',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
