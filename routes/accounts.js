@@ -84,7 +84,11 @@ router.get('/customer/:id', async (req, res) => {
     const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.id] });
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
     const { rows: invoices } = await db.execute({ sql: `SELECT t.id, t.transaction_number, t.total, t.status, t.created_at, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name FROM transactions t LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN branches b ON t.branch_id = b.id WHERE t.customer_id = ? AND t.payment_method = 'credit' ORDER BY t.created_at DESC`, args: [req.params.id] });
-    const { rows: payments } = await db.execute({ sql: `SELECT ap.*, CASE WHEN ap.payment_method = 'writeoff' THEN 0 ELSE ${UNAPPLIED_SQL} END AS unapplied, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name FROM account_payments ap LEFT JOIN employees e ON ap.employee_id = e.id LEFT JOIN branches b ON ap.branch_id = b.id WHERE ap.customer_id = ? ORDER BY ap.created_at DESC`, args: [req.params.id] });
+    // applied_to: the invoices each payment / credit note went against.
+    const { rows: payments } = await db.execute({ sql: `SELECT ap.*, CASE WHEN ap.payment_method = 'writeoff' THEN 0 ELSE ${UNAPPLIED_SQL} END AS unapplied, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name,
+      TRIM(COALESCE((SELECT GROUP_CONCAT(li.invoice_number, ', ') FROM legacy_invoice_allocations lia JOIN ar_legacy_invoices li ON li.id = lia.legacy_invoice_id WHERE lia.payment_id = ap.id), '') || ' ' ||
+        COALESCE((SELECT GROUP_CONCAT(t.transaction_number, ', ') FROM payment_allocations pa JOIN transactions t ON t.id = pa.transaction_id WHERE pa.payment_id = ap.id), '')) AS applied_to
+      FROM account_payments ap LEFT JOIN employees e ON ap.employee_id = e.id LEFT JOIN branches b ON ap.branch_id = b.id WHERE ap.customer_id = ? ORDER BY ap.created_at DESC`, args: [req.params.id] });
     const { rows: legacy_invoices } = await db.execute({ sql: `SELECT li.*, ${LEGACY_BALANCE_SQL} as balance_due FROM ar_legacy_invoices li WHERE li.customer_id = ? ORDER BY li.invoice_date DESC, li.id DESC`, args: [req.params.id] });
     res.json({ customer, invoices, payments, legacy_invoices });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -444,16 +448,32 @@ router.post('/legacy-credit-notes', requirePermission('accounts_create'), async 
     const reference = `Legacy CN ${number}`;
     const { rows: [dup] } = await db.execute({ sql: "SELECT id FROM account_payments WHERE customer_id = ? AND payment_method = 'credit_note' AND reference = ?", args: [customer_id, reference] });
     if (dup) return res.status(409).json({ error: `Legacy credit note ${number} is already on this customer's account` });
+    // apply_to_external_id: the legacy invoice (Books' id for it) the credit
+    // note is against — the old system's "apply to document". It's applied
+    // to that invoice, up to what it still owes; the rest stays on account.
+    let applyTo = null;
+    const applyExt = req.body.apply_to_external_id != null && req.body.apply_to_external_id !== '' ? String(req.body.apply_to_external_id) : null;
+    if (applyExt) {
+      const { rows: [inv] } = await db.execute({ sql: `SELECT li.id, li.invoice_number, li.status, ${LEGACY_BALANCE_SQL} AS due FROM ar_legacy_invoices li WHERE li.external_id = ? AND li.customer_id = ?`, args: [applyExt, customer_id] });
+      // Refused (not stored) so Books retries once the invoice has arrived.
+      if (!inv) return res.status(400).json({ error: "The invoice this credit note applies to isn't on the customer's POS account yet" });
+      if (inv.status === 'open' && inv.due > 0.005) applyTo = { legacy_invoice_id: inv.id, amount: parseFloat(Math.min(amount, inv.due).toFixed(2)) };
+    }
 
     const payment_number = await nextNumber(db, 'account_payments', 'payment_number', 'CN-', 6);
     const tx = await db.transaction('write');
     let committed = false, id;
     try {
       const result = await tx.execute({
-        sql: "INSERT INTO account_payments (payment_number, customer_id, amount, payment_method, payment_mode, reference, notes, external_id, created_at) VALUES (?,?,?,'credit_note','open',?,?,?,?)",
-        args: [payment_number, customer_id, amount, reference, memo || null, external_id, `${date} 12:00:00`],
+        sql: "INSERT INTO account_payments (payment_number, customer_id, amount, payment_method, payment_mode, reference, notes, external_id, created_at) VALUES (?,?,?,'credit_note',?,?,?,?,?)",
+        args: [payment_number, customer_id, amount, applyTo && applyTo.amount >= amount ? 'invoices' : 'open', reference, memo || null, external_id, `${date} 12:00:00`],
       });
       id = Number(result.lastInsertRowid);
+      if (applyTo) {
+        await insertAllocations(tx, id, [applyTo]);
+        await tx.execute({ sql: 'INSERT INTO payment_allocation_changes (payment_id, customer_id, before_json, after_json, changed_by, source) VALUES (?,?,?,?,?,?)',
+          args: [id, customer_id, '[]', JSON.stringify([applyTo]), 'RetailPOS Books (credit note entry)', 'books'] });
+      }
       await tx.execute({ sql: 'UPDATE customers SET account_balance = account_balance - ? WHERE id = ?', args: [amount, customer_id] });
       await tx.commit();
       committed = true;
@@ -472,14 +492,21 @@ router.post('/legacy-credit-notes/:id/void', requirePermission('accounts_create'
   try {
     const cn = await creditNoteRow(req.params.id);
     if (!cn || cn.payment_method !== 'credit_note') return res.status(404).json({ error: 'Legacy credit note not found' });
-    if (cn.amount - cn.unapplied > 0.001) return res.status(409).json({ error: `${(cn.amount - cn.unapplied).toFixed(2)} of credit note ${cn.payment_number} has been applied to invoices, so it can't be voided` });
-    // Its allocation history is kept, so one that was ever allocated stays.
-    const { rows: [history] } = await db.execute({ sql: 'SELECT id FROM payment_allocation_changes WHERE payment_id = ? LIMIT 1', args: [cn.id] });
+    // Its allocation history is kept, so one that was ever allocated stays —
+    // except the invoice it was applied to when it was entered, which goes
+    // with it (a credit note entered against the wrong invoice can be voided).
+    const ENTRY = 'RetailPOS Books (credit note entry)';
+    const { rows: [history] } = await db.execute({ sql: 'SELECT id FROM payment_allocation_changes WHERE payment_id = ? AND COALESCE(changed_by, \'\') != ? LIMIT 1', args: [cn.id, ENTRY] });
     if (history) return res.status(409).json({ error: `Credit note ${cn.payment_number} has been allocated before, so it can't be voided` });
+    const { rows: [store] } = await db.execute({ sql: 'SELECT 1 FROM store_credit_uses WHERE payment_id = ? LIMIT 1', args: [cn.id] });
+    if (store) return res.status(409).json({ error: `Credit note ${cn.payment_number} has been spent as store credit, so it can't be voided` });
 
     const tx = await db.transaction('write');
     let committed = false;
     try {
+      await tx.execute({ sql: 'DELETE FROM legacy_invoice_allocations WHERE payment_id = ?', args: [cn.id] });
+      await tx.execute({ sql: 'DELETE FROM payment_allocations WHERE payment_id = ?', args: [cn.id] });
+      await tx.execute({ sql: 'DELETE FROM payment_allocation_changes WHERE payment_id = ?', args: [cn.id] });
       await tx.execute({ sql: 'DELETE FROM account_payments WHERE id = ?', args: [cn.id] });
       await tx.execute({ sql: 'UPDATE customers SET account_balance = account_balance + ? WHERE id = ?', args: [cn.amount, cn.customer_id] });
       await tx.commit();

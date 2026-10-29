@@ -24640,6 +24640,7 @@ const App = {
           <div class="card-header"><span class="card-title">Credit Accounts</span>
             <div style="display:flex;gap:8px;align-items:center">
               <input type="search" id="ar-acct-q" placeholder="Search name, business, account #, phone, email…" autocomplete="off" style="width:280px;font-size:13px" oninput="App._arAcctSearch(this.value)">
+              <button class="btn btn-sm btn-outline" onclick="App.showBatchStatementsModal()">🖨 Print Statements</button>
               <button class="btn btn-sm btn-primary" onclick="App.showEnableCreditModal()">Enable Credit for Customer</button>
             </div>
           </div>
@@ -24870,10 +24871,10 @@ const App = {
     }).join('') : `<tr><td colspan="7" class="empty-state">${q ? 'No credit accounts match that search' : 'No credit accounts. Enable credit for a customer to get started.'}</td></tr>`;
   },
 
-  showStatementModal(customerId) {
-    const customer = (this._arCustomers || []).find(c => String(c.id) === String(customerId));
-    const name = customer ? `${customer.first_name} ${customer.last_name}` : 'Customer';
-    const email = customer ? (customer.email || '') : '';
+  showStatementModal(customerId, info) {
+    const customer = (this._arCustomers || this._arAccounts || []).find(c => String(c.id) === String(customerId));
+    const name = info?.name || (customer ? `${customer.first_name} ${customer.last_name}` : 'Customer');
+    const email = info?.email ?? (customer ? (customer.email || '') : '');
     const today = new Date().toISOString().slice(0, 10);
     const firstOfMonth = today.slice(0, 8) + '01';
     this.showModal(`
@@ -24892,10 +24893,61 @@ const App = {
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-          <button class="btn btn-outline" onclick="App._printStatement(${customerId})">&#128438; Print / Preview</button>
+          <button class="btn btn-outline" onclick="App._statementCsv(${customerId})">⬇ CSV</button>
+          <button class="btn btn-outline" onclick="App._printStatement(${customerId})">&#128438; Print / PDF</button>
           <button class="btn btn-primary" onclick="App._emailStatement(${customerId})">&#9993; Send Email</button>
         </div>
       </div>`);
+  },
+
+  _statementCsv(customerId) {
+    const params = new URLSearchParams();
+    const start = document.getElementById('stmt-start').value, end = document.getElementById('stmt-end').value;
+    if (start) params.set('start', start);
+    if (end) params.set('end', end);
+    window.open(`/api/email/statement-csv/${customerId}?${params}`, '_blank');
+  },
+
+  // Statements for many customers in one printable document (one per page).
+  showBatchStatementsModal() {
+    const today = this._apToday();
+    const q = this._arAcct?.q || '';
+    const matching = q ? (this._arAccounts || []).filter(a => [`${a.first_name} ${a.last_name}`, a.business_name, a.customer_number, a.phone, a.email].some(v => String(v || '').toLowerCase().includes(q))) : [];
+    this.showModal(`
+      <div class="modal" style="max-width:460px">
+        <div class="modal-header"><span class="modal-title">Print Statements</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
+            <div class="form-group" style="margin:0"><label>From Date</label><input type="date" id="bstmt-start" value="${today.slice(0, 8)}01"></div>
+            <div class="form-group" style="margin:0"><label>To Date</label><input type="date" id="bstmt-end" value="${today}"></div>
+          </div>
+          <div class="form-group"><label>Customers</label>
+            <select id="bstmt-scope">
+              <option value="balance">Credit customers with a balance</option>
+              <option value="all">All credit customers</option>
+              ${matching.length ? `<option value="search" selected>The ${matching.length} matching "${this.escapeAttr(q)}"</option>` : ''}
+            </select>
+          </div>
+          <p style="font-size:12px;color:var(--text-muted);margin:0">Opens one document with a statement per page — print it, or choose <em>Save as PDF</em> in the print dialog.</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App._printBatchStatements()">🖨 Print / PDF</button>
+        </div>
+      </div>`);
+    this._batchStmtIds = matching.map(a => a.id);
+  },
+  _printBatchStatements() {
+    const params = new URLSearchParams();
+    const start = document.getElementById('bstmt-start').value, end = document.getElementById('bstmt-end').value;
+    const scope = document.getElementById('bstmt-scope').value;
+    if (start) params.set('start', start);
+    if (end) params.set('end', end);
+    if (scope === 'search') params.set('ids', (this._batchStmtIds || []).join(','));
+    else params.set('scope', scope);
+    const win = window.open(`/api/email/statements-batch?${params}`, '_blank', 'width=900,height=750');
+    if (win) win.addEventListener('load', () => win.print());
+    this.closeModal();
   },
 
   _printStatement(customerId) {
@@ -25088,6 +25140,7 @@ const App = {
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
               <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;margin:0;cursor:pointer;text-transform:none;letter-spacing:0;font-weight:500;color:var(--text);white-space:nowrap;width:auto"><input type="checkbox" id="ard-all" style="width:16px;height:16px;margin:0" onchange="App._loadARDetail(${c.id})"> Include paid invoices</label>
               <span style="margin-left:auto"></span>
+              <button class="btn btn-sm btn-primary" onclick="App.showStatementModal(${c.id}, ${this.escapeAttr(JSON.stringify({ name: `${c.first_name} ${c.last_name}`, email: c.email || '' }))})">📄 Statement</button>
               <button class="btn btn-sm btn-outline" onclick="App._printARDetail(${c.id})">🖨 Print Detail</button>
               <button class="btn btn-sm btn-outline" onclick="App._emailARDetail(${c.id}, '${this.escapeAttr(c.email || '').replace(/'/g, "\\'")}')">✉ Email Detail</button>
             </div>
@@ -25095,8 +25148,8 @@ const App = {
           </div>
           <div id="acct-pmts" style="display:none">
             <div class="table-wrap"><table>
-              <thead><tr><th>Payment #</th><th>Amount</th><th>Method</th><th>Date</th></tr></thead>
-              <tbody>${data.payments.map(p => `<tr><td class="fw-600">${p.payment_number}</td><td class="color-success">${this.fmt(p.amount)}${p.unapplied > 0.005 ? `<div style="font-size:11px;color:var(--text-muted)">${this.fmt(p.unapplied)} on account, not yet applied</div>` : ''}</td><td>${p.payment_method === 'credit_note' ? '<span class="badge-pill badge-purple" style="font-size:10px">Credit note</span>' : p.payment_method}${p.reference ? `<div style="font-size:11px;color:var(--text-muted)">${this.escapeAttr(p.reference)}</div>` : ''}</td><td>${this.fmtDate(p.created_at)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">No payments</td></tr>'}</tbody>
+              <thead><tr><th>Payment #</th><th>Amount</th><th>Method</th><th>Applied To</th><th>Date</th></tr></thead>
+              <tbody>${data.payments.map(p => `<tr><td class="fw-600">${p.payment_number}</td><td class="color-success">${this.fmt(p.amount)}${p.unapplied > 0.005 ? `<div style="font-size:11px;color:var(--text-muted)">${this.fmt(p.unapplied)} on account, not yet applied</div>` : ''}</td><td>${p.payment_method === 'credit_note' ? '<span class="badge-pill badge-purple" style="font-size:10px">Credit note</span>' : p.payment_method}${p.reference ? `<div style="font-size:11px;color:var(--text-muted)">${this.escapeAttr(p.reference)}</div>` : ''}</td><td>${(p.applied_to || '').replace(/,\s*$/, '').trim() ? `<span style="font-size:12px">${this.escapeAttr(p.applied_to.trim())}</span>` : `<span style="font-size:12px;color:var(--text-muted)">${p.payment_method === 'writeoff' ? '—' : 'Not applied yet'}</span>`}</td><td>${this.fmtDate(p.created_at)}</td></tr>`).join('') || '<tr><td colspan="5" class="empty-state">No payments</td></tr>'}</tbody>
             </table></div>
           </div>
           ${(data.legacy_invoices || []).length ? `<div id="acct-legacy" style="display:none">

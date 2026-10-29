@@ -3,11 +3,10 @@ const router = express.Router();
 const nodemailer = require('nodemailer');
 const { db } = require('../database');
 const { requireAuth, requirePermission, requireAnyPermission, can } = require('../lib/permissions');
-const { customerArDetail } = require('../lib/arDetail');
+const { customerArDetail, customerStatement } = require('../lib/arDetail');
 const { inlineProtectedImages } = require('../lib/protectedUploads');
 const { rentalQuoteSummary, attachRentalRates, attachRateBasis, rentalWindow, rateBasisLabel } = require('../lib/rentals');
 const { renderDocumentPdf } = require('../lib/documentPdf');
-const { paymentAllocations } = require('../lib/legacyInvoices');
 const { loadDrawerSession } = require('../lib/drawerReport');
 const { paymentReceipt } = require('../lib/customerPayments');
 
@@ -1752,255 +1751,153 @@ router.post('/send-grn/:id', requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-function buildStatementHtml(data, s, origin) {
-  const { customer, payments, period } = data;
-  const storeName = s.store_name || 'My Store';
-  const storeAddr = s.store_address || '';
-  const storePhone = s.store_phone || '';
-  const customerName = `${customer.first_name} ${customer.last_name}`;
-  const totalPayments = payments.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
-  const periodText = (period.start || period.end)
-    ? `${period.start ? new Date(period.start + 'T00:00:00').toLocaleDateString() : 'Beginning'} – ${period.end ? new Date(period.end + 'T00:00:00').toLocaleDateString() : 'Today'}`
-    : 'All Time';
 
-  const paymentRows = payments.map(p => {
-    const allocRows = p.allocations && p.allocations.length
-      ? p.allocations.map(a => `
-          <tr style="background:#f9fafb">
-            <td style="padding:4px 8px 4px 28px;font-size:11px;color:#555;border-bottom:1px solid #f0f0f0">↳ ${a.transaction_number}${a.legacy_invoice_id ? ' (legacy invoice)' : ''}</td>
-            <td style="padding:4px 8px;font-size:11px;color:#555;border-bottom:1px solid #f0f0f0">${new Date(a.invoice_date).toLocaleDateString()}</td>
-            <td style="padding:4px 8px;font-size:11px;color:#555;border-bottom:1px solid #f0f0f0;text-align:right">${fmt(a.invoice_total)}</td>
-            <td style="padding:4px 8px;font-size:11px;color:${BRAND.green};border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(a.amount)}</td>
-          </tr>`).join('')
-      : '';
-    // An open (on-account) payment, or the part of one not yet applied to an invoice.
-    const unappliedRow = p.unapplied > 0.005
-      ? `<tr style="background:#f9fafb"><td colspan="3" style="padding:4px 8px 4px 28px;font-size:11px;color:#555;border-bottom:1px solid #f0f0f0;font-style:italic">↳ On account — not yet applied to an invoice</td><td style="padding:4px 8px;font-size:11px;color:${BRAND.green};border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(p.unapplied)}</td></tr>`
-      : (allocRows ? '' : `<tr style="background:#f9fafb"><td colspan="4" style="padding:4px 8px 4px 28px;font-size:11px;color:#aaa;border-bottom:1px solid #f0f0f0;font-style:italic">No invoice allocations</td></tr>`);
-    return `
-      <tr>
-        <td style="padding:8px;border-bottom:1px solid #e8e8e8;font-weight:700;font-size:13px">${p.payment_number}</td>
-        <td style="padding:8px;border-bottom:1px solid #e8e8e8;font-size:13px">${new Date(p.created_at).toLocaleDateString()}</td>
-        <td style="padding:8px;border-bottom:1px solid #e8e8e8;font-size:13px">${(p.payment_method||'cash').replace(/_/g,' ').toUpperCase()}</td>
-        <td style="padding:8px;border-bottom:1px solid #e8e8e8;font-size:13px;text-align:right;font-weight:700;color:${BRAND.green}">${fmt(p.amount)}</td>
-      </tr>${allocRows}${unappliedRow}`;
-  }).join('');
-
-  return `<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><title>Account Statement – ${customerName}</title>
-<style>@media print{body{background:#fff!important}}</style>
-</head>
-<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
-<tr><td align="center">
-  <table width="640" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
-    <tr><td style="${BRAND_HEADER_STYLE}">
-      ${origin ? `<div style="text-align:left;margin-bottom:8px">${logoImgTag(s, origin)}</div>` : ''}
-      <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
-      ${storeAddr ? `<div style="color:#ffffff;font-size:12px;margin-top:4px">${storeAddr}</div>` : ''}
-      ${storePhone ? `<div style="color:#ffffff;font-size:12px">${storePhone}</div>` : ''}
-    </td></tr>
-    <tr><td style="padding:24px">
-      <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px">
-        <tr>
-          <td style="vertical-align:top">
-            <div style="font-size:20px;font-weight:700;color:${BRAND.black}">ACCOUNT STATEMENT</div>
-            <div style="font-size:13px;color:#888;margin-top:2px">Period: ${periodText}</div>
-          </td>
-          <td style="text-align:right;vertical-align:top;font-size:13px;color:#444">
-            <div style="font-weight:700">${customerName}</div>
-            <div style="color:#888">${customer.customer_number || ''}</div>
-            ${customer.email ? `<div style="color:#888">${customer.email}</div>` : ''}
-            ${customer.phone ? `<div style="color:#888">${customer.phone}</div>` : ''}
-          </td>
-        </tr>
-      </table>
-      ${payments.length ? `
-      <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px;margin-bottom:16px">
-        <thead><tr style="background:#f9fafb">
-          <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Payment #</th>
-          <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Date</th>
-          <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Method</th>
-          <th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Amount</th>
-        </tr></thead>
-        <tbody>${paymentRows}</tbody>
-      </table>
-      <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444">
-        <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:4px 0"></td></tr>
-        <tr>
-          <td style="font-size:15px;font-weight:700;color:${BRAND.black};padding:4px 0">Total Payments</td>
-          <td style="font-size:15px;font-weight:700;color:${BRAND.green};text-align:right;padding:4px 0">${fmt(totalPayments)}</td>
-        </tr>
-        <tr>
-          <td style="font-size:13px;color:#555;padding:2px 0">Outstanding Balance</td>
-          <td style="font-size:13px;font-weight:600;color:${parseFloat(customer.account_balance||0)>0?'#dc2626':'#111'};text-align:right;padding:2px 0">${fmt(customer.account_balance||0)}</td>
-        </tr>
-      </table>` : '<div style="text-align:center;padding:24px;color:#888;font-style:italic">No payments found for this period.</div>'}
-      <div style="text-align:center;margin-top:24px;font-size:11px;color:#aaa">Generated ${new Date().toLocaleString()}</div>
-    </td></tr>
-  </table>
-</td></tr>
-</table>
-</body></html>`;
-}
-
-// Statement HTML preview (opens in new window for printing)
-router.get('/statement-preview/:customer_id', requireAuth, async (req, res) => {
-  try {
-    const { start, end } = req.query;
-    const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.customer_id] });
-    if (!customer) return res.status(404).send('<p>Customer not found</p>');
-    let sql = `SELECT p.*, e.first_name || ' ' || e.last_name as employee_name, (SELECT COALESCE(SUM(scu.amount), 0) FROM store_credit_uses scu WHERE scu.payment_id = p.id) AS store_credit_used FROM account_payments p LEFT JOIN employees e ON p.employee_id = e.id WHERE p.customer_id = ?`;
-    const params = [req.params.customer_id];
-    if (start) { sql += ' AND date(p.created_at) >= ?'; params.push(start); }
-    if (end)   { sql += ' AND date(p.created_at) <= ?'; params.push(end); }
-    sql += ' ORDER BY p.created_at ASC';
-    const { rows: payments } = await db.execute({ sql, args: params });
-    for (const p of payments) {
-      p.allocations = await paymentAllocations(db, p.id);
-      p.unapplied = p.payment_method === 'writeoff' ? 0 : Math.max(0, parseFloat((p.amount - p.allocations.reduce((s, a) => s + a.amount, 0) - (Number(p.store_credit_used) || 0)).toFixed(2)));
-    }
-    const s = await getSettings();
-    const origin = `${req.protocol}://${req.get('host')}`;
-    const html = buildStatementHtml({ customer, payments, period: { start: start||null, end: end||null } }, s, origin);
-    res.setHeader('Content-Type', 'text/html');
-    res.send(html);
-  } catch(e) { res.status(500).send(`<p>Error: ${e.message}</p>`); }
-});
-
-// ── Customer Aging Detail ─────────────────────────────────────────
-// Every open invoice with its due date, age and P.O. #, and under it each
-// payment (P), credit note (C) and write-off (W) applied to it — so a customer
-// can see which invoice a credit note went against — then credits not yet
-// applied, and the aged balances. Data from lib/arDetail.js.
-function buildArDetailHtml(d, s, origin) {
-  const c = d.customer;
+// ── Customer account statement ─────────────────────────────────────
+// lib/arDetail.js customerStatement: opening balance, the period's invoices
+// (new and old-system), payments, credit notes (with the invoice each was
+// applied to) and write-offs with a running balance, closing balance, then
+// the aged open items. One statement per page; the batch print strings
+// several together.
+function statementSectionHtml(st, s, origin) {
+  const c = st.customer;
   const name = `${c.first_name || ''} ${c.last_name || ''}`.trim();
   const dt = v => (v ? new Date(`${String(v).slice(0, 10)}T00:00:00`).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }) : '');
   const money = n => (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const t = d.totals;
-  const pct = n => (t.open_invoices > 0 ? `${((n / t.open_invoices) * 100).toFixed(2)}%` : '0.00%');
-  const td = (v, extra = '') => `<td style="padding:4px 6px;border-bottom:1px solid #eee;${extra}">${v}</td>`;
-  const typeName = { T: 'Invoice', P: 'Payment', C: 'Credit note', W: 'Write-off' };
-  const rows = d.invoices.map(inv => {
-    const invRow = `<tr style="background:#fafafa">
-      ${td(`<strong>${esc(inv.number)}</strong>`)}${td(esc(inv.number))}${td(inv.kind === 'store_credit' ? 'S <span style="color:#888;font-size:10px">store credit used</span>' : `T${inv.kind === 'legacy' ? ' <span style="color:#888;font-size:10px">legacy</span>' : ''}`)}
-      ${td(dt(inv.date))}${td(dt(inv.due_date))}${td(esc(inv.reference || ''))}
-      ${td(money(inv.amount), 'text-align:right')}${td(inv.age_days, 'text-align:right')}
-      ${td(`<strong>${money(inv.balance_due)}</strong>`, 'text-align:right')}</tr>`;
-    const applied = inv.applied.map(a => `<tr style="color:#444">
-      ${td(`&nbsp;&nbsp;↳ ${esc(a.number)}`)}${td(esc(inv.number))}${td(`<span title="${typeName[a.type]}">${a.type}</span>`)}
-      ${td(dt(a.date))}${td('')}${td(esc(a.reference || ''))}
-      ${td(`-${money(a.amount)}`, `text-align:right;color:${a.type === 'C' ? '#7c3aed' : BRAND.green}`)}${td('')}${td('')}</tr>`).join('');
-    return invRow + applied;
-  }).join('');
-  const credits = d.unapplied.map(u => `<tr style="color:#444">
-      ${td(`<strong>${esc(u.number)}</strong>`)}${td('<em>On account</em>')}${td(u.type)}${td(dt(u.date))}${td('')}${td(esc(u.reference || ''))}
-      ${td(`-${money(u.amount)}`, 'text-align:right')}${td(u.age_days, 'text-align:right')}
-      ${td(`<strong>-${money(u.unapplied)}</strong>`, 'text-align:right;color:#7c3aed')}</tr>`).join('');
-  const th = (v, align = 'left') => `<th style="padding:6px;border-bottom:2px solid #333;text-align:${align};font-size:11px;text-transform:uppercase">${v}</th>`;
-  const box = (label, value, sub = '') => `<td style="padding:6px 10px;border:1px solid #ddd;text-align:right"><div style="font-size:10px;color:#666;text-transform:uppercase">${label}</div><div style="font-weight:700">${value}</div>${sub ? `<div style="font-size:10px;color:#666">${sub}</div>` : ''}</td>`;
-  const printed = new Date();
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Customer Aging Detail – ${esc(name)}</title>
-<style>@page{size:letter landscape;margin:12mm}@media print{body{background:#fff!important}}</style></head>
-<body style="margin:0;padding:16px;font-family:Arial,sans-serif;font-size:12px;color:#111;background:#fff">
+  const td = (v, extra = '') => `<td style="padding:4px 6px;border-bottom:1px solid #eee;vertical-align:top;${extra}">${v}</td>`;
+  const th = (v, align = 'left') => `<th style="padding:5px 6px;border-bottom:2px solid #333;text-align:${align};font-size:10.5px;text-transform:uppercase">${v}</th>`;
+  const rows = st.lines.map(l => `<tr>
+      ${td(dt(l.date))}${td(`<strong>${esc(l.number)}</strong>`)}${td(esc(l.description))}
+      ${td(esc(l.reference || ''))}${td(l.applied_to ? `<span style="font-size:10.5px">${esc(l.applied_to)}</span>` : (l.due_date ? `<span style="font-size:10.5px;color:#666">Due ${dt(l.due_date)}</span>` : ''))}
+      ${td(l.debit ? money(l.debit) : '', 'text-align:right')}${td(l.credit ? money(l.credit) : '', 'text-align:right')}${td(money(l.balance), 'text-align:right;font-weight:600')}</tr>`).join('');
+  const a = st.aging;
+  const pct = n => (a && a.open_invoices > 0 ? `${Math.round((n / a.open_invoices) * 100)}%` : '');
+  const box = (label, value, sub = '', strong) => `<td style="padding:6px 10px;border:1px solid #ddd;text-align:right"><div style="font-size:9.5px;color:#666;text-transform:uppercase">${label}</div><div style="font-weight:700;${strong ? 'font-size:15px' : ''}">${value}</div>${sub ? `<div style="font-size:9.5px;color:#666">${sub}</div>` : ''}</td>`;
+  const openItems = a ? `
+    <div style="font-weight:700;margin:16px 0 6px">Open items as of ${dt(a.as_of)}</div>
+    <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-bottom:8px"><tr>
+      ${box('Current', money(a.aging.current), pct(a.aging.current))}${box('31 - 60 days', money(a.aging.d31_60), pct(a.aging.d31_60))}
+      ${box('61 - 90 days', money(a.aging.d61_90), pct(a.aging.d61_90))}${box('Over 90 days', money(a.aging.over_90), pct(a.aging.over_90))}
+      ${box('Unapplied credits', a.unapplied > 0 ? `-${money(a.unapplied)}` : '0.00')}${box('Balance due', money(a.balance), '', true)}
+    </tr></table>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:11px">
+      <thead><tr>${th('Invoice #')}${th('Date')}${th('Due')}${th('P.O. # / Ref')}${th('Amount', 'right')}${th('Paid / credited', 'right')}${th('Age', 'right')}${th('Balance', 'right')}</tr></thead>
+      <tbody>${a.invoices.map(i => `<tr>${td(`<strong>${esc(i.number)}</strong>`)}${td(dt(i.date))}${td(dt(i.due_date))}${td(esc(i.reference || ''))}
+        ${td(money(i.amount), 'text-align:right')}${td(i.amount - i.balance_due > 0.005 ? `-${money(i.amount - i.balance_due)}` : '', 'text-align:right')}${td(`${i.age_days}d`, 'text-align:right')}${td(money(i.balance_due), 'text-align:right;font-weight:600')}</tr>
+        ${i.applied.map(x => `<tr style="color:#555;font-size:10.5px">${td(`&nbsp;&nbsp;↳ ${esc(x.number)}`)}${td(dt(x.date))}${td({ P: 'Payment', C: 'Credit note', W: 'Write-off' }[x.type])}${td(esc(x.reference || ''))}${td('')}${td(`-${money(x.amount)}`, 'text-align:right')}${td('')}${td('')}</tr>`).join('')}`).join('')
+        || `<tr><td colspan="8" style="padding:8px;color:#888">No open invoices</td></tr>`}
+      ${a.unapplied_items.map(u => `<tr>${td(`<strong>${esc(u.number)}</strong>`)}${td(dt(u.date))}${td({ P: 'Payment', C: 'Credit note' }[u.type] || '')}${td(esc(u.reference || ''))}${td(money(u.amount), 'text-align:right')}${td('<em>On account</em>', 'text-align:right')}${td('')}${td(`-${money(u.unapplied)}`, 'text-align:right;font-weight:600')}</tr>`).join('')}
+      </tbody>
+    </table>` : '';
+  return `<div style="page-break-after:always">
   <table width="100%" cellpadding="0" cellspacing="0"><tr>
-    <td style="vertical-align:top;font-size:11px;color:#555">Date ${printed.toLocaleDateString('en-US')} &nbsp;Time ${printed.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</td>
-    <td style="text-align:center">${origin ? `<div>${logoImgTag(s, origin)}</div>` : ''}<div style="font-size:16px;font-weight:700">${esc(s.store_name || 'My Store')}</div>
-      <div style="font-size:13px;font-weight:700;letter-spacing:3px;margin-top:2px">CUSTOMER AGING DETAIL</div>
-      <div style="font-size:11px;color:#555">As of ${dt(d.as_of)}</div></td>
-    <td style="text-align:right;vertical-align:top;font-size:11px;color:#555">${esc(s.store_phone || '')}</td>
+    <td style="vertical-align:top">${origin ? `<div style="margin-bottom:4px">${logoImgTag(s, origin)}</div>` : ''}
+      <div style="font-size:16px;font-weight:700">${esc(s.store_name || 'My Store')}</div>
+      ${s.store_address ? `<div style="font-size:11px;color:#444">${esc(s.store_address)}</div>` : ''}${s.store_phone ? `<div style="font-size:11px;color:#444">${esc(s.store_phone)}</div>` : ''}</td>
+    <td style="vertical-align:top;text-align:right"><div style="font-size:20px;font-weight:700;letter-spacing:2px">STATEMENT</div>
+      <div style="font-size:11px;color:#444;margin-top:2px">Statement date: ${dt(st.period.end)}</div>
+      <div style="font-size:11px;color:#444">Period: ${st.period.start ? dt(st.period.start) : 'All activity'} – ${dt(st.period.end)}</div></td>
   </tr></table>
   <table width="100%" cellpadding="0" cellspacing="0" style="margin:14px 0 10px;font-size:12px"><tr>
-    <td style="vertical-align:top;width:50%">
-      <div><strong>Customer #</strong> ${esc(c.customer_number || '')}</div>
-      <div style="font-size:14px;font-weight:700;margin-top:2px">${esc(name)}</div>
+    <td style="vertical-align:top;width:55%;border:1px solid #ddd;padding:8px 10px">
+      <div style="font-size:9.5px;color:#666;text-transform:uppercase">Bill to</div>
+      <div style="font-size:14px;font-weight:700">${esc(name)}</div>
       ${c.business_name ? `<div>${esc(c.business_name)}</div>` : ''}
       ${[c.address, [c.city, c.state, c.zip].filter(Boolean).join(', ')].filter(Boolean).map(l => `<div>${esc(l)}</div>`).join('')}
-      ${c.phone ? `<div>Phone: ${esc(c.phone)}</div>` : ''}${c.email ? `<div>${esc(c.email)}</div>` : ''}
+      ${c.phone ? `<div>${esc(c.phone)}</div>` : ''}${c.email ? `<div>${esc(c.email)}</div>` : ''}
     </td>
-    <td style="vertical-align:top;text-align:right">
-      <div><strong>Credit limit:</strong> ${money(c.credit_limit)}</div>
-      <div><strong>Last payment:</strong> ${d.last_payment ? `${money(d.last_payment.amount)} on ${dt(d.last_payment.date)}` : 'none'}</div>
+    <td style="vertical-align:top;text-align:right;font-size:11.5px">
+      <div><strong>Account #</strong> ${esc(c.customer_number || '')}</div>
       <div><strong>Terms:</strong> ${c.terms_days} days</div>
+      <div><strong>Credit limit:</strong> ${money(c.credit_limit)}</div>
+      <div><strong>Last payment:</strong> ${st.last_payment ? `${money(st.last_payment.amount)} on ${dt(st.last_payment.date)}` : 'none'}</div>
     </td>
   </tr></table>
-  <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-bottom:14px;margin-left:auto"><tr>
-    ${box('Balance', money(t.balance))}${box('Open invoices', money(t.open_invoices))}
-    ${box('Current', money(t.aging.current), pct(t.aging.current))}${box('31 - 60 days', money(t.aging.d31_60), pct(t.aging.d31_60))}
-    ${box('61 - 90 days', money(t.aging.d61_90), pct(t.aging.d61_90))}${box('Over 90 days', money(t.aging.over_90), pct(t.aging.over_90))}
-    ${box('Unapplied credits', t.unapplied > 0 ? `-${money(t.unapplied)}` : '0.00')}
+  <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:0 0 12px auto"><tr>
+    ${box('Opening balance', money(st.opening))}${box('Charges', money(st.totals.debits))}${box('Payments & credits', `-${money(st.totals.credits)}`)}${box('Closing balance', money(st.totals.closing), '', true)}
   </tr></table>
-  <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:11.5px">
-    <thead><tr>${th('Doc #')}${th('Apply to doc #')}${th('Type')}${th('Doc date')}${th('Due date')}${th('P.O. # / Reference')}${th('Amount', 'right')}${th('Age', 'right')}${th('Balance due', 'right')}</tr></thead>
-    <tbody>${rows || `<tr><td colspan="9" style="padding:10px;color:#888;text-align:center">No open invoices</td></tr>`}${credits}</tbody>
+  <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:11px">
+    <thead><tr>${th('Date')}${th('Doc #')}${th('Description')}${th('P.O. # / Ref')}${th('Applied to / Due')}${th('Charges', 'right')}${th('Credits', 'right')}${th('Balance', 'right')}</tr></thead>
+    <tbody>
+      <tr style="background:#fafafa">${td(st.period.start ? dt(st.period.start) : '')}${td('')}${td('<em>Opening balance</em>')}${td('')}${td('')}${td('')}${td('')}${td(money(st.opening), 'text-align:right;font-weight:600')}</tr>
+      ${rows || `<tr><td colspan="8" style="padding:8px;color:#888">No activity in this period</td></tr>`}
+      <tr style="background:#fafafa">${td(dt(st.period.end))}${td('')}${td('<strong>Closing balance</strong>')}${td('')}${td('')}${td(money(st.totals.debits), 'text-align:right')}${td(money(st.totals.credits), 'text-align:right')}${td(`<strong>${money(st.totals.closing)}</strong>`, 'text-align:right')}</tr>
+    </tbody>
   </table>
-  <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px"><tr>
-    <td style="font-size:10px;color:#666">Type: T = invoice, S = sale paid with store credit, P = payment, C = credit note, W = write-off. Age = days since the document date. Payments and credit notes are shown under the invoice they were applied to.</td>
-    <td style="text-align:right;font-size:13px;white-space:nowrap"><strong>Customer open document balance: ${money(t.balance)}</strong></td>
-  </tr></table>
-</body></html>`;
+  ${openItems}
+  <div style="margin-top:12px;font-size:10px;color:#666">Credit notes and payments list the invoices they were applied to. Please quote your account number with payment. Questions about this statement: ${esc(s.store_phone || s.store_email || '')}</div>
+</div>`;
 }
 
-router.get('/aging-detail-preview/:customer_id', requireAnyPermission('accounts', 'customers'), async (req, res) => {
+function statementDocHtml(title, sections) {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(title)}</title>
+<style>@page{size:letter;margin:12mm}@media print{body{background:#fff!important}}div[style*="page-break-after"]:last-child{page-break-after:auto!important}</style></head>
+<body style="margin:0;padding:16px;font-family:Arial,sans-serif;font-size:12px;color:#111;background:#fff">${sections}</body></html>`;
+}
+
+const stmtRange = q => ({ start: /^\d{4}-\d{2}-\d{2}$/.test(q.start || '') ? q.start : null, end: /^\d{4}-\d{2}-\d{2}$/.test(q.end || '') ? q.end : null });
+
+router.get('/statement-preview/:customer_id', requireAnyPermission('accounts', 'customers'), async (req, res) => {
   try {
-    const detail = await customerArDetail(db, req.params.customer_id, { all: req.query.all === '1' });
-    if (!detail) return res.status(404).send('<p>Customer not found</p>');
+    const st = await customerStatement(db, req.params.customer_id, stmtRange(req.query));
+    if (!st) return res.status(404).send('<p>Customer not found</p>');
     res.setHeader('Content-Type', 'text/html');
-    res.send(buildArDetailHtml(detail, await getSettings(), `${req.protocol}://${req.get('host')}`));
+    res.send(statementDocHtml(`Statement – ${st.customer.first_name} ${st.customer.last_name}`, statementSectionHtml(st, await getSettings(), `${req.protocol}://${req.get('host')}`)));
   } catch(e) { res.status(500).send(`<p>Error: ${esc(e.message)}</p>`); }
 });
 
-router.post('/send-aging-detail/:customer_id', requireAnyPermission('accounts', 'customers'), async (req, res) => {
-  const to = String(req.body.to || '').trim();
-  if (!to) return res.status(400).json({ error: 'Recipient email is required' });
+// The statement's lines as a spreadsheet (CSV).
+router.get('/statement-csv/:customer_id', requireAnyPermission('accounts', 'customers'), async (req, res) => {
   try {
-    const detail = await customerArDetail(db, req.params.customer_id, { all: req.body.all === true || req.body.all === '1' });
-    if (!detail) return res.status(404).json({ error: 'Customer not found' });
-    const s = await getSettings();
-    const html = buildArDetailHtml(detail, s, `${req.protocol}://${req.get('host')}`);
-    const name = `${detail.customer.first_name || ''} ${detail.customer.last_name || ''}`.trim();
-    try {
-      await createTransporter(s).sendMail({
-        from: `"${s.email_from_name || s.store_name || 'POS System'}" <${s.email_smtp_user || s.store_email || ''}>`,
-        to, subject: `Account Detail – ${name} | ${s.store_name || 'Our Store'}`, html,
-      });
-      res.json({ success: true, message: `Account detail sent to ${to}` });
-    } catch(e) { res.status(500).json({ error: `Failed to send email: ${e.message}` }); }
+    const st = await customerStatement(db, req.params.customer_id, stmtRange(req.query));
+    if (!st) return res.status(404).json({ error: 'Customer not found' });
+    const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const out = [['Date', 'Doc #', 'Type', 'Description', 'P.O. # / Ref', 'Applied to', 'Due', 'Charges', 'Credits', 'Balance'].map(q).join(',')];
+    out.push(['', '', '', 'Opening balance', '', '', '', '', '', st.opening.toFixed(2)].map(q).join(','));
+    for (const l of st.lines) out.push([l.date, l.number, l.type, l.description, l.reference, l.applied_to, l.due_date, l.debit ? l.debit.toFixed(2) : '', l.credit ? l.credit.toFixed(2) : '', l.balance.toFixed(2)].map(q).join(','));
+    out.push(['', '', '', 'Closing balance', '', '', '', st.totals.debits.toFixed(2), st.totals.credits.toFixed(2), st.totals.closing.toFixed(2)].map(q).join(','));
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="statement-${st.customer.customer_number || st.customer.id}-${st.period.end}.csv"`);
+    res.send(out.join('\r\n'));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Email an account statement
-router.post('/send-statement/:customer_id', requireAuth, async (req, res) => {
-  const { to, start, end } = req.body;
-  if (!to) return res.status(400).json({ error: 'Recipient email is required' });
+// Several statements in one printable document: ?ids=1,2,3, or every active
+// credit customer with a balance (?scope=balance, the default) or all of them
+// (?scope=all).
+router.get('/statements-batch', requirePermission('accounts'), async (req, res) => {
   try {
-    const { rows: [customer] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.customer_id] });
-    if (!customer) return res.status(404).json({ error: 'Customer not found' });
-    let sql = `SELECT p.*, e.first_name || ' ' || e.last_name as employee_name, (SELECT COALESCE(SUM(scu.amount), 0) FROM store_credit_uses scu WHERE scu.payment_id = p.id) AS store_credit_used FROM account_payments p LEFT JOIN employees e ON p.employee_id = e.id WHERE p.customer_id = ?`;
-    const params = [req.params.customer_id];
-    if (start) { sql += ' AND date(p.created_at) >= ?'; params.push(start); }
-    if (end)   { sql += ' AND date(p.created_at) <= ?'; params.push(end); }
-    sql += ' ORDER BY p.created_at ASC';
-    const { rows: payments } = await db.execute({ sql, args: params });
-    for (const p of payments) {
-      p.allocations = await paymentAllocations(db, p.id);
-      p.unapplied = p.payment_method === 'writeoff' ? 0 : Math.max(0, parseFloat((p.amount - p.allocations.reduce((s, a) => s + a.amount, 0) - (Number(p.store_credit_used) || 0)).toFixed(2)));
+    let ids = String(req.query.ids || '').split(',').map(Number).filter(Boolean);
+    if (!ids.length) {
+      const { rows } = await db.execute(`SELECT id FROM customers WHERE credit_enabled = 1 AND active = 1${req.query.scope === 'all' ? '' : ' AND ABS(account_balance) > 0.005'} ORDER BY last_name, first_name`);
+      ids = rows.map(r => r.id);
     }
+    if (ids.length > 1000) return res.status(400).send('<p>That is more than 1,000 statements — narrow the list.</p>');
     const s = await getSettings();
     const origin = `${req.protocol}://${req.get('host')}`;
-    const html = buildStatementHtml({ customer, payments, period: { start: start||null, end: end||null } }, s, origin);
-    const customerName = `${customer.first_name} ${customer.last_name}`;
+    const sections = [];
+    for (const id of ids) {
+      const st = await customerStatement(db, id, stmtRange(req.query));
+      if (st) sections.push(statementSectionHtml(st, s, origin));
+    }
+    res.setHeader('Content-Type', 'text/html');
+    res.send(statementDocHtml(`Statements (${sections.length})`, sections.join('') || '<p>No customers to print.</p>'));
+  } catch(e) { res.status(500).send(`<p>Error: ${esc(e.message)}</p>`); }
+});
+
+// Email a customer their statement
+router.post('/send-statement/:customer_id', requireAnyPermission('accounts', 'customers'), async (req, res) => {
+  const to = String(req.body.to || '').trim();
+  if (!to) return res.status(400).json({ error: 'Recipient email is required' });
+  try {
+    const st = await customerStatement(db, req.params.customer_id, stmtRange(req.body));
+    if (!st) return res.status(404).json({ error: 'Customer not found' });
+    const s = await getSettings();
+    const customerName = `${st.customer.first_name} ${st.customer.last_name}`;
+    const html = statementDocHtml(`Statement – ${customerName}`, statementSectionHtml(st, s, `${req.protocol}://${req.get('host')}`));
     try {
-      const transporter = createTransporter(s);
-      const fromName = s.email_from_name || s.store_name || 'POS System';
-      const fromAddr = s.email_smtp_user || s.store_email || '';
-      await transporter.sendMail({
-        from: `"${fromName}" <${fromAddr}>`,
-        to,
-        subject: `Account Statement – ${customerName} | ${s.store_name || 'Our Store'}`,
-        html,
+      await createTransporter(s).sendMail({
+        from: `"${s.email_from_name || s.store_name || 'POS System'}" <${s.email_smtp_user || s.store_email || ''}>`,
+        to, subject: `Account Statement – ${customerName} | ${s.store_name || 'Our Store'}`, html,
       });
       res.json({ success: true, message: `Statement sent to ${to}` });
     } catch(e) { res.status(500).json({ error: `Failed to send email: ${e.message}` }); }
