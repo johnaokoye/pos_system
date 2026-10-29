@@ -2379,10 +2379,34 @@ async function _init() {
     // supplier sees (unlike notes, which print on the PO and pump authorization).
     'ALTER TABLE purchase_requests ADD COLUMN internal_notes TEXT',
     'ALTER TABLE purchase_orders ADD COLUMN internal_notes TEXT',
+    // A credit note made by a return (lib/returnCreditNotes.js).
+    'ALTER TABLE account_payments ADD COLUMN return_id INTEGER REFERENCES returns(id)',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
   }
+
+  // One-time: credit-note returns made before they were recorded as credit
+  // notes on the account — each gets its CN- document (dated with the return),
+  // applied to its sale's invoice up to what that still owes today.
+  try {
+    const { rows: pending } = await db.execute(`SELECT r.id, r.return_number, r.customer_id, r.employee_id, r.branch_id, r.total, r.created_at, r.original_transaction_id
+      FROM returns r WHERE r.resolution = 'credit_note' AND r.customer_id IS NOT NULL AND r.total > 0
+        AND NOT EXISTS (SELECT 1 FROM account_payments ap WHERE ap.return_id = r.id) ORDER BY r.id`);
+    if (pending.length) {
+      const { nextNumber } = require('./lib/nextNumber');
+      const { recordReturnCreditNote } = require('./lib/returnCreditNotes');
+      for (const r of pending) {
+        const { rows: [t] } = await db.execute({ sql: 'SELECT id, transaction_number, payment_method, is_credit FROM transactions WHERE id = ?', args: [r.original_transaction_id] });
+        const tx = await db.transaction('write');
+        try {
+          await recordReturnCreditNote(tx, { returnId: r.id, returnNumber: r.return_number, transaction: t, customerId: r.customer_id, employeeId: r.employee_id,
+            branchId: r.branch_id, amount: r.total, number: await nextNumber(tx, 'account_payments', 'payment_number', 'CN-', 6), createdAt: r.created_at });
+          await tx.commit();
+        } catch(e) { await tx.rollback(); throw e; }
+      }
+    }
+  } catch(e) { console.error('[db] return credit-note backfill:', e.message); }
 
   // One-time: the GCT in bills entered before ap_bills.tax_amount existed.
   // A receipt bill gets its received lines' tax exactly (as receiving now

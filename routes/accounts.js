@@ -6,6 +6,7 @@ const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { LEGACY_BALANCE_SQL, openArInvoices, buildAllocations, insertAllocations, paymentAllocations } = require('../lib/legacyInvoices');
 const { UNAPPLIED_SQL, allArInvoices, currentAllocations, setPaymentAllocations } = require('../lib/customerPayments');
+const { customerArDetail } = require('../lib/arDetail');
 
 // Every endpoint in this file is specific to the Accounts Receivable
 // screen (unlike e.g. employees.js, nothing here is used as a cross-feature
@@ -86,6 +87,17 @@ router.get('/customer/:id', async (req, res) => {
     const { rows: payments } = await db.execute({ sql: `SELECT ap.*, CASE WHEN ap.payment_method = 'writeoff' THEN 0 ELSE ${UNAPPLIED_SQL} END AS unapplied, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name FROM account_payments ap LEFT JOIN employees e ON ap.employee_id = e.id LEFT JOIN branches b ON ap.branch_id = b.id WHERE ap.customer_id = ? ORDER BY ap.created_at DESC`, args: [req.params.id] });
     const { rows: legacy_invoices } = await db.execute({ sql: `SELECT li.*, ${LEGACY_BALANCE_SQL} as balance_due FROM ar_legacy_invoices li WHERE li.customer_id = ? ORDER BY li.invoice_date DESC, li.id DESC`, args: [req.params.id] });
     res.json({ customer, invoices, payments, legacy_invoices });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Invoice-by-invoice detail (lib/arDetail.js): open invoices with due date,
+// age, P.O. #, and the payments / credit notes / write-offs applied to each;
+// ?all=1 includes paid invoices too.
+router.get('/customer/:id/detail', async (req, res) => {
+  try {
+    const detail = await customerArDetail(db, req.params.id, { all: req.query.all === '1', today: /^\d{4}-\d{2}-\d{2}$/.test(req.query.as_of || '') ? req.query.as_of : undefined });
+    if (!detail) return res.status(404).json({ error: 'Customer not found' });
+    res.json(detail);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

@@ -25072,28 +25072,31 @@ const App = {
     const data = await this.api('GET', `/accounts/customer/${customerId}`);
     const c = data.customer;
     this.showModal(`
-      <div class="modal" style="max-width:680px">
-        <div class="modal-header"><span class="modal-title">${c.first_name} ${c.last_name} — Account</span><button class="modal-close">✕</button></div>
+      <div class="modal" style="max-width:1000px">
+        <div class="modal-header"><span class="modal-title">${this.escapeAttr(`${c.first_name} ${c.last_name}`)} — Account</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <div class="two-col" style="margin-bottom:14px;font-size:13px">
             <div><strong>Credit Limit:</strong> ${this.fmt(c.credit_limit||0)}<br><strong>Outstanding:</strong> <span class="color-danger">${this.fmt(c.account_balance||0)}</span><br><strong>Available:</strong> <span class="color-success">${this.fmt(Math.max(0,(c.credit_limit||0)-(c.account_balance||0)))}</span></div>
             <div><strong>Phone:</strong> ${c.phone||'-'}<br><strong>Email:</strong> ${c.email||'-'}</div>
           </div>
           <div class="tab-bar" style="margin-bottom:10px">
-            <button class="tab-btn active" onclick="App.showModalTab(this,'acct-inv')">Invoices (${data.invoices.length})</button>
+            <button class="tab-btn active" onclick="App.showModalTab(this,'acct-inv')">Invoice Detail</button>
             <button class="tab-btn" onclick="App.showModalTab(this,'acct-pmts')">Payments (${data.payments.length})</button>
             ${(data.legacy_invoices || []).length ? `<button class="tab-btn" onclick="App.showModalTab(this,'acct-legacy')">Legacy Invoices (${data.legacy_invoices.length})</button>` : ''}
           </div>
           <div id="acct-inv">
-            <div class="table-wrap"><table>
-              <thead><tr><th>Invoice #</th><th>Amount</th><th>Date</th><th>Status</th></tr></thead>
-              <tbody>${data.invoices.map(i => `<tr><td class="fw-600">${i.transaction_number}</td><td>${this.fmt(i.total)}</td><td>${this.fmtDate(i.created_at)}</td><td><span class="badge-pill ${i.status==='completed'?'badge-success':'badge-danger'}">${i.status}</span></td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">No invoices</td></tr>'}</tbody>
-            </table></div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+              <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;margin:0;cursor:pointer;text-transform:none;letter-spacing:0;font-weight:500;color:var(--text);white-space:nowrap;width:auto"><input type="checkbox" id="ard-all" style="width:16px;height:16px;margin:0" onchange="App._loadARDetail(${c.id})"> Include paid invoices</label>
+              <span style="margin-left:auto"></span>
+              <button class="btn btn-sm btn-outline" onclick="App._printARDetail(${c.id})">🖨 Print Detail</button>
+              <button class="btn btn-sm btn-outline" onclick="App._emailARDetail(${c.id}, '${this.escapeAttr(c.email || '').replace(/'/g, "\\'")}')">✉ Email Detail</button>
+            </div>
+            <div id="ard-body"><div class="empty-state"><p>Loading...</p></div></div>
           </div>
           <div id="acct-pmts" style="display:none">
             <div class="table-wrap"><table>
               <thead><tr><th>Payment #</th><th>Amount</th><th>Method</th><th>Date</th></tr></thead>
-              <tbody>${data.payments.map(p => `<tr><td class="fw-600">${p.payment_number}</td><td class="color-success">${this.fmt(p.amount)}${p.unapplied > 0.005 ? `<div style="font-size:11px;color:var(--text-muted)">${this.fmt(p.unapplied)} on account, not yet applied</div>` : ''}</td><td>${p.payment_method}</td><td>${this.fmtDate(p.created_at)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">No payments</td></tr>'}</tbody>
+              <tbody>${data.payments.map(p => `<tr><td class="fw-600">${p.payment_number}</td><td class="color-success">${this.fmt(p.amount)}${p.unapplied > 0.005 ? `<div style="font-size:11px;color:var(--text-muted)">${this.fmt(p.unapplied)} on account, not yet applied</div>` : ''}</td><td>${p.payment_method === 'credit_note' ? '<span class="badge-pill badge-purple" style="font-size:10px">Credit note</span>' : p.payment_method}${p.reference ? `<div style="font-size:11px;color:var(--text-muted)">${this.escapeAttr(p.reference)}</div>` : ''}</td><td>${this.fmtDate(p.created_at)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">No payments</td></tr>'}</tbody>
             </table></div>
           </div>
           ${(data.legacy_invoices || []).length ? `<div id="acct-legacy" style="display:none">
@@ -25109,6 +25112,80 @@ const App = {
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
+    this._loadARDetail(c.id);
+  },
+
+  // Invoice-by-invoice account detail (GET /accounts/customer/:id/detail):
+  // each invoice's due date, age, P.O. #, and the payments / credit notes /
+  // write-offs applied to it, then credits still on account.
+  async _loadARDetail(customerId) {
+    const el = document.getElementById('ard-body');
+    if (!el) return;
+    const all = document.getElementById('ard-all')?.checked;
+    let d;
+    try { d = await this.api('GET', `/accounts/customer/${customerId}/detail?as_of=${this._apToday()}${all ? '&all=1' : ''}`); }
+    catch (e) { el.innerHTML = `<div class="empty-state"><p>${this.escapeAttr(e.message)}</p></div>`; return; }
+    const t = d.totals;
+    const pct = n => t.open_invoices > 0 ? `${Math.round(n / t.open_invoices * 100)}%` : '';
+    const tile = (label, v, sub, color) => `<div style="border:1px solid var(--border);border-radius:6px;padding:6px 10px;text-align:right;min-width:110px"><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase">${label}</div><div class="fw-600" style="${color ? `color:${color}` : ''}">${v}</div>${sub ? `<div style="font-size:10px;color:var(--text-muted)">${sub}</div>` : ''}</div>`;
+    const typeBadge = { P: ['Payment', 'badge-success'], C: ['Credit note', 'badge-purple'], W: ['Write-off', 'badge-secondary'] };
+    const dt = v => this._apDate(v);
+    const status = i => i.balance_due <= 0.005 ? ['Paid', 'badge-success'] : i.days_past_due > 0 ? [`Overdue ${i.days_past_due}d`, 'badge-danger'] : i.balance_due < i.amount - 0.005 ? ['Partial', 'badge-warning'] : ['Open', 'badge-info'];
+    el.innerHTML = `
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+        ${tile('Balance', this.fmt(t.balance), '', 'var(--danger)')}
+        ${tile('Current', this.fmt(t.aging.current), pct(t.aging.current))}
+        ${tile('31–60 days', this.fmt(t.aging.d31_60), pct(t.aging.d31_60))}
+        ${tile('61–90 days', this.fmt(t.aging.d61_90), pct(t.aging.d61_90))}
+        ${tile('Over 90 days', this.fmt(t.aging.over_90), pct(t.aging.over_90), t.aging.over_90 > 0 ? 'var(--danger)' : '')}
+        ${tile('Unapplied credits', t.unapplied > 0 ? `−${this.fmt(t.unapplied)}` : '—', '', t.unapplied > 0 ? 'var(--success)' : '')}
+      </div>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Terms ${d.customer.terms_days} days · Last payment: ${d.last_payment ? `${this.fmt(d.last_payment.amount)} on ${dt(d.last_payment.date)} (${d.last_payment.number})` : 'none'}</div>
+      <div class="table-wrap"><table style="font-size:13px">
+        <thead><tr><th>Invoice #</th><th>Date</th><th>Due</th><th>P.O. # / Ref</th><th style="text-align:right">Amount</th><th style="text-align:right">Age</th><th style="text-align:right">Balance Due</th><th>Status</th></tr></thead>
+        <tbody>
+          ${d.invoices.map(i => { const [sl, sc] = status(i); return `
+            <tr style="background:var(--bg-secondary,#f8f9fa)">
+              <td class="fw-600">${i.kind === 'sale' ? `<a href="#" style="color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.viewTransaction(${i.id})">${this.escapeAttr(i.number)}</a>` : `${this.escapeAttr(i.number)} <span class="badge-pill badge-secondary" style="font-size:10px">Legacy</span>`}</td>
+              <td>${dt(i.date)}</td><td>${dt(i.due_date)}</td>
+              <td>${i.reference ? this.escapeAttr(i.reference) : '<span style="color:var(--text-muted)">—</span>'}</td>
+              <td style="text-align:right">${this.fmt(i.amount)}</td>
+              <td style="text-align:right">${i.age_days}d</td>
+              <td style="text-align:right" class="fw-600 ${i.balance_due > 0.005 ? 'color-danger' : ''}">${this.fmt(i.balance_due)}</td>
+              <td><span class="badge-pill ${sc}" style="font-size:10px">${sl}</span></td>
+            </tr>
+            ${i.applied.map(a => `<tr style="color:var(--text-muted)">
+              <td style="padding-left:24px">↳ ${this.escapeAttr(a.number)}</td>
+              <td>${dt(a.date)}</td>
+              <td colspan="2"><span class="badge-pill ${typeBadge[a.type][1]}" style="font-size:10px">${typeBadge[a.type][0]}</span>${a.type === 'P' ? ` <span style="font-size:11px">${this.escapeAttr(String(a.method || '').replace(/_/g, ' '))}</span>` : ''}${a.reference ? ` <span style="font-size:11px">· ${this.escapeAttr(a.reference)}</span>` : ''}</td>
+              <td style="text-align:right;color:${a.type === 'C' ? 'var(--purple,#7c3aed)' : 'var(--success)'}">−${this.fmt(a.amount)}</td>
+              <td colspan="3"></td>
+            </tr>`).join('')}`; }).join('') || `<tr><td colspan="8" class="empty-state">${all ? 'No invoices' : 'No open invoices'}</td></tr>`}
+          ${d.unapplied.length ? `<tr><td colspan="8" style="padding-top:14px;font-weight:600;font-size:12px">On account — not yet applied to an invoice</td></tr>
+            ${d.unapplied.map(u => `<tr>
+              <td class="fw-600">${this.escapeAttr(u.number)}</td><td>${dt(u.date)}</td>
+              <td colspan="2"><span class="badge-pill ${typeBadge[u.type][1]}" style="font-size:10px">${typeBadge[u.type][0]}</span>${u.reference ? ` <span style="font-size:11px;color:var(--text-muted)">${this.escapeAttr(u.reference)}</span>` : ''}</td>
+              <td style="text-align:right">${this.fmt(u.amount)}</td><td style="text-align:right">${u.age_days}d</td>
+              <td style="text-align:right" class="fw-600 color-success">−${this.fmt(u.unapplied)}</td><td></td>
+            </tr>`).join('')}` : ''}
+        </tbody>
+      </table></div>
+      <div style="text-align:right;font-weight:700;margin-top:8px">Open document balance: ${this.fmt(t.balance)}</div>
+      ${Math.abs(t.balance - (d.customer.account_balance || 0)) > 0.01 ? `<p style="font-size:11px;color:var(--text-muted);text-align:right;margin:2px 0 0">Account balance on file: ${this.fmt(d.customer.account_balance || 0)}</p>` : ''}`;
+  },
+  _printARDetail(customerId) {
+    const all = document.getElementById('ard-all')?.checked;
+    const win = window.open(`/api/email/aging-detail-preview/${customerId}${all ? '?all=1' : ''}`, '_blank', 'width=1100,height=750');
+    if (win) win.addEventListener('load', () => win.print());
+  },
+  async _emailARDetail(customerId, email) {
+    const to = prompt('Email the account detail to:', email || '');
+    if (to == null) return;
+    if (!to.trim()) { this.alert('Enter a recipient email address', 'error'); return; }
+    try {
+      await this.api('POST', `/email/send-aging-detail/${customerId}`, { to: to.trim(), all: !!document.getElementById('ard-all')?.checked });
+      this.alert(`Account detail sent to ${to.trim()}`);
+    } catch (e) { this.alert(e.message, 'error'); }
   },
 
   showModalTab(btn, tabId) {

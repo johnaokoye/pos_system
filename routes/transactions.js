@@ -12,6 +12,7 @@ const { isSerialNumberProduct, serialNumberLabel, serialNumberOf, serialClashErr
 const { checkDiscountEligibility } = require('./promotions');
 const { allocateTicketDiscount, returnedDiscountShare } = require('../lib/ticketDiscount');
 const { UNAPPLIED_SQL, paymentReceipt } = require('../lib/customerPayments');
+const { recordReturnCreditNote } = require('../lib/returnCreditNotes');
 
 // Mirrors availableCashBack() in public/index.html — the frontend uses this
 // same formula to decide whether to show the Cash Back bar; this copy is the
@@ -954,6 +955,7 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
     const returnTotal = parseFloat((returnSubtotal + returnTax).toFixed(2));
 
     const return_number = await nextNumber(db, 'returns', 'return_number', 'RET-', 6);
+    const creditNoteNumber = resolution === 'credit_note' ? await nextNumber(db, 'account_payments', 'payment_number', 'CN-', 6) : null;
 
     const retTx = await db.transaction('write');
     let committed = false;
@@ -983,6 +985,9 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
           // going negative if there's nothing owed, to represent store
           // credit the business now owes the customer — not increases it.
           await retTx.execute({ sql: 'UPDATE customers SET account_balance = account_balance - ? WHERE id = ?', args: [returnTotal, tx.customer_id] });
+          // ...and the credit note itself, applied to this sale's invoice.
+          await recordReturnCreditNote(retTx, { returnId: retId, returnNumber: return_number, transaction: tx, customerId: tx.customer_id,
+            employeeId: employee_id || tx.employee_id, branchId: tx.branch_id, amount: returnTotal, number: creditNoteNumber });
         }
       }
 
