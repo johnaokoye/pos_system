@@ -2899,7 +2899,7 @@ const App = {
           </div>
           <label style="color:var(--text-muted);display:flex;align-items:center;gap:6px;margin:0" title="Who made this sale — it counts toward their sales targets. Leave on the cashier when they made it. A ticket a salesperson started is always theirs.">Salesperson:
             <select id="pos-salesperson" onchange="App._ticketSalesperson = this.value ? Number(this.value) : null" style="margin:0;padding:3px 6px;width:auto;min-width:160px">
-              <option value="">${this.escapeAttr(cashierName)} (cashier)</option>
+              <option value="">${this.escapeAttr(cashierName)}</option>
             </select>
           </label>
           <label style="color:var(--text-muted);display:flex;align-items:center;gap:6px;margin:0" title="The customer's purchase order number — printed on the Retail Tax Invoice. Leave blank for a write-in line.">P.O. #:
