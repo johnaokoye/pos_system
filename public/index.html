@@ -6275,7 +6275,7 @@ const App = {
           <td><span class="badge-pill ${p.active ? 'badge-success' : 'badge-danger'}">${p.active ? 'Active' : 'Inactive'}</span></td>
           <td style="white-space:nowrap">
             <button class="btn btn-outline btn-sm" onclick="App.showProductCard(${p.id})">View</button>
-            <button class="btn btn-secondary btn-sm" onclick="App.showProductForm(${p.id})">Edit</button>
+            <button class="btn btn-secondary btn-sm" onclick="App.showProductForm(${p.id}${branchId ? `,${branchId}` : ''})">Edit</button>
             ${this.can('inventory_adjust') ? `<button class="btn btn-outline btn-sm" onclick="App.showStockAdjust(${p.id},${this.escapeAttr(JSON.stringify(p.name))},${Number(p.stock_qty) || 0}${branchId ? `,${branchId},${this.escapeAttr(JSON.stringify(branchName))}` : ''})">Stock</button>` : ''}
             <button class="btn btn-secondary btn-sm" id="inv-hist-btn-${p.id}" onclick="App.toggleProductHistory(${p.id})" title="Stock history" style="padding:4px 7px">
               <svg viewBox="0 0 24 24" fill="currentColor" width="13" height="13"><path d="M13 3a9 9 0 1 0 9 9h-2a7 7 0 1 1-7-7v2l4-4-4-4v2zm-1 5v5l4.25 2.52.77-1.28-3.52-2.09V8z"/></svg>
@@ -6560,7 +6560,9 @@ const App = {
     return { base_unit_id, units };
   },
 
-  async showProductForm(id) {
+  // branchId (the inventory list's branch filter) picks which branch's stock
+  // the Stock Qty box edits — see _pfStockFieldHtml.
+  async showProductForm(id, branchId = '') {
     const [categories, brands, branches, suppliers, uoms] = await Promise.all([
       this.api('GET', '/categories'),
       this.api('GET', '/brands'),
@@ -6604,7 +6606,7 @@ const App = {
       </div>
       ${this._pfUnitsSectionHtml(p)}
       <div class="input-row">
-        <div class="form-group"><label>Stock Qty</label><input type="number" id="pf-stock" value="${p.stock_qty||0}" min="0" oninput="App._updatePfBinSplitSummary()"></div>
+        ${id ? this._pfStockFieldHtml(p, branches, branchId) : `<div class="form-group"><label>Stock Qty</label><input type="number" id="pf-stock" value="${p.stock_qty||0}" min="0" oninput="App._updatePfBinSplitSummary()"></div>`}
         <div class="form-group"><label>Min Stock</label><input type="number" id="pf-minstock" value="${p.min_stock||5}" min="0"></div>
       </div>
       ${!id ? `<div class="form-group"><label>Assign to Branch <span style="color:var(--text-muted);font-weight:400;font-size:11px">(allocates initial stock to this branch)</span></label>
@@ -6757,6 +6759,13 @@ const App = {
     const units = this._pfReadUnits();
     if (typeof units === 'string') { this.alert(units, 'error'); return; }
     if (units) Object.assign(data, units);
+    // An existing item's stock is only saved for the branch picked beside
+    // it; on All Branches (the sum of the branches) it's left as it is.
+    const stockBranchEl = document.getElementById('pf-stock-branch');
+    if (id && stockBranchEl) {
+      if (stockBranchEl.value) data.stock_branch_id = Number(stockBranchEl.value);
+      else delete data.stock_qty;
+    }
     let binRows = [];
     if (!id) {
       const branchEl = document.getElementById('pf-branch');
@@ -6789,6 +6798,35 @@ const App = {
       this.alert(id ? 'Product updated' : 'Product created');
       this.renderInventory(null, filters);
     } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  // Stock Qty on the edit form: a branch picker beside the count. All
+  // Branches shows the total across branches, read-only; picking a branch
+  // shows that branch's count and lets it be changed (saved as
+  // stock_branch_id, logged as an adjustment).
+  _pfStockFieldHtml(p, branches, branchId) {
+    this._pfBranchStock = new Map((p.branch_stock || []).map(s => [String(s.branch_id), Number(s.stock_qty) || 0]));
+    this._pfStockTotal = Number(p.stock_qty) || 0;
+    const opts = branches.filter(b => b.active || this._pfBranchStock.has(String(b.id)))
+      .map(b => `<option value="${b.id}" ${String(b.id) === String(branchId) ? 'selected' : ''}>${this.escapeAttr(b.name)} (${this._pfBranchStock.get(String(b.id)) ?? 0})</option>`).join('');
+    const picked = branchId ? String(branchId) : '';
+    const qty = picked ? (this._pfBranchStock.get(picked) ?? 0) : this._pfStockTotal;
+    return `<div class="form-group"><label>Stock Qty</label>
+      <div style="display:flex;gap:6px">
+        <select id="pf-stock-branch" style="flex:1;min-width:0" onchange="App._pfStockBranchChange()"><option value="">All Branches (total)</option>${opts}</select>
+        <input type="number" id="pf-stock" value="${qty}" min="0" style="width:100px" ${picked ? '' : 'disabled'}>
+      </div>
+      <div id="pf-stock-hint" style="font-size:11px;color:var(--text-muted);margin-top:4px">${picked ? 'Changes this branch\'s count only.' : 'Total of every branch — pick a branch to change its count.'}</div>
+    </div>`;
+  },
+
+  _pfStockBranchChange() {
+    const bid = document.getElementById('pf-stock-branch').value;
+    const input = document.getElementById('pf-stock');
+    input.value = bid ? (this._pfBranchStock.get(bid) ?? 0) : this._pfStockTotal;
+    input.disabled = !bid;
+    document.getElementById('pf-stock-hint').textContent = bid ? "Changes this branch's count only." : 'Total of every branch — pick a branch to change its count.';
+    if (bid) input.focus();
   },
 
   // ─── Add-product bin split (initial stock) ──────────────────────────────
@@ -13302,15 +13340,28 @@ const App = {
     this.renderCart();
   },
 
-  showStockAdjust(id, name, current, branchId = '', branchName = '') {
+  // From All Branches (no branchId) the dialog asks which branch to adjust —
+  // the All Branches figure is the sum of the branches, not set directly.
+  async showStockAdjust(id, name, current, branchId = '', branchName = '') {
     this._stockAdjustName = name;
+    let branchPick = '';
+    if (!branchId) {
+      try {
+        const [p, branches] = await Promise.all([this.api('GET', `/products/${id}`), this.api('GET', '/branches')]);
+        this._stockAdjustBranchQty = new Map((p.branch_stock || []).map(s => [String(s.branch_id), Number(s.stock_qty) || 0]));
+        const opts = branches.filter(b => b.active || this._stockAdjustBranchQty.has(String(b.id)))
+          .map(b => `<option value="${b.id}">${this.escapeAttr(b.name)} (${this._stockAdjustBranchQty.get(String(b.id)) ?? 0})</option>`).join('');
+        branchPick = `<div class="form-group"><label>Branch *</label><select id="stock-adj-branch" onchange="document.getElementById('stock-adj-current').textContent = this.value ? (App._stockAdjustBranchQty.get(this.value) ?? 0) : '${current}'"><option value="">Choose a branch…</option>${opts}</select></div>`;
+      } catch(e) { this.alert(e.message, 'error'); return; }
+    }
     const branchNote = branchName ? `<p style="margin-bottom:8px;color:var(--text-muted);font-size:12px">Branch: <strong>${branchName}</strong></p>` : '';
     this.showModal(`
       <div class="modal" style="max-width:360px">
         <div class="modal-header"><span class="modal-title">Adjust Stock: ${name}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           ${branchNote}
-          <p style="margin-bottom:12px;color:var(--text-muted)">Current stock: <strong>${current}</strong></p>
+          ${branchPick}
+          <p style="margin-bottom:12px;color:var(--text-muted)">Current stock${branchId ? '' : ' (all branches until one is chosen)'}: <strong id="stock-adj-current">${current}</strong></p>
           <div class="form-group"><label>Adjustment (+/-)</label><input type="number" id="stock-adj" placeholder="e.g. +10 or -5"></div>
           <div class="form-group"><label>Reason</label><input id="stock-reason" placeholder="Receiving, shrinkage, etc."></div>
         </div>
@@ -13325,8 +13376,14 @@ const App = {
     const adj = parseInt(document.getElementById('stock-adj').value);
     const reason = document.getElementById('stock-reason').value;
     if (isNaN(adj)) { this.alert('Enter a valid number', 'error'); return; }
-    await this.api('PATCH', `/products/${id}/stock`, { adjustment: adj, reason, branch_id: branchId || null });
-    const filters = this._invFilterState({ search: this._stockAdjustName, branchId });
+    const picker = document.getElementById('stock-adj-branch');
+    if (picker) {
+      if (!picker.value) { this.alert('Choose the branch to adjust', 'error'); return; }
+      branchId = Number(picker.value);
+    }
+    try { await this.api('PATCH', `/products/${id}/stock`, { adjustment: adj, reason, branch_id: branchId || null }); }
+    catch(e) { this.alert(e.message, 'error'); return; }
+    const filters = this._invFilterState({ search: this._stockAdjustName, branchId: picker ? undefined : branchId });
     this.closeModal();
     this.alert('Stock updated');
     this.renderInventory(null, filters);

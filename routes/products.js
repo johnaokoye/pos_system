@@ -53,6 +53,19 @@ async function syncAccessoryTotal(executor, productId) {
 }
 
 // [{ branch_id, branch_name, stock_qty }] for one accessory, by branch name.
+// "All Branches" stock is the sum of the branch counts — products.stock_qty
+// drifts from it (older edits and no-branch adjustments only touched the
+// global column). An item that isn't at any branch yet (a fresh CSV import)
+// still shows the global figure. No-branch lists select BRANCH_TOTAL_SQL as
+// branch_total_qty and run applyBranchTotal on each row; the old column is
+// kept as global_stock_qty.
+const BRANCH_TOTAL_SQL = '(SELECT SUM(bt.stock_qty) FROM branch_inventory bt WHERE bt.product_id = p.id)';
+function applyBranchTotal(row) {
+  row.global_stock_qty = row.stock_qty;
+  if (row.branch_total_qty != null) row.stock_qty = row.branch_total_qty;
+  delete row.branch_total_qty;
+}
+
 async function accessoryBranchStock(executor, productId) {
   const { rows } = await executor.execute({ sql: 'SELECT bi.branch_id, b.name AS branch_name, bi.stock_qty FROM branch_inventory bi JOIN branches b ON b.id = bi.branch_id WHERE bi.product_id = ? ORDER BY b.name', args: [productId] });
   return rows.map(r => ({ branch_id: r.branch_id, branch_name: r.branch_name, stock_qty: r.stock_qty }));
@@ -213,7 +226,8 @@ router.get('/', requireAuth, async (req, res) => {
         (SELECT b.name FROM branch_inventory bi JOIN branches b ON bi.branch_id = b.id WHERE bi.product_id = p.id LIMIT 1) as assigned_branch_name,
         CASE WHEN p.is_rental = 1 AND p.is_accessory = 1 THEN (SELECT json_group_array(json_object('branch_id', bi.branch_id, 'branch_name', b.name, 'stock_qty', bi.stock_qty))
           FROM branch_inventory bi JOIN branches b ON bi.branch_id = b.id WHERE bi.product_id = p.id) END as branch_stock,
-        (SELECT sku FROM products mp WHERE mp.id = p.merged_into_product_id) as merged_into_sku
+        (SELECT sku FROM products mp WHERE mp.id = p.merged_into_product_id) as merged_into_sku,
+        ${BRANCH_TOTAL_SQL} as branch_total_qty
         FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE 1=1`;
     }
 
@@ -240,12 +254,13 @@ router.get('/', requireAuth, async (req, res) => {
       if (branch_id) {
         sql += ` AND COALESCE(bi.stock_qty, p.stock_qty) <= COALESCE(bi.min_stock, p.min_stock)`;
       } else {
-        sql += ` AND p.stock_qty <= p.min_stock`;
+        sql += ` AND COALESCE(${BRANCH_TOTAL_SQL}, p.stock_qty) <= p.min_stock`;
       }
     }
     sql += ` ORDER BY p.name`;
 
     const { rows } = await db.execute({ sql, args: params });
+    if (!branch_id) rows.forEach(applyBranchTotal);
     for (const r of rows) if (typeof r.branch_stock === 'string') r.branch_stock = JSON.parse(r.branch_stock).sort((a, b) => a.branch_name.localeCompare(b.branch_name));
     await attachUnits(rows);
     res.json(rows);
@@ -307,7 +322,7 @@ router.get('/export', requirePermission('inventory_export'), async (req, res) =>
         WHERE 1=1`;
       params.push(branch_id);
     } else {
-      sql = `SELECT p.*, c.name as category_name, s.name as supplier_name
+      sql = `SELECT p.*, c.name as category_name, s.name as supplier_name, ${BRANCH_TOTAL_SQL} as branch_total_qty
         FROM products p
         LEFT JOIN categories c ON p.category_id = c.id
         LEFT JOIN suppliers s ON p.supplier_id = s.id
@@ -328,12 +343,13 @@ router.get('/export', requirePermission('inventory_export'), async (req, res) =>
       if (branch_id) {
         sql += ` AND COALESCE(bi.stock_qty, p.stock_qty) <= COALESCE(bi.min_stock, p.min_stock)`;
       } else {
-        sql += ` AND p.stock_qty <= p.min_stock`;
+        sql += ` AND COALESCE(${BRANCH_TOTAL_SQL}, p.stock_qty) <= p.min_stock`;
       }
     }
     sql += ` ORDER BY p.name`;
 
     const { rows: products } = await db.execute({ sql, args: params });
+    if (!branch_id) products.forEach(applyBranchTotal);
 
     const escape = v => {
       if (v == null) return '';
@@ -1016,7 +1032,8 @@ router.get('/:id', requireAuth, async (req, res) => {
       return res.json(product);
     }
     const { rows: [product] } = await db.execute({ sql: `SELECT p.*, c.name as category_name,
-      (SELECT branch_id FROM branch_inventory WHERE product_id = p.id LIMIT 1) as assigned_branch_id
+      (SELECT branch_id FROM branch_inventory WHERE product_id = p.id LIMIT 1) as assigned_branch_id,
+      ${BRANCH_TOTAL_SQL} as branch_total_qty
       FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE p.id = ?`, args: [req.params.id] });
     if (!product) return res.status(404).json({ error: 'Product not found' });
     // Additive fields only — used by the product form's Bin Locations panel to show
@@ -1026,7 +1043,10 @@ router.get('/:id', requireAuth, async (req, res) => {
       product.branch_stock_qty = bi ? bi.stock_qty : 0;
       product.branch_min_stock = bi ? bi.min_stock : product.min_stock;
     }
-    if (product.is_rental && product.is_accessory) product.branch_stock = await accessoryBranchStock(db, product.id);
+    applyBranchTotal(product);
+    // Per-branch counts behind that total — the View card's By Location and
+    // the edit form's read-only All Branches stock.
+    if ((product.is_rental && product.is_accessory) || (!product.is_rental && !product.is_service)) product.branch_stock = await accessoryBranchStock(db, product.id);
     await attachUnits([product]);
     res.json(product);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -1271,7 +1291,30 @@ router.put('/:id', async (req, res, next) => {
         }
       }
     }
-    await db.execute({ sql: `UPDATE products SET sku=?,barcode=?,name=?,description=?,category_id=?,price=?,cost=?,tax_rate=?,stock_qty=?,min_stock=?,active=?,supplier_id=?,is_service=?,unit=?,online_available=?,web_allotment=?,is_rental=?,rental_rate_type=?,rental_rate=?,rental_deposit=?,rental_late_fee_rate=?,replacement_value=?,rental_classification=?,rental_weekly_rate=?,rental_monthly_rate=?,rental_hourly_rate=?,rental_allow_sale=?,is_accessory=?,is_layaway_eligible=?,model_number=?,size=?,brand=?,taxable=? WHERE id=?`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, taxRateFinal, svc ? 0 : (stock_qty||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null, rnt, rental_rate_type||'daily', rental_rate||0, rental_deposit||0, rental_late_fee_rate||0, replacement_value||0, rental_classification||'tool', rental_weekly_rate||0, rental_monthly_rate||0, rental_hourly_rate||0, allowSale, acc, lay, model_number||null, size||null, brand||null, tax, req.params.id] });
+    // Retail stock is edited per branch: with stock_branch_id the Stock Qty is
+    // that branch's count (the difference is logged as an adjustment and the
+    // global column becomes the branch total). Without one, an item at two or more
+    // branches keeps its stock — the All Branches figure is their sum and
+    // can't be set directly — as does any save that doesn't send stock_qty.
+    let globalStock = stock_qty, branchStockEdit = null;
+    if (!svc && !rnt) {
+      const { rows: [cur] } = await db.execute({ sql: 'SELECT stock_qty, min_stock, (SELECT COUNT(*) FROM branch_inventory WHERE product_id = products.id) AS n FROM products WHERE id = ?', args: [req.params.id] });
+      const stockBranchId = req.body.stock_branch_id;
+      if (stockBranchId && stock_qty !== undefined) {
+        const qty = Number(stock_qty);
+        if (!Number.isFinite(qty)) return res.status(400).json({ error: 'Stock Qty must be a number' });
+        const { rows: [bi] } = await db.execute({ sql: 'SELECT stock_qty FROM branch_inventory WHERE product_id = ? AND branch_id = ?', args: [req.params.id, stockBranchId] });
+        const { rows: [{ others }] } = await db.execute({ sql: 'SELECT COALESCE(SUM(stock_qty), 0) AS others FROM branch_inventory WHERE product_id = ? AND branch_id != ?', args: [req.params.id, stockBranchId] });
+        const delta = qty - (bi ? Number(bi.stock_qty) || 0 : 0);
+        branchStockEdit = { branchId: stockBranchId, qty, delta, minStock: cur.min_stock };
+        // Reset to the branch total rather than moved by delta, so any old
+        // drift between the two is cleared on the way.
+        globalStock = (Number(others) || 0) + qty;
+      } else if (stock_qty === undefined || cur.n > 1) {
+        globalStock = cur.stock_qty;
+      }
+    }
+    await db.execute({ sql: `UPDATE products SET sku=?,barcode=?,name=?,description=?,category_id=?,price=?,cost=?,tax_rate=?,stock_qty=?,min_stock=?,active=?,supplier_id=?,is_service=?,unit=?,online_available=?,web_allotment=?,is_rental=?,rental_rate_type=?,rental_rate=?,rental_deposit=?,rental_late_fee_rate=?,replacement_value=?,rental_classification=?,rental_weekly_rate=?,rental_monthly_rate=?,rental_hourly_rate=?,rental_allow_sale=?,is_accessory=?,is_layaway_eligible=?,model_number=?,size=?,brand=?,taxable=? WHERE id=?`, args: [sku, barcode||null, name, description||null, category_id||null, price||0, cost||0, taxRateFinal, svc ? 0 : (globalStock||0), svc ? 0 : (min_stock||5), active??1, supplier_id||null, svc, unit||null, online_available?1:0, web_allotment!=null?parseInt(web_allotment):null, rnt, rental_rate_type||'daily', rental_rate||0, rental_deposit||0, rental_late_fee_rate||0, replacement_value||0, rental_classification||'tool', rental_weekly_rate||0, rental_monthly_rate||0, rental_hourly_rate||0, allowSale, acc, lay, model_number||null, size||null, brand||null, tax, req.params.id] });
     // Only when the caller sent it — PUT otherwise overwrites every column, and
     // older callers (imports, API clients) that predate this field would
     // silently wipe the website copy.
@@ -1297,7 +1340,18 @@ router.put('/:id', async (req, res, next) => {
           args: [req.params.id, branch_id, stock_qty||0, min_stock||5, stock_qty||0, min_stock||5],
         });
       }
-    } else if (!svc && !rnt) {
+    } else if (branchStockEdit) {
+      const { branchId, qty, delta, minStock } = branchStockEdit;
+      await db.execute({
+        sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+              ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = ?, updated_at = CURRENT_TIMESTAMP`,
+        args: [req.params.id, branchId, qty, minStock ?? 5, qty],
+      });
+      if (delta) {
+        await syncBinQty(db, req.params.id, branchId, delta);
+        await db.execute({ sql: 'INSERT INTO stock_movements (product_id, branch_id, quantity_change, type, reason) VALUES (?, ?, ?, ?, ?)', args: [req.params.id, branchId, delta, 'adjustment', `Edited on product form${req.employee ? ' by ' + [req.employee.first_name, req.employee.last_name].filter(Boolean).join(' ') : ''}`] });
+      }
+    } else if (!svc && !rnt && stock_qty !== undefined) {
       // The edit form has no branch picker for existing products, so a plain
       // Stock Qty change here only ever touched the global products.stock_qty
       // column — branch_inventory (what POS availability and branch-filtered
@@ -1357,6 +1411,12 @@ router.patch('/:id/stock', requirePermission('inventory_adjust'), async (req, re
       return res.json({ stock_qty: newQty, branch_id });
     }
 
+    // A retail item at a branch is adjusted at that branch — All Branches is
+    // the sum of them, so moving only the global column would just drift.
+    if (!product.is_rental && !product.is_service) {
+      const { rows: [{ n }] } = await db.execute({ sql: 'SELECT COUNT(*) AS n FROM branch_inventory WHERE product_id = ?', args: [req.params.id] });
+      if (n > 0) return res.status(400).json({ error: 'Choose the branch to adjust' });
+    }
     const newQty = product.stock_qty + adj;
     await db.execute({ sql: 'UPDATE products SET stock_qty = ? WHERE id = ?', args: [newQty, req.params.id] });
     await db.execute({ sql: 'INSERT INTO stock_movements (product_id, branch_id, quantity_change, type, reason) VALUES (?, ?, ?, ?, ?)', args: [req.params.id, null, adj, 'adjustment', reason || null] });
