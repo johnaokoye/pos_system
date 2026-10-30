@@ -287,11 +287,13 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .badge-info { background: #E3F2FD; color: #1565C0; }
 
 /* Charts */
-.chart-bars { display: flex; align-items: flex-end; gap: 6px; height: 120px; padding: 8px 0 0; }
-.chart-bar-wrap { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; height: 100%; }
-.chart-bar { width: 100%; background: var(--accent); border-radius: 4px 4px 0 0; min-height: 2px; transition: height .3s; opacity: .85; }
+.chart-bars { display: flex; gap: 6px; height: 160px; padding: 28px 0 0; }
+.chart-bar-wrap { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 4px; height: 100%; }
+/* Bars are a % of this track only (not the day label), so they share one baseline and scale */
+.chart-bar-track { flex: 1; min-height: 0; width: 100%; display: flex; align-items: flex-end; }
+.chart-bar { position: relative; width: 100%; background: var(--accent); border-radius: 4px 4px 0 0; min-height: 2px; transition: height .3s; opacity: .85; }
 .chart-bar-label { font-size: 10px; color: var(--text-muted); }
-.chart-bar-val { font-size: 10px; font-weight: 600; color: var(--accent); }
+.chart-bar-val { position: absolute; bottom: 100%; left: -3px; right: -3px; margin-bottom: 2px; text-align: center; line-height: 1.15; font-size: 10px; font-weight: 600; color: var(--accent); }
 
 /* Two column layout */
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -1568,6 +1570,8 @@ const App = {
   // everything after it (bit us in quotation/PR notes editing).
   escapeAttr(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); },
   fmt(n) { return new Intl.NumberFormat('en-US', { style: 'currency', currency: this.activeCurrency || this.settings.currency || 'USD' }).format(n || 0); },
+  // Short money for narrow chart columns (JMD 2.63M); pair with fmt() in a tooltip.
+  fmtCompact(n) { return new Intl.NumberFormat('en-US', { style: 'currency', currency: this.activeCurrency || this.settings.currency || 'USD', notation: 'compact', maximumFractionDigits: 2 }).format(n || 0).replace(/\u00a0/g, ' '); },
   // Mirrors lib/rentals.js's rateBasisLabel — "1 month @ $4,000.00/mo + 3
   // days @ $250.00/day" from an item's server-computed rate_basis, i.e. the
   // rate(s) that actually apply to the rental period.
@@ -2662,7 +2666,7 @@ const App = {
       const sales = dayMap[d] || 0;
       const h = Math.round((sales / maxSales) * 100);
       const label = new Date(d + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short' });
-      return `<div class="chart-bar-wrap"><div class="chart-bar-val">${sales > 0 ? this.fmt(sales) : ''}</div><div class="chart-bar" style="height:${h}%"></div><div class="chart-bar-label">${label}</div></div>`;
+      return `<div class="chart-bar-wrap"><div class="chart-bar-track"><div class="chart-bar" style="height:${h}%" title="${label}: ${this.fmt(sales)}"><div class="chart-bar-val">${sales > 0 ? this.fmt(sales) : ''}</div></div></div><div class="chart-bar-label">${label}</div></div>`;
     }).join('');
 
     // Location breakdown section (shown when viewing all branches)
@@ -18197,7 +18201,7 @@ const App = {
             ${sales.byDay.slice(-14).map(d => {
               const h = Math.round((d.sales / maxSales) * 100);
               const label = new Date(d.date + 'T12:00:00').toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' });
-              return `<div class="chart-bar-wrap"><div class="chart-bar-val">${this.fmt(d.sales)}</div><div class="chart-bar" style="height:${h}%"></div><div class="chart-bar-label">${label}</div></div>`;
+              return `<div class="chart-bar-wrap"><div class="chart-bar-track"><div class="chart-bar" style="height:${h}%" title="${label}: ${this.fmt(d.sales)}"><div class="chart-bar-val">${this.fmtCompact(d.sales)}</div></div></div><div class="chart-bar-label">${label}</div></div>`;
             }).join('')}
           </div>
         </div>
