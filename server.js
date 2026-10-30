@@ -54,7 +54,7 @@ app.use(async (req, res, next) => {
 // Document attachments are only ever served through their authenticated
 // /api/.../download routes — never hand them out as public static files,
 // even to someone holding the stored filename.
-app.use(['/uploads/quote-attachments', '/uploads/po-attachments', '/uploads/pr-attachments', '/uploads/rental-po-attachments'], (req, res) => res.status(404).json({ error: 'Not found' }));
+app.use(['/uploads/quote-attachments', '/uploads/po-attachments', '/uploads/pr-attachments', '/uploads/rental-po-attachments', '/uploads/payment-request-attachments'], (req, res) => res.status(404).json({ error: 'Not found' }));
 // Customer ID/address-proof scans and captured signatures are shown by the
 // SPA straight from their /uploads path (<img src>), so they stay static
 // files — but only for a signed-in session (the pos_session cookie is
@@ -84,7 +84,7 @@ app.use('/api', sessionAuth);
 // session — e.g. pasted into a new tab — goes to the login screen instead of
 // a bare JSON 401; the SPA re-opens the download after sign-in (see
 // App._resumeDownloadAfterLogin). The route itself still enforces auth.
-const DOWNLOAD_PATH = /^\/[\w-]+\/\d+\/attachments\/\d+\/download$/;
+const DOWNLOAD_PATH = /^(\/[\w-]+){1,2}\/\d+\/attachments\/\d+\/download$/;
 const RENTAL_DOWNLOAD_PATH = /^\/rentals\/agreements\/\d+\/po-attachment\/download$/;
 app.use('/api', (req, res, next) => {
   if (req.method === 'GET' && !req.employee && !req.apiKey
@@ -107,6 +107,7 @@ app.use('/api/catalogues',       require('./routes/catalogues'));
 app.use('/api/customers',        require('./routes/customers'));
 app.use('/api/customer-imports', require('./routes/customer-imports'));
 app.use('/api/supplier-imports', require('./routes/supplier-imports'));
+app.use('/api/payables/payment-requests', require('./routes/payment-requests'));
 app.use('/api/payables', require('./routes/payables'));
 app.use('/api/transactions',     require('./routes/transactions'));
 app.use('/api/employees',        require('./routes/employees'));

@@ -16,6 +16,7 @@ uploads/quote-attachments/*
 uploads/approval-signatures/*
 uploads/pr-attachments/*
 uploads/wo-photos/*
+uploads/payment-request-attachments/*
 !uploads/products/.gitkeep
 !uploads/po-attachments/.gitkeep
 !uploads/branding/.gitkeep
@@ -27,6 +28,7 @@ uploads/wo-photos/*
 !uploads/customer-reference-ids/.gitkeep
 !uploads/quote-attachments/.gitkeep
 !uploads/approval-signatures/.gitkeep
+!uploads/payment-request-attachments/.gitkeep
 .env
 .vercel
 test-results/

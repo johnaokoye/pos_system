@@ -1501,6 +1501,103 @@ function poUnapprovedLabel(po) {
   return null;
 }
 
+// ── Payment request (Payables > Payment Request > Print) ──────────────
+// Vendor, what's being paid, total requested, who asked for it and where
+// it stands in approval (with the approver's signature once approved).
+const PAYMENT_REQUEST_STATUS = { draft: 'DRAFT — NOT SUBMITTED', submitted: 'AWAITING APPROVAL', approved: 'APPROVED — NOT YET PAID', rejected: 'REJECTED', paid: 'APPROVED & PAID', cancelled: 'CANCELLED' };
+const PAYMENT_REQUEST_TYPE = { invoice: 'Invoice payment', quick: 'Quick payment (no invoice)', advance: 'Advance payment' };
+const AP_METHODS = { cheque: 'Cheque', bank_transfer: 'Bank Transfer', cash: 'Cash', card: 'Card', other: 'Other' };
+
+function buildPaymentRequestHtml(r, s, origin) {
+  const storeName = s.store_name || 'My Store';
+  const absUrl = (p) => !p ? null : (/^https?:\/\//.test(p) ? p : `${origin}${p}`);
+  const day = v => v ? new Date(/^\d{4}-\d{2}-\d{2}$/.test(String(v)) ? `${v}T00:00:00` : `${String(v).replace(' ', 'T')}Z`).toLocaleDateString() : '—';
+  const th = (label, align = 'left') => `<th style="padding:8px;text-align:${align};font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">${label}</th>`;
+  const td = (v, align = 'left', extra = '') => `<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:${align};${extra}">${v}</td>`;
+  let head, rows;
+  if (r.request_type === 'invoice') {
+    head = th('Bill #') + th('Vendor Invoice #') + th('Due') + th('Balance Owed', 'right') + th('Amount Requested', 'right');
+    rows = r.lines.map(l => `<tr>${td(esc(l.bill_number || ''))}${td(esc(l.vendor_invoice_number || '—'))}${td(day(l.due_date))}${td(r.status === 'paid' ? '—' : fmt(l.bill_balance), 'right')}${td(fmt(l.amount), 'right', 'font-weight:600')}</tr>`).join('');
+  } else {
+    head = th('Description') + th('Amount Requested', 'right');
+    rows = r.lines.map(l => `<tr>${td(esc(l.description || ''))}${td(fmt(l.amount), 'right', 'font-weight:600')}</tr>`).join('');
+  }
+  const statusColor = { paid: '#15803d', approved: '#15803d', rejected: '#dc2626', cancelled: '#6b7280' }[r.status] || '#b45309';
+  const vendorAddr = [r.supplier_address, [r.supplier_city, r.supplier_state, r.supplier_zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  const sigBox = (label, name, when, img) => `<td style="width:50%;vertical-align:bottom;padding:0 8px">
+      ${img ? `<img src="${esc(absUrl(img))}" alt="Signature" style="max-height:56px;max-width:200px;display:block;margin-bottom:2px">` : '<div style="height:40px"></div>'}
+      <div style="border-top:1px solid #111;padding-top:4px;font-size:12px;color:#444"><strong>${label}:</strong> ${name ? esc(name) : ''}${when ? ` · ${day(when)}` : ''}</div>
+    </td>`;
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Payment Request ${esc(r.request_number)}</title>
+${PRINT_PAGE_STYLE}
+</head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
+<table class="page-wrap" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
+<tr><td align="center">
+  <table class="page" width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+    <tr><td style="${BRAND_HEADER_STYLE}">
+      <div style="color:#fff;font-size:22px;font-weight:700">${esc(storeName)}</div>
+      ${s.store_address ? `<div style="color:#ffffff;font-size:12px;margin-top:4px">${esc(s.store_address)}</div>` : ''}
+      ${s.store_phone ? `<div style="color:#ffffff;font-size:12px">${esc(s.store_phone)}</div>` : ''}
+    </td></tr>
+    <tr><td style="padding:20px 24px">
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px"><tr>
+        <td style="vertical-align:top">
+          <div style="font-size:20px;font-weight:700;color:${BRAND.black}">PAYMENT REQUEST</div>
+          <div style="font-size:13px;color:#888;margin-top:2px">${esc(r.request_number)}</div>
+          <div style="display:inline-block;margin-top:6px;padding:3px 8px;border:2px solid ${statusColor};color:${statusColor};font-size:12px;font-weight:700;letter-spacing:.5px">${PAYMENT_REQUEST_STATUS[r.status] || esc(r.status)}</div>
+        </td>
+        <td style="vertical-align:top;text-align:right;font-size:13px;color:#444;line-height:1.6">
+          <div><strong>Requested:</strong> ${day(r.created_at)}</div>
+          <div><strong>Type:</strong> ${PAYMENT_REQUEST_TYPE[r.request_type] || esc(r.request_type)}</div>
+          ${r.po_number ? `<div><strong>Purchase Order:</strong> ${esc(r.po_number)}</div>` : ''}
+        </td>
+      </tr></table>
+      <div style="background:#f9fafb;border:1px solid #e8e8e8;border-radius:6px;padding:12px;margin-bottom:16px;font-size:13px;line-height:1.5">
+        <strong>Vendor:</strong><br>${esc(r.supplier_name)}${r.supplier_number ? ` <span style="color:#888">(${esc(r.supplier_number)})</span>` : ''}
+        ${vendorAddr ? `<br>${esc(vendorAddr)}` : ''}${r.supplier_phone ? `<br>${esc(r.supplier_phone)}` : ''}${r.supplier_email ? `<br>${esc(r.supplier_email)}` : ''}
+        ${r.supplier_terms ? `<br><span style="color:#666">Terms: ${esc(r.supplier_terms)}</span>` : ''}
+      </div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px">
+        <thead><tr style="background:#f9fafb">${head}</tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div style="text-align:right;margin-top:10px;font-size:16px;font-weight:700;color:${BRAND.black}">Total Requested: ${fmt(r.amount)}</div>
+      ${r.notes ? `<div style="margin-top:14px;font-size:13px;color:#444"><strong>Purpose / Notes:</strong> ${esc(r.notes)}</div>` : ''}
+      ${r.attachment_count ? `<div style="margin-top:6px;font-size:12px;color:#666">${r.attachment_count} supporting document${r.attachment_count === 1 ? '' : 's'} on file.</div>` : ''}
+      ${r.status === 'rejected' ? `<div style="margin-top:14px;padding:10px 12px;border:1px solid #fecaca;background:#fef2f2;border-radius:6px;font-size:13px;color:#991b1b"><strong>Rejected</strong> by ${esc(r.rejected_by_name || '—')} on ${day(r.rejected_at)}: ${esc(r.rejection_reason || '')}</div>` : ''}
+      ${r.status === 'cancelled' ? `<div style="margin-top:14px;padding:10px 12px;border:1px solid #e5e7eb;background:#f9fafb;border-radius:6px;font-size:13px;color:#444"><strong>Cancelled</strong> by ${esc(r.cancelled_by_name || '—')} on ${day(r.cancelled_at)}: ${esc(r.cancel_reason || '')}</div>` : ''}
+      ${r.payment_id ? `<div style="margin-top:14px;padding:10px 12px;border:1px solid #bbf7d0;background:#f0fdf4;border-radius:6px;font-size:13px;color:#166534">
+        <strong>Paid:</strong> ${esc(r.payment_number)} on ${day(r.payment_date)} by ${AP_METHODS[r.payment_method] || esc(r.payment_method)}${r.payment_reference ? ` · Ref ${esc(r.payment_reference)}` : ''}${r.paid_by_name ? ` · processed by ${esc(r.paid_by_name)}` : ''}${r.payment_status === 'void' ? ' <strong style="color:#dc2626">(payment since voided)</strong>' : ''}
+      </div>` : ''}
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:36px"><tr>
+        ${sigBox('Requested by', r.requested_by_name, r.created_at, null)}
+        ${sigBox('Approved by', r.approved_by_name, r.approved_at, r.approval_signature)}
+      </tr></table>
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body>
+</html>`;
+}
+
+router.get('/payment-request-preview/:id', requireAnyPermission('payables', 'payables_approve'), async (req, res) => {
+  try {
+    const { loadRequest } = require('./payment-requests');
+    const r = await loadRequest(req.params.id);
+    if (!r) return res.status(404).send('<p>Payment request not found</p>');
+    const { rows: [sup] } = await db.execute({ sql: 'SELECT address, city, state, zip, phone, email, payment_terms FROM suppliers WHERE id = ?', args: [r.supplier_id] });
+    Object.assign(r, { supplier_address: sup?.address, supplier_city: sup?.city, supplier_state: sup?.state, supplier_zip: sup?.zip, supplier_phone: sup?.phone, supplier_email: sup?.email, supplier_terms: sup?.payment_terms });
+    const s = await getSettings();
+    res.setHeader('Content-Type', 'text/html');
+    res.setHeader('X-Pos-Document', 'payment-request');
+    res.send(buildPaymentRequestHtml(r, s, `${req.protocol}://${req.get('host')}`));
+  } catch(e) { res.status(500).send(`<p>Error: ${esc(e.message)}</p>`); }
+});
+
 router.get('/po-preview/:id', requireAuth, async (req, res) => {
   try {
     const po = await loadPoDocument(req.params.id);

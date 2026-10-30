@@ -1280,6 +1280,8 @@ const App = {
     // Approvers who don't hold special_projects itself still need the tile
     // visible so they can reach the approval queue.
     if (section === 'special-projects') return this.can('special_projects') || this.can('special_projects_approve');
+    // Payment-request approvers reach their queue in Payables without the A/P module itself.
+    if (section === 'payables') return this.can('payables') || this.can('payables_approve');
     if (section === 'special-orders') return this._canSeeSpecialOrders();
     // The three report category tiles all gate on the same `reports`
     // permission every other report endpoint already uses — none of them
@@ -1476,7 +1478,7 @@ const App = {
       this._settingsDirty = false;
     }
     const perms = this.currentUser?.permissions;
-    const sectionAllowed = name === 'driver-dashboard' ? !!this.currentUser?.is_driver : name === 'guard-dashboard' ? !!this.currentUser?.is_security : name === 'online-orders' ? this.can('transactions') : name === 'rentals' ? this._canManageRentals() : name === 'rental-items' ? this._canManageRentals() : name === 'rental-deposits' ? this._canManageRentals() : name === 'rental-dispatch' ? this._canManageRentals() : name === 'transfer-dispatch' ? this.can('transfers') : name === 'purchase-requests' ? this.can('purchase_requests') : name === 'work-orders' ? this.can('work_orders') : name === 'wo-schedule' ? this.can('work_orders') : name === 'special-projects' ? (this.can('special_projects') || this.can('special_projects_approve')) : name === 'special-orders' ? this._canSeeSpecialOrders() : (name === 'reports-marketing' || name === 'reports-sales' || name === 'reports-accounts' || name === 'reports-purchasing') ? this.can('reports') : name === 'reports-inventory' ? (this.can('reports') || this.can('inventory')) : this._hubGroups[name] ? this.canAccessHub(name) : this.can(name);
+    const sectionAllowed = name === 'driver-dashboard' ? !!this.currentUser?.is_driver : name === 'guard-dashboard' ? !!this.currentUser?.is_security : name === 'online-orders' ? this.can('transactions') : name === 'rentals' ? this._canManageRentals() : name === 'rental-items' ? this._canManageRentals() : name === 'rental-deposits' ? this._canManageRentals() : name === 'rental-dispatch' ? this._canManageRentals() : name === 'transfer-dispatch' ? this.can('transfers') : name === 'purchase-requests' ? this.can('purchase_requests') : name === 'work-orders' ? this.can('work_orders') : name === 'wo-schedule' ? this.can('work_orders') : name === 'special-projects' ? (this.can('special_projects') || this.can('special_projects_approve')) : name === 'payables' ? (this.can('payables') || this.can('payables_approve')) : name === 'special-orders' ? this._canSeeSpecialOrders() : (name === 'reports-marketing' || name === 'reports-sales' || name === 'reports-accounts' || name === 'reports-purchasing') ? this.can('reports') : name === 'reports-inventory' ? (this.can('reports') || this.can('inventory')) : this._hubGroups[name] ? this.canAccessHub(name) : this.can(name);
     if (perms && !sectionAllowed) return;
     this.section = name;
     this._reportSection(name);
@@ -25408,7 +25410,8 @@ const App = {
   // ─── Accounts Payable ─────────────────────────────────────
   // What we owe vendors (routes/payables.js): bills — created automatically
   // when a PO is received, entered from a PO, or entered by hand — payments
-  // applied against them, and aging by vendor.
+  // applied against them, and aging by vendor. Vendors are only paid from
+  // an approved payment request (routes/payment-requests.js).
   _apStatusBadge: { open: 'badge-info', partial: 'badge-purple', overdue: 'badge-danger', paid: 'badge-success', void: 'badge-secondary' },
   _apMethods: [['cheque', 'Cheque'], ['bank_transfer', 'Bank Transfer'], ['cash', 'Cash'], ['card', 'Card'], ['other', 'Other']],
   // Bill/payment dates are plain YYYY-MM-DD; parsed as local midnight so
@@ -25419,35 +25422,45 @@ const App = {
   async renderPayables(tab) {
     if (tab) this._apTab = tab;
     else this._apSuppliers = null; // re-fetch the vendor filter list on a fresh visit
-    tab = this._apTab || 'bills';
+    // Approvers without the A/P module only get the request queue.
+    const fullAp = this.can('payables');
+    tab = fullAp ? (this._apTab || 'bills') : 'requests';
     const c = document.getElementById('content');
     c.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
-    let aging;
-    try { aging = await this.api('GET', `/payables/aging?as_of=${this._apToday()}`); }
+    let aging, awaiting;
+    try {
+      [aging, awaiting] = await Promise.all([
+        fullAp ? this.api('GET', `/payables/aging?as_of=${this._apToday()}`) : null,
+        this.api('GET', '/payables/payment-requests?status=submitted'),
+      ]);
+    }
     catch (e) { if (this.section === 'payables') c.innerHTML = `<div class="empty-state"><p>${this.escapeAttr(e.message)}</p></div>`; return; }
     if (this.section !== 'payables') return;
-    const t = aging.totals;
     const tile = (label, value, color) => `<div class="card" style="padding:14px 16px"><div style="font-size:12px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.03em">${label}</div><div style="font-size:22px;font-weight:700;margin-top:4px;${color ? `color:${color}` : ''}">${value}</div></div>`;
-    const overdue = t.d1_30 + t.d31_60 + t.d61_90 + t.d90_plus;
+    const t = aging?.totals;
+    const overdue = t ? t.d1_30 + t.d31_60 + t.d61_90 + t.d90_plus : 0;
+    const tabs = fullAp ? [['bills', 'Bills'], ['requests', 'Payment Request'], ['payments', 'Payments'], ['aging', 'Aging by Vendor']] : [['requests', 'Payment Request']];
     c.innerHTML = `
       <div class="section-header">
         <h2>Accounts Payable</h2>
         <div style="display:flex;gap:10px">
           ${this.can('payables_bills') ? `<button class="btn btn-secondary" onclick="App.showBillForm()">+ Enter Bill</button>` : ''}
-          ${this.can('payables_payments') ? `<button class="btn btn-primary" onclick="App.showPayVendorForm()">Pay Vendor</button>` : ''}
+          ${this.can('payables_requests') ? `<button class="btn btn-primary" onclick="App.showPaymentRequestForm()">+ Payment Request</button>` : ''}
         </div>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px">
-        ${tile('Total Owed', this.fmt(t.total))}
+        ${t ? `${tile('Total Owed', this.fmt(t.total))}
         ${tile('Overdue', this.fmt(overdue), overdue > 0 ? 'var(--danger)' : '')}
-        ${tile('Not Yet Due', this.fmt(t.current))}
-        ${tile('Vendors Owed', aging.vendors.length)}
+        ${tile('Not Yet Due', this.fmt(t.current))}` : ''}
+        ${tile('Awaiting Approval', `${awaiting.length}${awaiting.length ? ` <span style="font-size:13px;font-weight:500;color:var(--text-muted)">· ${this.fmt(awaiting.reduce((sum, r) => sum + r.amount, 0))}</span>` : ''}`, awaiting.length ? 'var(--warning, #b45309)' : '')}
+        ${aging?.advances_unapplied > 0 ? tile('Advances Not Yet Billed', this.fmt(aging.advances_unapplied)) : ''}
       </div>
       <div class="var-tab-bar" style="padding:0;margin-bottom:14px">
-        ${[['bills', 'Bills'], ['payments', 'Payments'], ['aging', 'Aging by Vendor']].map(([k, l]) => `<div class="var-tab ${tab === k ? 'active' : ''}" onclick="App.renderPayables('${k}')">${l}</div>`).join('')}
+        ${tabs.map(([k, l]) => `<div class="var-tab ${tab === k ? 'active' : ''}" onclick="App.renderPayables('${k}')">${l}${k === 'requests' && awaiting.length ? ` <span class="badge-pill badge-warning" style="font-size:10px;margin-left:4px">${awaiting.length}</span>` : ''}</div>`).join('')}
       </div>
       <div id="ap-tab-body"></div>`;
     if (tab === 'bills') this._renderApBills();
+    else if (tab === 'requests') this._renderApRequests();
     else if (tab === 'payments') this._renderApPayments();
     else this._renderApAging(aging);
   },
@@ -25489,7 +25502,7 @@ const App = {
           <td style="text-align:right">${this.fmt(b.amount)}</td>
           <td style="text-align:right" class="fw-600">${this.fmt(b.balance)}</td>
           <td><span class="badge-pill ${this._apStatusBadge[b.display_status] || ''}">${b.display_status}</span></td>
-          <td onclick="event.stopPropagation()">${b.balance > 0 && this.can('payables_payments') ? `<button class="btn btn-sm btn-primary" onclick="App.showPayVendorForm(${b.supplier_id}, ${b.id})">Pay</button>` : ''}</td>
+          <td onclick="event.stopPropagation()">${b.balance > 0 && this.can('payables_requests') ? `<button class="btn btn-sm btn-primary" onclick="App.showPaymentRequestForm(null, { supplier_id: ${b.supplier_id}, bill_id: ${b.id} })">Request Payment</button>` : ''}</td>
         </tr>`).join('') : '<tr><td colspan="10" class="empty-state">No bills found</td></tr>';
     };
     document.getElementById('ap-f-status').addEventListener('change', e => { f.status = e.target.value; load(); });
@@ -25505,7 +25518,7 @@ const App = {
     if (!el.isConnected) return;
     const methodLabel = Object.fromEntries(this._apMethods);
     el.innerHTML = `<div class="card"><div class="table-wrap"><table>
-      <thead><tr><th>Payment #</th><th>Date</th><th>Vendor</th><th>Method</th><th>Reference</th><th>Applied To</th><th style="text-align:right">Amount</th><th>Status</th><th></th></tr></thead>
+      <thead><tr><th>Payment #</th><th>Date</th><th>Vendor</th><th>Method</th><th>Reference</th><th>Request</th><th>Applied To</th><th style="text-align:right">Amount</th><th>Status</th><th></th></tr></thead>
       <tbody>${payments.length ? payments.map(p => `
         <tr style="${p.status === 'void' ? 'opacity:.6' : ''}">
           <td class="fw-600">${p.payment_number}</td>
@@ -25513,11 +25526,12 @@ const App = {
           <td>${this.escapeAttr(p.supplier_name)}</td>
           <td>${methodLabel[p.method] || p.method}</td>
           <td>${this.escapeAttr(p.reference || '—')}</td>
-          <td style="font-size:12px">${p.bill_numbers || '—'}</td>
+          <td>${p.payment_request_id ? `<a href="#" style="color:var(--primary)" onclick="event.preventDefault();App.viewPaymentRequest(${p.payment_request_id})">${p.request_number}</a>` : '—'}</td>
+          <td style="font-size:12px">${p.po_number ? `Advance on ${p.po_number}${p.bill_numbers ? ` → ${p.bill_numbers}` : ''}${p.status !== 'void' && p.unapplied > 0.004 ? `<div style="color:var(--text-muted)">${this.fmt(p.unapplied)} not yet billed</div>` : ''}` : (p.bill_numbers || '—')}</td>
           <td style="text-align:right" class="fw-600">${this.fmt(p.amount)}</td>
           <td><span class="badge-pill ${p.status === 'void' ? 'badge-secondary' : 'badge-success'}" ${p.void_reason ? `title="${this.escapeAttr(p.void_reason)}"` : ''}>${p.status}</span></td>
           <td>${p.status !== 'void' && this.can('payables_void') ? `<button class="btn btn-sm btn-outline" onclick="App.voidApPayment(${p.id}, '${p.payment_number}')">Void</button>` : ''}</td>
-        </tr>`).join('') : '<tr><td colspan="9" class="empty-state">No payments recorded yet</td></tr>'}
+        </tr>`).join('') : '<tr><td colspan="10" class="empty-state">No payments recorded yet</td></tr>'}
       </tbody></table></div></div>`;
   },
 
@@ -25707,7 +25721,7 @@ const App = {
           ${b.status !== 'void' && b.paid === 0 && this.can('payables_void') ? `<button class="btn btn-danger" onclick="App.voidBill(${b.id}, '${b.bill_number}')">Void Bill</button>` : ''}
           ${b.status !== 'void' && this.can('payables_bills') ? `<button class="btn btn-outline" onclick="App.showBillForm(${b.id})">Edit</button>` : ''}
           <button class="btn btn-secondary" onclick="App.showVendorStatement(${b.supplier_id})">Vendor Statement</button>
-          ${b.balance > 0 && this.can('payables_payments') ? `<button class="btn btn-primary" onclick="App.showPayVendorForm(${b.supplier_id}, ${b.id})">Pay</button>` : ''}
+          ${b.balance > 0 && this.can('payables_requests') ? `<button class="btn btn-primary" onclick="App.showPaymentRequestForm(null, { supplier_id: ${b.supplier_id}, bill_id: ${b.id} })">Request Payment</button>` : ''}
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
@@ -25726,7 +25740,7 @@ const App = {
   },
 
   async voidApPayment(id, number) {
-    const reason = prompt(`Void payment ${number}? The bills it paid will show as owing again. Enter a reason:`);
+    const reason = prompt(`Void payment ${number}? The bills it paid will show as owing again (an advance stops counting toward its PO). Enter a reason:`);
     if (reason === null) return;
     if (!reason.trim()) return this.alert('A reason is required', 'error');
     try {
@@ -25736,115 +25750,474 @@ const App = {
     } catch (e) { this.alert(e.message, 'error'); }
   },
 
-  // Pay one vendor across any of their unpaid bills. Typing a total spreads
-  // it over the bills oldest-due first; each bill's amount can then be
-  // adjusted, and the total follows.
-  async showPayVendorForm(supplierId, billId) {
-    const suppliers = await this.api('GET', '/suppliers');
+  // ─── Payment requests ─────────────────────────────────────
+  // The only way a vendor gets paid (routes/payment-requests.js): raised for
+  // open bills, as a quick payment with no bill, or as an advance on a PO;
+  // submitted, approved by someone else (payables_approve), then paid.
+  _prqStatusBadge: { draft: 'badge-secondary', submitted: 'badge-warning', approved: 'badge-info', rejected: 'badge-danger', paid: 'badge-success', cancelled: 'badge-secondary' },
+  _prqStatusLabel: { draft: 'Draft', submitted: 'Awaiting Approval', approved: 'Approved', rejected: 'Rejected', paid: 'Paid', cancelled: 'Cancelled' },
+  _prqTypeLabel: { invoice: 'Invoice Payment', quick: 'Quick Payment', advance: 'Advance Payment' },
+
+  async _renderApRequests() {
+    const el = document.getElementById('ap-tab-body');
+    // Approvers land on what's waiting for them; everyone else on what's still open.
+    const f = this._prqFilter || (this._prqFilter = { status: this.can('payables_approve') && !this.can('payables_requests') ? 'submitted' : 'open', supplier_id: '', q: '' });
+    if (!this._apSuppliers) this._apSuppliers = await this.api('GET', '/suppliers').catch(() => []);
+    if (!el.isConnected) return;
+    el.innerHTML = `
+      <div class="card" style="margin-bottom:12px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+        <select id="prq-f-status" style="width:auto">
+          ${[['open', 'Open (not paid)'], ['submitted', 'Awaiting Approval'], ['approved', 'Approved — to pay'], ['draft', 'Draft'], ['rejected', 'Rejected'], ['paid', 'Paid'], ['cancelled', 'Cancelled'], ['all', 'All']].map(([v, l]) => `<option value="${v}" ${f.status === v ? 'selected' : ''}>${l}</option>`).join('')}
+        </select>
+        <select id="prq-f-vendor" data-searchable style="width:auto;min-width:200px">
+          <option value="">All vendors</option>
+          ${this._apSuppliers.map(s => `<option value="${s.id}" ${String(f.supplier_id) === String(s.id) ? 'selected' : ''}>${this.escapeAttr(s.name)}</option>`).join('')}
+        </select>
+        <input id="prq-f-search" placeholder="Request #, vendor, bill #, PO #, description..." value="${this.escapeAttr(f.q)}" style="flex:1;min-width:200px">
+      </div>
+      <div class="card"><div class="table-wrap"><table>
+        <thead><tr><th>Request #</th><th>Date</th><th>Vendor</th><th>Type</th><th>For</th><th style="text-align:right">Amount</th><th>Requested By</th><th>Status</th></tr></thead>
+        <tbody id="prq-tbody"><tr><td colspan="8" class="empty-state">Loading...</td></tr></tbody>
+      </table></div></div>`;
+    const load = async () => {
+      const qs = new URLSearchParams({ status: f.status });
+      if (f.supplier_id) qs.set('supplier_id', f.supplier_id);
+      if (f.q) qs.set('q', f.q);
+      const rows = await this.api('GET', `/payables/payment-requests?${qs}`);
+      const tbody = document.getElementById('prq-tbody');
+      if (!tbody) return;
+      tbody.innerHTML = rows.length ? rows.map(r => `
+        <tr style="cursor:pointer;${r.status === 'cancelled' ? 'opacity:.6' : ''}" onclick="App.viewPaymentRequest(${r.id})">
+          <td class="fw-600">${r.request_number}</td>
+          <td>${this.fmtDate(r.created_at)}</td>
+          <td>${this.escapeAttr(r.supplier_name)}</td>
+          <td>${this._prqTypeLabel[r.request_type] || r.request_type}</td>
+          <td style="font-size:12px;max-width:260px">${r.request_type === 'advance' ? `PO ${this.escapeAttr(r.po_number || '')}` : this.escapeAttr(r.summary || '—')}${r.attachment_count ? ` <span title="Supporting documents" style="color:var(--text-muted)">📎${r.attachment_count}</span>` : ''}</td>
+          <td style="text-align:right" class="fw-600">${this.fmt(r.amount)}</td>
+          <td>${this.escapeAttr(r.requested_by_name || '—')}</td>
+          <td><span class="badge-pill ${this._prqStatusBadge[r.status] || ''}">${this._prqStatusLabel[r.status] || r.status}</span></td>
+        </tr>`).join('') : '<tr><td colspan="8" class="empty-state">No payment requests found</td></tr>';
+    };
+    document.getElementById('prq-f-status').addEventListener('change', e => { f.status = e.target.value; load(); });
+    document.getElementById('prq-f-vendor').addEventListener('change', e => { f.supplier_id = e.target.value; load(); });
+    let timer;
+    document.getElementById('prq-f-search').addEventListener('input', e => { clearTimeout(timer); timer = setTimeout(() => { f.q = e.target.value.trim(); load(); }, 300); });
+    await load();
+  },
+
+  // New or edit (draft/rejected) request. opts.supplier_id / opts.bill_id
+  // preselect a vendor and one of their bills (from the Bills tab, a bill
+  // or a vendor statement).
+  async showPaymentRequestForm(id, opts = {}) {
+    const [req, suppliers] = await Promise.all([
+      id ? this.api('GET', `/payables/payment-requests/${id}`) : Promise.resolve(null),
+      this.api('GET', '/suppliers'),
+    ]);
+    const r = req || { supplier_id: opts.supplier_id || '', request_type: opts.request_type || 'invoice', lines: opts.bill_id ? [{ bill_id: opts.bill_id }] : [] };
+    this._prq = { id: id || null, request: r, files: [], quickLines: r.request_type === 'quick' ? r.lines.map(l => ({ description: l.description, amount: l.amount })) : [{ description: '', amount: '' }] };
+    const typeCard = (k, title, sub) => `
+      <label style="flex:1;min-width:150px;border:1px solid var(--border);border-radius:8px;padding:10px 12px;cursor:pointer;display:flex;gap:8px;align-items:flex-start;justify-content:flex-start;text-align:left;text-transform:none;letter-spacing:normal;margin:0">
+        <input type="radio" name="prq-type" value="${k}" ${r.request_type === k ? 'checked' : ''} onchange="App._prqTypeChanged()" style="width:auto;flex:none;margin:3px 0 0">
+        <span><strong style="font-size:13px;color:var(--text)">${title}</strong><br><span style="font-size:11px;color:var(--text-muted);font-weight:400">${sub}</span></span>
+      </label>`;
     this.showModal(`
-      <div class="modal" style="max-width:720px">
-        <div class="modal-header"><span class="modal-title">Pay Vendor</span><button class="modal-close">✕</button></div>
+      <div class="modal" style="max-width:760px">
+        <div class="modal-header"><span class="modal-title">${id ? `Edit Payment Request ${r.request_number}` : 'New Payment Request'}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
+          ${r.status === 'rejected' ? `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:10px 12px;margin-bottom:12px;font-size:13px;color:#991b1b"><strong>Rejected by ${this.escapeAttr(r.rejected_by_name || '—')}:</strong> ${this.escapeAttr(r.rejection_reason || '')}<br><span style="font-size:12px">Saving puts it back to draft so it can be submitted again.</span></div>` : ''}
           <div class="form-group"><label>Vendor *</label>
-            <select id="pv-vendor" data-searchable onchange="App._pvLoadBills()">
+            <select id="prq-vendor" data-searchable onchange="App._prqVendorChanged()">
               <option value="">— Select vendor —</option>
-              ${suppliers.map(s => `<option value="${s.id}" ${String(supplierId) === String(s.id) ? 'selected' : ''}>${this.escapeAttr(s.name)} (${s.supplier_number})</option>`).join('')}
+              ${suppliers.map(s => `<option value="${s.id}" ${String(r.supplier_id) === String(s.id) ? 'selected' : ''}>${this.escapeAttr(s.name)} (${s.supplier_number})</option>`).join('')}
             </select>
           </div>
-          <div class="input-row-3">
-            <div class="form-group"><label>Payment Date *</label><input id="pv-date" type="date" value="${this._apToday()}"></div>
-            <div class="form-group"><label>Method *</label><select id="pv-method">${this._apMethods.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></div>
-            <div class="form-group"><label>Cheque / Reference #</label><input id="pv-ref"></div>
+          <div class="form-group"><label>Payment Type *</label>
+            <div style="display:flex;gap:10px;flex-wrap:wrap">
+              ${typeCard('invoice', 'Invoice Payment', 'Pay one or more of the vendor\'s outstanding bills')}
+              ${typeCard('quick', 'Quick Payment', 'No invoice — describe what it\'s for and attach support')}
+              ${typeCard('advance', 'Advance Payment', 'Pay ahead against one of the vendor\'s purchase orders')}
+            </div>
           </div>
-          <div class="input-row">
-            <div class="form-group"><label>Payment Amount *</label><input id="pv-amount" type="number" step="0.01" min="0" oninput="App._pvSpread()"></div>
-            <div class="form-group"><label>Notes</label><input id="pv-notes"></div>
+          <div id="prq-body" style="margin-bottom:12px"></div>
+          <div class="form-group"><label>Purpose / Notes for the approver</label>
+            <textarea id="prq-notes" rows="2" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;resize:vertical" placeholder="Why this payment is needed, any deadline...">${this.escapeAttr(r.notes || '')}</textarea>
           </div>
-          <div id="pv-bills" style="margin-top:6px"></div>
+          <div class="form-group"><label>Supporting Documents</label>
+            <div id="prq-existing-files" style="font-size:13px"></div>
+            <input type="file" id="prq-files" multiple accept=".pdf,.jpg,.jpeg,.png,.gif,.webp,.doc,.docx,.xls,.xlsx,.txt">
+            <div style="font-size:11px;color:var(--text-muted);margin-top:3px">Invoices, quotes, receipts — PDF, image, Word, Excel or text, up to 20 MB each. Uploaded when you save.</div>
+          </div>
         </div>
         <div class="modal-footer">
+          <span id="prq-total" style="margin-right:auto;font-size:15px"></span>
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-          <button class="btn btn-primary" onclick="App.savePayVendor()">Record Payment</button>
+          <button class="btn btn-outline" onclick="App.savePaymentRequest(false)">Save Draft</button>
+          <button class="btn btn-primary" onclick="App.savePaymentRequest(true)">Save &amp; Submit for Approval</button>
         </div>
       </div>`);
-    this._pvPreselect = billId || null;
-    if (supplierId) await this._pvLoadBills();
-  },
-
-  async _pvLoadBills() {
-    const vendorId = document.getElementById('pv-vendor').value;
-    const el = document.getElementById('pv-bills');
-    this._pvBills = [];
-    if (!vendorId) { el.innerHTML = ''; return; }
-    this._pvBills = await this.api('GET', `/payables/bills?supplier_id=${vendorId}&status=unpaid&as_of=${this._apToday()}`);
-    if (!this._pvBills.length) { el.innerHTML = '<p style="font-size:13px;color:var(--text-muted)">This vendor has no unpaid bills.</p>'; return; }
-    el.innerHTML = `
-      <div style="font-weight:600;font-size:13px;margin-bottom:6px">Apply to bills</div>
-      <table style="width:100%;font-size:13px">
-        <thead><tr style="color:var(--text-muted);font-size:12px"><th style="text-align:left">Bill #</th><th style="text-align:left">Vendor Inv #</th><th style="text-align:left">Due</th><th style="text-align:right">Balance</th><th style="text-align:right;width:140px">Pay</th></tr></thead>
-        <tbody>${this._pvBills.map(b => `
-          <tr style="border-top:1px solid var(--border)">
-            <td style="padding:6px 0">${b.bill_number}</td>
-            <td>${this.escapeAttr(b.vendor_invoice_number || '—')}</td>
-            <td style="${b.display_status === 'overdue' ? 'color:var(--danger)' : ''}">${this._apDate(b.due_date)}</td>
-            <td style="text-align:right">${this.fmt(b.balance)}</td>
-            <td style="text-align:right"><input type="number" step="0.01" min="0" max="${b.balance}" data-pv-bill="${b.id}" style="width:120px;text-align:right" oninput="App._pvSum()"></td>
-          </tr>`).join('')}</tbody>
-      </table>
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;font-size:13px">
-        <button type="button" class="btn btn-sm btn-outline" onclick="App._pvPayAll()">Pay all (${this.fmt(this._pvBills.reduce((s, b) => s + b.balance, 0))})</button>
-        <span>Applied: <strong id="pv-applied">${this.fmt(0)}</strong></span>
-      </div>`;
-    const pre = this._pvBills.find(b => b.id === this._pvPreselect);
-    if (pre) {
-      document.querySelector(`[data-pv-bill="${pre.id}"]`).value = pre.balance.toFixed(2);
-      this._pvSum();
+    if (id) {
+      const atts = await this.api('GET', `/payables/payment-requests/${id}/attachments`).catch(() => []);
+      const box = document.getElementById('prq-existing-files');
+      if (box && atts.length) box.innerHTML = `<div style="margin-bottom:6px">${atts.map(a => `📎 ${this.escapeAttr(a.original_name)}`).join('<br>')}</div>`;
     }
-    this._pvPreselect = null;
+    await this._prqVendorChanged();
   },
 
-  _pvSpread() {
-    let left = Math.round((parseFloat(document.getElementById('pv-amount').value) || 0) * 100);
-    for (const b of this._pvBills || []) {
-      const take = Math.min(left, Math.round(b.balance * 100));
-      document.querySelector(`[data-pv-bill="${b.id}"]`).value = take > 0 ? (take / 100).toFixed(2) : '';
-      left -= Math.max(take, 0);
+  _prqType() { return document.querySelector('input[name="prq-type"]:checked')?.value || 'invoice'; },
+
+  async _prqVendorChanged() {
+    const vendorId = document.getElementById('prq-vendor').value;
+    const body = document.getElementById('prq-body');
+    this._prq.options = null;
+    if (vendorId) {
+      body.innerHTML = '<p style="font-size:13px;color:var(--text-muted)">Loading...</p>';
+      try { this._prq.options = await this.api('GET', `/payables/payment-requests/options?supplier_id=${vendorId}${this._prq.id ? `&exclude=${this._prq.id}` : ''}`); }
+      catch (e) { body.innerHTML = `<p style="color:var(--danger);font-size:13px">${this.escapeAttr(e.message)}</p>`; return; }
     }
-    this._pvSum(false);
+    this._prqTypeChanged();
   },
 
-  _pvPayAll() {
-    for (const b of this._pvBills || []) document.querySelector(`[data-pv-bill="${b.id}"]`).value = b.balance.toFixed(2);
-    this._pvSum();
+  // Keeps typed quick-payment lines when switching type back and forth.
+  _prqKeepQuickLines() {
+    const rows = document.querySelectorAll('[data-prq-quick]');
+    if (rows.length) this._prq.quickLines = [...rows].map(row => ({ description: row.querySelector('.prq-q-desc').value, amount: row.querySelector('.prq-q-amt').value }));
   },
 
-  _pvSum(updateAmount = true) {
-    const cents = [...document.querySelectorAll('[data-pv-bill]')].reduce((s, i) => s + Math.round((parseFloat(i.value) || 0) * 100), 0);
-    document.getElementById('pv-applied').textContent = this.fmt(cents / 100);
-    if (updateAmount) document.getElementById('pv-amount').value = cents ? (cents / 100).toFixed(2) : '';
+  _prqTypeChanged() {
+    this._prqKeepQuickLines();
+    const type = this._prqType();
+    const body = document.getElementById('prq-body');
+    const opts = this._prq.options;
+    const r = this._prq.request;
+    if (!opts) { body.innerHTML = '<p style="font-size:13px;color:var(--text-muted)">Choose a vendor first.</p>'; this._prqSum(); return; }
+    const sameAsSaved = String(r.supplier_id) === document.getElementById('prq-vendor').value;
+    if (type === 'invoice') {
+      const chosen = new Map((sameAsSaved && r.request_type === 'invoice' || !r.id ? r.lines : []).map(l => [Number(l.bill_id), l.amount]));
+      body.innerHTML = opts.bills.length ? `
+        <div style="font-weight:600;font-size:13px;margin-bottom:6px">Outstanding invoices</div>
+        <table style="width:100%;font-size:13px">
+          <thead><tr style="color:var(--text-muted);font-size:12px"><th style="width:28px"></th><th style="text-align:left">Bill #</th><th style="text-align:left">Vendor Inv #</th><th style="text-align:left">Due</th><th style="text-align:right">Balance</th><th style="text-align:right;width:140px">Request</th></tr></thead>
+          <tbody>${opts.bills.map(b => {
+            const pre = chosen.has(Number(b.id));
+            const amt = pre ? (chosen.get(Number(b.id)) ?? b.available) : '';
+            return `<tr style="border-top:1px solid var(--border)">
+              <td><input type="checkbox" data-prq-bill-check="${b.id}" ${pre ? 'checked' : ''} ${b.available <= 0 && !pre ? 'disabled' : ''} onchange="App._prqBillToggle(${b.id})"></td>
+              <td style="padding:6px 0">${b.bill_number}${b.po_number ? `<div style="font-size:11px;color:var(--text-muted)">${b.po_number}</div>` : ''}</td>
+              <td>${this.escapeAttr(b.vendor_invoice_number || '—')}</td>
+              <td style="${b.due_date < this._apToday() ? 'color:var(--danger)' : ''}">${this._apDate(b.due_date)}</td>
+              <td style="text-align:right">${this.fmt(b.balance)}${b.requested > 0 ? `<div style="font-size:11px;color:var(--text-muted)">${this.fmt(b.requested)} on other requests</div>` : ''}</td>
+              <td style="text-align:right"><input type="number" step="0.01" min="0" max="${b.available}" data-prq-bill="${b.id}" value="${amt === '' ? '' : Number(amt).toFixed(2)}" ${pre ? '' : 'disabled'} style="width:120px;text-align:right" oninput="App._prqSum()"></td>
+            </tr>`;
+          }).join('')}</tbody>
+        </table>` : '<p style="font-size:13px;color:var(--text-muted)">This vendor has no outstanding invoices. Use a Quick Payment, or enter the bill first.</p>';
+    } else if (type === 'quick') {
+      body.innerHTML = `
+        <div style="font-weight:600;font-size:13px;margin-bottom:6px">What's being paid</div>
+        <div id="prq-quick-lines"></div>
+        <button type="button" class="btn btn-sm btn-outline" style="margin-top:6px" onclick="App._prqAddQuickLine()">+ Add line</button>`;
+      this._prqRenderQuickLines();
+    } else {
+      const usable = opts.pos.filter(p => !p.missing_rate);
+      const poId = sameAsSaved && r.request_type === 'advance' ? r.po_id : '';
+      const line = sameAsSaved && r.request_type === 'advance' ? r.lines[0] || {} : {};
+      body.innerHTML = opts.pos.length ? `
+        <div class="input-row">
+          <div class="form-group"><label>Purchase Order *</label>
+            <select id="prq-po" onchange="App._prqPoChanged()">
+              <option value="">— Select PO —</option>
+              ${usable.map(p => `<option value="${p.id}" ${String(poId) === String(p.id) ? 'selected' : ''}>${p.po_number} · ${p.status} · ${this.fmt(p.available)} left</option>`).join('')}
+            </select>
+            <div id="prq-po-info" style="font-size:11px;color:var(--text-muted);margin-top:3px"></div>
+          </div>
+          <div class="form-group"><label>Advance Amount *</label><input id="prq-adv-amount" type="number" step="0.01" min="0" value="${line.amount ?? ''}" oninput="App._prqSum()"></div>
+        </div>
+        <div class="form-group"><label>Description</label><input id="prq-adv-desc" value="${this.escapeAttr(line.description || '')}" placeholder="e.g. 50% deposit to start production"></div>
+        ${opts.pos.length > usable.length ? `<p style="font-size:11px;color:var(--text-muted)">${opts.pos.length - usable.length} foreign-currency PO(s) are hidden until they have an exchange rate.</p>` : ''}` :
+        '<p style="font-size:13px;color:var(--text-muted)">This vendor has no purchase orders an advance can go against (drafts and cancelled POs don\'t count).</p>';
+      if (opts.pos.length) this._prqPoChanged();
+    }
+    this._prqSum();
   },
 
-  async savePayVendor() {
-    const allocations = [...document.querySelectorAll('[data-pv-bill]')]
-      .map(i => ({ bill_id: Number(i.dataset.pvBill), amount: parseFloat(i.value) || 0 }))
-      .filter(a => a.amount > 0);
+  _prqBillToggle(billId) {
+    const check = document.querySelector(`[data-prq-bill-check="${billId}"]`);
+    const input = document.querySelector(`[data-prq-bill="${billId}"]`);
+    const bill = this._prq.options.bills.find(b => b.id === billId);
+    input.disabled = !check.checked;
+    input.value = check.checked ? Math.max(0, bill.available).toFixed(2) : '';
+    this._prqSum();
+  },
+
+  _prqRenderQuickLines() {
+    const box = document.getElementById('prq-quick-lines');
+    if (!box) return;
+    if (!this._prq.quickLines.length) this._prq.quickLines.push({ description: '', amount: '' });
+    box.innerHTML = this._prq.quickLines.map((l, i) => `
+      <div data-prq-quick style="display:flex;gap:8px;margin-bottom:6px;align-items:center">
+        <input class="prq-q-desc" placeholder="Description (e.g. Generator repair callout)" value="${this.escapeAttr(l.description || '')}" style="flex:1">
+        <input class="prq-q-amt" type="number" step="0.01" min="0" placeholder="Amount" value="${l.amount ?? ''}" style="width:130px;text-align:right" oninput="App._prqSum()">
+        <button type="button" class="btn btn-sm btn-outline" title="Remove line" onclick="App._prqRemoveQuickLine(${i})">✕</button>
+      </div>`).join('');
+    this._prqSum();
+  },
+  _prqAddQuickLine() { this._prqKeepQuickLines(); this._prq.quickLines.push({ description: '', amount: '' }); this._prqRenderQuickLines(); },
+  _prqRemoveQuickLine(i) { this._prqKeepQuickLines(); this._prq.quickLines.splice(i, 1); this._prqRenderQuickLines(); },
+
+  _prqPoChanged() {
+    const id = document.getElementById('prq-po')?.value;
+    const info = document.getElementById('prq-po-info');
+    const po = (this._prq.options?.pos || []).find(p => String(p.id) === id);
+    if (!info) return;
+    info.innerHTML = po ? `PO total ${this.fmt(po.total_base)}${po.currency ? ` (${po.currency} ${Number(po.total).toFixed(2)})` : ''} · paid so far ${this.fmt(po.paid)}${po.requested > 0 ? ` · ${this.fmt(po.requested)} on other requests` : ''} · <strong>${this.fmt(po.available)} left</strong>` : '';
+  },
+
+  // The lines as the server wants them, read from whichever panel is showing.
+  _prqLines() {
+    const type = this._prqType();
+    if (type === 'invoice') {
+      return [...document.querySelectorAll('[data-prq-bill]')].filter(i => !i.disabled)
+        .map(i => ({ bill_id: Number(i.dataset.prqBill), amount: parseFloat(i.value) || 0 }));
+    }
+    if (type === 'quick') {
+      return [...document.querySelectorAll('[data-prq-quick]')]
+        .map(row => ({ description: row.querySelector('.prq-q-desc').value.trim(), amount: parseFloat(row.querySelector('.prq-q-amt').value) || 0 }))
+        .filter(l => l.description || l.amount);
+    }
+    const amount = parseFloat(document.getElementById('prq-adv-amount')?.value) || 0;
+    return [{ description: document.getElementById('prq-adv-desc')?.value.trim() || '', amount }];
+  },
+
+  _prqSum() {
+    const el = document.getElementById('prq-total');
+    if (!el) return;
+    const cents = this._prqLines().reduce((s, l) => s + Math.round((l.amount || 0) * 100), 0);
+    el.innerHTML = `Total requested: <strong>${this.fmt(cents / 100)}</strong>`;
+  },
+
+  async savePaymentRequest(submit) {
+    const type = this._prqType();
+    const lines = this._prqLines();
     const data = {
-      supplier_id: document.getElementById('pv-vendor').value,
-      payment_date: document.getElementById('pv-date').value,
-      method: document.getElementById('pv-method').value,
-      reference: document.getElementById('pv-ref').value.trim(),
-      notes: document.getElementById('pv-notes').value.trim(),
-      amount: parseFloat(document.getElementById('pv-amount').value) || 0,
-      allocations,
+      supplier_id: document.getElementById('prq-vendor').value,
+      request_type: type,
+      notes: document.getElementById('prq-notes').value.trim(),
+      lines,
+      submit,
     };
     if (!data.supplier_id) return this.alert('Choose a vendor', 'error');
-    if (!allocations.length) return this.alert('Enter how much to pay on at least one bill', 'error');
+    if (type === 'advance') {
+      data.po_id = document.getElementById('prq-po')?.value || null;
+      data.amount = lines[0].amount;
+      data.description = lines[0].description;
+      if (!data.po_id) return this.alert('Choose the purchase order the advance is for', 'error');
+    }
+    if (!lines.length) return this.alert(type === 'invoice' ? 'Tick at least one invoice to pay' : 'Add at least one payment line', 'error');
+    const files = [...(document.getElementById('prq-files').files || [])];
     try {
-      const r = await this.api('POST', '/payables/payments', data);
-      this.alert(`Payment ${r.payment_number} recorded`);
+      const id = this._prq.id;
+      const saved = id ? await this.api('PUT', `/payables/payment-requests/${id}`, data) : await this.api('POST', '/payables/payment-requests', data);
+      try { await this._uploadPaymentRequestFiles(saved.id, files); }
+      catch (e) { this.alert(`${saved.request_number} saved, but a document didn't upload — ${e.message}`, 'warning'); }
+      this.alert(submit ? `${saved.request_number} submitted for approval` : `${saved.request_number} saved as a draft`);
       this.closeModal();
+      this._apTab = 'requests';
       this._afterApChange();
     } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  async _uploadPaymentRequestFiles(id, files) {
+    for (const file of files) {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await fetch(`/api/payables/payment-requests/${id}/attachments`, { method: 'POST', body: fd });
+      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(`${file.name}: ${e.error || 'Upload failed'}`); }
+    }
+  },
+
+  async viewPaymentRequest(id) {
+    const [r, atts] = await Promise.all([
+      this.api('GET', `/payables/payment-requests/${id}`),
+      this.api('GET', `/payables/payment-requests/${id}/attachments`).catch(() => []),
+    ]);
+    const methodLabel = Object.fromEntries(this._apMethods);
+    const mine = this.currentUser && Number(r.requested_by) === Number(this.currentUser.id);
+    const canEdit = this.can('payables_requests');
+    const canApprove = this.can('payables_approve');
+    const canRemoveDocs = canEdit && ['draft', 'submitted', 'rejected'].includes(r.status);
+    const note = (bg, border, color, html) => `<div style="background:${bg};border:1px solid ${border};border-radius:6px;padding:10px 12px;margin-bottom:12px;font-size:13px;color:${color}">${html}</div>`;
+    const linesHtml = r.request_type === 'invoice'
+      ? `<table style="width:100%;font-size:13px"><thead><tr style="color:var(--text-muted);font-size:12px"><th style="text-align:left">Bill #</th><th style="text-align:left">Vendor Inv #</th><th style="text-align:left">Due</th><th style="text-align:right">Balance Now</th><th style="text-align:right">Requested</th></tr></thead>
+         <tbody>${r.lines.map(l => `<tr style="border-top:1px solid var(--border)">
+           <td style="padding:6px 0">${this.can('payables') ? `<a href="#" style="color:var(--primary)" onclick="event.preventDefault();App.viewBill(${l.bill_id})">${l.bill_number}</a>` : l.bill_number}</td>
+           <td>${this.escapeAttr(l.vendor_invoice_number || '—')}</td><td>${this._apDate(l.due_date)}</td>
+           <td style="text-align:right">${this.fmt(l.bill_balance)}</td><td style="text-align:right" class="fw-600">${this.fmt(l.amount)}</td></tr>`).join('')}</tbody></table>`
+      : `<table style="width:100%;font-size:13px"><tbody>${r.lines.map(l => `<tr style="border-top:1px solid var(--border)"><td style="padding:6px 0">${this.escapeAttr(l.description || '')}</td><td style="text-align:right" class="fw-600">${this.fmt(l.amount)}</td></tr>`).join('')}</tbody></table>`;
+    const btn = (cls, label, onclick) => `<button class="btn ${cls}" onclick="${onclick}">${label}</button>`;
+    const actions = [];
+    if (['draft', 'rejected'].includes(r.status) && canEdit) actions.push(btn('btn-outline', r.status === 'rejected' ? 'Edit &amp; Resubmit' : 'Edit', `App.showPaymentRequestForm(${r.id})`));
+    if (r.status === 'draft' && canEdit) actions.push(btn('btn-primary', 'Submit for Approval', `App.paymentRequestAction(${r.id}, 'submit')`));
+    if (r.status === 'submitted' && canEdit) actions.push(btn('btn-outline', 'Recall to Draft', `App.paymentRequestAction(${r.id}, 'recall')`));
+    if (r.status === 'submitted' && canApprove && !mine) {
+      actions.push(btn('btn-danger', 'Reject', `App.rejectPaymentRequest(${r.id})`));
+      actions.push(btn('btn-success', 'Approve', `App.approvePaymentRequest(${r.id})`));
+    }
+    if (r.status === 'approved' && this.can('payables_payments')) actions.push(btn('btn-primary', 'Process Payment', `App.showPayRequestForm(${r.id})`));
+    if (['draft', 'submitted', 'approved', 'rejected'].includes(r.status) && canEdit) actions.unshift(btn('btn-outline', 'Cancel Request', `App.cancelPaymentRequest(${r.id})`));
+    this.showModal(`
+      <div class="modal" style="max-width:680px">
+        <div class="modal-header">
+          <span class="modal-title">Payment Request ${r.request_number}</span>
+          <div style="display:flex;gap:8px;align-items:center"><span class="badge-pill ${this._prqStatusBadge[r.status] || ''}">${this._prqStatusLabel[r.status] || r.status}</span><button class="modal-close">✕</button></div>
+        </div>
+        <div class="modal-body">
+          ${r.status === 'submitted' && mine && canApprove ? note('#fffbeb', '#fde68a', '#92400e', 'You raised this request, so someone else has to approve it.') : ''}
+          ${r.status === 'rejected' ? note('#fef2f2', '#fecaca', '#991b1b', `<strong>Rejected</strong> by ${this.escapeAttr(r.rejected_by_name || '—')} · ${this.fmtDate(r.rejected_at)}<br>${this.escapeAttr(r.rejection_reason || '')}`) : ''}
+          ${r.status === 'cancelled' ? note('#f9fafb', '#e5e7eb', '#374151', `<strong>Cancelled</strong> by ${this.escapeAttr(r.cancelled_by_name || '—')} · ${this.fmtDate(r.cancelled_at)}<br>${this.escapeAttr(r.cancel_reason || '')}`) : ''}
+          ${r.payment_id ? note('#f0fdf4', '#bbf7d0', '#166534', `<strong>Paid</strong> — ${r.payment_number} on ${this._apDate(r.payment_date)} by ${methodLabel[r.payment_method] || r.payment_method}${r.payment_reference ? ` · Ref ${this.escapeAttr(r.payment_reference)}` : ''}${r.paid_by_name ? ` · processed by ${this.escapeAttr(r.paid_by_name)}` : ''}${r.payment_status === 'void' ? '<br><strong style="color:#dc2626">That payment has since been voided.</strong>' : ''}`) : ''}
+          <div class="two-col" style="font-size:13px;margin-bottom:14px">
+            <div>
+              <strong>Vendor:</strong> ${this.escapeAttr(r.supplier_name)} (${r.supplier_number})<br>
+              <strong>Type:</strong> ${this._prqTypeLabel[r.request_type]}<br>
+              ${r.po_number ? `<strong>Purchase Order:</strong> ${this.can('purchasing') ? `<a href="#" style="color:var(--primary)" onclick="event.preventDefault();App.closeModal();App.showSection('purchasing').then(()=>App.viewPO(${r.po_id}))">${r.po_number}</a>` : r.po_number}<br>` : ''}
+            </div>
+            <div>
+              <strong>Requested:</strong> ${this.escapeAttr(r.requested_by_name || '—')} · ${this.fmtDate(r.created_at)}<br>
+              ${r.submitted_at ? `<strong>Submitted:</strong> ${this.fmtDate(r.submitted_at)}<br>` : ''}
+              ${r.approved_at ? `<strong>Approved:</strong> ${this.escapeAttr(r.approved_by_name || '—')} · ${this.fmtDate(r.approved_at)}${this._approvalSigImg(r.approval_signature)}` : ''}
+            </div>
+          </div>
+          ${linesHtml}
+          <div style="text-align:right;font-size:16px;margin:10px 0 14px">Total requested: <strong>${this.fmt(r.amount)}</strong></div>
+          ${r.notes ? `<div style="font-size:13px;margin-bottom:14px"><strong>Purpose / Notes:</strong> ${this.escapeAttr(r.notes)}</div>` : ''}
+          <div style="font-weight:600;font-size:13px;margin-bottom:6px">Supporting Documents</div>
+          <div style="font-size:13px">${atts.length ? atts.map(a => `
+            <div style="display:flex;justify-content:space-between;align-items:center;border-top:1px solid var(--border);padding:5px 0">
+              <a href="/api/payables/payment-requests/${r.id}/attachments/${a.id}/download" target="_blank" style="color:var(--primary)">📎 ${this.escapeAttr(a.original_name)}</a>
+              <span style="font-size:11px;color:var(--text-muted)">${this.escapeAttr(a.uploaded_by_name || '')}${canRemoveDocs ? ` <button class="btn btn-sm btn-outline" style="margin-left:6px" onclick="App.removePaymentRequestFile(${r.id}, ${a.id})">Remove</button>` : ''}</span>
+            </div>`).join('') : '<p style="color:var(--text-muted);margin:0">None attached.</p>'}</div>
+          ${canEdit && r.status !== 'cancelled' ? `<div style="display:flex;gap:8px;align-items:center;margin-top:8px"><input type="file" id="prq-view-files" multiple accept=".pdf,.jpg,.jpeg,.png,.gif,.webp,.doc,.docx,.xls,.xlsx,.txt"><button class="btn btn-sm btn-outline" onclick="App.addPaymentRequestFiles(${r.id})">Upload</button></div>` : ''}
+        </div>
+        <div class="modal-footer" style="flex-wrap:wrap;gap:8px">
+          <button class="btn btn-secondary" style="margin-right:auto" onclick="App.printPaymentRequest(${r.id})">🖨 Print</button>
+          ${actions.join('')}
+          <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+        </div>
+      </div>`);
+  },
+
+  async _afterPrqChange(id, message) {
+    this.alert(message);
+    this.closeModal();
+    if (this.section === 'payables') this.renderPayables();
+    if (id) this.viewPaymentRequest(id);
+  },
+
+  async paymentRequestAction(id, action) {
+    try {
+      const r = await this.api('POST', `/payables/payment-requests/${id}/${action}`, {});
+      this._afterPrqChange(id, action === 'submit' ? `${r.request_number} submitted for approval` : `${r.request_number} is back in draft`);
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  async approvePaymentRequest(id) {
+    const r = await this.api('GET', `/payables/payment-requests/${id}`).catch(() => null);
+    this._showApprovalDialog({
+      title: `Approve Payment Request${r ? ` ${r.request_number}` : ''}`,
+      intro: 'Once approved, the request can be paid. Your signature is printed on it.',
+      context: r ? `<div style="font-size:13px;margin-bottom:12px;padding:10px 12px;background:var(--bg-secondary,#f9fafb);border-radius:6px">
+        <strong>${this.escapeAttr(r.supplier_name)}</strong> · ${this._prqTypeLabel[r.request_type]}${r.po_number ? ` on ${r.po_number}` : ''}<br>
+        Total: <strong>${this.fmt(r.amount)}</strong> · requested by ${this.escapeAttr(r.requested_by_name || '—')}
+        ${r.notes ? `<div style="margin-top:4px;color:var(--text-muted)">${this.escapeAttr(r.notes)}</div>` : ''}</div>` : '',
+      approve: async (signature) => {
+        await this.api('POST', `/payables/payment-requests/${id}/approve`, { signature });
+        this._afterPrqChange(id, 'Payment request approved');
+      },
+    });
+  },
+
+  async rejectPaymentRequest(id) {
+    const reason = prompt('Reject this payment request? Tell the requester why:');
+    if (reason === null) return;
+    if (!reason.trim()) return this.alert('A reason is required', 'error');
+    try {
+      await this.api('POST', `/payables/payment-requests/${id}/reject`, { reason: reason.trim() });
+      this._afterPrqChange(id, 'Payment request rejected');
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  async cancelPaymentRequest(id) {
+    const reason = prompt('Cancel this payment request? It can\'t be paid afterwards. Enter a reason:');
+    if (reason === null) return;
+    if (!reason.trim()) return this.alert('A reason is required', 'error');
+    try {
+      await this.api('POST', `/payables/payment-requests/${id}/cancel`, { reason: reason.trim() });
+      this._afterPrqChange(id, 'Payment request cancelled');
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  async addPaymentRequestFiles(id) {
+    const files = [...(document.getElementById('prq-view-files').files || [])];
+    if (!files.length) return this.alert('Choose a file to upload', 'error');
+    try {
+      await this._uploadPaymentRequestFiles(id, files);
+      this._afterPrqChange(id, files.length > 1 ? `${files.length} documents attached` : 'Document attached');
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  async removePaymentRequestFile(id, attId) {
+    if (!confirm('Remove this document from the request?')) return;
+    try {
+      await this.api('DELETE', `/payables/payment-requests/${id}/attachments/${attId}`);
+      this._afterPrqChange(id, 'Document removed');
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  // Pays an approved request — the only place a vendor payment is recorded.
+  async showPayRequestForm(id) {
+    const r = await this.api('GET', `/payables/payment-requests/${id}`);
+    const explain = {
+      invoice: `Applied to ${r.lines.map(l => l.bill_number).join(', ')}.`,
+      quick: 'A bill is entered for each line and paid by this payment.',
+      advance: `Held as an advance on ${r.po_number} and applied to its bills as they're entered.`,
+    }[r.request_type];
+    this.showModal(`
+      <div class="modal" style="max-width:520px">
+        <div class="modal-header"><span class="modal-title">Process Payment — ${r.request_number}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;margin-top:0"><strong>${this.escapeAttr(r.supplier_name)}</strong> · ${this.fmt(r.amount)}<br><span style="color:var(--text-muted)">${this.escapeAttr(explain)}</span></p>
+          <div class="input-row">
+            <div class="form-group"><label>Payment Date *</label><input id="prp-date" type="date" value="${this._apToday()}"></div>
+            <div class="form-group"><label>Method *</label><select id="prp-method">${this._apMethods.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></div>
+          </div>
+          <div class="form-group"><label>Cheque / Reference #</label><input id="prp-ref"></div>
+          <div class="form-group"><label>Notes</label><input id="prp-notes" placeholder="Defaults to the request number"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.viewPaymentRequest(${r.id})">Back</button>
+          <button class="btn btn-primary" id="prp-btn" onclick="App.payPaymentRequest(${r.id})">Record Payment of ${this.fmt(r.amount)}</button>
+        </div>
+      </div>`);
+  },
+
+  async payPaymentRequest(id) {
+    const btn = document.getElementById('prp-btn');
+    if (btn) btn.disabled = true;
+    try {
+      const r = await this.api('POST', `/payables/payment-requests/${id}/pay`, {
+        payment_date: document.getElementById('prp-date').value,
+        method: document.getElementById('prp-method').value,
+        reference: document.getElementById('prp-ref').value.trim(),
+        notes: document.getElementById('prp-notes').value.trim(),
+      });
+      this._afterPrqChange(id, `Payment ${r.payment_number} recorded`);
+    } catch (e) {
+      if (btn) btn.disabled = false;
+      this.alert(e.message, 'error');
+    }
+  },
+
+  printPaymentRequest(id) {
+    return this._printServerDocument(`/api/email/payment-request-preview/${id}`, 'payment-request', 'payment request');
   },
 
   async showVendorStatement(supplierId) {
@@ -25873,7 +26246,7 @@ const App = {
         <div class="modal-footer" style="justify-content:space-between">
           <span style="font-size:15px">Balance owed: <strong>${this.fmt(st.balance)}</strong></span>
           <div style="display:flex;gap:8px">
-            ${st.balance > 0 && this.can('payables_payments') ? `<button class="btn btn-primary" onclick="App.showPayVendorForm(${supplierId})">Pay Vendor</button>` : ''}
+            ${st.balance > 0 && this.can('payables_requests') ? `<button class="btn btn-primary" onclick="App.showPaymentRequestForm(null, { supplier_id: ${supplierId} })">Request Payment</button>` : ''}
             <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
           </div>
         </div>
@@ -26623,9 +26996,13 @@ const App = {
     ]},
     { key: 'payables', label: 'Accounts Payable', subs: [
       { key: 'payables_bills', label: 'Enter & Edit Bills' },
-      { key: 'payables_payments', label: 'Pay Vendors' },
+      { key: 'payables_requests', label: 'Raise Payment Requests' },
+      { key: 'payables_payments', label: 'Pay Approved Requests' },
       { key: 'payables_void', label: 'Void Bills & Payments' },
     ]},
+    // Its own checkbox for the same reason as Approve Special Projects —
+    // whoever raises a payment request shouldn't get to sign it off.
+    { key: 'payables_approve', label: 'Approve Payment Requests', subs: [] },
     { key: 'crm', label: 'CRM & Sales', subs: [
       { key: 'crm_leads', label: 'Manage Leads' },
       { key: 'crm_opportunities', label: 'Manage Opportunities' },

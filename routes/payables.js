@@ -2,15 +2,12 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { requirePermission } = require('../lib/permissions');
-const { nextNumber } = require('../lib/nextNumber');
-const { round2, today, dueDateFor, PAID_SQL, createBill, poBilling } = require('../lib/payables');
+const { round2, today, dueDateFor, PAID_SQL, UNAPPLIED_SQL, createBill, applyPoAdvances, poBilling } = require('../lib/payables');
 
 // Accounts payable: bills (what vendors invoice us), payments against them,
 // and aging. Viewing needs `payables`; entering/editing bills needs
-// payables_bills, recording payments payables_payments, and voiding either
-// payables_void.
-
-const PAYMENT_METHODS = ['cash', 'cheque', 'bank_transfer', 'card', 'other'];
+// payables_bills and voiding either payables_void. Payments are only made
+// from approved payment requests (routes/payment-requests.js).
 
 // Bill columns plus the derived paid/balance/display status. `as_of` (the
 // viewer's local date) decides overdue, so it matches what the user's
@@ -140,13 +137,15 @@ router.put('/bills/:id', requirePermission('payables_bills'), async (req, res) =
       args: [body.supplier_id, String(body.vendor_invoice_number || '').trim() || null, body.po_id || null, body.branch_id || null,
         body.bill_date, body.due_date || bill.due_date, amount, tax, body.description || null, bill.id],
     });
+    if (body.po_id) await applyPoAdvances(db, body.po_id);
     const { rows: [updated] } = await db.execute({ sql: `${billSelect} WHERE b.id = ?`, args: [bill.id] });
     res.json(decorateBill(updated, today()));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Voiding a bill with payments applied would strand that money, so those
-// payments have to be voided first.
+// payments have to be voided first — except a PO advance's share, which
+// just goes back to being unapplied on the advance.
 router.post('/bills/:id/void', requirePermission('payables_void'), async (req, res) => {
   try {
     const reason = String(req.body.reason || '').trim();
@@ -154,11 +153,16 @@ router.post('/bills/:id/void', requirePermission('payables_void'), async (req, r
     const { rows: [bill] } = await db.execute({ sql: `${billSelect} WHERE b.id = ?`, args: [req.params.id] });
     if (!bill) return res.status(404).json({ error: 'Bill not found' });
     if (bill.status === 'void') return res.status(400).json({ error: 'This bill is already void' });
-    if (round2(bill.paid) > 0) return res.status(400).json({ error: 'This bill has payments applied — void those payments first' });
-    await db.execute({
-      sql: "UPDATE ap_bills SET status = 'void', void_reason = ?, voided_by = ?, voided_at = CURRENT_TIMESTAMP WHERE id = ?",
-      args: [reason, req.employee?.id || null, bill.id],
+    const { rows: [nonAdvance] } = await db.execute({
+      sql: `SELECT COALESCE(SUM(a.amount), 0) AS v FROM ap_payment_allocations a JOIN ap_payments p ON p.id = a.payment_id AND p.status = 'posted'
+            WHERE a.bill_id = ? AND p.po_id IS NULL`,
+      args: [bill.id],
     });
+    if (round2(nonAdvance.v) > 0) return res.status(400).json({ error: 'This bill has payments applied — void those payments first' });
+    await db.batch([
+      { sql: 'DELETE FROM ap_payment_allocations WHERE bill_id = ? AND payment_id IN (SELECT id FROM ap_payments WHERE po_id IS NOT NULL)', args: [bill.id] },
+      { sql: "UPDATE ap_bills SET status = 'void', void_reason = ?, voided_by = ?, voided_at = CURRENT_TIMESTAMP WHERE id = ?", args: [reason, req.employee?.id || null, bill.id] },
+    ], 'write');
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -178,8 +182,10 @@ router.get('/payments', requirePermission('payables'), async (req, res) => {
   try {
     const { supplier_id } = req.query;
     let sql = `SELECT p.*, s.name AS supplier_name, e.first_name || ' ' || e.last_name AS created_by_name,
-      (SELECT GROUP_CONCAT(b.bill_number, ', ') FROM ap_payment_allocations a JOIN ap_bills b ON b.id = a.bill_id WHERE a.payment_id = p.id) AS bill_numbers
-      FROM ap_payments p JOIN suppliers s ON s.id = p.supplier_id LEFT JOIN employees e ON e.id = p.created_by WHERE 1=1`;
+      (SELECT GROUP_CONCAT(b.bill_number, ', ') FROM ap_payment_allocations a JOIN ap_bills b ON b.id = a.bill_id WHERE a.payment_id = p.id) AS bill_numbers,
+      po.po_number, r.request_number, ${UNAPPLIED_SQL} AS unapplied
+      FROM ap_payments p JOIN suppliers s ON s.id = p.supplier_id LEFT JOIN employees e ON e.id = p.created_by
+      LEFT JOIN purchase_orders po ON po.id = p.po_id LEFT JOIN payment_requests r ON r.id = p.payment_request_id WHERE 1=1`;
     const args = [];
     if (supplier_id) { sql += ' AND p.supplier_id = ?'; args.push(supplier_id); }
     sql += ' ORDER BY p.payment_date DESC, p.id DESC LIMIT 500';
@@ -188,53 +194,10 @@ router.get('/payments', requirePermission('payables'), async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Records a payment and applies it to the given bills. Every allocation must
-// be for an open bill of the same vendor and no more than its balance, and
-// the allocations must add up to the payment amount exactly — there is no
-// unapplied vendor credit.
-router.post('/payments', requirePermission('payables_payments'), async (req, res) => {
-  try {
-    const { supplier_id, payment_date, method, reference, notes } = req.body;
-    const amount = round2(req.body.amount);
-    const allocations = (req.body.allocations || []).map(a => ({ bill_id: Number(a.bill_id), amount: round2(a.amount) })).filter(a => a.amount > 0);
-    if (!supplier_id) return res.status(400).json({ error: 'Vendor is required' });
-    if (!(amount > 0)) return res.status(400).json({ error: 'Amount must be greater than zero' });
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(payment_date || '')) return res.status(400).json({ error: 'Payment date is required' });
-    if (!PAYMENT_METHODS.includes(method)) return res.status(400).json({ error: 'Choose a payment method' });
-    if (!allocations.length) return res.status(400).json({ error: 'Apply the payment to at least one bill' });
-    const allocated = round2(allocations.reduce((s, a) => s + a.amount, 0));
-    if (allocated !== amount) return res.status(400).json({ error: `Amounts applied to bills (${allocated.toFixed(2)}) must equal the payment amount (${amount.toFixed(2)})` });
-    if (new Set(allocations.map(a => a.bill_id)).size !== allocations.length) return res.status(400).json({ error: 'A bill is listed more than once' });
-
-    const tx = await db.transaction('write');
-    let committed = false;
-    try {
-      // Balances are checked inside the write transaction so two people
-      // paying the same bill at once can't both succeed.
-      for (const a of allocations) {
-        const { rows: [bill] } = await tx.execute({ sql: `SELECT b.*, ${PAID_SQL} AS paid FROM ap_bills b WHERE b.id = ?`, args: [a.bill_id] });
-        if (!bill || Number(bill.supplier_id) !== Number(supplier_id)) throw new Error('One of the bills does not belong to this vendor');
-        if (bill.status === 'void') throw new Error(`Bill ${bill.bill_number} is void`);
-        const balance = round2(bill.amount - bill.paid);
-        if (a.amount > balance) throw new Error(`${a.amount.toFixed(2)} is more than the ${balance.toFixed(2)} still owed on bill ${bill.bill_number}`);
-      }
-      const payment_number = await nextNumber(tx, 'ap_payments', 'payment_number', 'APP-', 6);
-      const result = await tx.execute({
-        sql: 'INSERT INTO ap_payments (payment_number, supplier_id, payment_date, amount, method, reference, notes, created_by) VALUES (?,?,?,?,?,?,?,?)',
-        args: [payment_number, supplier_id, payment_date, amount, method, reference || null, notes || null, req.employee?.id || null],
-      });
-      const paymentId = Number(result.lastInsertRowid);
-      for (const a of allocations) {
-        await tx.execute({ sql: 'INSERT INTO ap_payment_allocations (payment_id, bill_id, amount) VALUES (?,?,?)', args: [paymentId, a.bill_id, a.amount] });
-      }
-      await tx.commit();
-      committed = true;
-      res.status(201).json({ id: paymentId, payment_number });
-    } catch (e) {
-      if (!committed) await tx.rollback().catch(() => {});
-      res.status(400).json({ error: e.message });
-    }
-  } catch (e) { res.status(500).json({ error: e.message }); }
+// Vendors are paid only from an approved payment request
+// (POST /payables/payment-requests/:id/pay), so direct payments are gone.
+router.post('/payments', requirePermission('payables_payments'), (req, res) => {
+  res.status(410).json({ error: 'Vendor payments are made from an approved payment request (Payables > Payment Request)' });
 });
 
 router.post('/payments/:id/void', requirePermission('payables_void'), async (req, res) => {
@@ -278,7 +241,10 @@ router.get('/aging', requirePermission('payables'), async (req, res) => {
       totals[bucket] = round2(totals[bucket] + bal); totals.total = round2(totals.total + bal);
     }
     const vendors = [...byVendor.values()].sort((a, b) => b.total - a.total);
-    res.json({ as_of: asOf, vendors, totals });
+    // Advances paid on POs that no bill has absorbed yet — already paid out,
+    // so not in the totals above.
+    const { rows: [adv] } = await db.execute({ sql: `SELECT COALESCE(SUM(${UNAPPLIED_SQL}), 0) AS v FROM ap_payments p WHERE p.po_id IS NOT NULL AND p.status = 'posted'`, args: [] });
+    res.json({ as_of: asOf, vendors, totals, advances_unapplied: round2(adv.v) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

@@ -1524,6 +1524,57 @@ async function _init() {
       bill_id INTEGER NOT NULL REFERENCES ap_bills(id),
       amount REAL NOT NULL
     )` },
+    // Payment requests (routes/paymentRequests.js): the only way a vendor
+    // gets paid. A request is for one vendor and one kind of payment —
+    // 'invoice' (lines against open bills), 'quick' (described lines with no
+    // bill; paying creates a bill per line) or 'advance' (against po_id; paid
+    // as an unapplied ap_payments row that settles the PO's bills as they
+    // come in). draft → submitted → approved | rejected → paid, or cancelled.
+    // Only an approved request can be paid; payment_id is the ap_payments
+    // row it became.
+    { sql: `CREATE TABLE IF NOT EXISTS payment_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_number TEXT UNIQUE NOT NULL,
+      supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
+      request_type TEXT NOT NULL,
+      po_id INTEGER REFERENCES purchase_orders(id),
+      amount REAL NOT NULL DEFAULT 0,
+      notes TEXT,
+      status TEXT NOT NULL DEFAULT 'draft',
+      requested_by INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      submitted_at DATETIME,
+      approved_by INTEGER REFERENCES employees(id),
+      approved_at DATETIME,
+      approval_signature TEXT,
+      rejected_by INTEGER REFERENCES employees(id),
+      rejected_at DATETIME,
+      rejection_reason TEXT,
+      payment_id INTEGER REFERENCES ap_payments(id),
+      paid_by INTEGER REFERENCES employees(id),
+      paid_at DATETIME,
+      cancelled_by INTEGER REFERENCES employees(id),
+      cancelled_at DATETIME,
+      cancel_reason TEXT
+    )` },
+    // bill_id for an invoice line; description for a quick or advance line.
+    { sql: `CREATE TABLE IF NOT EXISTS payment_request_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id INTEGER NOT NULL REFERENCES payment_requests(id) ON DELETE CASCADE,
+      bill_id INTEGER REFERENCES ap_bills(id),
+      description TEXT,
+      amount REAL NOT NULL
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS payment_request_attachments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id INTEGER NOT NULL REFERENCES payment_requests(id) ON DELETE CASCADE,
+      original_name TEXT NOT NULL,
+      stored_name TEXT NOT NULL,
+      mime_type TEXT,
+      file_size INTEGER,
+      uploaded_by INTEGER REFERENCES employees(id),
+      uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS supplier_import_batch_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       batch_id INTEGER NOT NULL REFERENCES supplier_import_batches(id),
@@ -2380,6 +2431,10 @@ async function _init() {
     // Books posts it to GCT Recoverable instead of Inventory. NULL = a bill
     // from before the column, filled in once below.
     'ALTER TABLE ap_bills ADD COLUMN tax_amount REAL',
+    // An advance payment is tied to its PO and may be partly unapplied;
+    // payment_request_id is the approved request it was paid from.
+    'ALTER TABLE ap_payments ADD COLUMN po_id INTEGER REFERENCES purchase_orders(id)',
+    'ALTER TABLE ap_payments ADD COLUMN payment_request_id INTEGER REFERENCES payment_requests(id)',
     // What a request / PO is for, for the approver — kept off everything the
     // supplier sees (unlike notes, which print on the PO and pump authorization).
     'ALTER TABLE purchase_requests ADD COLUMN internal_notes TEXT',
@@ -3008,6 +3063,13 @@ async function _init() {
         perms.payables = (can(perms, 'security') && can(perms, 'settings')) || /payable/i.test(g.name || '');
         changed = true;
       }
+      // Payment requests: raising one starts with whoever could already
+      // enter bills or pay vendors. Approving is a standalone key (not a
+      // `payables` sub, which a full A/P grant would hand to the clerks who
+      // raise requests) and starts on full-access groups only — the owner's
+      // choice (2026-10-30); others are ticked in Security Groups.
+      if (!('payables_requests' in perms)) { perms.payables_requests = can(perms, 'payables_bills') || can(perms, 'payables_payments'); changed = true; }
+      if (!('payables_approve' in perms)) { perms.payables_approve = can(perms, 'security') && can(perms, 'settings'); changed = true; }
       // Per-line margin on the POS screen briefly followed `reports_financial`
       // before getting its own standalone key — seeded from that so nobody's
       // view changes on upgrade. Standalone (not a `pos` sub) on purpose: a
@@ -3360,6 +3422,12 @@ async function _init() {
     'CREATE INDEX IF NOT EXISTS idx_ap_payments_supplier_id ON ap_payments(supplier_id)',
     'CREATE INDEX IF NOT EXISTS idx_ap_payment_allocations_bill_id ON ap_payment_allocations(bill_id)',
     'CREATE INDEX IF NOT EXISTS idx_ap_payment_allocations_payment_id ON ap_payment_allocations(payment_id)',
+    'CREATE INDEX IF NOT EXISTS idx_ap_payments_po_id ON ap_payments(po_id)',
+    'CREATE INDEX IF NOT EXISTS idx_payment_requests_supplier_id ON payment_requests(supplier_id)',
+    'CREATE INDEX IF NOT EXISTS idx_payment_requests_status ON payment_requests(status)',
+    'CREATE INDEX IF NOT EXISTS idx_payment_request_lines_request_id ON payment_request_lines(request_id)',
+    'CREATE INDEX IF NOT EXISTS idx_payment_request_lines_bill_id ON payment_request_lines(bill_id)',
+    'CREATE INDEX IF NOT EXISTS idx_payment_request_attachments_request_id ON payment_request_attachments(request_id)',
     'CREATE INDEX IF NOT EXISTS idx_session_activity_session_id ON session_activity(session_id)',
     'CREATE INDEX IF NOT EXISTS idx_session_activity_employee_id ON session_activity(employee_id)',
     'CREATE INDEX IF NOT EXISTS idx_session_activity_created_at ON session_activity(created_at)',
