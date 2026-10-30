@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const nodemailer = require('nodemailer');
 const { db } = require('../database');
-const { requireAuth, requirePermission, requireAnyPermission, can } = require('../lib/permissions');
+const { requireAuth, requirePermission, requireAnyPermission, can, drawerScope } = require('../lib/permissions');
 const { customerArDetail, customerStatement } = require('../lib/arDetail');
 const { inlineProtectedImages } = require('../lib/protectedUploads');
 const { orderLineUnit } = require('../lib/units');
@@ -2716,6 +2716,7 @@ router.post('/send-drawer-report/:id', requirePermission('drawers'), async (req,
   try {
     const sess = await loadDrawerSession(db, req.params.id);
     if (!sess) return res.status(404).json({ error: 'Drawer session not found' });
+    if (drawerScope(req) !== 'all' && sess.employee_id !== req.employee?.id) return res.status(403).json({ error: 'You can only email the report for your own drawer' });
     const s = await getSettings();
     const model = drawerReportPdfModel(sess, s);
     try {

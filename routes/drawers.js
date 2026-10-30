@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
-const { requireAuth, requirePermission, can } = require('../lib/permissions');
+const { requireAuth, requirePermission, drawerScope } = require('../lib/permissions');
 const { loadDrawerSession, currencySettings, round2 } = require('../lib/drawerReport');
 
 // ── Cash Drawers (configuration) ─────────────────────────────────────────────
@@ -56,6 +56,11 @@ router.delete('/:id', requirePermission('drawers'), async (req, res) => {
 
 // ── Drawer Sessions ───────────────────────────────────────────────────────────
 
+// Your own session, or anyone's with drawers_reconcile_all (drawerScope).
+function canActOnSession(req, session) {
+  return drawerScope(req) === 'all' || (!!req.employee && session.employee_id === req.employee.id);
+}
+
 // requireAuth only — App.checkPOSDrawer() calls this on every page load to
 // find the current user's own open session, regardless of drawers permission.
 router.get('/sessions', requireAuth, async (req, res) => {
@@ -66,7 +71,10 @@ router.get('/sessions', requireAuth, async (req, res) => {
     // `from`/`to` bound opened_at to a caller-local day (UTC 'YYYY-MM-DD
     // HH:MM:SS', matching CURRENT_TIMESTAMP) — `date` alone matches the UTC
     // calendar day, which splits a Jamaica evening across two dates.
-    const { branch_id, date, from, to, status, employee_id, unreconciled } = req.query;
+    // Without drawers_reconcile_all only the employee's own sessions are
+    // listed (App.checkPOSDrawer() only ever asks for its own).
+    const { branch_id, date, from, to, status, unreconciled } = req.query;
+    const employee_id = drawerScope(req) === 'all' ? req.query.employee_id : req.employee?.id;
     let sql = `
       SELECT ds.*,
         d.name as drawer_name,
@@ -101,6 +109,7 @@ router.get('/sessions/:id', requireAuth, async (req, res) => {
   try {
     const session = await loadDrawerSession(db, req.params.id);
     if (!session) return res.status(404).json({ error: 'Not found' });
+    if (!canActOnSession(req, session)) return res.status(403).json({ error: 'You can only view your own drawer sessions' });
     res.json(session);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -120,16 +129,29 @@ router.post('/sessions', requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// A cashier can always close their own session (the POS closes a stale
+// one from a previous day); anyone else's needs drawers_reconcile_all.
 router.patch('/sessions/:id/close', requireAuth, async (req, res) => {
   try {
+    const { rows: [session] } = await db.execute({ sql: 'SELECT id, employee_id FROM drawer_sessions WHERE id = ?', args: [req.params.id] });
+    if (!session) return res.status(404).json({ error: 'Drawer session not found' });
+    if (!canActOnSession(req, session)) return res.status(403).json({ error: 'You can only close your own drawer session' });
     await db.execute({ sql: "UPDATE drawer_sessions SET status='closed', closed_at=CURRENT_TIMESTAMP WHERE id=?", args: [req.params.id] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM drawer_sessions WHERE id = ?', args: [req.params.id] });
     res.json(row);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Reconcile: your own session with drawers_close, anyone's with
+// drawers_reconcile_all.
 router.post('/sessions/:id/reconcile', requireAuth, async (req, res) => {
   try {
+    const { rows: [session] } = await db.execute({ sql: 'SELECT id, employee_id, status FROM drawer_sessions WHERE id = ?', args: [req.params.id] });
+    if (!session) return res.status(404).json({ error: 'Drawer session not found' });
+    const scope = drawerScope(req);
+    if (!scope) return res.status(403).json({ error: 'Missing permission: Close & Reconcile Own Drawer' });
+    if (!canActOnSession(req, session)) return res.status(403).json({ error: 'You can only reconcile your own drawer — reconciling other drawers needs Reconcile All Drawers' });
+    if (session.status === 'reconciled') return res.status(400).json({ error: 'This drawer session is already reconciled' });
     const { cash_counted, card_counted, check_counted, gift_card_counted, credit_counted, direct_deposit_counted, notes, reconciled_by, note_counts } = req.body;
     // The float is handed back before the cash count (lib/drawerReport.js);
     // the rates valuing any foreign notes are kept with the count.
@@ -161,8 +183,8 @@ router.post('/sessions/:id/reconcile', requireAuth, async (req, res) => {
 // ── Petty Cash Payouts ────────────────────────────────────────────────────────
 
 // Pay petty cash out of an open drawer against a numbered petty cash
-// request slip. A cashier pays from their own open session; drawers_manage
-// can record one on any open session. Never more than the cash in the
+// request slip. A cashier pays from their own open session;
+// drawers_reconcile_all can record one on any open session. Never more than the cash in the
 // drawer (float + cash takings − payouts so far).
 router.post('/sessions/:id/payouts', requirePermission('pos_petty_cash'), async (req, res) => {
   try {
@@ -177,7 +199,7 @@ router.post('/sessions/:id/payouts', requirePermission('pos_petty_cash'), async 
     const session = await loadDrawerSession(db, req.params.id);
     if (!session) return res.status(404).json({ error: 'Drawer session not found' });
     if (session.status !== 'open') return res.status(400).json({ error: 'Petty cash can only be paid from an open drawer' });
-    if (session.employee_id !== req.employee?.id && !can(req.employee?.permissions, 'drawers_manage')) {
+    if (!canActOnSession(req, session)) {
       return res.status(403).json({ error: 'You can only pay petty cash from your own open drawer' });
     }
     const { rows: [dupe] } = await db.execute({ sql: 'SELECT p.id, p.voucher_number, ds.id as session_id FROM drawer_payouts p JOIN drawer_sessions ds ON ds.id = p.session_id WHERE LOWER(TRIM(p.voucher_number)) = LOWER(?) AND p.voided_at IS NULL', args: [voucher] });
@@ -191,10 +213,11 @@ router.post('/sessions/:id/payouts', requirePermission('pos_petty_cash'), async 
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Void a payout entered in error (drawers_manage), until the drawer is
-// reconciled. The voucher number can then be used again.
-router.patch('/payouts/:id/void', requirePermission('drawers_manage'), async (req, res) => {
+// Void a payout entered in error (drawers_reconcile_all), until the drawer
+// is reconciled. The voucher number can then be used again.
+router.patch('/payouts/:id/void', requireAuth, async (req, res) => {
   try {
+    if (drawerScope(req) !== 'all') return res.status(403).json({ error: 'Missing permission: Reconcile All Drawers' });
     const { rows: [p] } = await db.execute({ sql: 'SELECT p.*, ds.status as session_status FROM drawer_payouts p JOIN drawer_sessions ds ON ds.id = p.session_id WHERE p.id = ?', args: [req.params.id] });
     if (!p) return res.status(404).json({ error: 'Payout not found' });
     if (p.voided_at) return res.status(400).json({ error: 'Already voided' });

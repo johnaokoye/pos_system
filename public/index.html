@@ -1263,11 +1263,12 @@ const App = {
     return !!mod && mod.subs.some(s => !driverOnlySubs.has(s.key) && !!perms[s.key]);
   },
 
-  // Cash Drawers requires the drawers_manage sub-permission specifically (the
-  // parent drawers key only grants POS drawer access); Online Orders piggybacks
-  // on the transactions permission since it has no key of its own.
+  // Cash Drawers needs Manage Drawers or one of the reconcile keys, read as
+  // stored (the parent drawers key only grants POS drawer access); Online
+  // Orders piggybacks on the transactions permission since it has no key of
+  // its own.
   _hubTileAllowed(section) {
-    if (section === 'drawers') return !!this.currentUser?.permissions?.drawers_manage;
+    if (section === 'drawers') return this._canOpenDrawersScreen();
     if (section === 'online-orders') return this.can('transactions');
     if (section === 'rentals') return this._canManageRentals();
     if (section === 'rental-items') return this._canManageRentals();
@@ -1449,9 +1450,8 @@ const App = {
     document.querySelectorAll('.nav-item[data-section]').forEach(el => {
       const s = el.dataset.section;
       if (s === 'driver-dashboard' || s === 'guard-dashboard') return;
-      // Cash Drawers nav requires the drawers_manage sub-permission specifically;
-      // the parent drawers key only grants POS drawer access
-      const show = s === 'drawers' ? !!perms.drawers_manage : s === 'online-orders' ? this.can('transactions') : this._hubGroups[s] ? this.canAccessHub(s) : this.can(s);
+      // Cash Drawers nav: see _hubTileAllowed
+      const show = s === 'drawers' ? this._canOpenDrawersScreen() : s === 'online-orders' ? this.can('transactions') : this._hubGroups[s] ? this.canAccessHub(s) : this.can(s);
       el.style.display = show ? '' : 'none';
     });
   },
@@ -26945,9 +26945,10 @@ const App = {
       { key: 'pos_payment', label: 'Take Payment' },
     ]},
     { key: 'drawers', label: 'Cash Drawers', subs: [
-      { key: 'drawers_manage', label: 'Manage Drawers & Sessions' },
+      { key: 'drawers_manage', label: 'Manage Drawers (setup & access)' },
       { key: 'drawers_open', label: 'Open Drawer Sessions' },
-      { key: 'drawers_close', label: 'Close & Reconcile' },
+      { key: 'drawers_close', label: 'Close & Reconcile Own Drawer' },
+      { key: 'drawers_reconcile_all', label: 'Reconcile All Drawers' },
       { key: 'void_transactions', label: 'Void Transactions' },
     ]},
     { key: 'inventory', label: 'Inventory', subs: [
@@ -29844,28 +29845,54 @@ const App = {
 
   // ─── CASH DRAWERS ─────────────────────────────────────────────────────────
 
+  // Which drawer sessions the Cash Drawers screen shows and lets you close
+  // and reconcile: 'all' (Reconcile All Drawers), 'own' (Close & Reconcile
+  // Own Drawer) or null. Stored keys only — never inherited from the parent
+  // drawers key every cashier holds. Mirrors drawerScope() in
+  // lib/permissions.js.
+  _drawerScope() {
+    const p = this.currentUser?.permissions || {};
+    return p.drawers_reconcile_all ? 'all' : p.drawers_close ? 'own' : null;
+  },
+
+  _canOpenDrawersScreen() {
+    return !!this.currentUser?.permissions?.drawers_manage || !!this._drawerScope();
+  },
+
+  // Close / Reconcile on a session: anyone's with 'all', your own with 'own'.
+  _canActOnDrawerSession(s) {
+    const scope = this._drawerScope();
+    return scope === 'all' || (scope === 'own' && s.employee_id == this.currentUser?.id);
+  },
+
   async renderDrawers() {
-    this.drawerTab = this.drawerTab || 'sessions';
+    // Sessions needs a reconcile key; Manage Drawers (setup) needs drawers_manage.
+    const tabs = [
+      this._drawerScope() && { key: 'sessions', label: this._drawerScope() === 'all' ? 'Sessions' : 'My Sessions' },
+      this.currentUser?.permissions?.drawers_manage && { key: 'manage', label: 'Manage Drawers' },
+    ].filter(Boolean);
+    this._drawerTabs = tabs.map(t => t.key);
+    if (!this._drawerTabs.includes(this.drawerTab)) this.drawerTab = this._drawerTabs[0] || 'sessions';
     document.getElementById('content').innerHTML = `
       <div class="section-header">
         <h2>Cash Drawers</h2>
         <div id="drawer-hdr-actions"></div>
       </div>
       <div class="crm-tabs" id="drawer-tabs-nav">
-        <button class="crm-tab" onclick="App.switchDrawerTab('sessions')">Sessions</button>
-        <button class="crm-tab" onclick="App.switchDrawerTab('manage')">Manage Drawers</button>
+        ${tabs.map(t => `<button class="crm-tab" onclick="App.switchDrawerTab('${t.key}')">${t.label}</button>`).join('')}
       </div>
       <div id="drawer-tab-content"></div>`;
     document.querySelectorAll('#drawer-tabs-nav .crm-tab').forEach((btn,i) => {
-      btn.classList.toggle('active', ['sessions','manage'][i] === this.drawerTab);
+      btn.classList.toggle('active', this._drawerTabs[i] === this.drawerTab);
     });
+    if (!tabs.length) { document.getElementById('drawer-tab-content').innerHTML = '<div class="empty-state"><p>You don\'t have access to drawer sessions or drawer setup.</p></div>'; return; }
     await this.renderDrawerTab();
   },
 
   switchDrawerTab(tab) {
     this.drawerTab = tab;
     document.querySelectorAll('#drawer-tabs-nav .crm-tab').forEach((btn,i) => {
-      btn.classList.toggle('active', ['sessions','manage'][i] === tab);
+      btn.classList.toggle('active', (this._drawerTabs || [])[i] === tab);
     });
     this.renderDrawerTab();
   },
@@ -29896,7 +29923,8 @@ const App = {
     ]);
     const pendingIds = new Set(pending.map(s => s.id));
     const history = daySessions.filter(s => !pendingIds.has(s.id));
-    const canReconcile = !!(this.currentUser?.permissions?.drawers_manage) || this.can('void_transactions');
+    // Without Reconcile All Drawers the server returns only your own sessions.
+    const ownOnly = this._drawerScope() !== 'all';
     const sc = { open:'badge-success', closed:'badge-warning', reconciled:'badge-info' };
     // opened_at is a UTC 'YYYY-MM-DD HH:MM:SS' with no zone marker.
     const parseUtc = v => new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(String(v)) ? v : `${String(v).replace(' ', 'T')}Z`);
@@ -29925,8 +29953,8 @@ const App = {
             <td style="text-align:right;white-space:nowrap">
               <button class="btn btn-sm btn-outline" onclick="App.viewDrawerReport(${s.id})">Report</button>
               ${s.status === 'reconciled' ? `<button class="btn btn-sm btn-outline" title="Email the reconciliation report as a PDF" onclick="App.emailDrawerReport(${s.id})">✉ Email</button>` : ''}
-              ${canReconcile && s.status !== 'reconciled' ? `<button class="btn btn-sm btn-primary" onclick="App.showReconcileModal(${s.id})">Reconcile</button>` : ''}
-              ${canReconcile && s.status === 'open' ? `<button class="btn btn-sm btn-secondary" onclick="App.closeDrawerSession(${s.id})">Close</button>` : ''}
+              ${this._canActOnDrawerSession(s) && s.status !== 'reconciled' ? `<button class="btn btn-sm btn-primary" onclick="App.showReconcileModal(${s.id})">Reconcile</button>` : ''}
+              ${this._canActOnDrawerSession(s) && s.status === 'open' ? `<button class="btn btn-sm btn-secondary" onclick="App.closeDrawerSession(${s.id})">Close</button>` : ''}
             </td>
           </tr>`; }).join('')}
         </tbody>
@@ -29934,6 +29962,7 @@ const App = {
     el.innerHTML = `
       <div style="margin-bottom:22px">
         <h3 style="font-size:14px;margin:0 0 4px">Open &amp; Unreconciled <span class="badge badge-${pending.length ? 'warning' : 'secondary'}">${pending.length}</span></h3>
+        ${ownOnly ? '<p style="font-size:12px;margin:0 0 6px"><strong>Showing your own drawer sessions only.</strong> Reconciling other cashiers\' drawers needs the Reconcile All Drawers permission.</p>' : ''}
         <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px">Every session not yet reconciled, from any date. An <strong>open</strong> session holds its drawer until it's closed or reconciled; closing releases the drawer, reconciling finishes the session. <strong>Unreconciled</strong> sessions are closed but still need their count.</p>
         ${pending.length ? table(pending) : '<div class="empty-state" style="padding:14px"><p>All drawer sessions are reconciled.</p></div>'}
       </div>
@@ -30142,12 +30171,12 @@ const App = {
 
   // The body of a drawer report (lib/drawerReport.js figures) — shared by
   // the on-screen report and the printed copy. With `actions`, petty cash
-  // rows get a Void button for drawers_manage before reconciliation.
+  // rows get a Void button for Reconcile All Drawers before reconciliation.
   _drawerReportBodyHtml(s, { actions = false } = {}) {
     const r = s.report, rec = s.reconciliation, esc = v => this.escapeAttr(v ?? ''), m = n => this._drawerMoney(n);
     const cash = r.tenders.find(t => t.key === 'cash');
     const sum = r.summary;
-    const canVoid = actions && s.status !== 'reconciled' && this.can('drawers_manage');
+    const canVoid = actions && s.status !== 'reconciled' && this._drawerScope() === 'all';
     const tenderRows = r.tenders.filter(t => !t.uncounted || t.sales || t.key === 'available_credit').map(t => {
       const note = t.key === 'cash'
         ? [r.float.included_in_cash ? `incl. ${m(r.float.opening)} float` : 'float returned separately', r.payouts_total ? `less ${m(r.payouts_total)} petty cash` : ''].filter(Boolean).join(', ')
@@ -30239,7 +30268,7 @@ const App = {
         <div class="modal-footer">
           <button class="btn btn-outline" onclick="App.printDrawerReport(${id})">🖨 Print</button>
           <button class="btn btn-outline" onclick="App.emailDrawerReport(${id})">✉ Email PDF</button>
-          ${this.can('drawers_manage') && s.status !== 'reconciled' ? `<button class="btn btn-primary" onclick="App.closeModal();App.showReconcileModal(${id})">Reconcile</button>` : ''}
+          ${this._canActOnDrawerSession(s) && s.status !== 'reconciled' ? `<button class="btn btn-primary" onclick="App.closeModal();App.showReconcileModal(${id})">Reconcile</button>` : ''}
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);

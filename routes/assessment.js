@@ -106,7 +106,7 @@ const PROCESSES = [
   {
     key: 'drawer_close', label: 'Drawer Reconciliation',
     description: 'Close a cash drawer session and reconcile the count.',
-    perms: ['drawers_close', 'drawers_manage'],
+    perms: ['drawers_close', 'drawers_reconcile_all'],
     from: 'drawer_reconciliations dr', emp: 'dr.reconciled_by', ref: `'Session #' || dr.session_id`, status: `'reconciled'`,
     started: '1', completed: '1',
     startedAt: 'dr.reconciled_at', doneAt: 'dr.reconciled_at',

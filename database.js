@@ -3095,6 +3095,12 @@ async function _init() {
       // choice (2026-10-30); others are ticked in Security Groups.
       if (!('payables_requests' in perms)) { perms.payables_requests = can(perms, 'payables_bills') || can(perms, 'payables_payments'); changed = true; }
       if (!('payables_approve' in perms)) { perms.payables_approve = can(perms, 'security') && can(perms, 'settings'); changed = true; }
+      // Seeing and reconciling every cashier's drawer used to come with
+      // Manage Drawers & Sessions; it's now its own key (2026-10-30), and
+      // drawers_close covers your own drawer only. Seeded from the stored
+      // drawers_manage (not can(), which would fall back to `drawers` —
+      // every cashier's POS drawer key).
+      if (!('drawers_reconcile_all' in perms)) { perms.drawers_reconcile_all = !!perms.drawers_manage; changed = true; }
       // Per-line margin on the POS screen briefly followed `reports_financial`
       // before getting its own standalone key — seeded from that so nobody's
       // view changes on upgrade. Standalone (not a `pos` sub) on purpose: a
