@@ -1057,6 +1057,45 @@ async function attachUnits(rows) {
 // caller sends `units`, so older callers that don't know about units
 // (imports, API clients, full-row PUTs from before) never clear them.
 // Replaces the product's whole unit list. Returns an error message or null.
+// Inventory, Services and Rental Items all live in `products`, so they share
+// one set of SKUs and barcodes — but each screen only lists its own kind,
+// so a clash with an item on another screen looked like a mystery. The POS
+// also matches a typed/scanned code against SKU and barcode ignoring case,
+// so "fles210" next to "FLES210" is the same code to the till: checked
+// case-insensitively here. Only a new or changed value is checked, so
+// editing an item that already shares a code (from before this check) still
+// saves. Returns an error message or null.
+const ITEM_SCREEN = p => p.is_rental ? 'a rental item (Rentals > Rental Items)' : p.is_service ? 'a service (Services)' : 'an inventory item (Inventory)';
+async function itemCodeConflict({ sku, barcode }, productId = 0) {
+  const { rows: [cur] } = productId
+    ? await db.execute({ sql: 'SELECT sku, barcode FROM products WHERE id = ?', args: [productId] })
+    : { rows: [] };
+  const same = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+  const checks = [['SKU', sku, cur?.sku], ['Barcode', barcode, cur?.barcode]];
+  for (const [label, value, current] of checks) {
+    const v = String(value || '').trim();
+    if (!v || (cur && same(v, current))) continue;
+    const { rows: [hit] } = await db.execute({
+      sql: `SELECT id, sku, barcode, name, active, is_rental, is_service FROM products
+            WHERE id != ? AND (LOWER(TRIM(sku)) = LOWER(?) OR LOWER(TRIM(barcode)) = LOWER(?)) LIMIT 1`,
+      args: [productId || 0, v, v],
+    });
+    if (!hit) continue;
+    // Say which of its codes matched when it's not the same field or spelling.
+    const asField = same(hit.sku, v) ? (label === 'SKU' && hit.sku === v ? '' : ` (its SKU is ${hit.sku})`) : ` (its barcode is ${hit.barcode})`;
+    return `${label} "${v}" is already used by "${hit.name}"${asField}, ${ITEM_SCREEN(hit)}${hit.active ? '' : ', which is inactive'}. `
+      + 'SKUs and barcodes have to be unique across Inventory, Services and Rental Items, ignoring upper/lower case. Use a different one (e.g. add a suffix), or reuse that item.';
+  }
+  return null;
+}
+
+// Last resort if a duplicate still reaches the database (e.g. two saves at
+// once): SQLite's own wording means nothing to staff.
+function friendlySaveError(e) {
+  const m = /UNIQUE constraint failed: products\.(sku|barcode)/.exec(e.message || '');
+  return m ? `That ${m[1] === 'sku' ? 'SKU' : 'barcode'} is already used by another item (Inventory, Services or Rental Items) — use a different one` : e.message;
+}
+
 async function saveProductUnits(productId, body) {
   if (!Array.isArray(body.units)) return null;
   const baseId = body.base_unit_id ? Number(body.base_unit_id) : null;
@@ -1127,8 +1166,10 @@ router.post('/:id/units', requireAnyPermission('inventory_edit', 'inventory_unit
 // (see requireProductPermission above), not any-of-the-three statically.
 router.post('/', (req, res, next) => requireProductPermission(!!req.body.is_rental, !!req.body.is_service)(req, res, next), async (req, res) => {
   const { sku, barcode, name, description, category_id, price, cost, tax_rate, stock_qty, min_stock, active, branch_id, supplier_id, is_service, unit, online_available, web_allotment, is_rental, rental_rate_type, rental_rate, rental_deposit, rental_late_fee_rate, replacement_value, rental_classification, rental_weekly_rate, rental_monthly_rate, rental_hourly_rate, rental_allow_sale, is_accessory, is_layaway_eligible, model_number, size, brand, taxable } = req.body;
-  if (!sku || !name) return res.status(400).json({ error: 'SKU and name are required' });
+  if (!String(sku || '').trim() || !name) return res.status(400).json({ error: 'SKU and name are required' });
   try {
+    const conflict = await itemCodeConflict({ sku, barcode });
+    if (conflict) return res.status(400).json({ error: conflict });
     const svc = is_service ? 1 : 0;
     const rnt = is_rental ? 1 : 0;
     const acc = is_accessory ? 1 : 0;
@@ -1155,7 +1196,7 @@ router.post('/', (req, res, next) => requireProductPermission(!!req.body.is_rent
     const { rows: [prod] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [productId] });
     res.status(201).json(unitsError ? { ...prod, warning: unitsError } : prod);
   } catch (e) {
-    res.status(400).json({ error: e.message });
+    res.status(400).json({ error: friendlySaveError(e) });
   }
 });
 
@@ -1182,6 +1223,9 @@ router.put('/:id', async (req, res, next) => {
     const tax = taxable === undefined ? 1 : (taxable ? 1 : 0);
     const allowSale = rental_allow_sale ? 1 : 0;
     const taxRateFinal = tax_rate ?? (parseFloat(await getSetting('tax_rate', 8.5)) || 8.5);
+    if (!String(sku || '').trim()) return res.status(400).json({ error: 'SKU is required' });
+    const conflict = await itemCodeConflict({ sku, barcode }, req.params.id);
+    if (conflict) return res.status(400).json({ error: conflict });
     // Rental items live at a single branch — reassigning the dropdown moves
     // the stock there instantly, with no audit trail or driver hand-off.
     // That's fine for a never-rented item, but moving it out from under units
@@ -1274,7 +1318,7 @@ router.put('/:id', async (req, res, next) => {
     const { rows: [prod] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [req.params.id] });
     res.json(prod);
   } catch (e) {
-    res.status(400).json({ error: e.message });
+    res.status(400).json({ error: friendlySaveError(e) });
   }
 });
 
