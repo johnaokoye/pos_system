@@ -9,7 +9,7 @@ const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 const { requireAuth, requirePermission, requireAnyPermission, can } = require('../lib/permissions');
 const { getOutstandingQty, getOutOfServiceQty } = require('../lib/rentalAvailability');
 const { mergeProducts } = require('../lib/productMerge');
-const { HAS_ISSUE_SQL, ISSUE_LABEL_SQL, rowsToCsv } = require('../lib/productIssues');
+const { HAS_ISSUE_SQL, ISSUE_LABEL_SQL, csvEscape, rowsToCsv } = require('../lib/productIssues');
 const { getSetting } = require('../lib/settings');
 const { EACH, unitsByProduct, unitLabel, productUnits } = require('../lib/units');
 
@@ -392,6 +392,56 @@ router.get('/export/issues', requirePermission('inventory_missing_data'), async 
     const timestamp = new Date().toISOString().slice(0, 10);
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="products_missing_data_${timestamp}.csv"`);
+    res.send(csv);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET CSV of retail items whose global products.stock_qty differs from the
+// sum of their branch counts — the review list before bringing the global
+// column into line. Biggest gaps first; one column per branch. A positive
+// difference (global above the branches) may be real stock that was never
+// put at a branch, rather than drift.
+router.get('/export/stock-mismatches', requirePermission('inventory'), async (req, res) => {
+  try {
+    const [{ rows }, { rows: branchRows }, { rows: branches }] = await Promise.all([
+      db.execute({
+        sql: `SELECT p.id, p.sku, p.name, p.active, p.cost, c.name as category_name, p.stock_qty as overall_qty, t.branch_total
+          FROM products p
+          JOIN (SELECT product_id, SUM(stock_qty) AS branch_total FROM branch_inventory GROUP BY product_id) t ON t.product_id = p.id
+          LEFT JOIN categories c ON p.category_id = c.id
+          WHERE p.is_rental = 0 AND p.is_service = 0 AND COALESCE(p.is_non_inventory, 0) = 0
+            AND p.stock_qty <> t.branch_total
+          ORDER BY ABS(p.stock_qty - t.branch_total) DESC, p.sku`,
+        args: [],
+      }),
+      db.execute({ sql: 'SELECT product_id, branch_id, stock_qty FROM branch_inventory', args: [] }),
+      db.execute({ sql: 'SELECT id, name FROM branches ORDER BY name', args: [] }),
+    ]);
+    const byProduct = new Map();
+    for (const r of branchRows) {
+      if (!byProduct.has(r.product_id)) byProduct.set(r.product_id, new Map());
+      byProduct.get(r.product_id).set(r.branch_id, r.stock_qty);
+    }
+    // Only branches that hold one of these items get a column.
+    const ids = new Set(rows.map(r => r.id));
+    const used = branches.filter(b => branchRows.some(r => r.branch_id === b.id && ids.has(r.product_id)));
+    const cols = ['sku', 'name', 'category_name', 'active', 'overall_qty', 'branch_total', 'difference', 'difference_cost_value', 'note'];
+    const out = rows.map(r => {
+      const diff = Number(r.overall_qty) - Number(r.branch_total);
+      const row = {
+        ...r, active: r.active ? 'yes' : 'no', difference: diff,
+        difference_cost_value: Math.round(diff * (Number(r.cost) || 0) * 100) / 100,
+        note: diff > 0 ? 'Overall is higher - check for stock never put at a branch' : 'Branches hold more than the overall figure',
+      };
+      for (const b of used) row[`branch_${b.id}`] = byProduct.get(r.id)?.get(b.id) ?? '';
+      return row;
+    });
+    const header = [...cols, ...used.map(b => b.name)];
+    const keys = [...cols, ...used.map(b => `branch_${b.id}`)];
+    const csv = [header.map(csvEscape).join(','), ...out.map(r => keys.map(k => csvEscape(r[k])).join(','))].join('\n');
+    const timestamp = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="stock_mismatches_${timestamp}.csv"`);
     res.send(csv);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
