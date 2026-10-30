@@ -470,6 +470,25 @@ async function _init() {
       quantity_requested INTEGER NOT NULL DEFAULT 1,
       quantity_received INTEGER DEFAULT 0
     )` },
+    // One row per delivery received on a transfer (receiving can be split
+    // over several drop-offs): who brought it — an employee (delivered_by_id)
+    // or, for an outside courier, a typed name (delivered_by_name) — who
+    // received it (the signed-in employee), and the quantities in it.
+    { sql: `CREATE TABLE IF NOT EXISTS branch_transfer_receipts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      transfer_id INTEGER NOT NULL REFERENCES branch_transfers(id),
+      received_by INTEGER REFERENCES employees(id),
+      received_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      delivered_by_id INTEGER REFERENCES employees(id),
+      delivered_by_name TEXT,
+      notes TEXT
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS branch_transfer_receipt_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      receipt_id INTEGER NOT NULL REFERENCES branch_transfer_receipts(id) ON DELETE CASCADE,
+      transfer_item_id INTEGER NOT NULL REFERENCES branch_transfer_items(id),
+      quantity INTEGER NOT NULL
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS quotation_item_sources (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       quotation_item_id INTEGER NOT NULL REFERENCES quotation_items(id) ON DELETE CASCADE,
@@ -2421,6 +2440,12 @@ async function _init() {
     'ALTER TABLE branch_transfer_items ADD COLUMN quantity_asked INTEGER',
     'ALTER TABLE branch_transfers ADD COLUMN sent_by INTEGER REFERENCES employees(id)',
     'ALTER TABLE branch_transfers ADD COLUMN sent_at DATETIME',
+    // Picked up (in transit): who took it (driver_id, or driver_name for an
+    // outside courier) and who marked it picked up, when.
+    'ALTER TABLE branch_transfers ADD COLUMN driver_id INTEGER REFERENCES employees(id)',
+    'ALTER TABLE branch_transfers ADD COLUMN driver_name TEXT',
+    'ALTER TABLE branch_transfers ADD COLUMN dispatched_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE branch_transfers ADD COLUMN dispatched_at DATETIME',
     // Customer's purchase order number, printed on the Retail Tax Invoice
     // (a blank write-in line when empty). Set on the quote or at the POS;
     // a sale from a quote takes the quote's unless the cashier typed one.
@@ -3423,6 +3448,8 @@ async function _init() {
     'CREATE INDEX IF NOT EXISTS idx_ap_payment_allocations_bill_id ON ap_payment_allocations(bill_id)',
     'CREATE INDEX IF NOT EXISTS idx_ap_payment_allocations_payment_id ON ap_payment_allocations(payment_id)',
     'CREATE INDEX IF NOT EXISTS idx_ap_payments_po_id ON ap_payments(po_id)',
+    'CREATE INDEX IF NOT EXISTS idx_branch_transfer_receipts_transfer_id ON branch_transfer_receipts(transfer_id)',
+    'CREATE INDEX IF NOT EXISTS idx_branch_transfer_receipt_items_receipt_id ON branch_transfer_receipt_items(receipt_id)',
     'CREATE INDEX IF NOT EXISTS idx_payment_requests_supplier_id ON payment_requests(supplier_id)',
     'CREATE INDEX IF NOT EXISTS idx_payment_requests_status ON payment_requests(status)',
     'CREATE INDEX IF NOT EXISTS idx_payment_request_lines_request_id ON payment_request_lines(request_id)',

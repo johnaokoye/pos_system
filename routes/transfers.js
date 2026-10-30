@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { createTransfer, deductTransferStock, addTransferStock } = require('../lib/transfers');
-const { requirePermission, requireAuth } = require('../lib/permissions');
+const { requirePermission, requireAnyPermission, requireAuth } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 
 router.use(requireAuth);
@@ -12,8 +12,10 @@ router.get('/', requirePermission('transfers'), async (req, res) => {
   try {
     const { status, from_branch_id, to_branch_id, limit = 100 } = req.query;
     let sql = `SELECT t.*, fb.name as from_branch_name, tb.name as to_branch_name, e.first_name || ' ' || e.last_name as employee_name,
+      COALESCE(dr.first_name || ' ' || dr.last_name, t.driver_name) as driver_display_name,
       (SELECT GROUP_CONCAT(product_name || ' x' || quantity_requested, ', ') FROM branch_transfer_items WHERE transfer_id = t.id) as item_summary
-      FROM branch_transfers t LEFT JOIN branches fb ON t.from_branch_id = fb.id LEFT JOIN branches tb ON t.to_branch_id = tb.id LEFT JOIN employees e ON t.employee_id = e.id WHERE 1=1`;
+      FROM branch_transfers t LEFT JOIN branches fb ON t.from_branch_id = fb.id LEFT JOIN branches tb ON t.to_branch_id = tb.id LEFT JOIN employees e ON t.employee_id = e.id
+      LEFT JOIN employees dr ON dr.id = t.driver_id WHERE 1=1`;
     const params = [];
     if (status) { sql += ' AND t.status = ?'; params.push(status); }
     if (from_branch_id) { sql += ' AND t.from_branch_id = ?'; params.push(from_branch_id); }
@@ -47,13 +49,49 @@ router.get('/inbox', requirePermission('transfers_approve'), async (req, res) =>
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Active employees for the "Picked up by" / "Delivered by" pickers — names
+// only (the employee list itself needs the Employees module). Drivers first.
+// Registered before GET /:id.
+router.get('/people', requireAnyPermission('transfers_pickup', 'transfers_dropoff'), async (req, res) => {
+  try {
+    const { rows } = await db.execute({ sql: `SELECT id, first_name || ' ' || last_name AS name, is_driver FROM employees
+      WHERE active = 1 ORDER BY is_driver DESC, first_name, last_name`, args: [] });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Who carried the stock: an active employee (id) or an outside courier
+// (typed name). Returns { id, name } or { error }.
+async function resolveCarrier(executor, id, name, label) {
+  const typed = String(name || '').trim();
+  if (id) {
+    const { rows: [emp] } = await executor.execute({ sql: 'SELECT id FROM employees WHERE id = ? AND active = 1', args: [id] });
+    if (!emp) return { error: `Choose who ${label} from the list` };
+    return { id: emp.id, name: null };
+  }
+  if (typed) return { id: null, name: typed.slice(0, 120) };
+  return { error: `Enter who ${label}` };
+}
+
 // GET single transfer with items
 router.get('/:id', requirePermission('transfers'), async (req, res) => {
   try {
     const { rows: [transfer] } = await db.execute({ sql: `SELECT t.*, fb.name as from_branch_name, tb.name as to_branch_name, e.first_name || ' ' || e.last_name as employee_name,
-      se.first_name || ' ' || se.last_name as sent_by_name
-      FROM branch_transfers t LEFT JOIN branches fb ON t.from_branch_id = fb.id LEFT JOIN branches tb ON t.to_branch_id = tb.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN employees se ON t.sent_by = se.id WHERE t.id = ?`, args: [req.params.id] });
+      se.first_name || ' ' || se.last_name as sent_by_name,
+      COALESCE(dr.first_name || ' ' || dr.last_name, t.driver_name) as driver_display_name,
+      dp.first_name || ' ' || dp.last_name as dispatched_by_name
+      FROM branch_transfers t LEFT JOIN branches fb ON t.from_branch_id = fb.id LEFT JOIN branches tb ON t.to_branch_id = tb.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN employees se ON t.sent_by = se.id
+      LEFT JOIN employees dr ON dr.id = t.driver_id LEFT JOIN employees dp ON dp.id = t.dispatched_by WHERE t.id = ?`, args: [req.params.id] });
     if (!transfer) return res.status(404).json({ error: 'Not found' });
+    // Each delivery received: who brought it, who received it, what was in it.
+    const { rows: receipts } = await db.execute({ sql: `SELECT r.*, rb.first_name || ' ' || rb.last_name AS received_by_name,
+        COALESCE(dl.first_name || ' ' || dl.last_name, r.delivered_by_name) AS delivered_by_display,
+        (SELECT json_group_array(json_object('product_name', ti.product_name, 'quantity', ri.quantity)) FROM branch_transfer_receipt_items ri
+           JOIN branch_transfer_items ti ON ti.id = ri.transfer_item_id WHERE ri.receipt_id = r.id) AS lines
+      FROM branch_transfer_receipts r LEFT JOIN employees rb ON rb.id = r.received_by LEFT JOIN employees dl ON dl.id = r.delivered_by_id
+      WHERE r.transfer_id = ? ORDER BY r.received_at, r.id`, args: [req.params.id] });
+    for (const r of receipts) r.lines = JSON.parse(r.lines || '[]');
+    transfer.receipts = receipts;
     // Each line also carries what the sending branch holds (source_stock)
     // and where it's shelved there (bins, primary first) — for Review & Send
     // and the printed pick list.
@@ -125,7 +163,13 @@ router.post('/quick', requirePermission('transfers_quick'), async (req, res) => 
         await addTransferStock(tx, to_branch_id, line.product_id, line.quantity_requested);
         await tx.execute({ sql: 'UPDATE branch_transfer_items SET quantity_received = quantity_requested WHERE id = ?', args: [line.id] });
       }
-      await tx.execute({ sql: "UPDATE branch_transfers SET status = 'received', received_at = ?, is_quick = 1 WHERE id = ?", args: [new Date().toISOString(), transferId] });
+      // Co-located branches: the person doing it carries and receives it.
+      const now = new Date().toISOString();
+      await tx.execute({ sql: "UPDATE branch_transfers SET status = 'received', received_at = ?, is_quick = 1, driver_id = ?, dispatched_by = ?, dispatched_at = ? WHERE id = ?", args: [now, employeeId, employeeId, now, transferId] });
+      const receipt = await tx.execute({ sql: "INSERT INTO branch_transfer_receipts (transfer_id, received_by, received_at, delivered_by_id, notes) VALUES (?,?,?,?,'Quick transfer')", args: [transferId, employeeId, now, employeeId] });
+      for (const line of lines) {
+        await tx.execute({ sql: 'INSERT INTO branch_transfer_receipt_items (receipt_id, transfer_item_id, quantity) VALUES (?,?,?)', args: [Number(receipt.lastInsertRowid), line.id, line.quantity_requested] });
+      }
       await tx.commit();
     } catch(e) {
       await tx.rollback();
@@ -184,7 +228,12 @@ router.patch('/:id/dispatch', requirePermission('transfers_pickup'), async (req,
     const { rows: [transfer] } = await db.execute({ sql: 'SELECT * FROM branch_transfers WHERE id = ?', args: [req.params.id] });
     if (!transfer) return res.status(404).json({ error: 'Not found' });
     if (transfer.status !== 'pending') return res.status(400).json({ error: 'Only pending transfers can be dispatched' });
-    await db.execute({ sql: 'UPDATE branch_transfers SET status = ? WHERE id = ?', args: ['in_transit', req.params.id] });
+    const driver = await resolveCarrier(db, req.body.driver_id, req.body.driver_name, 'is taking it');
+    if (driver.error) return res.status(400).json({ error: driver.error });
+    await db.execute({
+      sql: "UPDATE branch_transfers SET status = 'in_transit', driver_id = ?, driver_name = ?, dispatched_by = ?, dispatched_at = ? WHERE id = ? AND status = 'pending'",
+      args: [driver.id, driver.name, req.employee?.id || null, new Date().toISOString(), req.params.id],
+    });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM branch_transfers WHERE id = ?', args: [req.params.id] });
     res.json(row);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -200,9 +249,18 @@ router.patch('/:id/receive', requirePermission('transfers_dropoff'), async (req,
     if (transfer.status === 'cancelled') return res.status(400).json({ error: 'Cannot receive cancelled transfer' });
     if (transfer.status === 'requested') return res.status(400).json({ error: 'This transfer has not been sent yet' });
     if (transfer.status === 'received') return res.status(400).json({ error: 'Transfer already fully received' });
+    // Who brought it is required; who received it is whoever is signed in.
+    const deliverer = await resolveCarrier(db, req.body.delivered_by_id, req.body.delivered_by_name, 'delivered the items');
+    if (deliverer.error) return res.status(400).json({ error: deliverer.error });
 
     const tx = await db.transaction('write');
     try {
+      const receipt = await tx.execute({
+        sql: 'INSERT INTO branch_transfer_receipts (transfer_id, received_by, received_at, delivered_by_id, delivered_by_name, notes) VALUES (?,?,?,?,?,?)',
+        args: [transfer.id, req.employee?.id || null, new Date().toISOString(), deliverer.id, deliverer.name, String(req.body.notes || '').trim() || null],
+      });
+      const receiptId = Number(receipt.lastInsertRowid);
+      let receivedAny = false;
       for (const { item_id, quantity_received } of (items || [])) {
         const qty = parseInt(quantity_received);
         if (!qty || qty <= 0) continue;
@@ -213,12 +271,15 @@ router.patch('/:id/receive', requirePermission('transfers_dropoff'), async (req,
         if (actual <= 0) continue;
 
         await tx.execute({ sql: 'UPDATE branch_transfer_items SET quantity_received = quantity_received + ? WHERE id = ?', args: [actual, item_id] });
+        await tx.execute({ sql: 'INSERT INTO branch_transfer_receipt_items (receipt_id, transfer_item_id, quantity) VALUES (?,?,?)', args: [receiptId, item.id, actual] });
+        receivedAny = true;
 
         if (item.product_id) {
           await addTransferStock(tx, transfer.to_branch_id, item.product_id, actual);
         }
       }
 
+      if (!receivedAny) throw new Error('Enter a quantity received for at least one item');
       const { rows: transferItems } = await tx.execute({ sql: 'SELECT * FROM branch_transfer_items WHERE transfer_id = ?', args: [req.params.id] });
       const allReceived = transferItems.every(i => (i.quantity_received || 0) >= i.quantity_requested);
       const anyReceived = transferItems.some(i => (i.quantity_received || 0) > 0);

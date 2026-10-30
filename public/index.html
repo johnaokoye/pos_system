@@ -22524,6 +22524,7 @@ const App = {
             <div><strong>To:</strong> ${t.to_branch_name||'-'}</div>
             <div><strong>Requested by:</strong> ${t.employee_name||'-'} · ${this.fmtDate(t.created_at)}</div>
             ${t.sent_at ? `<div><strong>Sent by:</strong> ${t.sent_by_name||'-'} · ${this.fmtDate(t.sent_at)}</div>` : ''}
+            ${t.dispatched_at ? `<div><strong>Picked up by:</strong> ${this.escapeAttr(t.driver_display_name||'-')} · ${this.fmtDateTime(t.dispatched_at)}${t.dispatched_by_name && t.dispatched_by_name !== t.driver_display_name ? ` <span style="color:var(--text-muted)">(marked by ${this.escapeAttr(t.dispatched_by_name)})</span>` : ''}</div>` : ''}
           </div>
           ${t.notes ? `<p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">${t.notes}</p>` : ''}
           <div class="table-wrap">
@@ -22540,6 +22541,17 @@ const App = {
               </tbody>
             </table>
           </div>
+          ${(t.receipts || []).length ? `
+          <h4 style="font-size:13px;margin:16px 0 6px">Deliveries Received</h4>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Received</th><th>Delivered by</th><th>Received by</th><th>Items</th></tr></thead>
+            <tbody>${t.receipts.map(r => `<tr>
+              <td style="white-space:nowrap">${this.fmtDateTime(r.received_at)}</td>
+              <td>${this.escapeAttr(r.delivered_by_display || '—')}</td>
+              <td>${this.escapeAttr(r.received_by_name || '—')}</td>
+              <td style="font-size:12px">${r.lines.map(l => `${this.escapeAttr(l.product_name)} × ${l.quantity}`).join('<br>')}${r.notes ? `<div style="color:var(--text-muted)">${this.escapeAttr(r.notes)}</div>` : ''}</td>
+            </tr>`).join('')}</tbody>
+          </table></div>` : (t.status === 'received' ? '<p style="font-size:12px;color:var(--text-muted);margin-top:12px">Received before deliveries were recorded — who delivered and received it wasn\'t captured.</p>' : '')}
         </div>
         <div class="modal-footer">
           ${t.status==='requested' && this.can('transfers_approve') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showSendTransfer(${t.id})">Review &amp; Send</button>` : ''}
@@ -22562,9 +22574,56 @@ const App = {
     this._pollTransferInbox(); // sent / cancelled requests leave the badge count
   },
 
+  // Employees for the carrier pickers (GET /transfers/people), drivers first.
+  async _transferPeople() {
+    if (!this._transferPeopleCache) this._transferPeopleCache = await this.api('GET', '/transfers/people').catch(() => []);
+    return this._transferPeopleCache;
+  },
+
+  // "Who carried it" picker: an employee, or Someone else with a typed name
+  // (an outside courier). Read back with _readCarrier(prefix).
+  _carrierPickerHtml(prefix, people, { id = null, name = '' } = {}) {
+    const drivers = people.filter(p => p.is_driver), others = people.filter(p => !p.is_driver);
+    const opt = p => `<option value="${p.id}" ${String(id) === String(p.id) ? 'selected' : ''}>${this.escapeAttr(p.name)}</option>`;
+    const other = !id && !!name;
+    return `
+      <select id="${prefix}-emp" onchange="document.getElementById('${prefix}-name').style.display = this.value === 'other' ? '' : 'none'">
+        <option value="">— Select —</option>
+        ${drivers.length ? `<optgroup label="Drivers">${drivers.map(opt).join('')}</optgroup>` : ''}
+        <optgroup label="${drivers.length ? 'Other employees' : 'Employees'}">${others.map(opt).join('')}</optgroup>
+        <option value="other" ${other ? 'selected' : ''}>Someone else (outside courier)…</option>
+      </select>
+      <input id="${prefix}-name" placeholder="Name of the person / courier" value="${this.escapeAttr(other ? name : '')}" style="margin-top:6px;${other ? '' : 'display:none'}">`;
+  },
+  _readCarrier(prefix) {
+    const v = document.getElementById(`${prefix}-emp`)?.value;
+    if (v === 'other') return { name: document.getElementById(`${prefix}-name`).value.trim() };
+    return v ? { id: Number(v) } : {};
+  },
+
+  // Picked Up: record who's taking the stock to the other branch.
   async dispatchTransfer(id) {
+    const people = await this._transferPeople();
+    const me = this.currentUser?.id;
+    this.showModal(`
+      <div class="modal" style="max-width:420px">
+        <div class="modal-header"><span class="modal-title">Picked Up — In Transit</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div class="form-group"><label>Who is taking it? *</label>${this._carrierPickerHtml('tdisp', people, { id: people.some(p => p.id === me) ? me : null })}</div>
+          <p style="font-size:12px;color:var(--text-muted);margin:0">They'll be shown as the deliverer when the other branch receives it.</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.confirmDispatchTransfer(${id})">Mark In-Transit</button>
+        </div>
+      </div>`);
+  },
+
+  async confirmDispatchTransfer(id) {
+    const driver = this._readCarrier('tdisp');
+    if (!driver.id && !driver.name) { this.alert('Choose who is taking it', 'error'); return; }
     try {
-      await this.api('PATCH', `/transfers/${id}/dispatch`, {});
+      await this.api('PATCH', `/transfers/${id}/dispatch`, { driver_id: driver.id || null, driver_name: driver.name || null });
       this.closeModal();
       this.alert('Transfer marked as in-transit');
       this._refreshTransferView();
@@ -22698,7 +22757,7 @@ const App = {
   },
 
   async showReceiveTransfer(id) {
-    const t = await this.api('GET', `/transfers/${id}`);
+    const [t, people] = await Promise.all([this.api('GET', `/transfers/${id}`), this._transferPeople()]);
     if (t.status === 'requested') { this.alert('This transfer has not been sent yet', 'warning'); return; }
     const pending = t.items.filter(i => (i.quantity_received||0) < i.quantity_requested);
     if (!pending.length) { this.alert('All items already received', 'warning'); return; }
@@ -22706,7 +22765,11 @@ const App = {
       <div class="modal" style="max-width:600px">
         <div class="modal-header"><span class="modal-title">Receive Transfer — ${t.transfer_number}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
-          <p style="font-size:13px;color:var(--text-muted);margin-bottom:6px">Receiving at: <strong>${t.to_branch_name}</strong></p>
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:10px">Receiving at: <strong>${t.to_branch_name}</strong></p>
+          <div class="input-row">
+            <div class="form-group"><label>Delivered by *</label>${this._carrierPickerHtml('trecv-by', people, { id: t.driver_id, name: t.driver_name || '' })}</div>
+            <div class="form-group"><label>Received by</label><input value="${this.escapeAttr(this.currentUser ? `${this.currentUser.first_name} ${this.currentUser.last_name}` : '')}" disabled title="Recorded as the person signed in"></div>
+          </div>
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px">Enter quantities received. Branch inventory will be updated automatically.</p>
           ${pending.map(i => `
             <div class="po-receive-row">
@@ -22716,6 +22779,7 @@ const App = {
               </div>
               <input id="trecv-${i.id}" type="number" min="0" max="${i.quantity_requested-(i.quantity_received||0)}" value="${i.quantity_requested-(i.quantity_received||0)}" style="width:80px" placeholder="Qty">
             </div>`).join('')}
+          <div class="form-group" style="margin-top:10px"><label>Notes</label><input id="trecv-notes" placeholder="Optional — e.g. one box damaged"></div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
@@ -22727,8 +22791,10 @@ const App = {
   async confirmReceiveTransfer(transferId, itemIds) {
     const items = itemIds.map(id => ({ item_id: id, quantity_received: parseInt(document.getElementById(`trecv-${id}`).value) || 0 })).filter(i => i.quantity_received > 0);
     if (!items.length) { this.alert('Enter at least one quantity', 'error'); return; }
+    const by = this._readCarrier('trecv-by');
+    if (!by.id && !by.name) { this.alert('Choose who delivered the items', 'error'); return; }
     try {
-      await this.api('PATCH', `/transfers/${transferId}/receive`, { items });
+      await this.api('PATCH', `/transfers/${transferId}/receive`, { items, delivered_by_id: by.id || null, delivered_by_name: by.name || null, notes: document.getElementById('trecv-notes')?.value.trim() || null });
       this.closeModal();
       this.alert('Items received — destination branch inventory updated');
       this._refreshTransferView();
@@ -22768,7 +22834,7 @@ const App = {
           <td>${t.from_branch_name||'—'}</td>
           <td>${t.to_branch_name||'—'}</td>
           <td style="max-width:260px">${t.item_summary||'—'}</td>
-          <td><span class="badge-pill ${statusColor[t.status]||'badge-secondary'}">${this._transferStatusLabel(t.status)}</span></td>
+          <td><span class="badge-pill ${statusColor[t.status]||'badge-secondary'}">${this._transferStatusLabel(t.status)}</span>${t.driver_display_name ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">with ${this.escapeAttr(t.driver_display_name)}</div>` : ''}</td>
           <td style="text-align:right;white-space:nowrap">
             ${t.status==='pending' && this.can('transfers_pickup') ? `<button class="btn btn-sm btn-primary" onclick="App.dispatchTransfer(${t.id})">Picked Up</button>` : ''}
             ${(t.status==='pending'||t.status==='in_transit') && this.can('transfers_dropoff') ? `<button class="btn btn-sm btn-success" onclick="App.showReceiveTransfer(${t.id})">Dropped Off</button>` : ''}
