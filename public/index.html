@@ -14702,10 +14702,11 @@ const App = {
           <div class="form-group"><label>Notes</label><textarea id="cf-notes" rows="2">${c.notes||''}</textarea></div>
           <div class="form-group">
             <label>Customer Type</label>
-            <select id="cf-type" onchange="App.toggleCreditFields()">
+            <select id="cf-type" onchange="App.toggleCreditFields()" ${this.can('customers_credit') ? '' : 'disabled'}>
               <option value="cash" ${!isCredit?'selected':''}>Cash</option>
               <option value="credit" ${isCredit?'selected':''}>Credit</option>
             </select>
+            ${this.can('customers_credit') ? '' : '<p style="font-size:11px;color:var(--text-muted);margin-top:4px">Switching between Cash and Credit, and credit limits and terms, need the Manage Credit Limits permission.</p>'}
           </div>
           <div class="form-group"><label>Customer Category</label>
             <select id="cf-category">
@@ -14716,8 +14717,8 @@ const App = {
           </div>
           <div id="cf-credit-fields" style="display:${isCredit?'block':'none'}">
             <div class="input-row">
-              <div class="form-group"><label>Credit Terms (days)</label><input type="number" id="cf-terms" value="${c.credit_terms_days||30}" min="1" placeholder="e.g. 30"></div>
-              <div class="form-group"><label>Credit Limit</label><input type="number" id="cf-limit" value="${c.credit_limit||0}" min="0" step="0.01" placeholder="0 = unlimited"></div>
+              <div class="form-group"><label>Credit Terms (days)</label><input type="number" id="cf-terms" value="${c.credit_terms_days||30}" min="1" placeholder="e.g. 30" ${this.can('customers_credit') ? '' : 'readonly'}></div>
+              <div class="form-group"><label>Credit Limit</label><input type="number" id="cf-limit" value="${c.credit_limit||0}" min="0" step="0.01" placeholder="0 = unlimited" ${this.can('customers_credit') ? '' : 'readonly'}></div>
             </div>
             ${id && c.credit_block ? this._creditBlockBoxHtml(c) : ''}
           </div>
@@ -15190,7 +15191,7 @@ const App = {
     await this._runBatchedCsvImport({
       rows, endpoint: '/customers/import', title: 'Importing Customers',
       extraBody: { duplicate_mode: duplicateMode, batch_id: batchId },
-      summarize: totals => `${totals.created||0} created${totals.skipped ? `, ${totals.skipped} skipped (possible duplicate)` : ''}`,
+      summarize: totals => `${totals.created||0} created${totals.skipped ? `, ${totals.skipped} skipped (possible duplicate)` : ''}${totals.imported_as_cash ? `, ${totals.imported_as_cash} marked Credit imported as Cash (needs Manage Credit Limits)` : ''}`,
       onFinish: async () => {
         await this.api('PATCH', `/customer-imports/${batchId}/finish`).catch(() => {});
         this.renderCustomers();
@@ -24800,7 +24801,7 @@ const App = {
             <div style="display:flex;gap:8px;align-items:center">
               <input type="search" id="ar-acct-q" placeholder="Search name, business, account #, phone, email…" autocomplete="off" style="width:280px;font-size:13px" oninput="App._arAcctSearch(this.value)">
               <button class="btn btn-sm btn-outline" onclick="App.showBatchStatementsModal()">🖨 Print Statements</button>
-              <button class="btn btn-sm btn-primary" onclick="App.showEnableCreditModal()">Enable Credit for Customer</button>
+              ${this.can('customers_credit') ? '<button class="btn btn-sm btn-primary" onclick="App.showEnableCreditModal()">Enable Credit for Customer</button>' : ''}
             </div>
           </div>
           <div class="table-wrap">
@@ -26904,7 +26905,7 @@ const App = {
       { key: 'customers_add', label: 'Add Customers' },
       { key: 'customers_edit', label: 'Edit Customers' },
       { key: 'customers_delete', label: 'Delete Customers' },
-      { key: 'customers_credit', label: 'Manage Credit Limits' },
+      { key: 'customers_credit', label: 'Manage Credit Limits (Cash ↔ Credit, limits, terms)' },
       { key: 'customers_merge', label: 'Find & Merge Duplicate Customers' },
       { key: 'customers_import', label: 'Import Customers (CSV)' },
       { key: 'customers_import_history', label: 'View & Reverse Import History' },

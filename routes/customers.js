@@ -423,6 +423,33 @@ function normalizeCustomerType(t) {
   return String(t || '').trim().toLowerCase() === 'credit' ? 'credit' : 'cash';
 }
 
+// Opening or closing a credit account, or changing its limit or terms, needs
+// customers_credit ("Manage Credit Limits") — customers_add/_edit alone
+// can't. Without it a new customer is always Cash, and an edit keeps the
+// customer's type/limit/terms (a field the caller left out counts as
+// unchanged; a cash customer's hidden limit/terms are ignored). Returns
+// { type, terms, limit } to save, or { error }.
+const CREDIT_PERMISSION_ERROR = 'Changing a customer between Cash and Credit, or a credit limit or terms, needs the Manage Credit Limits permission';
+function resolveCreditFields(req, body, existing) {
+  const wanted = {
+    type: normalizeCustomerType(body.customer_type),
+    terms: parseInt(body.credit_terms_days) || 30,
+    limit: parseFloat(body.credit_limit) || 0,
+  };
+  if (req.apiKey || can(req.employee?.permissions, 'customers_credit')) return wanted;
+  if (!existing) {
+    if (wanted.type === 'credit') return { error: `Opening a credit account needs the Manage Credit Limits permission — save the customer as Cash and ask someone who has it to switch them to Credit` };
+    return { type: 'cash', terms: 30, limit: 0 };
+  }
+  const cur = { type: normalizeCustomerType(existing.customer_type), terms: existing.credit_terms_days || 30, limit: existing.credit_limit || 0 };
+  if (body.customer_type !== undefined && wanted.type !== cur.type) return { error: CREDIT_PERMISSION_ERROR };
+  if (cur.type === 'credit') {
+    if (body.credit_limit !== undefined && Math.abs(wanted.limit - cur.limit) > 0.005) return { error: CREDIT_PERMISSION_ERROR };
+    if (body.credit_terms_days !== undefined && wanted.terms !== cur.terms) return { error: CREDIT_PERMISSION_ERROR };
+  }
+  return cur;
+}
+
 const CSV_COLUMNS = ['first_name','last_name','email','phone','address','city','state','zip','customer_type','credit_terms_days','credit_limit','tax_exempt','tax_exemption_number','customer_category_name','notes'];
 
 // Text-only rental compliance fields (see lib/rentals.js RENTAL_REQUIREMENTS)
@@ -809,11 +836,11 @@ router.post('/', requirePermission('customers_add'), async (req, res) => {
     if (cardError) return res.status(400).json({ error: cardError });
     const cashBackCardError = await validateCashBackCard(cash_back_card_type_id, cash_back_card_number, null);
     if (cashBackCardError) return res.status(400).json({ error: cashBackCardError });
+    const credit = resolveCreditFields(req, req.body, null);
+    if (credit.error) return res.status(403).json({ error: credit.error });
     const customer_number = await nextNumber(db, 'customers', 'customer_number', 'CUST-', 4);
-    const type = normalizeCustomerType(customer_type);
+    const { type, terms, limit } = credit;
     const creditEnabled = type === 'credit' ? 1 : 0;
-    const terms = parseInt(credit_terms_days) || 30;
-    const limit = parseFloat(credit_limit) || 0;
     const taxExempt = tax_exempt ? 1 : 0;
     const isRentalCust = is_rental_customer ? 1 : 0;
     // Never preapproved on manual create — see resolveRentalPreapproval.
@@ -872,7 +899,10 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
     if (cardError) return res.status(400).json({ error: cardError });
     const cashBackCardError = await validateCashBackCard(cash_back_card_type_id, cash_back_card_number, req.params.id);
     if (cashBackCardError) return res.status(400).json({ error: cashBackCardError });
-    const { rows: [existing] } = await db.execute({ sql: 'SELECT phone, email, rental_preapproved, rental_preapproved_by, rental_preapproved_at FROM customers WHERE id = ?', args: [req.params.id] });
+    const { rows: [existing] } = await db.execute({ sql: 'SELECT phone, email, rental_preapproved, rental_preapproved_by, rental_preapproved_at, customer_type, credit_terms_days, credit_limit FROM customers WHERE id = ?', args: [req.params.id] });
+    if (!existing) return res.status(404).json({ error: 'Customer not found' });
+    const credit = resolveCreditFields(req, req.body, existing);
+    if (credit.error) return res.status(403).json({ error: credit.error });
     // Changing a customer's phone/email to one another active customer
     // already uses is refused, same as on create. Only checked when the value
     // actually changes, so records that already shared a number before this
@@ -885,10 +915,8 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
         if (clashes.length) return res.status(409).json(hardDuplicateError(clashes));
       }
     }
-    const type = normalizeCustomerType(customer_type);
+    const { type, terms, limit } = credit;
     const creditEnabled = type === 'credit' ? 1 : 0;
-    const terms = parseInt(credit_terms_days) || 30;
-    const limit = parseFloat(credit_limit) || 0;
     const taxExempt = tax_exempt ? 1 : 0;
     const isRentalCust = is_rental_customer ? 1 : 0;
     const preapproval = resolveRentalPreapproval(req, existing, isRentalCust, !!rental_preapproved, await createdByImport(req.params.id));
@@ -952,6 +980,10 @@ router.post('/import', requirePermission('customers_import'), async (req, res) =
     // row that asks for it without the permission just imports as an
     // ordinary (non-preapproved) rental customer instead of failing.
     const canPreapprove = can(req.employee?.permissions, 'customers_rental_preapprove');
+    // Same rule as a single create: without Manage Credit Limits, rows marked
+    // Credit come in as Cash (counted and reported back) rather than failing.
+    const canCredit = !!req.apiKey || can(req.employee?.permissions, 'customers_credit');
+    let importedAsCash = 0;
 
     let created = 0, skipped = 0;
     const errors = [];
@@ -1001,7 +1033,8 @@ router.post('/import', requirePermission('customers_import'), async (req, res) =
           }
         }
         const category_id = customer_category_name ? (catMap[customer_category_name.toLowerCase()] ?? null) : null;
-        const type = normalizeCustomerType(customer_type);
+        const asCash = !canCredit && normalizeCustomerType(customer_type) === 'credit';
+        const type = asCash ? 'cash' : normalizeCustomerType(customer_type);
         const customer_number = await nextNumber(db, 'customers', 'customer_number', 'CUST-', 4);
         // Rental fields only get stored when the row actually flags the
         // customer as a rental customer — same as POST / (single create).
@@ -1015,7 +1048,7 @@ router.post('/import', requirePermission('customers_import'), async (req, res) =
                 rental_reference3_name,rental_reference3_phone,rental_reference3_relationship,
                 rental_preapproved,rental_preapproved_by,rental_preapproved_at)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          args: [customer_number, first_name, last_name, email||null, phone||null, address||null, city||null, state||null, zip||null, type, parseInt(credit_terms_days)||30, parseFloat(credit_limit)||0, type === 'credit' ? 1 : 0, tax_exempt ? 1 : 0, tax_exemption_number||null, category_id, notes||null,
+          args: [customer_number, first_name, last_name, email||null, phone||null, address||null, city||null, state||null, zip||null, type, parseInt(credit_terms_days)||30, canCredit ? (parseFloat(credit_limit)||0) : 0, type === 'credit' ? 1 : 0, tax_exempt ? 1 : 0, tax_exemption_number||null, category_id, notes||null,
             isRentalCust ? 1 : 0, isRentalCust ? (rental_id_type||null) : null, isRentalCust ? (rental_id_number||null) : null, isRentalCust ? (rental_address_proof_type||null) : null,
             isRentalCust ? (rental_reference_name||null) : null, isRentalCust ? (rental_reference_phone||null) : null, isRentalCust ? (rental_reference_relationship||null) : null, isRentalCust ? (rental_reference_address||null) : null,
             isRentalCust ? (rental_reference2_name||null) : null, isRentalCust ? (rental_reference2_phone||null) : null, isRentalCust ? (rental_reference2_relationship||null) : null,
@@ -1029,6 +1062,7 @@ router.post('/import', requirePermission('customers_import'), async (req, res) =
         await db.execute({ sql: 'UPDATE customers SET customer_kind = ?, business_name = ? WHERE id = ?', args: [names.kind, names.business_name, newId] });
         if (contactSet.rows.length) await saveContacts(newId, contactSet.rows);
         created++;
+        if (asCash) importedAsCash++;
         await logItem(rowLabel, newId, 'created', null, null);
       } catch (e) {
         errors.push(`Row ${rowNum} (${rowLabel}): ${e.message}`);
@@ -1036,7 +1070,7 @@ router.post('/import', requirePermission('customers_import'), async (req, res) =
       }
     }
 
-    res.json({ created, skipped, errors, duplicates, total: rows.length });
+    res.json({ created, skipped, errors, duplicates, total: rows.length, imported_as_cash: importedAsCash });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

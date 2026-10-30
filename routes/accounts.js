@@ -105,13 +105,15 @@ router.get('/customer/:id/detail', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Enable/disable credit for a customer and set credit limit
-router.patch('/customer/:id', async (req, res) => {
+// Enable/disable credit for a customer and set credit limit — Manage
+// Credit Limits, same as switching a customer to Credit on their form.
+router.patch('/customer/:id', requirePermission('customers_credit'), async (req, res) => {
   try {
     const { credit_enabled, credit_limit } = req.body;
     const updates = [];
     const params = [];
-    if (credit_enabled !== undefined) { updates.push('credit_enabled = ?'); params.push(credit_enabled ? 1 : 0); }
+    // customer_type is what the POS checks for a credit sale, so it follows.
+    if (credit_enabled !== undefined) { updates.push('credit_enabled = ?', 'customer_type = ?'); params.push(credit_enabled ? 1 : 0, credit_enabled ? 'credit' : 'cash'); }
     if (credit_limit !== undefined) { updates.push('credit_limit = ?'); params.push(parseFloat(credit_limit)); }
     if (updates.length === 0) return res.status(400).json({ error: 'No fields to update' });
     params.push(req.params.id);
