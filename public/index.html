@@ -3413,7 +3413,7 @@ const App = {
     if (item.is_comment) { this.showCommentItemModal(idx); return; }
     if (item.is_delivery) { this.showDeliveryItemModal(idx); return; }
     if (!item.product_id) { this.alert('No catalog record for this line', 'warning'); return; }
-    this.showProductForm(item.product_id);
+    this.showProductCard(item.product_id);
   },
 
   posCustZoom() {
@@ -6435,7 +6435,9 @@ const App = {
     const rates = !isRental ? row('Price', this.fmt(p.price)) : isEquipment
       ? [['Hourly', p.rental_hourly_rate], ['Daily', p.rental_rate], ['Weekly', p.rental_weekly_rate], ['Monthly', p.rental_monthly_rate]].filter(([, v]) => v > 0).map(([l, v]) => row(`${l} Rate`, this.fmt(v))).join('')
       : (() => { const t = this._toolTierDayRates(p.rental_rate); return row('Daily Rate', this.fmt(p.rental_rate)) + row('Weekly Tier', `${this.fmt(t.weekTierDayRate)}/day`) + row('Monthly Tier', `${this.fmt(t.monthTierDayRate)}/day`); })();
-    const canEdit = isRental ? this.can('rentals_manage_items') : true;
+    // Same keys PUT /products/:id checks (requiredProductPermission), so the
+    // card opened from POS Item Zoom only offers Edit to people who can save.
+    const canEdit = isRental ? this.can('rentals_manage_items') : p.is_service ? this.can('services') : this.can('inventory_edit');
     const editCall = isRental ? `App.showRentalItemForm(${p.id})` : `App.showProductForm(${p.id})`;
     this.showModal(`
       <div class="modal" style="max-width:720px">
