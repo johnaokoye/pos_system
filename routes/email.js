@@ -2657,7 +2657,10 @@ function drawerReportPdfModel(sess, s) {
       cells: [t.label, t.tx_count, money(t.sales), t.uncounted ? '-' : money(t.expected), t.uncounted ? 'n/a' : money(t.counted), signed(t.variance)],
       sub: t.key === 'cash' ? [r.payouts_total ? `less petty cash ${fmt(r.payouts_total)}` : '', r.float.included_in_cash ? `incl. ${fmt(r.float.opening)} float` : 'float returned separately'].filter(Boolean).join(' · ')
         : t.key === 'available_credit' ? 'store credit from customer accounts - no money in the drawer' : '',
-    })) });
+    })).concat(r.summary ? [{
+      cells: ['All Tenders', r.summary.tx_count ?? '', money(r.summary.sales), money(r.summary.expected), money(r.summary.counted), signed(r.summary.takings_variance)],
+      sub: 'every tender as one (store credit has nothing to count)',
+    }] : []) });
   if ((sess.payouts || []).length) {
     tables.push({ heading: 'Petty Cash Paid Out', mainCol: 2, columns: [{ label: 'Voucher #', width: 1.3 }, { label: 'Paid To', width: 1.8 }, { label: 'Reason', width: 2.6 }, { label: 'Amount', width: 1.2, align: 'right' }],
       rows: sess.payouts.map(p => ({ cells: [p.voucher_number, p.paid_to || '', p.reason || '', p.voided_at ? 'VOID' : fmt(p.amount)],
@@ -2691,7 +2694,15 @@ function drawerReportPdfModel(sess, s) {
       r.payouts_total ? { label: `Petty cash (${r.payouts_count})`, value: `-${fmt(r.payouts_total)}` } : null,
       { label: 'Expected cash', value: fmt(cash.expected) },
       { label: 'Cash counted', value: money(cash.counted) },
-      { label: 'Cash variance', value: signed(cash.variance), style: 'grand' },
+      { label: 'Cash variance', value: signed(cash.variance) },
+      ...(r.summary ? [
+        { label: 'All tenders', style: 'heading' },
+        { label: 'Expected', value: fmt(r.summary.expected) },
+        { label: 'Counted', value: money(r.summary.counted) },
+        { label: 'Tenders variance', value: signed(r.summary.takings_variance) },
+        ...(r.summary.float_variance != null ? [{ label: 'Float variance', value: signed(r.summary.float_variance) }] : []),
+        { label: 'Overall variance', value: signed(r.summary.overall_variance), style: 'grand' },
+      ] : []),
     ].filter(Boolean),
     notes: rec?.notes ? [rec.notes] : [],
     footer: `Printed ${new Date().toLocaleString()}`,

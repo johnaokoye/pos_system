@@ -30062,12 +30062,25 @@ const App = {
     return `<span style="${style}">${v >= 0 ? '+' : '-'}${this._drawerMoney(Math.abs(v)).replace('$', '')}</span>`;
   },
 
+  // Overall over/short for the whole drawer: every counted tender's
+  // variance plus the float's (lib/drawerReport.js summary).
+  _drawerOverallHtml(sum, m) {
+    if (sum.overall_variance == null) return `<p style="font-size:12px;color:var(--text-muted,#777);margin:8px 0 0">Overall variance shows once the drawer is reconciled.</p>`;
+    const v = sum.overall_variance;
+    const tone = v < 0 ? ['#fef2f2', '#fecaca', '#991b1b', 'Short'] : v > 0 ? ['#f0fdf4', '#bbf7d0', '#166534', 'Over'] : ['#f9fafb', '#e5e7eb', '#374151', 'Balanced'];
+    return `<div style="margin-top:10px;padding:10px 12px;border:1px solid ${tone[1]};background:${tone[0]};border-radius:6px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+      <div style="font-size:12px;color:#444">All tenders ${this._drawerVarianceHtml(sum.takings_variance)}${sum.float_variance != null ? ` &nbsp;+&nbsp; float ${this._drawerVarianceHtml(sum.float_variance)}` : ''}</div>
+      <div style="font-size:15px;font-weight:700;color:${tone[2]}">Overall Variance: ${v > 0 ? '+' : v < 0 ? '−' : ''}${m(Math.abs(v))} <span style="font-size:12px;font-weight:600">(${tone[3]})</span></div>
+    </div>`;
+  },
+
   // The body of a drawer report (lib/drawerReport.js figures) — shared by
   // the on-screen report and the printed copy. With `actions`, petty cash
   // rows get a Void button for drawers_manage before reconciliation.
   _drawerReportBodyHtml(s, { actions = false } = {}) {
     const r = s.report, rec = s.reconciliation, esc = v => this.escapeAttr(v ?? ''), m = n => this._drawerMoney(n);
     const cash = r.tenders.find(t => t.key === 'cash');
+    const sum = r.summary;
     const canVoid = actions && s.status !== 'reconciled' && this.can('drawers_manage');
     const tenderRows = r.tenders.filter(t => !t.uncounted || t.sales || t.key === 'available_credit').map(t => {
       const note = t.key === 'cash'
@@ -30117,9 +30130,18 @@ const App = {
       <h3 style="font-size:13px;margin:14px 0 6px">Takings</h3>
       <table class="table" style="margin-bottom:0">
         <thead><tr><th>Tender</th><th style="text-align:center">Txns</th><th style="text-align:right">Sales</th><th style="text-align:right">Expected</th><th style="text-align:right">Counted</th><th style="text-align:right">Variance</th></tr></thead>
-        <tbody>${tenderRows}</tbody>
+        <tbody>${tenderRows}${sum ? `
+          <tr style="font-weight:700;border-top:2px solid var(--border,#ccc)">
+            <td>All Tenders</td>
+            <td style="text-align:center">${sum.tx_count ?? ''}</td>
+            <td style="text-align:right">${m(sum.sales)}</td>
+            <td style="text-align:right">${m(sum.expected)}</td>
+            <td style="text-align:right">${sum.counted != null ? m(sum.counted) : '<span style="color:var(--text-muted,#777)">—</span>'}</td>
+            <td style="text-align:right">${this._drawerVarianceHtml(sum.takings_variance)}</td>
+          </tr>` : ''}</tbody>
       </table>
       <p style="font-size:12px;color:var(--text-muted,#777);margin:6px 0 0">Expected cash = cash sales &amp; account payments ${m(r.cash_sales)}${r.payouts_total ? ` − petty cash ${m(r.payouts_total)}` : ''}${r.float.included_in_cash ? ` + float ${m(r.float.opening)}` : ''} = <strong>${m(cash.expected)}</strong></p>
+      ${sum ? this._drawerOverallHtml(sum, m) : ''}
       ${payoutsHtml}
       ${acctHtml}
       ${denomHtml}
@@ -30237,6 +30259,8 @@ const App = {
       </details>` : `<p style="font-size:11px;color:var(--text-muted);margin:4px 0 8px">No denominations configured for ${this.escapeAttr(base)}. Set them up in Settings.</p>`;
 
     const nonCash = r.tenders.filter(t => t.key !== 'cash' && !t.uncounted);
+    // What section 4 totals as the counts are typed.
+    this._reconcileSummary = { opening: r.float.opening, tenders: [{ key: 'cash', expected: expectedCash }, ...nonCash.map(t => ({ key: t.key, expected: t.expected }))] };
     this.showModal(`
       <div class="modal" style="max-width:720px">
         <div class="modal-header">
@@ -30294,6 +30318,15 @@ const App = {
             </tbody>
           </table>
           ${(() => { const ac = r.tenders.find(t => t.key === 'available_credit'); return ac && ac.sales ? `<p style="font-size:12px;color:var(--text-muted);margin:-6px 0 10px">Available Credit ${m(ac.sales)} was paid from customers' store credit — no money in the drawer, nothing to count.</p>` : ''; })()}
+          <h3 style="font-size:13px;margin:0 0 6px">4. Summary — all tenders</h3>
+          <table class="table" style="margin-bottom:12px">
+            <thead><tr><th></th><th>Expected</th><th>Counted</th><th>Variance</th></tr></thead>
+            <tbody>
+              <tr><td>All tenders</td><td>${m(this._reconcileSummary.tenders.reduce((t, x) => t + x.expected, 0))}</td><td id="rcs-counted"></td><td id="rcs-var" style="font-weight:600"></td></tr>
+              <tr><td>Float</td><td>${m(r.float.opening)}</td><td id="rcs-float"></td><td id="rcs-float-var" style="font-weight:600"></td></tr>
+              <tr style="font-weight:700;border-top:2px solid var(--border)"><td>Overall</td><td>${m(this._reconcileSummary.tenders.reduce((t, x) => t + x.expected, 0) + r.float.opening)}</td><td id="rcs-all"></td><td id="rcs-all-var"></td></tr>
+            </tbody>
+          </table>
           <div class="form-group"><label>Notes</label>
             <textarea id="rc-notes" rows="2" placeholder="Optional notes…">${this.escapeAttr(rec.notes||'')}</textarea>
           </div>
@@ -30308,12 +30341,34 @@ const App = {
         </div>
       </div>`);
     this._updateDenomTotal();
+    this._updateReconcileSummary();
   },
 
   _updateFloatVariance(opening) {
     const val = parseFloat(document.getElementById('rc-float')?.value) || 0;
     const el = document.getElementById('rcv-float');
     if (el) el.innerHTML = this._calcVariance(val, opening);
+    this._updateReconcileSummary();
+  },
+
+  // Section 4 of the reconcile screen: every tender counted as one, the
+  // float, and the overall over/short — same sums as the saved report's
+  // summary (lib/drawerReport.js).
+  _updateReconcileSummary() {
+    const sum = this._reconcileSummary;
+    if (!sum || !document.getElementById('rcs-all')) return;
+    const val = id => parseFloat(document.getElementById(id)?.value) || 0;
+    const cents = n => Math.round(n * 100);
+    const expected = sum.tenders.reduce((t, x) => t + cents(x.expected), 0) / 100;
+    const counted = sum.tenders.reduce((t, x) => t + cents(val(`rc-${x.key}`)), 0) / 100;
+    const floatBack = val('rc-float');
+    const m = n => this._drawerMoney(n);
+    document.getElementById('rcs-counted').textContent = m(counted);
+    document.getElementById('rcs-var').innerHTML = this._calcVariance(counted, expected);
+    document.getElementById('rcs-float').textContent = m(floatBack);
+    document.getElementById('rcs-float-var').innerHTML = this._calcVariance(floatBack, sum.opening);
+    document.getElementById('rcs-all').textContent = m(counted + floatBack);
+    document.getElementById('rcs-all-var').innerHTML = this._calcVariance(counted + floatBack, expected + sum.opening);
   },
 
   // Per-currency totals of the denomination count, and their sum in the
@@ -30361,6 +30416,7 @@ const App = {
     const val = parseFloat(document.getElementById(`rc-${key}`)?.value) || 0;
     const el = document.getElementById(`rcv-${key}`);
     if (el) el.innerHTML = this._calcVariance(val, expected);
+    this._updateReconcileSummary();
   },
 
   async submitReconcile(id) {
