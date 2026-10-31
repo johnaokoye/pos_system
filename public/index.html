@@ -417,7 +417,8 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 @keyframes home-drop { 0% { transform: translateY(-6px); opacity: 0; } 20% { opacity: 1; } 100% { transform: translateY(16px); opacity: 0; } }
 @keyframes home-flash { 0%, 86%, 100% { opacity: 0; } 88%, 92% { opacity: 1; } }
 .home-hours { position: relative; margin-top: auto; padding-top: 120px; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
-.home-hours:empty { display: block; padding-top: 0; min-height: 150px; }
+.home-hours:empty { display: block; padding-top: 0; min-height: 70px; }
+.home-sky:has(.home-hours:empty) .home-land { bottom: -96px; }
 .home-hour { flex: 1 0 64px; text-align: center; padding: 10px 4px 8px; border-radius: 12px; background: rgba(255,255,255,.14); backdrop-filter: blur(4px); font-size: 12px; }
 .home-hour .home-wicon { width: 38px; height: 38px; display: block; margin: 2px auto; }
 .home-hour b { display: block; font-size: 15px; }
