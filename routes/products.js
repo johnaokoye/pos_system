@@ -1326,9 +1326,17 @@ router.put('/:id', async (req, res, next) => {
       }
     }
     if (rnt && !acc && branch_id !== undefined) {
-      const { rows: [{ n }] } = await db.execute({ sql: 'SELECT COUNT(*) AS n FROM branch_inventory WHERE product_id = ?', args: [req.params.id] });
-      if (n > 1) return res.status(400).json({ error: `This item is stocked at ${n} locations — only accessories can be. Set every location but one to 0 (as an accessory) before unticking "This is an accessory".` });
-      const { rows: [currentBI] } = await db.execute({ sql: 'SELECT branch_id FROM branch_inventory WHERE product_id = ?', args: [req.params.id] });
+      // A location with nothing on hand or held (e.g. left behind by a retail
+      // item that shared this SKU) is just dropped by the save below; only two
+      // or more locations that still hold units block it.
+      const { rows: locs } = await db.execute({ sql: 'SELECT bi.branch_id, bi.stock_qty, b.name FROM branch_inventory bi LEFT JOIN branches b ON b.id = bi.branch_id WHERE bi.product_id = ?', args: [req.params.id] });
+      const stocked = [];
+      for (const l of locs) {
+        const held = (await getOutstandingQty(db, req.params.id, l.branch_id)) + (await getOutOfServiceQty(db, req.params.id, l.branch_id));
+        if ((Number(l.stock_qty) || 0) > 0 || held > 0) stocked.push(l);
+      }
+      if (stocked.length > 1) return res.status(400).json({ error: `This item has stock at ${stocked.length} locations (${stocked.map(l => `${l.name || 'unknown'}: ${l.stock_qty}`).join(', ')}) — only accessories can be. Tick "This is an accessory", set every location but one to 0 and save, then untick it.` });
+      const currentBI = stocked[0] || locs[0];
       const oldBranchId = currentBI?.branch_id || null;
       if (oldBranchId && String(oldBranchId) !== String(branch_id || '')) {
         const outstanding = await getOutstandingQty(db, req.params.id, oldBranchId);
