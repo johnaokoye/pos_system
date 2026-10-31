@@ -416,9 +416,9 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 @keyframes home-drift { 0%,100% { transform: translateX(-4px); } 50% { transform: translateX(5px); } }
 @keyframes home-drop { 0% { transform: translateY(-6px); opacity: 0; } 20% { opacity: 1; } 100% { transform: translateY(16px); opacity: 0; } }
 @keyframes home-flash { 0%, 86%, 100% { opacity: 0; } 88%, 92% { opacity: 1; } }
-.home-hours { position: relative; margin-top: auto; padding-top: 120px; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+.home-hours { position: relative; margin-top: auto; padding-top: 150px; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
 .home-hours:empty { display: block; padding-top: 0; min-height: 70px; }
-.home-sky:has(.home-hours:empty) .home-land { bottom: -96px; }
+.home-sky:has(.home-hours:empty) .home-land { bottom: -126px; }
 .home-hour { flex: 1 0 64px; text-align: center; padding: 10px 4px 8px; border-radius: 12px; background: rgba(255,255,255,.14); backdrop-filter: blur(4px); font-size: 12px; }
 .home-hour .home-wicon { width: 38px; height: 38px; display: block; margin: 2px auto; }
 .home-hour b { display: block; font-size: 15px; }
@@ -443,13 +443,13 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .home-sky.night { --hill-far: rgba(20,30,70,.6); --hill-near: rgba(10,16,40,.85); --ground: rgba(6,10,26,.92); --road: rgba(20,22,32,.95); --veh-filter: brightness(.55) saturate(.8); }
 .home-sky.grey { --hill-far: rgba(60,85,80,.45); --hill-near: rgba(45,70,60,.72); --ground: rgba(36,52,46,.85); }
 .home-sky.storm { --hill-far: rgba(30,40,45,.6); --hill-near: rgba(20,28,32,.85); --ground: rgba(14,20,24,.92); --veh-filter: brightness(.7); }
-.home-land { position: absolute; left: 0; right: 0; bottom: 0; height: 300px; pointer-events: none; overflow: hidden; }
+.home-land { position: absolute; left: 0; right: 0; bottom: 0; height: 330px; pointer-events: none; overflow: hidden; }
 .home-land > svg { position: absolute; inset: 0; width: 100%; height: 100%; }
 .home-veh { position: absolute; width: 130px; height: 66px; animation: home-drive 32s linear infinite; }
 .home-veh svg { width: 100%; height: 100%; overflow: visible; filter: var(--veh-filter); }
-.home-veh.far { width: 82px; height: 42px; bottom: 150px; animation-name: home-drive-left; animation-duration: 44s; opacity: .9; }
+.home-veh.far { width: 82px; height: 42px; bottom: 180px; animation-name: home-drive-left; animation-duration: 44s; opacity: .9; }
 .home-veh.far svg { transform: scaleX(-1); }
-.home-veh.near { bottom: 128px; }
+.home-veh.near { bottom: 158px; }
 @keyframes home-drive { from { left: -180px; } to { left: 100%; } }
 @keyframes home-drive-left { from { left: 100%; } to { left: -120px; } }
 .home-veh .wh { animation: home-spin .7s linear infinite; }
@@ -27356,14 +27356,14 @@ const App = {
     const near = [[dump, 0], [excavator, -11], [dozer, -22]];
     const far = [[mixer, -6], [flatbed, -28]];
     return `
-      <svg viewBox="0 0 1000 300" preserveAspectRatio="none" aria-hidden="true">
-        <path d="M0 150 C 90 70 180 90 260 120 S 420 60 520 100 S 700 70 800 110 S 940 80 1000 100 V 300 H 0 Z" fill="var(--hill-far)"/>
-        <path d="M0 175 C 120 120 230 150 330 140 S 520 110 640 145 S 860 120 1000 140 V 300 H 0 Z" fill="var(--hill-near)"/>
+      <svg viewBox="0 0 1000 330" preserveAspectRatio="none" aria-hidden="true">
+        <path d="M0 150 C 90 70 180 90 260 120 S 420 60 520 100 S 700 70 800 110 S 940 80 1000 100 V 330 H 0 Z" fill="var(--hill-far)"/>
+        <path d="M0 175 C 120 120 230 150 330 140 S 520 110 640 145 S 860 120 1000 140 V 330 H 0 Z" fill="var(--hill-near)"/>
         ${[[70, 128], [150, 132], [380, 126], [610, 132], [690, 136], [880, 128], [930, 130]].map(([x, y]) => `<path d="M${x} ${y}l7 -20l7 20z" fill="var(--hill-near)"/><rect x="${x + 6}" y="${y}" width="2" height="5" fill="var(--hill-near)"/>`).join('')}
         <rect x="0" y="138" width="1000" height="34" fill="var(--road)"/>
         <path d="M0 155 H1000" stroke="rgba(255,213,79,.7)" stroke-width="2" stroke-dasharray="22 18"/>
         <path d="M0 139 H1000 M0 171 H1000" stroke="rgba(255,255,255,.35)" stroke-width="1.5"/>
-        <rect x="0" y="172" width="1000" height="128" fill="var(--ground)"/>
+        <rect x="0" y="172" width="1000" height="158" fill="var(--ground)"/>
       </svg>
       ${far.map(([v, d]) => `<div class="home-veh far" style="animation-delay:${d}s">${v}</div>`).join('')}
       ${near.map(([v, d]) => `<div class="home-veh near" style="animation-delay:${d}s">${v}</div>`).join('')}`;
