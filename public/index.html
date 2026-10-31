@@ -27119,15 +27119,23 @@ const App = {
     const unit = this._homeUnit();
     if (this._homeWeather && this._homeWeather.city === city && this._homeWeather.unit === unit && Date.now() - this._homeWeather.at < 15 * 60e3) return this._homeWeather;
     let place;
-    const cacheKey = `homeGeo:${city}|${b.state || ''}`;
+    // v2: earlier lookups could pick a same-named town abroad (Drax Hall, Barbados).
+    const cacheKey = `homeGeo2:${city}|${b.state || ''}`;
     try { place = JSON.parse(localStorage.getItem(cacheKey) || 'null'); } catch {}
     if (!place) {
       const g = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=10&language=en&format=json`).then(r => r.json());
       const results = g.results || [];
       if (!results.length) return { error: `Couldn't find "${city}" for the weather.` };
-      // Prefer the match in the branch's state/parish when one is set.
-      const st = String(b.state || '').trim().toLowerCase();
-      const hit = (st && results.find(r => [r.admin1, r.admin2, r.country, r.country_code].some(v => v && (String(v).toLowerCase() === st || String(v).toLowerCase().startsWith(st))))) || results[0];
+      // Same-named towns exist across countries (Drax Hall is in Jamaica and
+      // Barbados), so rank: the branch's state/parish ("St. Ann" = "Saint Ann
+      // Parish"), then the store's country (from its currency: JMD → JM),
+      // then the geocoder's own order.
+      const norm = v => String(v || '').toLowerCase().replace(/\bst\.?\s/g, 'saint ').replace(/\bparish\b/g, '').replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
+      const st = norm(b.state);
+      const country = String(b.currency || this.settings?.currency || '').slice(0, 2).toUpperCase();
+      const stateHit = r => st && [r.admin1, r.admin2, r.country].some(v => { const n = norm(v); return n && (n === st || n.includes(st) || st.includes(n)); });
+      const score = r => (stateHit(r) ? 2 : 0) + (country && r.country_code === country ? 1 : 0);
+      const hit = results.reduce((best, r) => score(r) > score(best) ? r : best, results[0]);
       place = { lat: hit.latitude, lon: hit.longitude, name: [hit.name, hit.admin1 && hit.admin1 !== hit.name ? hit.admin1 : null, hit.country_code].filter(Boolean).join(', ') };
       try { localStorage.setItem(cacheKey, JSON.stringify(place)); } catch {}
     }
