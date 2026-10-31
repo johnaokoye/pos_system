@@ -32,6 +32,10 @@ async function attachBranches(emp) {
       ? (await db.execute({ sql: `SELECT b.id, b.branch_code, b.name, b.currency, b.city, b.state, 1 as is_default FROM branches b WHERE b.id = ? AND b.active = 1`, args: [emp.default_branch_id] })).rows
       : [];
   }
+  // Where the Home page's weather comes from when the employee has no branch,
+  // or their branch has no city set: the Drax Hall branch (the owner's choice).
+  const { rows: [fallback] } = await db.execute("SELECT name, city, state, currency FROM branches WHERE name = 'Drax Hall' AND active = 1 LIMIT 1");
+  emp.weather_branch = fallback || null;
 }
 
 // requireAuth only, not requirePermission('employees') — this list is used

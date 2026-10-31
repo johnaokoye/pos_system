@@ -27118,8 +27118,12 @@ const App = {
   },
 
   async _homeLoadWeather() {
+    // The user's default branch, or — with no branch, or one without a city
+    // — the Drax Hall branch (weather_branch, set at login).
     const branches = this.currentUser.branches || [];
-    const b = branches.find(x => x.is_default) || branches[0];
+    const own = branches.find(x => x.is_default) || branches[0];
+    const fb = this.currentUser.weather_branch;
+    const b = own?.city ? own : fb ? { ...fb, city: fb.city || fb.name } : own;
     const city = String(b?.city || '').trim();
     if (!city) return { error: 'Add a city to your branch (Admin → Branches) to see the weather here.' };
     const unit = this._homeUnit();
