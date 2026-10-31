@@ -381,9 +381,15 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .home-sky.dawn { background: linear-gradient(160deg, #3f4c8a 0%, #c86b98 50%, #ffb88c 100%); }
 .home-sky.day { background: linear-gradient(160deg, #1e88e5 0%, #4fb3ff 55%, #a8e4ff 100%); }
 .home-sky.dusk { background: linear-gradient(160deg, #2d2a6e 0%, #b8487a 55%, #ff9a5a 100%); }
-.home-sky.grey { background: linear-gradient(160deg, #46566b 0%, #6f8197 55%, #a9b6c6 100%); }
+.home-sky.grey { background: linear-gradient(160deg, #4f6f8f 0%, #7d9bb8 55%, #b9cde0 100%); }
 .home-sky.storm { background: linear-gradient(160deg, #1f2533 0%, #3b4457 55%, #5f6b80 100%); }
 .home-stars { position: absolute; inset: 0; pointer-events: none; }
+.home-clouds, .home-precip { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.home-clouds span { position: absolute; left: -45%; width: 45%; border-radius: 50%; background: rgba(255,255,255,.5); filter: blur(16px); animation: home-cloud linear infinite; }
+@keyframes home-cloud { to { transform: translateX(330%); } }
+.home-precip i { position: absolute; top: -40px; width: 1.5px; height: 20px; background: linear-gradient(transparent, rgba(255,255,255,.75)); animation: home-rain linear infinite; }
+.home-precip.snow i { width: 5px; height: 5px; border-radius: 50%; background: rgba(255,255,255,.9); }
+@keyframes home-rain { to { transform: translate(-30px, 720px); } }
 .home-stars i { position: absolute; width: 2px; height: 2px; border-radius: 50%; background: #fff; animation: home-twinkle 3s ease-in-out infinite; }
 @keyframes home-twinkle { 0%,100% { opacity: .2; } 50% { opacity: 1; } }
 .home-greet { position: relative; font-size: 15px; opacity: .9; letter-spacing: .02em; }
@@ -27141,7 +27147,7 @@ const App = {
     }
     const qs = new URLSearchParams({
       latitude: place.lat, longitude: place.lon, timezone: 'auto', forecast_days: '4',
-      current: 'temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,is_day',
+      current: 'temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,is_day,cloud_cover',
       daily: 'weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,precipitation_probability_max',
       hourly: 'temperature_2m,weather_code,precipitation_probability,is_day', forecast_hours: '24',
       temperature_unit: unit === 'F' ? 'fahrenheit' : 'celsius', wind_speed_unit: unit === 'F' ? 'mph' : 'kmh',
@@ -27161,8 +27167,11 @@ const App = {
     else { rise = new Date(now).setHours(6, 15, 0, 0); set = new Date(now).setHours(18, 15, 0, 0); }
     const hr = 3600e3, t = now.getTime();
     let phase = t < rise - hr / 2 || t > set + hr / 2 ? 'night' : t < rise + hr ? 'dawn' : t > set - hr ? 'dusk' : 'day';
+    // Grey only when the sky really is covered — a passing drizzle under a
+    // mostly clear sky stays blue (its clouds and rain are drawn on top).
+    const cover = wx?.w?.current?.cloud_cover ?? (kind === 'cloudy' ? 100 : 0);
     if (phase === 'day' && kind === 'storm') phase = 'storm';
-    else if (phase === 'day' && ['cloudy', 'rain', 'fog', 'snow'].includes(kind)) phase = 'grey';
+    else if (phase === 'day' && (kind === 'cloudy' || kind === 'fog' || (['rain', 'snow'].includes(kind) && cover >= 60))) phase = 'grey';
     return phase;
   },
 
@@ -27174,6 +27183,8 @@ const App = {
       <div class="home-wrap">
         <div class="home-sky" id="home-sky">
           <div class="home-stars" id="home-stars"></div>
+          <div class="home-clouds" id="home-clouds"></div>
+          <div class="home-precip" id="home-precip"></div>
           <div class="home-greet" id="home-greet"></div>
           <div class="home-clock-row">
             <svg class="home-analog" viewBox="0 0 200 200" aria-hidden="true">
@@ -27247,6 +27258,7 @@ const App = {
     const el = document.getElementById('home-weather');
     if (wx.error) { el.innerHTML = `<div style="opacity:.85;font-size:14px">⛅ ${this.escapeAttr(wx.error)}</div>`; wx = null; tick(); return; }
     const cur = wx.w.current, unit = wx.unit, deg = `°${unit}`;
+    this._homePaintSkyFx(cur);
     el.innerHTML = `
       ${this._homeWeatherSvg(this._homeKind(cur.weather_code), !!cur.is_day)}
       <div>
@@ -27275,6 +27287,26 @@ const App = {
       </div>`).join('');
     this._homePaintSun(wx.w, new Date());
     tick();
+  },
+
+  // Drifting clouds (as many as the cloud cover) and falling rain or snow
+  // (heavier codes, more drops) over the sky.
+  _homePaintSkyFx(cur) {
+    const kind = this._homeKind(cur.weather_code);
+    const cover = cur.cloud_cover ?? ({ clear: 0, partly: 40, cloudy: 90, fog: 80 }[kind] ?? 70);
+    const clouds = Math.round(cover / 12);
+    const cl = document.getElementById('home-clouds');
+    if (cl) cl.innerHTML = Array.from({ length: clouds }, (_, i) => {
+      const dur = 70 + (i * 23) % 60;
+      return `<span style="top:${(i * 29) % 75}%;height:${50 + (i * 17) % 50}px;opacity:${.35 + (i % 4) * .15};animation-duration:${dur}s;animation-delay:-${(i * 37) % dur}s"></span>`;
+    }).join('');
+    const pr = document.getElementById('home-precip');
+    if (!pr) return;
+    const code = cur.weather_code;
+    const drops = kind === 'snow' ? 40 : kind === 'storm' ? 110 : kind === 'rain' ? ([51, 56, 61, 80].includes(code) ? 30 : [53, 63, 66, 81].includes(code) ? 70 : 110) : 0;
+    pr.className = `home-precip${kind === 'snow' ? ' snow' : ''}`;
+    pr.innerHTML = Array.from({ length: drops }, (_, i) =>
+      `<i style="left:${(i * 47) % 105}%;animation-duration:${kind === 'snow' ? 6 + (i % 5) : .7 + (i % 5) * .12}s;animation-delay:-${(i * 0.37) % 6}s"></i>`).join('');
   },
 
   // Sunrise → sunset arc with the sun (or moon, after dark) where it is now.
