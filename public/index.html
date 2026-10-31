@@ -393,7 +393,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .home-sub { position: relative; font-size: 13px; opacity: .8; margin-top: 2px; }
 .home-clock-row { position: relative; display: flex; align-items: center; gap: 28px; flex-wrap: wrap; }
 .home-analog { width: 170px; height: 170px; flex: none; filter: drop-shadow(0 6px 16px rgba(0,0,0,.2)); }
-.home-analog .hand { transform-origin: 100px 100px; transition: transform .25s cubic-bezier(.4,2.3,.6,1); }
+.home-analog .hand { transform-origin: 100px 100px; will-change: transform; }
 .home-weather-now { position: relative; display: flex; align-items: center; gap: 18px; margin-top: 26px; flex-wrap: wrap; }
 .home-temp { font-size: 64px; font-weight: 800; line-height: 1; }
 .home-temp sup { font-size: 22px; font-weight: 600; cursor: pointer; opacity: .85; }
@@ -27207,11 +27207,6 @@ const App = {
       if (this.section !== 'home' || !document.getElementById('home-time')) { clearInterval(this._homeTimer); this._homeTimer = null; return; }
       const now = new Date();
       const h = now.getHours(), m = now.getMinutes(), sec = now.getSeconds();
-      // Hands turn continuously (no jump back at 12 / 60) — angles keep counting up.
-      const days = Math.floor(now.getTime() / 864e5);
-      document.getElementById('home-h').style.transform = `rotate(${(days * 2 + Math.floor(h / 12)) * 360 + ((h % 12) + m / 60) * 30}deg)`;
-      document.getElementById('home-m').style.transform = `rotate(${(days * 24 + h) * 360 + (m + sec / 60) * 6}deg)`;
-      document.getElementById('home-s').style.transform = `rotate(${((days * 24 + h) * 60 + m) * 360 + sec * 6}deg)`;
       const t = now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
       const [hm, ap] = t.split(' ');
       document.getElementById('home-time').innerHTML = `${hm}<small>${String(sec).padStart(2, '0')} ${ap || ''}</small>`;
@@ -27228,6 +27223,21 @@ const App = {
       stars.style.display = sky === 'night' ? '' : 'none';
       if (wx?.w && sec === 0) this._homePaintSun(wx.w, now);
     };
+    // Hands sweep smoothly: positioned every animation frame from the exact
+    // time (milliseconds included) rather than stepped once a second.
+    const handH = document.getElementById('home-h'), handM = document.getElementById('home-m'), handS = document.getElementById('home-s');
+    const sweep = () => {
+      if (this.section !== 'home' || !handS.isConnected) return;
+      const now = new Date();
+      const secs = now.getSeconds() + now.getMilliseconds() / 1000;
+      const mins = now.getMinutes() + secs / 60;
+      const hrs = (now.getHours() % 12) + mins / 60;
+      handS.style.transform = `rotate(${secs * 6}deg)`;
+      handM.style.transform = `rotate(${mins * 6}deg)`;
+      handH.style.transform = `rotate(${hrs * 30}deg)`;
+      requestAnimationFrame(sweep);
+    };
+    requestAnimationFrame(sweep);
     clearInterval(this._homeTimer);
     tick();
     this._homeTimer = setInterval(tick, 1000);
