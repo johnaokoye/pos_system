@@ -416,8 +416,8 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 @keyframes home-drift { 0%,100% { transform: translateX(-4px); } 50% { transform: translateX(5px); } }
 @keyframes home-drop { 0% { transform: translateY(-6px); opacity: 0; } 20% { opacity: 1; } 100% { transform: translateY(16px); opacity: 0; } }
 @keyframes home-flash { 0%, 86%, 100% { opacity: 0; } 88%, 92% { opacity: 1; } }
-.home-hours { position: relative; margin-top: auto; padding-top: 22px; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
-.home-hours:empty { display: none; }
+.home-hours { position: relative; margin-top: auto; padding-top: 120px; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+.home-hours:empty { display: block; padding-top: 0; min-height: 150px; }
 .home-hour { flex: 1 0 64px; text-align: center; padding: 10px 4px 8px; border-radius: 12px; background: rgba(255,255,255,.14); backdrop-filter: blur(4px); font-size: 12px; }
 .home-hour .home-wicon { width: 38px; height: 38px; display: block; margin: 2px auto; }
 .home-hour b { display: block; font-size: 15px; }
@@ -435,6 +435,35 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .home-link { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 14px 8px; border-radius: 12px; color: #fff; font-weight: 700; font-size: 13px; cursor: pointer; text-align: center; transition: transform .15s, box-shadow .15s; }
 .home-link:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(0,0,0,.15); }
 .home-link svg { width: 26px; height: 26px; }
+
+/* Home landscape: hills, a two-lane road and heavy equipment driving by */
+.home-sky { --hill-far: rgba(40,110,70,.45); --hill-near: rgba(30,90,50,.72); --ground: rgba(28,60,34,.82); --road: rgba(48,52,58,.92); --veh-filter: none; }
+.home-sky.dawn, .home-sky.dusk { --hill-far: rgba(90,50,100,.45); --hill-near: rgba(60,35,80,.72); --ground: rgba(40,25,55,.85); --road: rgba(40,34,50,.92); --veh-filter: brightness(.85); }
+.home-sky.night { --hill-far: rgba(20,30,70,.6); --hill-near: rgba(10,16,40,.85); --ground: rgba(6,10,26,.92); --road: rgba(20,22,32,.95); --veh-filter: brightness(.55) saturate(.8); }
+.home-sky.grey { --hill-far: rgba(60,85,80,.45); --hill-near: rgba(45,70,60,.72); --ground: rgba(36,52,46,.85); }
+.home-sky.storm { --hill-far: rgba(30,40,45,.6); --hill-near: rgba(20,28,32,.85); --ground: rgba(14,20,24,.92); --veh-filter: brightness(.7); }
+.home-land { position: absolute; left: 0; right: 0; bottom: 0; height: 300px; pointer-events: none; overflow: hidden; }
+.home-land > svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.home-veh { position: absolute; width: 130px; height: 66px; animation: home-drive 32s linear infinite; }
+.home-veh svg { width: 100%; height: 100%; overflow: visible; filter: var(--veh-filter); }
+.home-veh.far { width: 82px; height: 42px; bottom: 150px; animation-name: home-drive-left; animation-duration: 44s; opacity: .9; }
+.home-veh.far svg { transform: scaleX(-1); }
+.home-veh.near { bottom: 128px; }
+@keyframes home-drive { from { left: -180px; } to { left: 100%; } }
+@keyframes home-drive-left { from { left: 100%; } to { left: -120px; } }
+.home-veh .wh { animation: home-spin .7s linear infinite; }
+.home-veh .trk { animation: home-track .5s linear infinite; }
+.home-veh .body { animation: home-bob .45s ease-in-out infinite alternate; }
+.home-veh .arm { animation: home-dig 3.2s ease-in-out infinite; }
+.home-veh .drum { animation: home-track 1.2s linear infinite; }
+.home-veh .dust circle { animation: home-dust 1.1s ease-out infinite; opacity: 0; }
+.home-veh .beam { opacity: 0; transition: opacity 1s; }
+.home-sky.night .home-veh .beam, .home-sky.storm .home-veh .beam { opacity: 1; }
+@keyframes home-track { to { stroke-dashoffset: -16; } }
+@keyframes home-bob { to { transform: translateY(-1.2px); } }
+@keyframes home-dig { 0%, 100% { transform: rotate(4deg); } 50% { transform: rotate(-16deg); } }
+@keyframes home-dust { 0% { opacity: .55; transform: translate(0,0) scale(.6); } 100% { opacity: 0; transform: translate(-18px,-8px) scale(1.6); } }
+@media (prefers-reduced-motion: reduce) { .home-land *, .home-clouds span, .home-precip i { animation-play-state: paused !important; } }
 @media (max-width: 880px) { .home-wrap { grid-template-columns: 1fr; } .home-sky { padding: 20px; min-height: 0; } .home-analog { width: 130px; height: 130px; } }
 
 .badge-teal { background: #E0F2F1; color: #00695C; }
@@ -27188,6 +27217,7 @@ const App = {
         <div class="home-sky" id="home-sky">
           <div class="home-stars" id="home-stars"></div>
           <div class="home-clouds" id="home-clouds"></div>
+          <div class="home-land">${this._homeLandscape()}</div>
           <div class="home-precip" id="home-precip"></div>
           <div class="home-greet" id="home-greet"></div>
           <div class="home-clock-row">
@@ -27291,6 +27321,54 @@ const App = {
       </div>`).join('');
     this._homePaintSun(wx.w, new Date());
     tick();
+  },
+
+  // Background scene for Home: hills, a two-lane road and heavy equipment —
+  // a dump truck, excavator and bulldozer heading right in the near lane, a
+  // cement mixer and pipe flatbed heading left in the far one. Wheels and
+  // tracks turn, the excavator digs, the mixer drum spins; headlights come on
+  // at night (CSS). Drawn facing right; the far lane is mirrored.
+  _homeLandscape() {
+    const wheel = (cx, cy, r) => `<g class="wh" style="transform-origin:${cx}px ${cy}px"><circle cx="${cx}" cy="${cy}" r="${r}" fill="#212121"/><circle cx="${cx}" cy="${cy}" r="${r * .5}" fill="#9E9E9E"/><path d="M${cx - r * .5} ${cy}h${r}M${cx} ${cy - r * .5}v${r}" stroke="#616161" stroke-width="1.6"/></g>`;
+    const track = (x, y, w, h) => `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${h / 2}" fill="#263238"/><rect class="trk" x="${x + 1.5}" y="${y + 1.5}" width="${w - 3}" height="${h - 3}" rx="${(h - 3) / 2}" fill="none" stroke="#78909C" stroke-width="2.5" stroke-dasharray="4 4"/>${[0, 1, 2, 3].map(i => `<circle cx="${x + h / 2 + i * (w - h) / 3}" cy="${y + h / 2}" r="${h * .28}" fill="#546E7A"/>`).join('')}`;
+    const dust = (x, y) => `<g class="dust">${[0, .35, .7].map(d => `<circle cx="${x}" cy="${y}" r="5" fill="rgba(210,190,160,.8)" style="animation-delay:${d}s"/>`).join('')}</g>`;
+    const beam = (x, y) => `<path class="beam" d="M${x} ${y}l46 -9v20z" fill="rgba(255,241,150,.32)"/><circle cx="${x}" cy="${y}" r="2.4" fill="#FFF59D"/>`;
+    const Y = '#F9A825', Y2 = '#FBC02D', DK = '#37474F', GL = '#B3E5FC';
+    const dump = `<svg viewBox="0 0 140 70">${dust(10, 58)}<g class="body">
+      <path d="M6 20h78l-4 28H10z" fill="${Y}" stroke="#E65100" stroke-width="1.5"/><path d="M20 22v24M36 22v24M52 22v24M68 22v24" stroke="#F57F17" stroke-width="1.5"/>
+      <rect x="4" y="46" width="122" height="7" rx="2" fill="${DK}"/>
+      <path d="M86 48V24h22l14 15v9z" fill="${Y2}" stroke="#E65100" stroke-width="1.5"/><path d="M92 28h14l9 10H92z" fill="${GL}"/>${beam(122, 43)}</g>
+      ${wheel(24, 56, 10)}${wheel(48, 56, 10)}${wheel(108, 56, 10)}</svg>`;
+    const excavator = `<svg viewBox="0 0 150 80">${dust(8, 70)}${track(8, 60, 84, 16)}<g class="body">
+      <rect x="16" y="40" width="62" height="20" rx="3" fill="${Y}"/><rect x="10" y="44" width="12" height="14" rx="2" fill="${DK}"/>
+      <rect x="48" y="20" width="24" height="22" rx="3" fill="${Y2}"/><rect x="53" y="24" width="15" height="12" rx="2" fill="${GL}"/>
+      <g class="arm" style="transform-origin:74px 44px"><path d="M74 44L110 16" stroke="${Y}" stroke-width="9" stroke-linecap="round"/><path d="M110 16L130 46" stroke="${Y2}" stroke-width="7" stroke-linecap="round"/>
+        <path d="M124 42h16l-3 14h-12z" fill="#455A64"/></g>${beam(78, 50)}</g></svg>`;
+    const dozer = `<svg viewBox="0 0 130 70">${dust(10, 60)}${track(12, 50, 74, 16)}<g class="body">
+      <rect x="18" y="32" width="62" height="20" rx="3" fill="${Y}"/><path d="M30 32V12h28v20" fill="none" stroke="${DK}" stroke-width="3"/><rect x="33" y="15" width="22" height="15" fill="${GL}" opacity=".85"/>
+      <path d="M80 44l18 -4" stroke="${DK}" stroke-width="4"/><path d="M98 24q8 16 0 40h8V24z" fill="#FFB300" stroke="#E65100" stroke-width="1.5"/>${beam(81, 38)}</g></svg>`;
+    const mixer = `<svg viewBox="0 0 150 72"><g class="body"><rect x="6" y="48" width="132" height="7" rx="2" fill="${DK}"/>
+      <g transform="rotate(-12 64 32)"><ellipse cx="64" cy="32" rx="38" ry="18" fill="#ECEFF1" stroke="#90A4AE" stroke-width="1.5"/><ellipse class="drum" cx="64" cy="32" rx="30" ry="12" fill="none" stroke="#FB8C00" stroke-width="5" stroke-dasharray="10 10"/></g>
+      <path d="M106 50V24h20l12 14v12z" fill="#1E88E5" stroke="#0D47A1" stroke-width="1.5"/><path d="M111 28h14l8 10h-22z" fill="${GL}"/>${beam(137, 44)}</g>
+      ${wheel(26, 58, 10)}${wheel(50, 58, 10)}${wheel(122, 58, 10)}</svg>`;
+    const flatbed = `<svg viewBox="0 0 150 72"><g class="body"><rect x="4" y="44" width="104" height="6" fill="#8D6E63"/>
+      ${[0, 1, 2].map(i => `<rect x="10" y="${30 - i * 0}" width="90" height="7" rx="3.5" fill="#B0BEC5" transform="translate(0 ${-i * 7 + 6})"/>`).join('')}
+      <rect x="4" y="48" width="134" height="6" rx="2" fill="${DK}"/><path d="M108 50V22h18l12 14v14z" fill="#E53935" stroke="#B71C1C" stroke-width="1.5"/><path d="M113 26h12l8 10h-20z" fill="${GL}"/>${beam(137, 44)}</g>
+      ${wheel(22, 58, 9)}${wheel(44, 58, 9)}${wheel(122, 58, 9)}</svg>`;
+    const near = [[dump, 0], [excavator, -11], [dozer, -22]];
+    const far = [[mixer, -6], [flatbed, -28]];
+    return `
+      <svg viewBox="0 0 1000 300" preserveAspectRatio="none" aria-hidden="true">
+        <path d="M0 150 C 90 70 180 90 260 120 S 420 60 520 100 S 700 70 800 110 S 940 80 1000 100 V 300 H 0 Z" fill="var(--hill-far)"/>
+        <path d="M0 175 C 120 120 230 150 330 140 S 520 110 640 145 S 860 120 1000 140 V 300 H 0 Z" fill="var(--hill-near)"/>
+        ${[[70, 128], [150, 132], [380, 126], [610, 132], [690, 136], [880, 128], [930, 130]].map(([x, y]) => `<path d="M${x} ${y}l7 -20l7 20z" fill="var(--hill-near)"/><rect x="${x + 6}" y="${y}" width="2" height="5" fill="var(--hill-near)"/>`).join('')}
+        <rect x="0" y="138" width="1000" height="34" fill="var(--road)"/>
+        <path d="M0 155 H1000" stroke="rgba(255,213,79,.7)" stroke-width="2" stroke-dasharray="22 18"/>
+        <path d="M0 139 H1000 M0 171 H1000" stroke="rgba(255,255,255,.35)" stroke-width="1.5"/>
+        <rect x="0" y="172" width="1000" height="128" fill="var(--ground)"/>
+      </svg>
+      ${far.map(([v, d]) => `<div class="home-veh far" style="animation-delay:${d}s">${v}</div>`).join('')}
+      ${near.map(([v, d]) => `<div class="home-veh near" style="animation-delay:${d}s">${v}</div>`).join('')}`;
   },
 
   // Drifting clouds (as many as the cloud cover) and falling rain or snow
