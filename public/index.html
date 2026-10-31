@@ -666,6 +666,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
     <p>Point of Sale System</p>
   </div>
   <div class="sidebar-nav">
+    <div class="nav-item" data-section="home">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
+      Home
+    </div>
     <div class="nav-item active" data-section="dashboard">
       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
       Dashboard
@@ -1549,13 +1553,9 @@ const App = {
     document.querySelectorAll('.nav-item[data-section]').forEach(el => {
       const s = el.dataset.section;
       if (s === 'driver-dashboard' || s === 'guard-dashboard') return;
-      if (s === 'dashboard') {
-        // Everyone has a landing page: the Dashboard, or Home without it.
-        el.style.display = '';
-        const label = [...el.childNodes].reverse().find(n => n.nodeType === 3 && n.textContent.trim());
-        if (label) label.textContent = this.can('dashboard') ? ' Dashboard ' : ' Home ';
-        return;
-      }
+      // Home is open to everyone (it's also where users without the
+      // Dashboard land); the Dashboard item follows its permission below.
+      if (s === 'home') { el.style.display = ''; return; }
       // Cash Drawers nav: see _hubTileAllowed
       const show = s === 'drawers' ? this._canOpenDrawersScreen() : s === 'online-orders' ? this.can('transactions') : this._hubGroups[s] ? this.canAccessHub(s) : this.can(s);
       el.style.display = show ? '' : 'none';
@@ -1597,7 +1597,7 @@ const App = {
     document.querySelectorAll('.nav-item').forEach(el => {
       const ds = el.dataset.section;
       const hub = this._hubGroups[ds];
-      el.classList.toggle('active', ds === name || (ds === 'dashboard' && name === 'home') || !!(hub && hub.children.some(c => c.section === name)));
+      el.classList.toggle('active', ds === name || !!(hub && hub.children.some(c => c.section === name)));
     });
     const titles = { home: 'Home', dashboard: 'Dashboard', 'driver-dashboard': 'My Deliveries', 'guard-dashboard': 'My Verifications', pos: 'Point of Sale', inventory: 'Retail Inventory Management', services: 'Services & Non-Inventory Items', rentals: 'Rentals', 'rental-items': 'Rental Items', 'work-orders': 'Work Orders', 'wo-schedule': 'Technician Schedule', dispatch: 'Dispatch', 'rental-dispatch': 'Rental Dispatch', 'transfer-dispatch': 'Branch Transfer Dispatch', 'rental-deposits': 'Rental Deposits & Credit Notes', 'purchase-requests': 'Purchase Requests', layaway: 'Layaway', customers: 'Customers', transactions: 'Transactions', 'online-orders': 'Online Orders', reports: 'Reports & Analytics', employees: 'Employees', settings: 'Settings', suppliers: 'Suppliers', purchasing: 'Purchasing', quotations: 'Quotations', 'special-projects': 'Special Projects', 'special-orders': 'Special Orders', accounts: 'Accounts Receivable', payables: 'Accounts Payable', 'shop-use': 'Shop Use', branches: 'Branch Management', security: 'Security Groups', 'user-sessions': 'Active Sessions', assessment: 'Training Assessment', transfers: 'Branch Transfers', crm: 'CRM & Sales', commissions: 'Commission Tracking', warehouse: 'Warehouse Management', shipping: 'Shipping', 'cycle-counts': 'Cycle Counts', drawers: 'Cash Drawers', promotions: 'Promotions', 'discount-cards': 'Discount Cards', 'cash-back-cards': 'Cash Back Cards', 'purchasing-hub': 'Purchasing', 'sales-hub': 'Sales', 'accounts-hub': 'Accounts', 'warehouse-hub': 'Warehouse', 'admin-hub': 'Admin', 'reports-hub': 'Reports', 'reports-marketing': 'Marketing Reports', 'reports-sales': 'Sales Reports', 'reports-accounts': 'Accounts Reports', 'reports-purchasing': 'Purchasing Reports', 'reports-inventory': 'Inventory Reports' };
     document.getElementById('topbar-title').innerHTML = this.buildBreadcrumb(name, titles[name] || name);
