@@ -666,11 +666,11 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
     <p>Point of Sale System</p>
   </div>
   <div class="sidebar-nav">
-    <div class="nav-item" data-section="home">
+    <div class="nav-item active" data-section="home">
       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
       Home
     </div>
-    <div class="nav-item active" data-section="dashboard">
+    <div class="nav-item" data-section="dashboard">
       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
       Dashboard
     </div>
@@ -743,7 +743,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 
 <script>
 const App = {
-  section: 'dashboard',
+  section: 'home',
   currentUser: null,
   cart: [],
   cartCustomer: null,
@@ -1000,15 +1000,12 @@ const App = {
     document.getElementById('topbar-user').textContent = name;
     this.bindNav();
     this.applyNavPermissions();
-    const perms = this.currentUser.permissions;
-    const allSections = ['dashboard','pos','inventory','customers','transactions','reports','employees','suppliers','purchasing','transfers','quotations','accounts','branches','security','settings'];
-    // Drivers/guards land on their own purpose-built view instead of the
-    // generic (manager-oriented) Dashboard — neither role needs sales
-    // totals or low-stock counts, just their rental checkpoint queue.
+    // Everyone starts on Home; drivers/guards on their own purpose-built
+    // view — neither role needs more than their rental checkpoint queue.
     let firstSection;
     if (this.currentUser.is_driver) firstSection = 'driver-dashboard';
     else if (this.currentUser.is_security) firstSection = 'guard-dashboard';
-    else firstSection = perms ? (allSections.find(s => this.can(s)) || 'dashboard') : 'dashboard';
+    else firstSection = 'home';
     this.showSection(firstSection);
     this.checkLowStock();
     this._startTransferInbox();
@@ -1413,7 +1410,7 @@ const App = {
   // tile grid (e.g. Sales), not just to the sidebar nav item.
   buildBreadcrumb(name, currentTitle) {
     const homeIcon = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>`;
-    const homeLink = `<a href="#" class="breadcrumb-link" onclick="event.preventDefault();App.showSection('dashboard')">${homeIcon}Home</a>`;
+    const homeLink = `<a href="#" class="breadcrumb-link" onclick="event.preventDefault();App.showSection('home')">${homeIcon}Home</a>`;
     if (name === 'dashboard' || name === 'home') return `<span class="breadcrumb-current">${currentTitle}</span>`;
     const sep = `<span class="breadcrumb-sep">›</span>`;
     const parts = [homeLink];
