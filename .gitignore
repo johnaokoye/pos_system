@@ -17,6 +17,8 @@ uploads/approval-signatures/*
 uploads/pr-attachments/*
 uploads/wo-photos/*
 uploads/payment-request-attachments/*
+uploads/shop-use-attachments/*
+uploads/shop-use-signatures/*
 !uploads/products/.gitkeep
 !uploads/po-attachments/.gitkeep
 !uploads/branding/.gitkeep

@@ -54,7 +54,7 @@ app.use(async (req, res, next) => {
 // Document attachments are only ever served through their authenticated
 // /api/.../download routes — never hand them out as public static files,
 // even to someone holding the stored filename.
-app.use(['/uploads/quote-attachments', '/uploads/po-attachments', '/uploads/pr-attachments', '/uploads/rental-po-attachments', '/uploads/payment-request-attachments'], (req, res) => res.status(404).json({ error: 'Not found' }));
+app.use(['/uploads/quote-attachments', '/uploads/po-attachments', '/uploads/pr-attachments', '/uploads/rental-po-attachments', '/uploads/payment-request-attachments', '/uploads/shop-use-attachments'], (req, res) => res.status(404).json({ error: 'Not found' }));
 // Customer ID/address-proof scans and captured signatures are shown by the
 // SPA straight from their /uploads path (<img src>), so they stay static
 // files — but only for a signed-in session (the pos_session cookie is
@@ -140,6 +140,7 @@ app.use('/api/work-orders',    require('./routes/work-orders'));
 app.use('/api/sales-targets',  require('./routes/sales-targets'));
 app.use('/api/sessions',       require('./routes/sessions'));
 app.use('/api/assessment',     require('./routes/assessment'));
+app.use('/api/shop-use',       require('./routes/shop-use'));
 
 // Any error under /api (oversized body, malformed JSON, etc.) must come back
 // as JSON — App.api()'s res.json() call otherwise chokes on Express's default

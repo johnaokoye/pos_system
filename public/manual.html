@@ -145,6 +145,7 @@
       <a href="#suppliers">Suppliers</a>
       <a href="#transfers">Branch Transfers</a>
       <a href="#warehouse">Warehouse Management</a>
+      <a href="#shop-use">Shop Use</a>
     </div>
     <div class="toc-group">
       <div class="toc-group-label">Customers &amp; Money</div>
@@ -743,6 +744,71 @@
       <p>Create a shipment (a set of items going out to a customer or another location) — its item picker is searchable, type a few letters of the name or SKU rather than scrolling the full catalog — print a pick list for warehouse staff and a shipping label once it's packed, then progress it: <strong>draft → shipped</strong> (deducts stock) <strong>→ delivered</strong>. A shipment can also be created directly from an online order that's ready to fulfill, and cancelling a shipment that had already shipped restores the stock it took.</p>
     </section>
 
+    <section class="module" id="shop-use">
+      <h2 class="module">Shop Use <span class="tag">shop_use</span> <span class="tag">shop_use_approve</span></h2>
+      <p class="module-intro">Stock taken from inventory for the company's own use — from the request, through approval and issue, to the accounting entry and Finance's reconciliation. Open it from <strong>Warehouse → Shop Use</strong>.</p>
+      <p>Shop Use covers <strong>cleaning &amp; general consumables</strong>, <strong>building &amp; branch maintenance</strong>, <strong>company equipment repairs</strong>, <strong>internal projects</strong> and <strong>reusable tools &amp; equipment</strong>. Staff purchases, customer giveaways, damaged stock and inventory shortages are <em>not</em> Shop Use — they're processed separately. Everything is valued at <strong>inventory cost</strong> (the item's cost, never its selling price); a Shop Use issue never creates a sale, revenue or a customer balance.</p>
+
+      <h3>Four separate statuses</h3>
+      <p>Each request shows its <strong>approval</strong> (Draft, Pending Approval, Returned for Correction, Approved, Rejected), <strong>fulfilment</strong> (Not Issued, Partially Issued, Fully Issued, Cancelled), <strong>posting</strong> (Pending Posting, Posted, Posting Failed) and <strong>reconciliation</strong> (Unreconciled, Reconciled) side by side, so a request that's approved, 6 of 10 issued, posted and not yet reconciled reads exactly that way.</p>
+
+      <h3>Raising a request <span class="perm-pill">shop_use_request</span></h3>
+      <p><strong>+ New Request</strong>: choose the category, the branch and department the items are for, the stock location supplying them, and the reason; add an equipment ID or project reference where it applies. Add items by searching their code or name — each line shows the unit, quantity, what's <strong>available</strong> at the supplying location and the inventory cost, with the estimated total at the bottom. <strong>+ Borrow Tool</strong> adds a tool already on the company tool register instead. Attach supporting documents or photos. <strong>Save Draft</strong> keeps it to finish later; <strong>Submit for Approval</strong> sends it on. Neither takes anything out of stock.</p>
+      <p>If the supplying location is short of an item, the shortage is shown in red. You can still submit. <strong>Raise Purchase Request</strong> on the request (needs <span class="perm-pill">pr_create</span>) creates a draft purchase request for exactly the shortfall, linked to the Shop Use request; it then goes through the normal purchase-request approval.</p>
+
+      <h3>Approval <span class="perm-pill">shop_use_approve</span></h3>
+      <p>On submission the request goes to <strong>Pending Approval</strong> and its approvers are notified in the app (a notice that stays until dismissed, also listed under <em>Awaiting my approval</em>). Who approves is set by the <strong>approval rules</strong> under <strong>Settings</strong> (<span class="perm-pill">shop_use_routing</span>): each rule can be limited to a branch, a department and/or a category and has an <strong>approval limit</strong>. A request goes to the matching rule with the lowest limit that covers its total; anything above a manager's limit moves up to the next rule. With no rules set up, any Shop Use approver may approve. Approvers also need the standalone <span class="perm-pill">shop_use_approve</span> permission. <strong>Nobody can approve their own request.</strong></p>
+      <p>The approver can <strong>approve</strong> the quantities requested, <strong>approve less</strong> on any line (a reason is required), <strong>reject</strong> (with a reason) or <strong>return it for correction</strong> (with what needs fixing). Each decision records who, when and the comments. Requests waiting longer than the overdue time set in Settings (24 hours by default) are flagged <em>Overdue</em>.</p>
+      <p>Changing an approved request's items, quantities, supplying location, branch, department or category sends it back for approval as a new version, and nothing more can be issued until it's approved again. Notes and references can be changed freely. Once anything has been issued, the supplying location, branch, department and category are fixed, and issued lines can't be removed or reduced below what was issued.</p>
+
+      <h3>Issuing <span class="perm-pill">shop_use_issue</span></h3>
+      <p>Approved requests waiting for stock are listed on the <strong>Issue</strong> tab. <strong>Issue</strong> shows each line's outstanding quantity and what's on hand. Enter what's actually being issued, who's receiving it (an employee or a name), their optional signature and their <strong>acknowledgment</strong>. A partial issue needs a comment; the rest stays outstanding until it's issued or cancelled. The system refuses issues against a request that isn't approved, more than the approved quantity left, more than is in stock, and the same issue twice. Print the <strong>issue slip</strong> straight away or later (🖨 Slip / PDF on the request).</p>
+      <p>Confirming an issue takes the stock out of the supplying location at its current inventory cost, logs the stock movement against the issue number, and queues the accounting entry, all in one step.</p>
+
+      <h3>Accounting entries</h3>
+      <p>Each issue posts <strong>Dr</strong> the category's expense account (or asset account, for categories Finance treats as assets) and <strong>Cr</strong> inventory, against the benefiting branch and department, at inventory cost. A return or reversal posts the reverse at the <em>original issue cost</em>. Finance maps the accounts under <strong>Settings → Account mapping</strong> (<span class="perm-pill">shop_use_finance</span>), using the account codes in RetailPOS Books. The entries are delivered to RetailPOS Books on its sync. Books posts each one once (it can't be booked twice) and reports back <strong>Posted</strong> with its journal number, or <strong>Posting Failed</strong> with the reason (an unmapped category, or an account code that isn't in the Books chart). Fix the cause and press <strong>Retry</strong>. Books' POS API key needs the <code>shop_use:read</code> and <code>shop_use:write</code> scopes.</p>
+
+      <h3>Returns, cancellations and reversals</h3>
+      <ul>
+        <li><strong>Return</strong> (<span class="perm-pill">shop_use_issue</span>) — unused items brought back against their issue. Count and inspect them: <em>Good</em> items go back into saleable stock and their cost is reversed at the original issue cost; <em>Damaged / unusable</em> items are recorded but not restocked or reversed. Process them through the damaged-stock procedure.</li>
+        <li><strong>Cancel</strong> — quantities not yet issued can be cancelled, all or line by line, with a reason (the requester, the issuing team or an approver with authority).</li>
+        <li><strong>Reverse</strong> (<span class="perm-pill">shop_use_finance</span>) — corrects an issue made in error: the stock goes back, the cost is reversed, and the quantity is outstanding on the request again. A reason is required.</li>
+      </ul>
+      <p>Nothing posted is ever deleted or overwritten. Every correction is its own linked return or reversal, and the original stays on the record.</p>
+
+      <h3>Tool Register</h3>
+      <p>Reusable tools are tracked in a custody register: tool number, description, serial number, custodian, branch, department, location, date issued, condition, and every later transfer, return or disposal (click a tool number for its history). Tools issued on a <em>Reusable tools &amp; equipment</em> request are <strong>taken out of saleable inventory for good</strong>, with one register entry per unit (enter serial numbers when issuing). Tools the company already owns are added with <strong>+ Register Tool</strong>; these are <strong>lent out</strong> on a request (<em>+ Borrow Tool</em>) with no stock or cost involved, and come back with <strong>Return</strong>. <strong>Transfer</strong> changes the custodian, branch or department; <strong>Dispose</strong> retires a tool with a reason.</p>
+
+      <h3>Reconciliation <span class="perm-pill">shop_use_finance</span></h3>
+      <p>The <strong>Reconciliation</strong> tab checks every issue and return:</p>
+      <ul>
+        <li>it was authorized: approved by someone other than the requester, and issued within the approved quantity</li>
+        <li>its stock movements match the quantities</li>
+        <li>its cost equals the amount posted in the books</li>
+        <li>its branch, department, category and accounts are right</li>
+        <li>its returns are recorded against it</li>
+      </ul>
+      <p>Differences are listed until they're resolved: an item can only be marked <strong>Reconciled</strong> once every check passes. Add <strong>Notes</strong> while investigating. <strong>Reopen</strong> puts a reconciled item back with a reason. The reviewer and review date are recorded.</p>
+
+      <h3>Dashboard and reports</h3>
+      <p>The <strong>Dashboard</strong> highlights overdue approvals, requests awaiting your approval, approved requests awaiting issue, partially issued requests and their outstanding quantity, posting failures, unreconciled items, this month's cost and tools out. <strong>Reports</strong> (<span class="perm-pill">shop_use_reports</span> or <span class="perm-pill">shop_use_finance</span>) cover:</p>
+      <ul>
+        <li>the detailed transaction report</li>
+        <li>monthly cost by branch and department</li>
+        <li>usage by item and category</li>
+        <li>approved requests awaiting issue</li>
+        <li>partially issued requests and outstanding quantities</li>
+        <li>failed or pending postings</li>
+        <li>unreconciled transactions</li>
+        <li>returns and reversals</li>
+        <li>reusable tools and their custodians</li>
+      </ul>
+      <p>Filter by date, branch, department, category, item, requester, approver and any status. Every report shows totals and exports to <strong>Excel</strong> or <strong>PDF</strong>.</p>
+
+      <h3>Audit trail</h3>
+      <p>Every submission, amendment, approval decision, issue, posting, return, reversal, cancellation and reconciliation action, plus changes to rules and account mappings, is kept with the user, date and time. A request's own trail and approval history are at the bottom of the request.</p>
+    </section>
+
     <section class="module" id="customers">
       <h2 class="module">Customers <span class="tag">customers</span></h2>
       <p class="module-intro">Customer profiles, purchase history, and account status.</p>
@@ -1030,6 +1096,8 @@
         <tr><td>warehouse</td><td>warehouse_bins, warehouse_assign</td></tr>
         <tr><td>shipping</td><td>shipping_create, shipping_carriers</td></tr>
         <tr><td>cycle-counts</td><td>cyclecounts_create, cyclecounts_approve</td></tr>
+        <tr><td>shop_use</td><td>shop_use_request (raise requests), shop_use_issue (issue, returns, tool register), shop_use_finance (account mapping, postings, reversals, reconciliation), shop_use_routing (approval rules &amp; limits), shop_use_reports (dashboards &amp; reports)</td></tr>
+        <tr><td>shop_use_approve</td><td>(none — approve Shop Use requests within your rules; a separate permission, never your own request)</td></tr>
         <tr><td>branches</td><td>branches_add, branches_edit, branches_delete</td></tr>
         <tr><td>security</td><td>security_manage, security_assign</td></tr>
         <tr><td>user-sessions</td><td>sessions_logout</td></tr>

@@ -13,7 +13,7 @@ const VALID_SCOPES = [
   'products:read', 'products:write',
   'customers:read', 'customers:write',
   'orders:read', 'orders:write',
-  'accounts:read', 'accounts:write', 'suppliers:read', 'payables:read',
+  'accounts:read', 'accounts:write', 'suppliers:read', 'payables:read', 'shop_use:read', 'shop_use:write',
   '*',
 ];
 

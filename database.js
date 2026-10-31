@@ -1606,6 +1606,259 @@ async function _init() {
       reverse_outcome TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // ── Shop Use (stock taken for company use — routes/shop-use.js, lib/shopUse.js) ──
+    // A request moves through approval (approval_status) and, once approved,
+    // fulfilment (fulfillment_status, from its lines' issued/cancelled
+    // quantities). branch_id + department benefit from the items;
+    // source_branch_id is the stock location supplying them. version goes up
+    // on every amendment that needs reapproval.
+    { sql: `CREATE TABLE IF NOT EXISTS shop_use_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_number TEXT UNIQUE NOT NULL,
+      requested_by INTEGER REFERENCES employees(id),
+      branch_id INTEGER REFERENCES branches(id),
+      department TEXT,
+      source_branch_id INTEGER REFERENCES branches(id),
+      category TEXT NOT NULL,
+      reason TEXT,
+      equipment_ref TEXT,
+      project_ref TEXT,
+      notes TEXT,
+      approval_status TEXT NOT NULL DEFAULT 'draft',
+      fulfillment_status TEXT NOT NULL DEFAULT 'not_issued',
+      total_estimated REAL NOT NULL DEFAULT 0,
+      version INTEGER NOT NULL DEFAULT 1,
+      routed_rule_id INTEGER,
+      routed_approvers TEXT,
+      submitted_at DATETIME,
+      decided_by INTEGER REFERENCES employees(id),
+      decided_at DATETIME,
+      decision_comment TEXT,
+      approval_signature TEXT,
+      cancelled_by INTEGER REFERENCES employees(id),
+      cancelled_at DATETIME,
+      cancel_reason TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    // An inventory line (product_id) or the loan of a tool already on the
+    // tool register (tool_id). Quantities are in the line's unit
+    // (units_per stock units each); unit_cost is per line unit at the time
+    // of the request — an estimate, the issue costs it again.
+    { sql: `CREATE TABLE IF NOT EXISTS shop_use_request_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id INTEGER NOT NULL REFERENCES shop_use_requests(id) ON DELETE CASCADE,
+      product_id INTEGER REFERENCES products(id),
+      tool_id INTEGER,
+      sku TEXT,
+      description TEXT NOT NULL,
+      uom_id INTEGER,
+      unit_name TEXT,
+      units_per REAL NOT NULL DEFAULT 1,
+      qty_requested REAL NOT NULL DEFAULT 0,
+      qty_approved REAL,
+      approve_reason TEXT,
+      qty_issued REAL NOT NULL DEFAULT 0,
+      qty_cancelled REAL NOT NULL DEFAULT 0,
+      cancel_reason TEXT,
+      unit_cost REAL NOT NULL DEFAULT 0,
+      equipment_ref TEXT,
+      notes TEXT
+    )` },
+    // Decision history — every submit, approve, reject, return, amendment
+    // and cancellation, with the request version it applied to.
+    { sql: `CREATE TABLE IF NOT EXISTS shop_use_approvals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id INTEGER NOT NULL REFERENCES shop_use_requests(id) ON DELETE CASCADE,
+      version INTEGER,
+      action TEXT NOT NULL,
+      employee_id INTEGER REFERENCES employees(id),
+      comments TEXT,
+      rule_id INTEGER,
+      amount REAL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    // Approval routing (set by management): a rule matches a request when its
+    // branch / department / category are blank or equal, and covers it when
+    // max_amount is blank (no limit) or at least the request total.
+    { sql: `CREATE TABLE IF NOT EXISTS shop_use_approval_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      branch_id INTEGER REFERENCES branches(id),
+      department TEXT,
+      category TEXT,
+      max_amount REAL,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS shop_use_rule_approvers (
+      rule_id INTEGER NOT NULL REFERENCES shop_use_approval_rules(id) ON DELETE CASCADE,
+      employee_id INTEGER NOT NULL REFERENCES employees(id),
+      PRIMARY KEY (rule_id, employee_id)
+    )` },
+    // Finance's account mapping per category: the debit account (expense, or
+    // an asset account for asset treatment) and the inventory account credited.
+    { sql: `CREATE TABLE IF NOT EXISTS shop_use_accounts (
+      category TEXT PRIMARY KEY,
+      treatment TEXT NOT NULL DEFAULT 'expense',
+      debit_account_code TEXT,
+      debit_account_name TEXT,
+      credit_account_code TEXT,
+      credit_account_name TEXT,
+      updated_by INTEGER REFERENCES employees(id),
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    // One confirmed issue against a request. issue_key (sent by the client
+    // per Confirm) makes a resubmitted issue return the first one instead of
+    // issuing twice. Costs are inventory cost (products.cost) at issue.
+    { sql: `CREATE TABLE IF NOT EXISTS shop_use_issues (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      issue_number TEXT UNIQUE NOT NULL,
+      issue_key TEXT UNIQUE,
+      request_id INTEGER NOT NULL REFERENCES shop_use_requests(id),
+      request_version INTEGER,
+      source_branch_id INTEGER REFERENCES branches(id),
+      issued_by INTEGER REFERENCES employees(id),
+      issued_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      recipient_employee_id INTEGER REFERENCES employees(id),
+      recipient_name TEXT,
+      acknowledged INTEGER NOT NULL DEFAULT 0,
+      recipient_signature TEXT,
+      comments TEXT,
+      total_cost REAL NOT NULL DEFAULT 0
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS shop_use_issue_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      issue_id INTEGER NOT NULL REFERENCES shop_use_issues(id),
+      request_line_id INTEGER NOT NULL REFERENCES shop_use_request_lines(id),
+      product_id INTEGER REFERENCES products(id),
+      tool_id INTEGER,
+      quantity REAL NOT NULL,
+      stock_units REAL NOT NULL DEFAULT 0,
+      unit_cost REAL NOT NULL DEFAULT 0,
+      line_cost REAL NOT NULL DEFAULT 0,
+      condition TEXT,
+      qty_returned REAL NOT NULL DEFAULT 0
+    )` },
+    // Returns of unused items (kind 'return') and authorized reversals of a
+    // wrong issue (kind 'reversal', which also puts the quantity back as
+    // outstanding on the request). Both go back at the original issue cost.
+    { sql: `CREATE TABLE IF NOT EXISTS shop_use_returns (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      return_number TEXT UNIQUE NOT NULL,
+      return_key TEXT UNIQUE,
+      kind TEXT NOT NULL DEFAULT 'return',
+      issue_id INTEGER NOT NULL REFERENCES shop_use_issues(id),
+      request_id INTEGER NOT NULL REFERENCES shop_use_requests(id),
+      received_by INTEGER REFERENCES employees(id),
+      received_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      reason TEXT,
+      total_cost REAL NOT NULL DEFAULT 0
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS shop_use_return_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      return_id INTEGER NOT NULL REFERENCES shop_use_returns(id),
+      issue_line_id INTEGER NOT NULL REFERENCES shop_use_issue_lines(id),
+      quantity REAL NOT NULL,
+      stock_units REAL NOT NULL DEFAULT 0,
+      condition TEXT NOT NULL DEFAULT 'good',
+      restocked INTEGER NOT NULL DEFAULT 1,
+      line_cost REAL NOT NULL DEFAULT 0,
+      notes TEXT
+    )` },
+    // The accounting entry for one issue or return, delivered to RetailPOS
+    // Books (GET /shop-use/postings-feed → POST /shop-use/postings-ack).
+    // UNIQUE(source_type, source_id) keeps it to one entry per document.
+    // Reconciliation (Finance) is recorded on the same row.
+    { sql: `CREATE TABLE IF NOT EXISTS shop_use_postings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_type TEXT NOT NULL,
+      source_id INTEGER NOT NULL,
+      reference TEXT NOT NULL,
+      request_id INTEGER NOT NULL REFERENCES shop_use_requests(id),
+      posting_date DATE NOT NULL,
+      branch_id INTEGER REFERENCES branches(id),
+      department TEXT,
+      category TEXT,
+      debit_account_code TEXT,
+      credit_account_code TEXT,
+      amount REAL NOT NULL DEFAULT 0,
+      memo TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      external_ref TEXT,
+      posted_amount REAL,
+      posted_at DATETIME,
+      recon_status TEXT NOT NULL DEFAULT 'unreconciled',
+      reconciled_by INTEGER REFERENCES employees(id),
+      reconciled_at DATETIME,
+      recon_comment TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(source_type, source_id)
+    )` },
+    // Custody register for reusable tools. source 'inventory' = taken out of
+    // saleable stock for good by a Shop Use issue; 'register' = a company
+    // tool entered on the register directly, which is lent out and returned.
+    { sql: `CREATE TABLE IF NOT EXISTS shop_use_tools (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tool_number TEXT UNIQUE NOT NULL,
+      description TEXT NOT NULL,
+      serial_number TEXT,
+      product_id INTEGER REFERENCES products(id),
+      source TEXT NOT NULL DEFAULT 'register',
+      status TEXT NOT NULL DEFAULT 'available',
+      custodian_employee_id INTEGER REFERENCES employees(id),
+      custodian_name TEXT,
+      branch_id INTEGER REFERENCES branches(id),
+      department TEXT,
+      location TEXT,
+      condition TEXT,
+      issued_at DATETIME,
+      request_id INTEGER REFERENCES shop_use_requests(id),
+      issue_id INTEGER REFERENCES shop_use_issues(id),
+      issue_line_id INTEGER REFERENCES shop_use_issue_lines(id),
+      unit_cost REAL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS shop_use_tool_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tool_id INTEGER NOT NULL REFERENCES shop_use_tools(id),
+      event TEXT NOT NULL,
+      custodian_employee_id INTEGER REFERENCES employees(id),
+      custodian_name TEXT,
+      branch_id INTEGER REFERENCES branches(id),
+      department TEXT,
+      location TEXT,
+      condition TEXT,
+      notes TEXT,
+      request_id INTEGER,
+      issue_id INTEGER,
+      employee_id INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS shop_use_attachments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id INTEGER NOT NULL REFERENCES shop_use_requests(id) ON DELETE CASCADE,
+      original_name TEXT NOT NULL,
+      stored_name TEXT NOT NULL,
+      mime_type TEXT,
+      file_size INTEGER,
+      uploaded_by INTEGER REFERENCES employees(id),
+      uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    // Append-only trail of every Shop Use action (never updated or deleted).
+    { sql: `CREATE TABLE IF NOT EXISTS shop_use_audit (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id INTEGER,
+      entity TEXT NOT NULL,
+      entity_id INTEGER,
+      action TEXT NOT NULL,
+      details TEXT,
+      employee_id INTEGER REFERENCES employees(id),
+      employee_name TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
   ], 'write');
 
   // Migrations — each in its own try/catch
@@ -2475,6 +2728,8 @@ async function _init() {
       amount REAL NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`,
+    // A purchase request raised for a Shop Use request's stock shortage.
+    'ALTER TABLE purchase_requests ADD COLUMN shop_use_request_id INTEGER REFERENCES shop_use_requests(id)',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
@@ -3095,6 +3350,11 @@ async function _init() {
       // choice (2026-10-30); others are ticked in Security Groups.
       if (!('payables_requests' in perms)) { perms.payables_requests = can(perms, 'payables_bills') || can(perms, 'payables_payments'); changed = true; }
       if (!('payables_approve' in perms)) { perms.payables_approve = can(perms, 'security') && can(perms, 'settings'); changed = true; }
+      // Shop Use is new (no earlier key gated it): the module and approving
+      // (standalone shop_use_approve, never on your own request) start on
+      // full-access groups only; everyone else is ticked in Security Groups.
+      if (!('shop_use' in perms)) { perms.shop_use = can(perms, 'security') && can(perms, 'settings'); changed = true; }
+      if (!('shop_use_approve' in perms)) { perms.shop_use_approve = can(perms, 'security') && can(perms, 'settings'); changed = true; }
       // Seeing and reconciling every cashier's drawer used to come with
       // Manage Drawers & Sessions; it's now its own key (2026-10-30), and
       // drawers_close covers your own drawer only. Seeded from the stored
@@ -3468,6 +3728,19 @@ async function _init() {
     'CREATE INDEX IF NOT EXISTS idx_cycle_count_uploads_session_id ON cycle_count_uploads(session_id)',
     'CREATE INDEX IF NOT EXISTS idx_cycle_count_upload_lines_upload_id ON cycle_count_upload_lines(upload_id)',
     'CREATE INDEX IF NOT EXISTS idx_cycle_count_upload_lines_item_id ON cycle_count_upload_lines(item_id)',
+    'CREATE INDEX IF NOT EXISTS idx_shop_use_requests_status ON shop_use_requests(approval_status, fulfillment_status)',
+    'CREATE INDEX IF NOT EXISTS idx_shop_use_request_lines_request_id ON shop_use_request_lines(request_id)',
+    'CREATE INDEX IF NOT EXISTS idx_shop_use_approvals_request_id ON shop_use_approvals(request_id)',
+    'CREATE INDEX IF NOT EXISTS idx_shop_use_issues_request_id ON shop_use_issues(request_id)',
+    'CREATE INDEX IF NOT EXISTS idx_shop_use_issue_lines_issue_id ON shop_use_issue_lines(issue_id)',
+    'CREATE INDEX IF NOT EXISTS idx_shop_use_returns_issue_id ON shop_use_returns(issue_id)',
+    'CREATE INDEX IF NOT EXISTS idx_shop_use_return_lines_return_id ON shop_use_return_lines(return_id)',
+    'CREATE INDEX IF NOT EXISTS idx_shop_use_postings_status ON shop_use_postings(status)',
+    'CREATE INDEX IF NOT EXISTS idx_shop_use_postings_request_id ON shop_use_postings(request_id)',
+    'CREATE INDEX IF NOT EXISTS idx_shop_use_tool_events_tool_id ON shop_use_tool_events(tool_id)',
+    'CREATE INDEX IF NOT EXISTS idx_shop_use_audit_request_id ON shop_use_audit(request_id)',
+    'CREATE INDEX IF NOT EXISTS idx_stock_movements_reference ON stock_movements(reference)',
+    'CREATE INDEX IF NOT EXISTS idx_purchase_requests_shop_use ON purchase_requests(shop_use_request_id)',
   ];
   for (const sql of indexes) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
