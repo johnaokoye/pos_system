@@ -417,7 +417,8 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 @keyframes home-drop { 0% { transform: translateY(-6px); opacity: 0; } 20% { opacity: 1; } 100% { transform: translateY(16px); opacity: 0; } }
 @keyframes home-flash { 0%, 86%, 100% { opacity: 0; } 88%, 92% { opacity: 1; } }
 .home-hours { position: relative; margin-top: auto; padding-top: 120px; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
-.home-hours:empty { display: block; padding-top: 0; min-height: 150px; }
+.home-hours:empty { display: block; padding-top: 0; min-height: 70px; }
+.home-sky:has(.home-hours:empty) .home-land { bottom: -96px; }
 .home-hour { flex: 1 0 64px; text-align: center; padding: 10px 4px 8px; border-radius: 12px; background: rgba(255,255,255,.14); backdrop-filter: blur(4px); font-size: 12px; }
 .home-hour .home-wicon { width: 38px; height: 38px; display: block; margin: 2px auto; }
 .home-hour b { display: block; font-size: 15px; }
@@ -27146,38 +27147,53 @@ const App = {
     this.renderHome();
   },
 
+  // Finds a branch's town: { lat, lon, name } or null. The geocoder knows
+  // names one way only ("Saint Ann's Bay", not "St. Ann's Bay"), so spelling
+  // variants are tried in turn. Same-named towns exist across countries
+  // (Drax Hall is in Jamaica and Barbados), so matches are ranked: the
+  // branch's state/parish ("St. Ann" = "Saint Ann Parish"), then the store's
+  // country (from its currency: JMD → JM), then the geocoder's own order.
+  async _homeGeocode(b) {
+    const city = String(b?.city || '').trim();
+    if (!city) return null;
+    // v3: adds the spelling variants (St. Ann's Bay wasn't found before).
+    const cacheKey = `homeGeo3:${city}|${b.state || ''}`;
+    try { const hit = JSON.parse(localStorage.getItem(cacheKey) || 'null'); if (hit) return hit; } catch {}
+    const variants = [...new Set([
+      city,
+      city.replace(/\bSt\.?\s+/gi, 'Saint '),
+      city.replace(/\bSaint\s+/gi, 'St '),
+      city.replace(/\bSt\.?\s+/gi, 'Saint ').replace(/['’]/g, ''),
+      city.replace(/['’]/g, ''),
+    ])];
+    let results = [];
+    for (const name of variants) {
+      const g = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(name)}&count=10&language=en&format=json`).then(r => r.json()); // a network failure throws → "unavailable", not "couldn't find"
+      if (g.results?.length) { results = g.results; break; }
+    }
+    if (!results.length) return null;
+    const norm = v => String(v || '').toLowerCase().replace(/\bst\.?\s/g, 'saint ').replace(/\bparish\b/g, '').replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
+    const st = norm(b.state);
+    const country = String(b.currency || this.settings?.currency || '').slice(0, 2).toUpperCase();
+    const stateHit = r => st && [r.admin1, r.admin2, r.country].some(v => { const n = norm(v); return n && (n === st || n.includes(st) || st.includes(n)); });
+    const score = r => (stateHit(r) ? 2 : 0) + (country && r.country_code === country ? 1 : 0);
+    const hit = results.reduce((best, r) => score(r) > score(best) ? r : best, results[0]);
+    const place = { lat: hit.latitude, lon: hit.longitude, name: [hit.name, hit.admin1 && hit.admin1 !== hit.name ? hit.admin1 : null, hit.country_code].filter(Boolean).join(', ') };
+    try { localStorage.setItem(cacheKey, JSON.stringify(place)); } catch {}
+    return place;
+  },
+
   async _homeLoadWeather() {
-    // The user's default branch, or — with no branch, or one without a city
-    // — the Drax Hall branch (weather_branch, set at login).
+    // The user's default branch; with no branch, no city, or a town the
+    // geocoder can't find, the Drax Hall branch (weather_branch, set at login).
     const branches = this.currentUser.branches || [];
     const own = branches.find(x => x.is_default) || branches[0];
-    const fb = this.currentUser.weather_branch;
-    const b = own?.city ? own : fb ? { ...fb, city: fb.city || fb.name } : own;
-    const city = String(b?.city || '').trim();
-    if (!city) return { error: 'Add a city to your branch (Admin → Branches) to see the weather here.' };
+    const fb = this.currentUser.weather_branch ? { ...this.currentUser.weather_branch, city: this.currentUser.weather_branch.city || this.currentUser.weather_branch.name } : null;
     const unit = this._homeUnit();
-    if (this._homeWeather && this._homeWeather.city === city && this._homeWeather.unit === unit && Date.now() - this._homeWeather.at < 15 * 60e3) return this._homeWeather;
-    let place;
-    // v2: earlier lookups could pick a same-named town abroad (Drax Hall, Barbados).
-    const cacheKey = `homeGeo2:${city}|${b.state || ''}`;
-    try { place = JSON.parse(localStorage.getItem(cacheKey) || 'null'); } catch {}
-    if (!place) {
-      const g = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=10&language=en&format=json`).then(r => r.json());
-      const results = g.results || [];
-      if (!results.length) return { error: `Couldn't find "${city}" for the weather.` };
-      // Same-named towns exist across countries (Drax Hall is in Jamaica and
-      // Barbados), so rank: the branch's state/parish ("St. Ann" = "Saint Ann
-      // Parish"), then the store's country (from its currency: JMD → JM),
-      // then the geocoder's own order.
-      const norm = v => String(v || '').toLowerCase().replace(/\bst\.?\s/g, 'saint ').replace(/\bparish\b/g, '').replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
-      const st = norm(b.state);
-      const country = String(b.currency || this.settings?.currency || '').slice(0, 2).toUpperCase();
-      const stateHit = r => st && [r.admin1, r.admin2, r.country].some(v => { const n = norm(v); return n && (n === st || n.includes(st) || st.includes(n)); });
-      const score = r => (stateHit(r) ? 2 : 0) + (country && r.country_code === country ? 1 : 0);
-      const hit = results.reduce((best, r) => score(r) > score(best) ? r : best, results[0]);
-      place = { lat: hit.latitude, lon: hit.longitude, name: [hit.name, hit.admin1 && hit.admin1 !== hit.name ? hit.admin1 : null, hit.country_code].filter(Boolean).join(', ') };
-      try { localStorage.setItem(cacheKey, JSON.stringify(place)); } catch {}
-    }
+    const key = `${own?.city || ''}|${fb?.city || ''}`;
+    if (this._homeWeather && this._homeWeather.key === key && this._homeWeather.unit === unit && Date.now() - this._homeWeather.at < 15 * 60e3) return this._homeWeather;
+    const place = (own?.city && await this._homeGeocode(own)) || (fb && await this._homeGeocode(fb));
+    if (!place) return { error: own?.city ? `Couldn't find "${own.city}" for the weather.` : 'Add a city to your branch (Admin → Branches) to see the weather here.' };
     const qs = new URLSearchParams({
       latitude: place.lat, longitude: place.lon, timezone: 'auto', forecast_days: '4',
       current: 'temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,is_day,cloud_cover',
@@ -27187,7 +27203,7 @@ const App = {
     });
     const w = await fetch(`https://api.open-meteo.com/v1/forecast?${qs}`).then(r => r.json());
     if (!w.current) return { error: 'Weather is unavailable right now.' };
-    this._homeWeather = { city, unit, at: Date.now(), place, w };
+    this._homeWeather = { key, unit, at: Date.now(), place, w };
     return this._homeWeather;
   },
 
