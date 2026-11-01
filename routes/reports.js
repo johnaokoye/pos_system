@@ -1190,10 +1190,12 @@ router.get('/items-sold', requireAnyPermission('reports', 'inventory'), async (r
           COALESCE(SUM((l.units - l.ret_units) * COALESCE(p.cost, 0)), 0) AS cost,
           ${onHand} AS on_hand
         FROM lines l JOIN products p ON p.id = l.product_id LEFT JOIN categories c ON c.id = p.category_id
-        WHERE 1=1${pf}
+        WHERE upper(COALESCE(p.sku, '')) != ?${pf}
         GROUP BY p.id
         ORDER BY SUM(l.units - l.ret_units) DESC, SUM(l.sales - l.returns) DESC`,
-      args: [s, e, ...bp, s, e, ...bp, ...bp, ...pp],
+      // The $0 SN item only carries serial numbers — never an item sold,
+      // even with type=all.
+      args: [s, e, ...bp, s, e, ...bp, ...bp, SERIAL_NUMBER_SKU, ...pp],
     });
 
     const items = rows.map(r => {
