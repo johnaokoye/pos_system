@@ -80,7 +80,7 @@ router.get('/top-products', requirePermission('reports'), async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Sales by category
+// Sales by category — SN serial-number lines (the $0 SN carrier item) left out
 router.get('/by-category', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
@@ -89,7 +89,7 @@ router.get('/by-category', requirePermission('reports'), async (req, res) => {
     const bf = branch_id ? ' AND t.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
 
-    const { rows: data } = await db.execute({ sql: `SELECT c.name as category, SUM(ti.quantity * COALESCE(ti.units_per, 1)) as units_sold, SUM(ti.total) as revenue FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id JOIN products p ON ti.product_id = p.id JOIN categories c ON p.category_id = c.id WHERE t.status='completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf} GROUP BY c.id ORDER BY revenue DESC`, args: [s, e, ...bp] });
+    const { rows: data } = await db.execute({ sql: `SELECT c.name as category, SUM(ti.quantity * COALESCE(ti.units_per, 1)) as units_sold, SUM(ti.total) as revenue FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id JOIN products p ON ti.product_id = p.id JOIN categories c ON p.category_id = c.id WHERE t.status='completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf} AND upper(COALESCE(p.sku, '')) != ? AND (ti.serial_number IS NULL OR ti.serial_number = '') GROUP BY c.id ORDER BY revenue DESC`, args: [s, e, ...bp, SERIAL_NUMBER_SKU] });
     res.json(data);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
