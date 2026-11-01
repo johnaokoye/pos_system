@@ -37,7 +37,7 @@ router.get('/sales', requirePermission('reports'), async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Top selling products
+// Top selling products — by number of transactions (frequency)
 router.get('/top-products', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, limit = 10, branch_id, category_id } = req.query;
@@ -51,7 +51,10 @@ router.get('/top-products', requirePermission('reports'), async (req, res) => {
     const cf = category_id ? ' AND p.category_id = ?' : '';
     const cp = category_id ? [category_id] : [];
 
-    const { rows: products } = await db.execute({ sql: `SELECT ti.product_name, ti.sku, SUM(ti.quantity * COALESCE(ti.units_per, 1)) as units_sold, SUM(ti.total) as revenue, COUNT(DISTINCT ti.transaction_id) as transactions FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id JOIN products p ON ti.product_id = p.id WHERE t.status='completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}${cf} GROUP BY ti.product_id ORDER BY units_sold DESC LIMIT ?`, args: [s, e, ...bp, ...cp, parseInt(limit)] });
+    // Ranked by frequency — how many completed tickets the item was on —
+    // unless ?sort=units asks for the old by-quantity order.
+    const order = req.query.sort === 'units' ? 'units_sold DESC, transactions DESC' : 'transactions DESC, units_sold DESC';
+    const { rows: products } = await db.execute({ sql: `SELECT ti.product_name, ti.sku, SUM(ti.quantity * COALESCE(ti.units_per, 1)) as units_sold, SUM(ti.total) as revenue, COUNT(DISTINCT ti.transaction_id) as transactions FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id JOIN products p ON ti.product_id = p.id WHERE t.status='completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}${cf} GROUP BY ti.product_id ORDER BY ${order} LIMIT ?`, args: [s, e, ...bp, ...cp, parseInt(limit)] });
     res.json(products);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

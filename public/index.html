@@ -1506,10 +1506,10 @@ const App = {
     el.innerHTML = `
       <div class="two-col">
         <div>
-          <h4 style="font-size:13px;font-weight:600;margin-bottom:8px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Top Selling Products</h4>
+          <h4 style="font-size:13px;font-weight:600;margin-bottom:8px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Top Selling Products <span style="text-transform:none;font-weight:400;letter-spacing:0">· by number of transactions</span></h4>
           <table>
-            <thead><tr><th>#</th><th>Product</th><th>Units</th><th>Revenue</th></tr></thead>
-            <tbody>${topProds.length ? topProds.map((p,i) => `<tr><td style="color:var(--text-muted)">${i+1}</td><td class="fw-600">${p.product_name}</td><td style="text-align:center">${p.units_sold}</td><td class="fw-600 color-success">${this.fmt(p.revenue)}</td></tr>`).join('') : '<tr><td colspan="4" class="empty-state">No sales in this period</td></tr>'}</tbody>
+            <thead><tr><th>#</th><th>Product</th><th title="Number of completed transactions the item was on">Transactions</th><th>Units</th><th>Revenue</th></tr></thead>
+            <tbody>${topProds.length ? topProds.map((p,i) => `<tr><td style="color:var(--text-muted)">${i+1}</td><td class="fw-600">${p.product_name}</td><td class="fw-600" style="text-align:center">${p.transactions}</td><td style="text-align:center">${p.units_sold}</td><td class="fw-600 color-success">${this.fmt(p.revenue)}</td></tr>`).join('') : '<tr><td colspan="5" class="empty-state">No sales in this period</td></tr>'}</tbody>
           </table>
         </div>
         <div>
@@ -18518,10 +18518,10 @@ const App = {
       </div>
       <div class="two-col" style="margin-bottom:16px">
         <div class="card">
-          <div class="card-header"><span class="card-title">Top Selling Products</span></div>
+          <div class="card-header"><span class="card-title">Top Selling Products</span><span style="font-size:11px;color:var(--text-muted)">by number of transactions</span></div>
           <table>
-            <thead><tr><th>#</th><th>Product</th><th>Units</th><th>Revenue</th></tr></thead>
-            <tbody>${topProds.map((p,i) => `<tr><td style="color:var(--text-muted)">${i+1}</td><td class="fw-600">${p.product_name}</td><td style="text-align:center">${p.units_sold}</td><td class="fw-600 color-success">${this.fmt(p.revenue)}</td></tr>`).join('')}</tbody>
+            <thead><tr><th>#</th><th>Product</th><th title="Number of completed transactions the item was on">Transactions</th><th>Units</th><th>Revenue</th></tr></thead>
+            <tbody>${topProds.map((p,i) => `<tr><td style="color:var(--text-muted)">${i+1}</td><td class="fw-600">${p.product_name}</td><td class="fw-600" style="text-align:center">${p.transactions}</td><td style="text-align:center">${p.units_sold}</td><td class="fw-600 color-success">${this.fmt(p.revenue)}</td></tr>`).join('')}</tbody>
           </table>
         </div>
         <div class="card">
