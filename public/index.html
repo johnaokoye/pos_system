@@ -4848,7 +4848,7 @@ const App = {
                     <span style="font-size:12px;color:var(--text-muted);font-family:monospace">${h.source_quote_number || h.transaction_number}</span>
                   </div>
                   <div style="font-size:13px;color:var(--text-muted);margin-top:3px">
-                    Total: <strong>${this.fmt(h.total)}</strong> &bull; ${this._storeTime(h.created_at)}
+                    Total: <strong>${this.fmt(h.total)}</strong> &bull; ${this._storeDateTime(h.created_at)}
                     ${h.notes ? `&bull; ${h.notes}` : ''}
                   </div>
                   ${this._recallMetaLine(h.employee_name, h.branch_name)}
@@ -4859,7 +4859,7 @@ const App = {
                     <span style="font-size:12px;color:var(--text-muted);font-family:monospace">${r.source_quote_number || r.agreement_number}</span>
                   </div>
                   <div style="font-size:13px;color:var(--text-muted);margin-top:3px">
-                    ${r.item_count} item${r.item_count===1?'':'s'} &bull; Due ${this.fmtDate(r.due_date)} &bull; ${this._storeTime(r.created_at)}
+                    ${r.item_count} item${r.item_count===1?'':'s'} &bull; Due ${this.fmtDate(r.due_date)} &bull; ${this._storeDateTime(r.created_at)}
                   </div>
                   ${this._recallMetaLine(r.employee_name, r.branch_name)}
                 </div>`)(entry.data) : entry.type === 'rental_balance' ? (r => `
@@ -4869,7 +4869,7 @@ const App = {
                     <span style="font-size:12px;color:var(--text-muted);font-family:monospace">${r.agreement_number}</span>
                   </div>
                   <div style="font-size:13px;color:var(--text-muted);margin-top:3px">
-                    Balance Due: <strong>${this.fmt(r.balance_due)}</strong> &bull; returned ${this._storeTime(r.returned_at)}
+                    Balance Due: <strong>${this.fmt(r.balance_due)}</strong> &bull; returned ${this._storeDateTime(r.returned_at)}
                   </div>
                   ${this._recallMetaLine(r.employee_name, r.branch_name)}
                 </div>`)(entry.data) : entry.type === 'exchange' ? (r => `
@@ -4892,7 +4892,7 @@ const App = {
                     ${w.status==='intake' ? `Assessment Fee: <strong>${this.fmt(w.assessment_fee)}</strong>`
                       : w.status==='pending_deposit' ? `Deposit: <strong>${this.fmt(w.deposit_amount)}</strong>`
                       : `Balance Due: <strong>${this.fmt(Math.max(0, (parseFloat(w.estimate_labor)||0) + (parseFloat(w.estimate_consumables)||0) + (parseFloat(w.parts_total)||0) - (parseFloat(w.deposit_amount)||0)))}</strong>`}
-                    &bull; ${this._storeTime(w.created_at)}
+                    &bull; ${this._storeDateTime(w.created_at)}
                   </div>
                   ${this._recallMetaLine(w.employee_name, w.branch_name)}
                 </div>`)(entry.data)).join('')}
