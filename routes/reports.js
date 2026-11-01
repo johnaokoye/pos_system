@@ -1459,4 +1459,60 @@ router.get('/online-sales', requirePermission('reports'), async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Hourly Sales by Day — completed sales bucketed by day of the week and hour
+// of the day, in store-local time (settings.store_timezone; created_at is
+// stored in UTC). `days_in_range` counts how many of each weekday the range
+// holds, so the screen can show a per-day average as well as the total.
+router.get('/hourly-sales', requirePermission('reports'), async (req, res) => {
+  try {
+    const { start, end, branch_id } = req.query;
+    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+    const e = end || new Date().toISOString().slice(0, 10);
+    const { rows: tzRows } = await db.execute({ sql: "SELECT value FROM settings WHERE key = 'store_timezone'", args: [] });
+    let timeZone = (tzRows[0]?.value || '').trim() || 'America/Jamaica';
+    try { new Intl.DateTimeFormat('en-US', { timeZone }); } catch (err) { timeZone = 'America/Jamaica'; }
+    // UTC offset of the store zone (minutes) at the middle of the range.
+    const mid = new Date((new Date(`${s}T12:00:00Z`).getTime() + new Date(`${e}T12:00:00Z`).getTime()) / 2);
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).formatToParts(mid).map(p => [p.type, p.value]));
+    const offsetMin = Math.round((Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute) - Math.floor(mid.getTime() / 60000) * 60000) / 60000);
+    const local = `datetime(t.created_at, '${offsetMin >= 0 ? '+' : ''}${offsetMin} minutes')`;
+    const bf = branch_id ? ' AND t.branch_id = ?' : '';
+    const bp = branch_id ? [branch_id] : [];
+
+    const { rows } = await db.execute({
+      sql: `SELECT CAST(strftime('%w', ${local}) AS INTEGER) as dow, CAST(strftime('%H', ${local}) AS INTEGER) as hour,
+              COUNT(*) as tickets, COALESCE(SUM(t.total), 0) as revenue
+            FROM transactions t
+            WHERE t.status = 'completed' AND date(${local}) BETWEEN date(?) AND date(?)${bf}
+            GROUP BY dow, hour`,
+      args: [s, e, ...bp],
+    });
+
+    const round = n => parseFloat((n || 0).toFixed(2));
+    const daysInRange = [0, 0, 0, 0, 0, 0, 0];
+    for (let d = new Date(`${s}T00:00:00Z`), last = new Date(`${e}T00:00:00Z`); d <= last; d.setUTCDate(d.getUTCDate() + 1)) daysInRange[d.getUTCDay()]++;
+    const names = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const days = names.map((name, dow) => ({ dow, name, days_in_range: daysInRange[dow], tickets: 0, revenue: 0, hours: Array.from({ length: 24 }, (_, hour) => ({ hour, tickets: 0, revenue: 0 })) }));
+    const hours = Array.from({ length: 24 }, (_, hour) => ({ hour, tickets: 0, revenue: 0 }));
+    const totals = { tickets: 0, revenue: 0 };
+    for (const r of rows) {
+      const day = days[r.dow];
+      day.hours[r.hour].tickets += r.tickets; day.hours[r.hour].revenue += r.revenue;
+      day.tickets += r.tickets; day.revenue += r.revenue;
+      hours[r.hour].tickets += r.tickets; hours[r.hour].revenue += r.revenue;
+      totals.tickets += r.tickets; totals.revenue += r.revenue;
+    }
+    const finish = o => { o.revenue = round(o.revenue); o.avg_ticket = o.tickets ? round(o.revenue / o.tickets) : null; return o; };
+    for (const d of days) { finish(d); d.hours.forEach(finish); }
+    hours.forEach(finish); finish(totals);
+
+    let branchName = null;
+    if (branch_id) {
+      const { rows: [b] } = await db.execute({ sql: 'SELECT name FROM branches WHERE id = ?', args: [branch_id] });
+      branchName = b?.name || null;
+    }
+    res.json({ start: s, end: e, time_zone: timeZone, branch_name: branchName, days, hours, totals });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 module.exports = router;

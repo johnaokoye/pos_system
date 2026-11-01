@@ -16803,6 +16803,7 @@ const App = {
     document.getElementById('content').innerHTML = `
       <div class="section-header"><h2>Sales Reports</h2></div>
       ${this._reportButtonCard('Sales by Branch &amp; Department', 'Total sales per branch, broken down into Retail, Rental, Work Orders, and Special Projects.', 'App.showSalesByDepartmentReport()')}
+      ${this._reportButtonCard('Hourly Sales by Day', 'For each day of the week, sales and tickets in every hour of the day, with average revenue per ticket — to see when the store is busiest.', 'App.showHourlySalesReport()')}
       ${this._reportButtonCard('Online Sales', 'Orders from the website and WooCommerce — by channel, branch, fulfillment status and day, with top-selling products.', 'App.showOnlineSalesReport()')}
       ${this._reportButtonCard('Salesperson Leaderboard', 'Quotes created/converted, win rate, and total credited sales per salesperson.', 'App.showSalesLeaderboardReport()')}
       ${this._reportButtonCard('Quote Funnel &amp; Cycle Time', 'How many quotes sit in each status, and the average days spent between Draft, Sent, Accepted, and Converted.', 'App.showQuoteFunnelReport()')}
@@ -17639,6 +17640,139 @@ const App = {
   },
 
   // ─── Online Sales ───────────────────────────────────────────────────────
+
+  // ─── Hourly Sales by Day ────────────────────────────────────────────────
+  // GET /reports/hourly-sales — completed sales by weekday × hour (store time).
+  // "Average per day" divides by how many of that weekday the range holds.
+
+  async showHourlySalesReport() {
+    const branches = await this.api('GET', '/branches').catch(() => []);
+    const filters = `${this._reportDateRangeFilters('hsr-start', 'hsr-end', 3)}
+      <select id="hsr-branch" style="width:170px"><option value="">All locations</option>${branches.map(b => `<option value="${b.id}">${this.escapeAttr(b.name)}</option>`).join('')}</select>
+      <select id="hsr-mode" style="width:170px" onchange="App._renderHourlySalesReport()"><option value="total">Totals for the range</option><option value="avg">Average per day</option></select>`;
+    this._showReportModal('Hourly Sales by Day', filters, 'loadHourlySalesReport');
+    const modal = document.getElementById('rpt-modal-content')?.closest('.modal');
+    if (modal) modal.style.maxWidth = '1060px';
+  },
+
+  async loadHourlySalesReport() {
+    const start = document.getElementById('hsr-start')?.value || '';
+    const end = document.getElementById('hsr-end')?.value || '';
+    const branch = document.getElementById('hsr-branch')?.value || '';
+    const content = document.getElementById('rpt-modal-content');
+    if (!content) return;
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    try { this._hourlySalesData = await this.api('GET', `/reports/hourly-sales?start=${start}&end=${end}${branch ? '&branch_id=' + branch : ''}`); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${e.message}</p></div>`; return; }
+    this._renderHourlySalesReport();
+  },
+
+  _renderHourlySalesReport() {
+    const content = document.getElementById('rpt-modal-content');
+    const data = this._hourlySalesData;
+    if (!content || !data) return;
+    const avgMode = document.getElementById('hsr-mode')?.value === 'avg';
+    const { totals } = data;
+    // Monday first; Sunday last.
+    const days = [1, 2, 3, 4, 5, 6, 0].map(d => data.days[d]);
+    const per = (n, day) => avgMode ? (day.days_in_range ? n / day.days_in_range : 0) : n;
+    const money = n => this.fmt(n).replace(/ /g, ' ');
+    const compact = n => {
+      const v = Math.abs(n);
+      const num = v >= 1e6 ? (n / 1e6).toFixed(v >= 1e7 ? 0 : 1) + 'M' : v >= 1e3 ? (n / 1e3).toFixed(v >= 1e4 ? 0 : 1) + 'k' : Math.round(n).toString();
+      return num.replace(/\.0(?=[kM])/, '');
+    };
+    const tix = n => avgMode ? (Math.round(n * 10) / 10).toLocaleString('en-US') : Math.round(n).toLocaleString('en-US');
+    const hourLabel = h => `${h % 12 || 12}${h < 12 ? 'am' : 'pm'}`;
+    const hourRange = h => `${hourLabel(h)}–${hourLabel((h + 1) % 24)}`;
+    const fmtDate = d => new Date(d + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+
+    // Same hour span on every chart so the days line up: the first to last hour
+    // with any sale in the range.
+    const active = data.hours.filter(h => h.tickets).map(h => h.hour);
+    const header = `<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">${fmtDate(data.start)} – ${fmtDate(data.end)} · ${data.branch_name ? this.escapeAttr(data.branch_name) : 'All locations'} · ${avgMode ? 'average per day' : 'totals for the range'}</div>`;
+    if (!active.length) { content.innerHTML = header + '<div class="empty-state"><p>No completed sales in this range.</p></div>'; return; }
+    const span = [];
+    for (let h = Math.min(...active); h <= Math.max(...active); h++) span.push(h);
+
+    let busiest = null;
+    for (const d of days) for (const h of d.hours) if (h.tickets && (!busiest || per(h.revenue, d) > busiest.rev)) busiest = { day: d.name, hour: h.hour, rev: per(h.revenue, d) };
+    const bestDay = days.reduce((a, d) => (per(d.revenue, d) > per(a.revenue, a) ? d : a), days[0]);
+
+    // Each chart has its own scale — one big sale would otherwise flatten
+    // every other day.
+    const chart = day => {
+      const maxRev = Math.max(...span.map(h => per(day.hours[h].revenue, day)), 0) || 1;
+      const bars = span.map(h => {
+        const c = day.hours[h];
+        const rev = per(c.revenue, day);
+        const pct = rev > 0 ? Math.max(rev / maxRev * 100, 1.5) : 0;
+        const tip = `${day.name} ${hourRange(h)} — ${money(rev)} · ${tix(per(c.tickets, day))} ticket${per(c.tickets, day) === 1 ? '' : 's'}${c.avg_ticket != null ? ' · avg ' + money(c.avg_ticket) + '/ticket' : ''}`;
+        return `<div class="hsr-col" title="${this.escapeAttr(tip)}">
+          <div class="hsr-bar-area">
+            <div class="hsr-val">${rev > 0 ? compact(rev) : ''}</div>
+            <div class="hsr-bar" style="height:${pct}%"></div>
+          </div>
+          <div class="hsr-hour">${hourLabel(h)}</div>
+        </div>`;
+      }).join('');
+      return `<div class="hsr-chart">${bars}</div>`;
+    };
+    const dayTable = day => `
+      <div class="table-wrap"><table class="hsr-table">
+        <thead><tr><th>${day.name}</th>${span.map(h => `<th>${hourLabel(h)}</th>`).join('')}</tr></thead>
+        <tbody>
+          <tr><td class="fw-600">Revenue</td>${span.map(h => `<td>${day.hours[h].revenue ? compact(per(day.hours[h].revenue, day)) : '—'}</td>`).join('')}</tr>
+          <tr><td class="fw-600">Tickets</td>${span.map(h => `<td>${day.hours[h].tickets ? tix(per(day.hours[h].tickets, day)) : '—'}</td>`).join('')}</tr>
+          <tr><td class="fw-600">Avg / Ticket</td>${span.map(h => `<td>${day.hours[h].avg_ticket != null ? compact(day.hours[h].avg_ticket) : '—'}</td>`).join('')}</tr>
+        </tbody>
+      </table></div>`;
+
+    content.innerHTML = `
+      <style>
+        .hsr-chart { display:flex; gap:2px; align-items:stretch; height:170px; padding:4px 0 0; border-bottom:1px solid var(--border); margin-bottom:6px; }
+        .hsr-col { flex:1 1 0; min-width:0; display:flex; flex-direction:column; cursor:default; }
+        .hsr-col:hover .hsr-bar { opacity:.75; }
+        .hsr-col:hover .hsr-val { color:var(--text); font-weight:700; }
+        .hsr-bar-area { flex:1; display:flex; flex-direction:column; justify-content:flex-end; align-items:center; min-height:0; }
+        .hsr-bar { width:min(70%, 34px); background:var(--primary); border-radius:4px 4px 0 0; }
+        .hsr-val { font-size:10px; color:var(--text-muted); white-space:nowrap; margin-bottom:2px; font-variant-numeric:tabular-nums; }
+        .hsr-hour { font-size:10px; color:var(--text-muted); text-align:center; padding-top:3px; white-space:nowrap; }
+        .hsr-table th, .hsr-table td { font-size:11px; padding:4px 4px; text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }
+        .hsr-table th:first-child, .hsr-table td:first-child { text-align:left; }
+      </style>
+      ${header}
+      <div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr));margin-bottom:18px">
+        <div class="stat-card blue" style="min-width:0;padding:14px"><div class="stat-label">Revenue</div><div class="stat-value" style="font-size:18px;overflow-wrap:anywhere">${money(totals.revenue)}</div><div class="stat-sub">all days in range</div></div>
+        <div class="stat-card" style="min-width:0;padding:14px"><div class="stat-label">Tickets</div><div class="stat-value" style="font-size:18px">${totals.tickets.toLocaleString('en-US')}</div></div>
+        <div class="stat-card green" style="min-width:0;padding:14px"><div class="stat-label">Avg Revenue per Ticket</div><div class="stat-value" style="font-size:18px;overflow-wrap:anywhere">${totals.avg_ticket != null ? money(totals.avg_ticket) : '—'}</div></div>
+        <div class="stat-card orange" style="min-width:0;padding:14px"><div class="stat-label">Busiest Hour</div><div class="stat-value" style="font-size:16px">${busiest ? `${busiest.day.slice(0, 3)} ${hourRange(busiest.hour)}` : '—'}</div><div class="stat-sub">${busiest ? money(busiest.rev) + (avgMode ? ' avg' : '') : ''} · best day ${bestDay.name}</div></div>
+      </div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">By Day of the Week</span></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Day</th><th>Days in Range</th><th>Tickets</th><th>Revenue</th><th>Avg Revenue / Day</th><th>Avg Revenue / Ticket</th><th>Busiest Hour</th></tr></thead>
+          <tbody>${days.map(d => {
+            const top = d.hours.reduce((a, h) => (h.revenue > (a?.revenue || 0) ? h : a), null);
+            return `<tr>
+              <td class="fw-600">${d.name}</td><td>${d.days_in_range}</td><td>${d.tickets.toLocaleString('en-US')}</td><td>${money(d.revenue)}</td>
+              <td>${d.days_in_range ? money(d.revenue / d.days_in_range) : '—'}</td><td class="fw-600">${d.avg_ticket != null ? money(d.avg_ticket) : '—'}</td>
+              <td>${top ? hourRange(top.hour) : '—'}</td></tr>`;
+          }).join('')}
+            <tr style="border-top:2px solid var(--border)"><td class="fw-600">All days</td><td>${days.reduce((n, d) => n + d.days_in_range, 0)}</td><td class="fw-600">${totals.tickets.toLocaleString('en-US')}</td><td class="fw-600">${money(totals.revenue)}</td><td></td><td class="fw-600">${totals.avg_ticket != null ? money(totals.avg_ticket) : '—'}</td><td></td></tr>
+          </tbody>
+        </table></div>
+      </div>
+      ${days.map(d => `
+      <div class="card" style="margin-bottom:16px;break-inside:avoid">
+        <div class="card-header" style="flex-wrap:wrap;gap:6px">
+          <span class="card-title">${d.name}</span>
+          <span style="font-size:12px;color:var(--text-muted)">${d.tickets ? `${money(per(d.revenue, d))}${avgMode ? ' avg/day' : ''} · ${tix(per(d.tickets, d))} tickets · avg ${money(d.avg_ticket)}/ticket` : 'No sales'} · ${d.days_in_range} ${d.name}${d.days_in_range === 1 ? '' : 's'} in range</span>
+        </div>
+        ${d.tickets ? chart(d) + dayTable(d) : '<div class="empty-state" style="padding:14px"><p>No completed sales on ' + d.name + 's in this range.</p></div>'}
+      </div>`).join('')}
+      <p style="font-size:11px;color:var(--text-muted);margin-top:10px">Completed sales only, by the time the ticket was rung up in store time (${this.escapeAttr(data.time_zone)}). Revenue is the ticket total including tax; returns are not deducted. Bar labels are revenue (k = thousand); hover a bar for the full figures. Each day's chart is scaled to its own busiest hour, so compare days by the figures, not bar heights. Average per day divides by the number of that weekday in the range; average revenue per ticket is the same either way.</p>`;
+  },
 
   showOnlineSalesReport() {
     this._showReportModal('Online Sales', this._reportDateRangeFilters('ons-start','ons-end'), 'loadOnlineSalesReport');
