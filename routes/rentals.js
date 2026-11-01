@@ -1739,7 +1739,7 @@ router.patch('/agreements/:id/missed-pickup-contact', requireRentalsManage, asyn
     if (!['email', 'phone'].includes(contact_method)) return res.status(400).json({ error: 'contact_method must be "email" or "phone"' });
     const pause = await findOpenMissedPickupPause(req.params.id);
     if (!pause) return res.status(400).json({ error: 'No open missed-pickup pause found on this agreement' });
-    const stamp = `[${new Date().toLocaleString()}${employee_id ? ` — emp #${employee_id}` : ''}, ${contact_method}] ${(notes || '').trim() || '(no notes)'}`;
+    const stamp = `[${require('../lib/storeTime').fmtDateTime(new Date())}${employee_id ? ` — emp #${employee_id}` : ''}, ${contact_method}] ${(notes || '').trim() || '(no notes)'}`;
     const combinedNotes = pause.contact_notes ? `${pause.contact_notes}\n${stamp}` : stamp;
     await db.execute({ sql: 'UPDATE rental_agreement_pauses SET contact_method = ?, contact_notes = ? WHERE id = ?', args: [contact_method, combinedNotes, pause.id] });
     const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
@@ -1780,7 +1780,7 @@ router.patch('/agreements/:id/missed-pickup-confirm', requireRentalsManage, asyn
     }
 
     const now = new Date().toISOString();
-    const stamp = notes && notes.trim() ? `[${new Date().toLocaleString()}] Customer confirmed: ${decision}${decision === 'continue' ? ` (new pickup date ${newDueDate})` : ''} — ${notes.trim()}` : `[${new Date().toLocaleString()}] Customer confirmed: ${decision}${decision === 'continue' ? ` (new pickup date ${newDueDate})` : ''}`;
+    const stamp = notes && notes.trim() ? `[${require('../lib/storeTime').fmtDateTime(new Date())}] Customer confirmed: ${decision}${decision === 'continue' ? ` (new pickup date ${newDueDate})` : ''} — ${notes.trim()}` : `[${require('../lib/storeTime').fmtDateTime(new Date())}] Customer confirmed: ${decision}${decision === 'continue' ? ` (new pickup date ${newDueDate})` : ''}`;
     const combinedNotes = pause.contact_notes ? `${pause.contact_notes}\n${stamp}` : stamp;
 
     const tx = await db.transaction('write');

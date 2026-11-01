@@ -830,7 +830,7 @@ router.post('/requests/:id/issues', requirePermission('shop_use_issue'), async (
       total = round2(total);
       await tx.execute({ sql: 'UPDATE shop_use_issues SET total_cost = ? WHERE id = ?', args: [total, issueId] });
       if (inventoryLines) {
-        const { rows: [{ d }] } = await tx.execute("SELECT date('now', 'localtime') AS d");
+        const d = require('../lib/storeTime').storeToday();
         await queuePosting(tx, { sourceType: 'issue', sourceId: issueId, reference: issueNumber, request: r, amount: total, date: d,
           memo: `Shop Use ${issueNumber} (${r.request_number}) — ${categoryLabel(r.category)}` });
       }
@@ -896,7 +896,7 @@ async function storeInfo() {
   const { rows } = await db.execute("SELECT key, value FROM settings WHERE key IN ('store_name', 'store_address', 'store_phone', 'company_logo_url')");
   return Object.fromEntries(rows.map(r => [r.key, r.value]));
 }
-const pdfDateTime = d => d ? new Date(String(d).replace(' ', 'T') + (String(d).includes('Z') ? '' : 'Z')).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+const pdfDateTime = d => d ? require('../lib/storeTime').fmtDateTime(d, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
 const money = n => (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 // Issue slip as a PDF download.
@@ -1021,7 +1021,7 @@ router.post('/issues/:id/returns', inModule, async (req, res) => {
       total = round2(total);
       await tx.execute({ sql: 'UPDATE shop_use_returns SET total_cost = ? WHERE id = ?', args: [total, returnId] });
       if (total > 0) {
-        const { rows: [{ d }] } = await tx.execute("SELECT date('now', 'localtime') AS d");
+        const d = require('../lib/storeTime').storeToday();
         await queuePosting(tx, { sourceType: 'return', sourceId: returnId, reference: number, request: r, amount: total, date: d,
           memo: `Shop Use ${kind} ${number} of ${issue.issue_number} (${r.request_number})` });
       }

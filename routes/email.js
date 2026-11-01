@@ -1,5 +1,8 @@
 const express = require('express');
 const router = express.Router();
+// Dates on emails/PDFs are on the store clock (lib/storeTime.js); make sure
+// the Store Time Zone setting is fresh before any document is built.
+router.use((req, res, next) => { refreshStoreTz().then(() => next(), () => next()); });
 const nodemailer = require('nodemailer');
 const { db } = require('../database');
 const { requireAuth, requirePermission, requireAnyPermission, can, drawerScope } = require('../lib/permissions');
@@ -10,6 +13,7 @@ const { rentalQuoteSummary, attachRentalRates, attachRateBasis, rentalWindow, ra
 const { renderDocumentPdf } = require('../lib/documentPdf');
 const { loadDrawerSession } = require('../lib/drawerReport');
 const { paymentReceipt } = require('../lib/customerPayments');
+const { fmtDate, fmtDateTime, refreshStoreTz } = require('../lib/storeTime');
 
 // Brand palette for every email sent out (receipts, quotes, invoices,
 // statements, notices): green header with a yellow accent stripe, black
@@ -203,7 +207,7 @@ function buildReceiptHtml(tx, s) {
     </td></tr>
     <tr><td style="padding:20px 24px">
       <div style="font-size:18px;font-weight:700;color:${BRAND.black};margin-bottom:12px">${receiptDocTitle(tx)}</div>
-      ${billToRowHtml(tx, [['Invoice #', tx.transaction_number], ['Date', new Date(tx.created_at).toLocaleString()], ['P.O. #', poValueHtml(txPoNumber(tx))], ['Quotation', tx.source_quote_number]])}
+      ${billToRowHtml(tx, [['Invoice #', tx.transaction_number], ['Date', fmtDateTime(tx.created_at)], ['P.O. #', poValueHtml(txPoNumber(tx))], ['Quotation', tx.source_quote_number]])}
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-bottom:16px">
         ${tx.created_by_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Created By:</strong> ${tx.created_by_name}</td></tr>` : ''}
         ${tx.employee_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Cashier:</strong> ${tx.employee_name}</td></tr>` : ''}
@@ -274,7 +278,7 @@ function buildVoidReceiptHtml(tx, s) {
   <table width="480" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
     ${docHeader(storeName, tx.branch_name, storeAddr, tx.branch_phone || s.store_phone, 'Void Receipt', `Ref: ${tx.transaction_number}`)}
     <tr><td style="padding:0 24px 20px">
-      ${docRow('Voided', new Date(tx.voided_at).toLocaleString())}
+      ${docRow('Voided', fmtDateTime(tx.voided_at))}
       ${tx.customer_name ? docRow('Customer', tx.customer_name) : ''}
       ${docRow('Original Payment Method', (tx.payment_method || '').replace('_',' ').toUpperCase())}
       ${tx.voided_by_name ? docRow('Authorized By', tx.voided_by_name) : ''}
@@ -318,7 +322,7 @@ function buildReturnReceiptHtml(ret, s) {
   <table width="480" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
     ${docHeader(storeName, ret.branch_name, storeAddr, ret.branch_phone || s.store_phone, 'Return Receipt', `Ref: ${ret.return_number}`)}
     <tr><td style="padding:0 24px 20px">
-      ${docRow('Date', new Date(ret.created_at).toLocaleString())}
+      ${docRow('Date', fmtDateTime(ret.created_at))}
       ${ret.original_transaction_number ? docRow('Original Transaction', ret.original_transaction_number) : ''}
       ${ret.customer_name ? docRow('Customer', ret.customer_name) : ''}
       ${docRow('Resolution', resolutionLabel)}
@@ -356,7 +360,7 @@ function buildPaymentReceiptHtml(p, s) {
     : s.store_address || '';
   const rows = (p.applied || []).map(a => `
     <tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${esc(a.invoice_number)}<br><span style="color:#888;font-size:11px">${a.invoice_date ? new Date(a.invoice_date).toLocaleDateString() : ''}</span></td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${esc(a.invoice_number)}<br><span style="color:#888;font-size:11px">${a.invoice_date ? fmtDate(a.invoice_date) : ''}</span></td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(a.amount)}</td>
     </tr>`).join('');
 
@@ -369,7 +373,7 @@ function buildPaymentReceiptHtml(p, s) {
   <table width="480" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
     ${docHeader(storeName, p.branch_name, storeAddr, p.branch_phone || s.store_phone, 'Payment Receipt', `Ref: ${esc(p.payment_number)}`)}
     <tr><td style="padding:0 24px 20px">
-      ${docRow('Date', new Date(p.created_at).toLocaleString())}
+      ${docRow('Date', fmtDateTime(p.created_at))}
       ${docRow('Customer', esc(p.customer_name))}
       ${p.customer_number ? docRow('Account #', esc(p.customer_number)) : ''}
       ${docRow('Payment Method', esc(paymentMethodLabel(p.payment_method)))}
@@ -385,7 +389,7 @@ function buildPaymentReceiptHtml(p, s) {
         ${p.unapplied > 0.005 ? `<tr><td style="padding:3px 0">Held on account (not yet applied to an invoice)</td><td style="text-align:right">${fmt(p.unapplied)}</td></tr>` : ''}
         <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
         <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">AMOUNT RECEIVED</td><td style="font-size:16px;font-weight:700;color:#16a34a;text-align:right">${fmt(p.amount)}</td></tr>
-        <tr><td style="padding:8px 0 0">Account balance as of ${new Date().toLocaleDateString()}</td><td style="padding:8px 0 0;text-align:right;font-weight:600">${fmt(p.account_balance)}</td></tr>
+        <tr><td style="padding:8px 0 0">Account balance as of ${fmtDate(new Date())}</td><td style="padding:8px 0 0;text-align:right;font-weight:600">${fmt(p.account_balance)}</td></tr>
       </table>
     </td></tr>
   </table>
@@ -413,7 +417,7 @@ function buildCancellationReceiptHtml(agreement, s) {
   <table width="480" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
     ${docHeader(storeName, agreement.branch_name, s.store_address, s.store_phone, 'Rental Cancellation Receipt', `Ref: ${agreement.agreement_number}`)}
     <tr><td style="padding:0 24px 20px">
-      ${docRow('Cancelled', agreement.cancelled_at ? new Date(agreement.cancelled_at).toLocaleString() : '—')}
+      ${docRow('Cancelled', agreement.cancelled_at ? fmtDateTime(agreement.cancelled_at) : '—')}
       ${agreement.customer_name ? docRow('Customer', agreement.customer_name) : ''}
       ${agreement.cancelled_by_name ? docRow('Cancelled By', agreement.cancelled_by_name) : ''}
       ${agreement.cancellation_reason ? docRow('Reason', agreement.cancellation_reason) : ''}
@@ -470,8 +474,8 @@ function buildRentalInvoiceHtml(agreement, tx, s, origin) {
   const footer = footerHtml(s);
   const absUrl = (path) => !path ? null : (/^https?:\/\//.test(path) ? path : `${origin}${path}`);
   const rentedItemsLabel = (agreement.items || []).filter(i => !i.parent_item_id).map(i => `${i.product_name} x${i.quantity}`).join(', ');
-  const rentedLabel = agreement.checkout_datetime ? new Date(agreement.checkout_datetime).toLocaleString() : '—';
-  const returnedLabel = agreement.returned_at ? new Date(agreement.returned_at).toLocaleString() : 'Not yet returned';
+  const rentedLabel = agreement.checkout_datetime ? fmtDateTime(agreement.checkout_datetime) : '—';
+  const returnedLabel = agreement.returned_at ? fmtDateTime(agreement.returned_at) : 'Not yet returned';
   const durationLabel = rentalDurationText(agreement.checkout_datetime, agreement.due_date, agreement.returned_at);
 
   const rows = (tx.items || []).map(i => i.is_comment ? commentRowHtml(i.product_name, 2) : `
@@ -514,7 +518,7 @@ function buildRentalInvoiceHtml(agreement, tx, s, origin) {
       ${sigs.map(([label, name, src, signedAt]) => `<td style="text-align:center;padding:4px 8px">
         <img src="${absUrl(src)}" style="max-height:44px;max-width:120px;border-bottom:1px solid #333;padding-bottom:4px" />
         <div style="font-size:10px;color:#555;margin-top:4px">${label}${name ? ` — ${name}` : ''}</div>
-        ${signedAt ? `<div style="font-size:9px;color:#888">${new Date(signedAt).toLocaleString()}</div>` : ''}
+        ${signedAt ? `<div style="font-size:9px;color:#888">${fmtDateTime(signedAt)}</div>` : ''}
       </td>`).join('')}
     </tr></table>`;
   };
@@ -534,7 +538,7 @@ function buildRentalInvoiceHtml(agreement, tx, s, origin) {
     </td></tr>
     <tr><td style="padding:20px 24px">
       <div style="font-size:18px;font-weight:700;color:${BRAND.black};margin-bottom:12px">Rental Agreement</div>
-      ${billToRowHtml(agreement, [['Invoice #', tx.transaction_number], ['Date', new Date(tx.created_at).toLocaleString()], ['P.O. #', poValueHtml(agreement.customer_po_number)], ['Rental Agreement', agreement.agreement_number]])}
+      ${billToRowHtml(agreement, [['Invoice #', tx.transaction_number], ['Date', fmtDateTime(tx.created_at)], ['P.O. #', poValueHtml(agreement.customer_po_number)], ['Rental Agreement', agreement.agreement_number]])}
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-bottom:16px">
         ${tx.created_by_name || tx.employee_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Created By:</strong> ${tx.created_by_name || tx.employee_name}</td></tr>` : ''}
         ${tx.employee_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Cashier:</strong> ${tx.employee_name}</td></tr>` : ''}
@@ -625,16 +629,16 @@ function rentalSummaryFigures(agreement) {
   let dispositionLine = null;
   if (isReturned && agreement.balance_due > 0.004) {
     dispositionLine = agreement.settlement_transaction_id
-      ? `Collected ${fmt(agreement.balance_due)} via ${(agreement.settlement_payment_method||'').replace('_',' ').toUpperCase()} on ${new Date(agreement.settlement_created_at).toLocaleString()}${agreement.settlement_amount_tendered > agreement.balance_due ? ` — Tendered ${fmt(agreement.settlement_amount_tendered)}, Change ${fmt(agreement.settlement_change_amount)}` : ''}.`
+      ? `Collected ${fmt(agreement.balance_due)} via ${(agreement.settlement_payment_method||'').replace('_',' ').toUpperCase()} on ${fmtDateTime(agreement.settlement_created_at)}${agreement.settlement_amount_tendered > agreement.balance_due ? ` — Tendered ${fmt(agreement.settlement_amount_tendered)}, Change ${fmt(agreement.settlement_change_amount)}` : ''}.`
       : 'Balance due has not yet been collected — see POS Hold Recall.';
   } else if (isReturned && agreement.balance_due < -0.004) {
     if (agreement.credit_note_amount > 0) {
-      dispositionLine = `Issued as store credit on the customer's account: ${fmt(agreement.credit_note_amount)} on ${new Date(agreement.credit_note_issued_at).toLocaleString()}${agreement.credit_note_issued_by_name ? ` by ${agreement.credit_note_issued_by_name}` : ''}.`;
+      dispositionLine = `Issued as store credit on the customer's account: ${fmt(agreement.credit_note_amount)} on ${fmtDateTime(agreement.credit_note_issued_at)}${agreement.credit_note_issued_by_name ? ` by ${agreement.credit_note_issued_by_name}` : ''}.`;
     } else if (agreement.checkout_payment_method === 'credit') {
       dispositionLine = `Applied automatically to the customer's account balance: ${fmt(-agreement.settlement_total)}.`;
     } else if (['cash','bank_transfer','original_card'].includes(agreement.deposit_return_method)) {
       const methodLabels = { cash: 'Cash', bank_transfer: 'Bank Transfer', original_card: 'Refund to Original Card' };
-      dispositionLine = `Refunded via ${methodLabels[agreement.deposit_return_method]} on ${new Date(agreement.deposit_return_recorded_at).toLocaleString()}${agreement.deposit_return_reference ? ` — Ref: ${agreement.deposit_return_reference}` : ''}${agreement.deposit_return_recorded_by_name ? ` (recorded by ${agreement.deposit_return_recorded_by_name})` : ''}.`;
+      dispositionLine = `Refunded via ${methodLabels[agreement.deposit_return_method]} on ${fmtDateTime(agreement.deposit_return_recorded_at)}${agreement.deposit_return_reference ? ` — Ref: ${agreement.deposit_return_reference}` : ''}${agreement.deposit_return_recorded_by_name ? ` (recorded by ${agreement.deposit_return_recorded_by_name})` : ''}.`;
     } else {
       dispositionLine = 'Refund due — not yet disbursed.';
     }
@@ -669,7 +673,7 @@ function buildRentalSummaryHtml(agreement, s) {
     ${issueSignatures.map(([label, name, src, signedAt]) => `<td style="text-align:center;padding:4px 8px">
       <img src="${src}" style="max-height:44px;max-width:110px;border-bottom:1px solid #333;padding-bottom:4px" />
       <div style="font-size:10px;color:#555;margin-top:4px">${label}${name ? ` — ${name}` : ''}</div>
-      ${signedAt ? `<div style="font-size:9px;color:#888">${new Date(signedAt).toLocaleString()}</div>` : ''}
+      ${signedAt ? `<div style="font-size:9px;color:#888">${fmtDateTime(signedAt)}</div>` : ''}
     </td>`).join('')}
   </tr></table>`;
 
@@ -688,7 +692,7 @@ function buildRentalSummaryHtml(agreement, s) {
     </td></tr>
     <tr><td style="padding:20px 24px">
       <div style="font-size:18px;font-weight:700;color:${BRAND.black};margin-bottom:12px">Rental Tax Invoice</div>
-      ${billToRowHtml(agreement, [['Agreement #', agreement.agreement_number], ['P.O. #', poValueHtml(agreement.customer_po_number)], ['Checked Out', agreement.checkout_datetime ? new Date(agreement.checkout_datetime).toLocaleString() : '—'], ['Due Date', agreement.due_date], ['Returned', agreement.returned_at ? new Date(agreement.returned_at).toLocaleString() : 'Not yet returned']])}
+      ${billToRowHtml(agreement, [['Agreement #', agreement.agreement_number], ['P.O. #', poValueHtml(agreement.customer_po_number)], ['Checked Out', agreement.checkout_datetime ? fmtDateTime(agreement.checkout_datetime) : '—'], ['Due Date', agreement.due_date], ['Returned', agreement.returned_at ? fmtDateTime(agreement.returned_at) : 'Not yet returned']])}
       <div style="font-size:12px;font-weight:700;text-transform:uppercase;color:#666;border-bottom:1px solid #e8e8e8;padding-bottom:4px;margin-bottom:6px">Items Rented</div>
       <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:12px">
         <thead><tr style="background:#f9fafb"><th style="padding:6px 8px;text-align:left;font-size:11px;color:#666;border-bottom:1px solid #e8e8e8">Item</th><th style="padding:6px 8px;text-align:center;font-size:11px;color:#666;border-bottom:1px solid #e8e8e8">Qty</th><th style="padding:6px 8px;text-align:center;font-size:11px;color:#666;border-bottom:1px solid #e8e8e8">Rate</th><th style="padding:6px 8px;text-align:right;font-size:11px;color:#666;border-bottom:1px solid #e8e8e8">Original Fee</th><th style="padding:6px 8px;text-align:right;font-size:11px;color:#666;border-bottom:1px solid #e8e8e8">Final Fee</th><th style="padding:6px 8px;text-align:right;font-size:11px;color:#666;border-bottom:1px solid #e8e8e8">Damage Fee</th></tr></thead>
@@ -765,8 +769,8 @@ ${print ? PRINT_PAGE_STYLE : ''}
           <div style="font-size:13px;color:#888;margin-top:2px">${q.quote_number}</div>
         </div>
         <div style="text-align:right;font-size:13px;color:#444">
-          <div><strong>Date:</strong> ${new Date(q.created_at).toLocaleDateString()}</div>
-          ${q.valid_until ? `<div><strong>Valid Until:</strong> ${new Date(q.valid_until + 'T00:00:00').toLocaleDateString()}</div>` : ''}
+          <div><strong>Date:</strong> ${fmtDate(q.created_at)}</div>
+          ${q.valid_until ? `<div><strong>Valid Until:</strong> ${fmtDate(String(q.valid_until).slice(0, 10))}</div>` : ''}
           ${q.branch_name ? `<div><strong>Branch:</strong> ${q.branch_name}</div>` : ''}
         </div>
       </div>
@@ -810,7 +814,7 @@ function approvalSignatureHtml(q) {
         <div style="font-size:10px;font-weight:bold;text-transform:uppercase;color:#888;margin-bottom:6px">Approved By</div>
         <img src="${q.approval_signature}" style="max-height:60px;max-width:220px;border-bottom:1px solid #333;padding-bottom:4px;display:block" />
         <div style="font-size:12px;color:#555;margin-top:4px">${q.approved_by_name || ''}</div>
-        ${q.approved_at ? `<div style="font-size:11px;color:#888">${new Date(q.approved_at).toLocaleString()}</div>` : ''}
+        ${q.approved_at ? `<div style="font-size:11px;color:#888">${fmtDateTime(q.approved_at)}</div>` : ''}
       </div>`;
 }
 
@@ -905,7 +909,7 @@ ${print ? PRINT_PAGE_STYLE : ''}
             <div style="font-size:13px;color:#888;margin-top:2px">${q.quote_number}</div>
           </td>
           <td style="vertical-align:top;text-align:right;font-size:13px;color:#444">
-            <div><strong>Date:</strong> ${new Date(q.created_at).toLocaleDateString()}</div>
+            <div><strong>Date:</strong> ${fmtDate(q.created_at)}</div>
             ${q.branch_name ? `<div><strong>Branch:</strong> ${q.branch_name}</div>` : ''}
             ${q.employee_name ? `<div><strong>Prepared By:</strong> ${q.employee_name}</div>` : ''}
           </td>
@@ -1353,7 +1357,7 @@ function buildGrnHtml(po, s) {
           <div style="font-size:13px;color:#888;margin-top:2px">${po.po_number}</div>
         </div>
         <div style="text-align:right;font-size:13px;color:#444">
-          <div><strong>Date:</strong> ${new Date().toLocaleDateString()}</div>
+          <div><strong>Date:</strong> ${fmtDate(new Date())}</div>
           ${po.branch_name ? `<div><strong>Branch:</strong> ${po.branch_name}</div>` : ''}
         </div>
       </div>
@@ -1427,7 +1431,7 @@ ${print ? PRINT_PAGE_STYLE : ''}
           ${poUnapprovedLabel(po) ? `<div style="display:inline-block;margin-top:6px;padding:3px 8px;border:2px solid #dc2626;color:#dc2626;font-size:12px;font-weight:700;letter-spacing:.5px">${poUnapprovedLabel(po)}</div>` : ''}
         </div>
         <div style="text-align:right;font-size:13px;color:#444">
-          <div><strong>Approved:</strong> ${po.approved_at ? new Date(po.approved_at).toLocaleDateString() : '—'}</div>
+          <div><strong>Approved:</strong> ${po.approved_at ? fmtDate(po.approved_at) : '—'}</div>
           ${po.branch_name ? `<div><strong>Branch:</strong> ${po.branch_name}</div>` : ''}
           ${po.vendor_order_number ? `<div><strong>Vendor Order #:</strong> ${po.vendor_order_number}</div>` : ''}
           ${po.currency ? `<div><strong>Currency:</strong> ${po.currency}</div>` : ''}
@@ -1464,7 +1468,7 @@ ${print ? PRINT_PAGE_STYLE : ''}
             <div style="font-size:10px;font-weight:bold;text-transform:uppercase;color:#888;margin-bottom:6px">Approved By</div>
             <img src="${absUrl(po.approval_signature)}" style="max-height:60px;max-width:220px;display:block" />
             <div style="border-top:1px solid #333;margin-top:4px;padding-top:4px;font-size:12px;color:#555">${po.approved_by_name || ''}</div>
-            ${po.approved_at ? `<div style="font-size:11px;color:#888">${new Date(po.approved_at).toLocaleString()}</div>` : ''}
+            ${po.approved_at ? `<div style="font-size:11px;color:#888">${fmtDateTime(po.approved_at)}</div>` : ''}
           </td></tr></table>
         </td></tr>
       </table>` : ''}
@@ -1511,7 +1515,7 @@ const AP_METHODS = { cheque: 'Cheque', bank_transfer: 'Bank Transfer', cash: 'Ca
 function buildPaymentRequestHtml(r, s, origin) {
   const storeName = s.store_name || 'My Store';
   const absUrl = (p) => !p ? null : (/^https?:\/\//.test(p) ? p : `${origin}${p}`);
-  const day = v => v ? new Date(/^\d{4}-\d{2}-\d{2}$/.test(String(v)) ? `${v}T00:00:00` : `${String(v).replace(' ', 'T')}Z`).toLocaleDateString() : '—';
+  const day = v => v ? fmtDate(v) : '—';
   const th = (label, align = 'left') => `<th style="padding:8px;text-align:${align};font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">${label}</th>`;
   const td = (v, align = 'left', extra = '') => `<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:${align};${extra}">${v}</td>`;
   let head, rows;
@@ -1728,7 +1732,7 @@ function buildPumpAuthorizationHtml(pr, s, origin) {
           <div style="font-size:13px;color:#888;margin-top:2px">${pr.pr_number}</div>
         </td>
         <td style="vertical-align:top;text-align:right;font-size:13px;color:#444">
-          <div><strong>Approved:</strong> ${new Date(pr.approved_at).toLocaleDateString()}</div>
+          <div><strong>Approved:</strong> ${fmtDate(pr.approved_at)}</div>
           ${pr.branch_name ? `<div><strong>Branch:</strong> ${pr.branch_name}</div>` : ''}
           ${pr.department ? `<div><strong>Department:</strong> ${pr.department}</div>` : ''}
           ${pr.employee_name ? `<div><strong>Requested by:</strong> ${pr.employee_name}</div>` : ''}
@@ -1754,7 +1758,7 @@ function buildPumpAuthorizationHtml(pr, s, origin) {
             <div style="font-size:10px;font-weight:bold;text-transform:uppercase;color:#888;margin-bottom:6px">Authorized By</div>
             <img src="${absUrl(pr.approval_signature)}" style="max-height:60px;max-width:220px;display:block" />
             <div style="border-top:1px solid #333;margin-top:4px;padding-top:4px;font-size:12px;color:#555">${pr.approved_by_name || ''}</div>
-            <div style="font-size:11px;color:#888">${new Date(pr.approved_at).toLocaleString()}</div>
+            <div style="font-size:11px;color:#888">${fmtDateTime(pr.approved_at)}</div>
           </td></tr></table>
         </td></tr>
       </table>` : ''}
@@ -1865,7 +1869,7 @@ router.post('/send-grn/:id', requireAuth, async (req, res) => {
 function statementSectionHtml(st, s, origin) {
   const c = st.customer;
   const name = `${c.first_name || ''} ${c.last_name || ''}`.trim();
-  const dt = v => (v ? new Date(`${String(v).slice(0, 10)}T00:00:00`).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }) : '');
+  const dt = v => (v ? fmtDate(v, { month: '2-digit', day: '2-digit', year: 'numeric' }) : '');
   const money = n => (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const td = (v, extra = '') => `<td style="padding:4px 6px;border-bottom:1px solid #eee;vertical-align:top;${extra}">${v}</td>`;
   const th = (v, align = 'left') => `<th style="padding:5px 6px;border-bottom:2px solid #333;text-align:${align};font-size:10.5px;text-transform:uppercase">${v}</th>`;
@@ -2049,8 +2053,8 @@ function buildWorkOrderReadyHtml(wo, s) {
       ${wo.item_label ? docRow('Item', wo.item_label) : ''}
       ${wo.item_serial ? docRow('Item #', wo.item_serial) : ''}
       ${(wo.accessories || []).length ? docRow('Accessories', wo.accessories.map(a => `A${a.line_no} ${a.name}`).join(', ')) : ''}
-      ${docRow('Completed', wo.completed_at ? new Date(wo.completed_at).toLocaleString() : '—')}
-      ${docRow('Pickup By', wo.pickup_due_date ? new Date(wo.pickup_due_date).toLocaleDateString() : '—', '#dc2626')}
+      ${docRow('Completed', wo.completed_at ? fmtDateTime(wo.completed_at) : '—')}
+      ${docRow('Pickup By', wo.pickup_due_date ? fmtDate(wo.pickup_due_date) : '—', '#dc2626')}
       <div style="text-align:center;margin-top:20px;font-size:14px;color:#333">Your item is ready for pickup. Please bring this reference number with you.</div>
       <div style="text-align:center;margin-top:16px;font-size:11px;color:#999">Pickup must happen by the date above.</div>
     </td></tr>
@@ -2166,7 +2170,7 @@ ${print ? PRINT_PAGE_STYLE : ''}
           <div style="font-size:13px;color:#888;margin-top:2px">${wo.wo_number}</div>
         </div>
       </div>
-      ${billToRowHtml(wo, [['Invoice #', wo.wo_number], ['P.O. #', poValueHtml(wo.po_number)], ['Status', `${WO_STATUS_LABELS[wo.status] || wo.status}${wo.is_express ? ' (Express)' : ''}`], ['Opened', new Date(wo.created_at).toLocaleDateString()], ['Pickup Due', wo.pickup_due_date ? new Date(wo.pickup_due_date + 'T00:00:00').toLocaleDateString() : '']], [wo.customer_phone, wo.customer_email])}
+      ${billToRowHtml(wo, [['Invoice #', wo.wo_number], ['P.O. #', poValueHtml(wo.po_number)], ['Status', `${WO_STATUS_LABELS[wo.status] || wo.status}${wo.is_express ? ' (Express)' : ''}`], ['Opened', fmtDate(wo.created_at)], ['Pickup Due', wo.pickup_due_date ? new Date(wo.pickup_due_date + 'T00:00:00').toLocaleDateString() : '']], [wo.customer_phone, wo.customer_email])}
       <div style="font-size:13px;color:#444;margin-bottom:16px">
         <strong>Description:</strong> ${wo.description}
         ${wo.item_label ? `<br><strong>Item:</strong> ${wo.item_label}` : ''}
@@ -2312,7 +2316,7 @@ function buildMissedPickupConfirmationHtml(agreement, pause, s) {
   const storeName = s.store_name || 'My Store';
   const isContinue = pause.customer_confirmation === 'continue';
   const summary = isContinue
-    ? `This confirms your rental (agreement ${agreement.agreement_number}) will continue. The new pickup date is <strong>${new Date(pause.due_date_after).toLocaleDateString()}</strong>.`
+    ? `This confirms your rental (agreement ${agreement.agreement_number}) will continue. The new pickup date is <strong>${fmtDate(pause.due_date_after)}</strong>.`
     : `This confirms your rental (agreement ${agreement.agreement_number}) will be closed out. Our team will follow up to finalize the return.`;
   return `<!DOCTYPE html>
 <html>
@@ -2373,8 +2377,8 @@ router.post('/send-missed-pickup-confirmation/:id', requireAuth, async (req, res
 // onto lib/documentPdf.js's generic layout, so the PDF carries the same
 // content; the email body becomes a short cover note.
 
-const pdfDate = d => d ? new Date(String(d).length === 10 ? `${d}T00:00:00` : d).toLocaleDateString() : '';
-const pdfDateTime = d => d ? new Date(d).toLocaleString() : '';
+const pdfDate = d => d ? fmtDate(d) : '';
+const pdfDateTime = d => d ? fmtDateTime(d) : '';
 
 function pdfStore(s, src = {}) {
   const addr = src.branch_address
@@ -2440,7 +2444,7 @@ function grnPdfModel(po, s) {
   return {
     store: pdfStore(s),
     title: 'GOODS RECEIVED NOTE', number: po.po_number,
-    meta: [['Date', new Date().toLocaleDateString()], ['Branch', po.branch_name]],
+    meta: [['Date', fmtDate(new Date())], ['Branch', po.branch_name]],
     party: { label: 'Supplier', lines: [po.supplier_name, po.supplier_contact, po.supplier_email] },
     tables: [{ columns: [{ label: 'Item', width: 3.4 }, { label: 'Ordered', width: 1, align: 'center' }, { label: 'Unit', width: 1.1, align: 'center' }, { label: 'Received', width: 1, align: 'center' }, { label: 'Damaged', width: 1, align: 'center' }, { label: 'Good', width: 1, align: 'center' }],
       rows: (po.items || []).map(i => {
@@ -2705,7 +2709,7 @@ function drawerReportPdfModel(sess, s) {
       ] : []),
     ].filter(Boolean),
     notes: rec?.notes ? [rec.notes] : [],
-    footer: `Printed ${new Date().toLocaleString()}`,
+    footer: `Printed ${fmtDateTime(new Date())}`,
   };
 }
 
