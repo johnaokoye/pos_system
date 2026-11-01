@@ -4819,7 +4819,7 @@ const App = {
         ...pendingRentalBalances.map(r => ({ type: 'rental_balance', created_at: r.returned_at || r.created_at, data: r })),
         ...pendingWOs.map(w => ({ type: 'work_order', created_at: w.created_at, data: w })),
         ...pendingExchanges.map(r => ({ type: 'exchange', created_at: r.created_at, data: r })),
-      ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+      ].sort((a, b) => this._utcDate(b.created_at) - this._utcDate(a.created_at));
       this.showModal(`
         <div class="modal">
           <div class="modal-header">
@@ -4835,7 +4835,7 @@ const App = {
                     <span style="font-size:12px;color:var(--text-muted);font-family:monospace">${h.source_quote_number || h.transaction_number}</span>
                   </div>
                   <div style="font-size:13px;color:var(--text-muted);margin-top:3px">
-                    Total: <strong>${this.fmt(h.total)}</strong> &bull; ${new Date(h.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}
+                    Total: <strong>${this.fmt(h.total)}</strong> &bull; ${this._storeTime(h.created_at)}
                     ${h.notes ? `&bull; ${h.notes}` : ''}
                   </div>
                   ${this._recallMetaLine(h.employee_name, h.branch_name)}
@@ -4846,7 +4846,7 @@ const App = {
                     <span style="font-size:12px;color:var(--text-muted);font-family:monospace">${r.source_quote_number || r.agreement_number}</span>
                   </div>
                   <div style="font-size:13px;color:var(--text-muted);margin-top:3px">
-                    ${r.item_count} item${r.item_count===1?'':'s'} &bull; Due ${this.fmtDate(r.due_date)} &bull; ${new Date(r.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}
+                    ${r.item_count} item${r.item_count===1?'':'s'} &bull; Due ${this.fmtDate(r.due_date)} &bull; ${this._storeTime(r.created_at)}
                   </div>
                   ${this._recallMetaLine(r.employee_name, r.branch_name)}
                 </div>`)(entry.data) : entry.type === 'rental_balance' ? (r => `
@@ -4856,7 +4856,7 @@ const App = {
                     <span style="font-size:12px;color:var(--text-muted);font-family:monospace">${r.agreement_number}</span>
                   </div>
                   <div style="font-size:13px;color:var(--text-muted);margin-top:3px">
-                    Balance Due: <strong>${this.fmt(r.balance_due)}</strong> &bull; returned ${new Date(r.returned_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}
+                    Balance Due: <strong>${this.fmt(r.balance_due)}</strong> &bull; returned ${this._storeTime(r.returned_at)}
                   </div>
                   ${this._recallMetaLine(r.employee_name, r.branch_name)}
                 </div>`)(entry.data) : entry.type === 'exchange' ? (r => `
@@ -4866,7 +4866,7 @@ const App = {
                     <span style="font-size:12px;color:var(--text-muted);font-family:monospace">${r.return_number}</span>
                   </div>
                   <div style="font-size:13px;color:var(--text-muted);margin-top:3px">
-                    Credit: <strong>${this.fmt(r.total)}</strong> &bull; returned ${this.escapeAttr(r.item_names || '')} from ${r.original_transaction_number || '—'} &bull; ${this.fmtDateTime(r.created_at)}
+                    Credit: <strong>${this.fmt(r.total)}</strong> &bull; returned ${this.escapeAttr(r.item_names || '')} from ${r.original_transaction_number || '—'} &bull; ${this._storeDateTime(r.created_at)}
                   </div>
                   ${this._recallMetaLine(r.employee_name, r.branch_name).replace('Held by', 'Returned by')}
                 </div>`)(entry.data) : (w => `
@@ -4879,7 +4879,7 @@ const App = {
                     ${w.status==='intake' ? `Assessment Fee: <strong>${this.fmt(w.assessment_fee)}</strong>`
                       : w.status==='pending_deposit' ? `Deposit: <strong>${this.fmt(w.deposit_amount)}</strong>`
                       : `Balance Due: <strong>${this.fmt(Math.max(0, (parseFloat(w.estimate_labor)||0) + (parseFloat(w.estimate_consumables)||0) + (parseFloat(w.parts_total)||0) - (parseFloat(w.deposit_amount)||0)))}</strong>`}
-                    &bull; ${new Date(w.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}
+                    &bull; ${this._storeTime(w.created_at)}
                   </div>
                   ${this._recallMetaLine(w.employee_name, w.branch_name)}
                 </div>`)(entry.data)).join('')}
@@ -26976,6 +26976,22 @@ const App = {
   _utcDate(d) {
     if (!d) return null;
     return new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(d) ? d : String(d).replace(' ', 'T') + 'Z');
+  },
+
+  // A UTC database timestamp shown on the store's clock (Settings → Store
+  // Time Zone, default America/Jamaica — no DST), whatever time zone the
+  // device itself is set to.
+  _storeTz() {
+    const tz = (this.settings?.store_timezone || '').trim() || 'America/Jamaica';
+    try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return tz; } catch (e) { return 'America/Jamaica'; }
+  },
+  _storeTime(d) {
+    const dt = d instanceof Date ? d : this._utcDate(d);
+    return dt && !isNaN(dt) ? dt.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: this._storeTz() }) : '';
+  },
+  _storeDateTime(d) {
+    const dt = d instanceof Date ? d : this._utcDate(d);
+    return dt && !isNaN(dt) ? dt.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: this._storeTz() }) : '';
   },
 
   _timeAgo(d) {
