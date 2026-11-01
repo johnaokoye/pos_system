@@ -1478,7 +1478,9 @@ router.get('/online-sales', requirePermission('reports'), async (req, res) => {
       db.execute({ sql: `SELECT date(t.created_at) as date, ${agg} FROM transactions t WHERE ${base} AND ${counted} GROUP BY date(t.created_at) ORDER BY date`, args }),
       db.execute({ sql: `SELECT ti.product_name, ti.sku, SUM(ti.quantity) as quantity, COUNT(DISTINCT t.id) as order_count, COALESCE(SUM(ti.total), 0) as total
             FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id
-            WHERE ${base} AND ${counted} GROUP BY COALESCE(ti.product_id, ti.sku) ORDER BY total DESC LIMIT 15`, args }),
+            WHERE ${base} AND ${counted}
+              AND (ti.serial_number IS NULL OR ti.serial_number = '') AND upper(COALESCE(ti.sku, '')) != ?
+            GROUP BY COALESCE(ti.product_id, ti.sku) ORDER BY total DESC LIMIT 15`, args: [...args, SERIAL_NUMBER_SKU] }),
     ]);
 
     res.json({ start: s, end: e, totals: { ...totals, all_sales: all.total }, byChannel, byFulfillment, byBranch, byDay, topProducts });
