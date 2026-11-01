@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { requireAuth, requirePermission, requireAnyPermission } = require('../lib/permissions');
+const { SERIAL_NUMBER_SKU } = require('../lib/serialNumber');
 const { oldestOpenLegacySql, oldestUnpaidSaleSql, earliestDate } = require('../lib/legacyInvoices');
 
 // Sales summary for a date range
@@ -54,7 +55,27 @@ router.get('/top-products', requirePermission('reports'), async (req, res) => {
     // Ranked by frequency — how many completed tickets the item was on —
     // unless ?sort=units asks for the old by-quantity order.
     const order = req.query.sort === 'units' ? 'units_sold DESC, transactions DESC' : 'transactions DESC, units_sold DESC';
-    const { rows: products } = await db.execute({ sql: `SELECT ti.product_name, ti.sku, SUM(ti.quantity * COALESCE(ti.units_per, 1)) as units_sold, SUM(ti.total) as revenue, COUNT(DISTINCT ti.transaction_id) as transactions FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id JOIN products p ON ti.product_id = p.id WHERE t.status='completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}${cf} GROUP BY ti.product_id ORDER BY ${order} LIMIT ?`, args: [s, e, ...bp, ...cp, parseInt(limit)] });
+    // Per catalog item, under its current name/SKU (not the name on the
+    // ticket line, which goes stale on a rename and carries variant/unit
+    // suffixes). Left out — they aren't item sales:
+    //  - SN lines: the $0 "SN" item that only carries a serial number
+    //  - comment / delivery lines
+    //  - rental checkout & settlement tickets: rental fees, "(included)"
+    //    accessories and "Damage Fee — …" lines all sit on the rented item
+    const { rows: products } = await db.execute({
+      sql: `SELECT p.id as product_id, p.name as product_name, p.sku,
+              SUM(ti.quantity * COALESCE(ti.units_per, 1)) as units_sold, SUM(ti.total) as revenue,
+              COUNT(DISTINCT ti.transaction_id) as transactions
+            FROM transaction_items ti
+            JOIN transactions t ON ti.transaction_id = t.id
+            JOIN products p ON ti.product_id = p.id
+            WHERE t.status='completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}${cf}
+              AND upper(COALESCE(p.sku, '')) != ? AND (ti.serial_number IS NULL OR ti.serial_number = '')
+              AND COALESCE(ti.is_comment, 0) = 0 AND COALESCE(ti.is_delivery, 0) = 0
+              AND NOT EXISTS (SELECT 1 FROM rental_agreements ra WHERE ra.checkout_transaction_id = t.id OR ra.settlement_transaction_id = t.id)
+            GROUP BY p.id ORDER BY ${order} LIMIT ?`,
+      args: [s, e, ...bp, ...cp, SERIAL_NUMBER_SKU, parseInt(limit)],
+    });
     res.json(products);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
