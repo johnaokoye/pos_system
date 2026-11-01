@@ -17689,7 +17689,7 @@ const App = {
 
     // Same hour span on every chart so the days line up: the first to last hour
     // with any sale in the range.
-    const active = data.hours.filter(h => h.tickets).map(h => h.hour);
+    const active = data.hours.filter(h => h.tickets || h.return_count).map(h => h.hour);
     const header = `<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">${fmtDate(data.start)} – ${fmtDate(data.end)} · ${data.branch_name ? this.escapeAttr(data.branch_name) : 'All locations'} · ${avgMode ? 'average per day' : 'totals for the range'}</div>`;
     if (!active.length) { content.innerHTML = header + '<div class="empty-state"><p>No completed sales in this range.</p></div>'; return; }
     const span = [];
@@ -17707,10 +17707,10 @@ const App = {
         const c = day.hours[h];
         const rev = per(c.revenue, day);
         const pct = rev > 0 ? Math.max(rev / maxRev * 100, 1.5) : 0;
-        const tip = `${day.name} ${hourRange(h)} — ${money(rev)} · ${tix(per(c.tickets, day))} ticket${per(c.tickets, day) === 1 ? '' : 's'}${c.avg_ticket != null ? ' · avg ' + money(c.avg_ticket) + '/ticket' : ''}`;
+        const tip = `${day.name} ${hourRange(h)} — ${money(rev)}${c.returns ? ` (after ${money(per(c.returns, day))} returns)` : ''} · ${tix(per(c.tickets, day))} ticket${per(c.tickets, day) === 1 ? '' : 's'}${c.avg_ticket != null ? ' · avg ' + money(c.avg_ticket) + '/ticket' : ''}`;
         return `<div class="hsr-col" title="${this.escapeAttr(tip)}">
           <div class="hsr-bar-area">
-            <div class="hsr-val">${rev > 0 ? compact(rev) : ''}</div>
+            <div class="hsr-val"${rev < 0 ? ' style="color:var(--danger)"' : ''}>${rev ? compact(rev) : ''}</div>
             <div class="hsr-bar" style="height:${pct}%"></div>
           </div>
           <div class="hsr-hour">${hourLabel(h)}</div>
@@ -17722,7 +17722,9 @@ const App = {
       <div class="table-wrap"><table class="hsr-table">
         <thead><tr><th>${day.name}</th>${span.map(h => `<th>${hourLabel(h)}</th>`).join('')}</tr></thead>
         <tbody>
-          <tr><td class="fw-600">Revenue</td>${span.map(h => `<td>${day.hours[h].revenue ? compact(per(day.hours[h].revenue, day)) : '—'}</td>`).join('')}</tr>
+          <tr><td class="fw-600">Sales</td>${span.map(h => `<td>${day.hours[h].gross ? compact(per(day.hours[h].gross, day)) : '—'}</td>`).join('')}</tr>
+          <tr><td class="fw-600">Returns</td>${span.map(h => `<td${day.hours[h].returns ? ' style="color:var(--danger)"' : ''}>${day.hours[h].returns ? '-' + compact(per(day.hours[h].returns, day)) : '—'}</td>`).join('')}</tr>
+          <tr><td class="fw-600">Net Revenue</td>${span.map(h => `<td class="fw-600"${day.hours[h].revenue < 0 ? ' style="color:var(--danger)"' : ''}>${day.hours[h].revenue ? compact(per(day.hours[h].revenue, day)) : '—'}</td>`).join('')}</tr>
           <tr><td class="fw-600">Tickets</td>${span.map(h => `<td>${day.hours[h].tickets ? tix(per(day.hours[h].tickets, day)) : '—'}</td>`).join('')}</tr>
           <tr><td class="fw-600">Avg / Ticket</td>${span.map(h => `<td>${day.hours[h].avg_ticket != null ? compact(day.hours[h].avg_ticket) : '—'}</td>`).join('')}</tr>
         </tbody>
@@ -17740,26 +17742,27 @@ const App = {
         .hsr-hour { font-size:10px; color:var(--text-muted); text-align:center; padding-top:3px; white-space:nowrap; }
         .hsr-table th, .hsr-table td { font-size:11px; padding:4px 4px; text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }
         .hsr-table th:first-child, .hsr-table td:first-child { text-align:left; }
+        .hsr-days th, .hsr-days td { white-space:nowrap; font-size:12px; padding:8px 8px; font-variant-numeric:tabular-nums; }
       </style>
       ${header}
       <div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr));margin-bottom:18px">
-        <div class="stat-card blue" style="min-width:0;padding:14px"><div class="stat-label">Revenue</div><div class="stat-value" style="font-size:18px;overflow-wrap:anywhere">${money(totals.revenue)}</div><div class="stat-sub">all days in range</div></div>
+        <div class="stat-card blue" style="min-width:0;padding:14px"><div class="stat-label">Net Revenue</div><div class="stat-value" style="font-size:18px;overflow-wrap:anywhere">${money(totals.revenue)}</div><div class="stat-sub">net of ${money(totals.returns)} returns (${totals.return_count})</div></div>
         <div class="stat-card" style="min-width:0;padding:14px"><div class="stat-label">Tickets</div><div class="stat-value" style="font-size:18px">${totals.tickets.toLocaleString('en-US')}</div></div>
         <div class="stat-card green" style="min-width:0;padding:14px"><div class="stat-label">Avg Revenue per Ticket</div><div class="stat-value" style="font-size:18px;overflow-wrap:anywhere">${totals.avg_ticket != null ? money(totals.avg_ticket) : '—'}</div></div>
         <div class="stat-card orange" style="min-width:0;padding:14px"><div class="stat-label">Busiest Hour</div><div class="stat-value" style="font-size:16px">${busiest ? `${busiest.day.slice(0, 3)} ${hourRange(busiest.hour)}` : '—'}</div><div class="stat-sub">${busiest ? money(busiest.rev) + (avgMode ? ' avg' : '') : ''} · best day ${bestDay.name}</div></div>
       </div>
       <div class="card" style="margin-bottom:16px">
         <div class="card-header"><span class="card-title">By Day of the Week</span></div>
-        <div class="table-wrap"><table>
-          <thead><tr><th>Day</th><th>Days in Range</th><th>Tickets</th><th>Revenue</th><th>Avg Revenue / Day</th><th>Avg Revenue / Ticket</th><th>Busiest Hour</th></tr></thead>
+        <div class="table-wrap"><table class="hsr-days">
+          <thead><tr><th>Day</th><th>Days</th><th>Tickets</th><th>Sales</th><th>Returns</th><th>Net Revenue</th><th>Avg / Day</th><th>Avg / Ticket</th><th>Busiest Hour</th></tr></thead>
           <tbody>${days.map(d => {
             const top = d.hours.reduce((a, h) => (h.revenue > (a?.revenue || 0) ? h : a), null);
             return `<tr>
-              <td class="fw-600">${d.name}</td><td>${d.days_in_range}</td><td>${d.tickets.toLocaleString('en-US')}</td><td>${money(d.revenue)}</td>
+              <td class="fw-600">${d.name}</td><td>${d.days_in_range}</td><td>${d.tickets.toLocaleString('en-US')}</td><td>${money(d.gross)}</td><td${d.returns ? ' style="color:var(--danger)"' : ''}>${d.returns ? '-' + money(d.returns) : '—'}</td><td class="fw-600">${money(d.revenue)}</td>
               <td>${d.days_in_range ? money(d.revenue / d.days_in_range) : '—'}</td><td class="fw-600">${d.avg_ticket != null ? money(d.avg_ticket) : '—'}</td>
               <td>${top ? hourRange(top.hour) : '—'}</td></tr>`;
           }).join('')}
-            <tr style="border-top:2px solid var(--border)"><td class="fw-600">All days</td><td>${days.reduce((n, d) => n + d.days_in_range, 0)}</td><td class="fw-600">${totals.tickets.toLocaleString('en-US')}</td><td class="fw-600">${money(totals.revenue)}</td><td></td><td class="fw-600">${totals.avg_ticket != null ? money(totals.avg_ticket) : '—'}</td><td></td></tr>
+            <tr style="border-top:2px solid var(--border)"><td class="fw-600">All days</td><td>${days.reduce((n, d) => n + d.days_in_range, 0)}</td><td class="fw-600">${totals.tickets.toLocaleString('en-US')}</td><td class="fw-600">${money(totals.gross)}</td><td class="fw-600">${totals.returns ? '-' + money(totals.returns) : '—'}</td><td class="fw-600">${money(totals.revenue)}</td><td></td><td class="fw-600">${totals.avg_ticket != null ? money(totals.avg_ticket) : '—'}</td><td></td></tr>
           </tbody>
         </table></div>
       </div>
@@ -17767,11 +17770,11 @@ const App = {
       <div class="card" style="margin-bottom:16px;break-inside:avoid">
         <div class="card-header" style="flex-wrap:wrap;gap:6px">
           <span class="card-title">${d.name}</span>
-          <span style="font-size:12px;color:var(--text-muted)">${d.tickets ? `${money(per(d.revenue, d))}${avgMode ? ' avg/day' : ''} · ${tix(per(d.tickets, d))} tickets · avg ${money(d.avg_ticket)}/ticket` : 'No sales'} · ${d.days_in_range} ${d.name}${d.days_in_range === 1 ? '' : 's'} in range</span>
+          <span style="font-size:12px;color:var(--text-muted)">${d.tickets || d.return_count ? `${money(per(d.revenue, d))}${avgMode ? ' avg/day' : ''} · ${tix(per(d.tickets, d))} tickets · avg ${d.avg_ticket != null ? money(d.avg_ticket) : '—'}/ticket` : 'No sales'} · ${d.days_in_range} ${d.name}${d.days_in_range === 1 ? '' : 's'} in range</span>
         </div>
-        ${d.tickets ? chart(d) + dayTable(d) : '<div class="empty-state" style="padding:14px"><p>No completed sales on ' + d.name + 's in this range.</p></div>'}
+        ${d.tickets || d.return_count ? chart(d) + dayTable(d) : '<div class="empty-state" style="padding:14px"><p>No completed sales on ' + d.name + 's in this range.</p></div>'}
       </div>`).join('')}
-      <p style="font-size:11px;color:var(--text-muted);margin-top:10px">Completed sales only, by the time the ticket was rung up in store time (${this.escapeAttr(data.time_zone)}). Revenue is the ticket total including tax; returns are not deducted. Bar labels are revenue (k = thousand); hover a bar for the full figures. Each day's chart is scaled to its own busiest hour, so compare days by the figures, not bar heights. Average per day divides by the number of that weekday in the range; average revenue per ticket is the same either way.</p>`;
+      <p style="font-size:11px;color:var(--text-muted);margin-top:10px">Completed sales only, by the time the ticket was rung up in store time (${this.escapeAttr(data.time_zone)}). Revenue is the ticket total including tax, less refund and credit-note returns, which come off the hour the return was processed. Exchanges aren't deducted, since the replacement sale already carries the credit as a discount. Average revenue per ticket is net revenue over sales tickets. Bar labels are net revenue (k = thousand); hover a bar for the full figures. Each day's chart is scaled to its own busiest hour, so compare days by the figures, not bar heights. Average per day divides by the number of that weekday in the range; average revenue per ticket is the same either way.</p>`;
   },
 
   showOnlineSalesReport() {

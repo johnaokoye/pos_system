@@ -1475,8 +1475,11 @@ router.get('/hourly-sales', requirePermission('reports'), async (req, res) => {
     const mid = new Date((new Date(`${s}T12:00:00Z`).getTime() + new Date(`${e}T12:00:00Z`).getTime()) / 2);
     const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).formatToParts(mid).map(p => [p.type, p.value]));
     const offsetMin = Math.round((Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute) - Math.floor(mid.getTime() / 60000) * 60000) / 60000);
-    const local = `datetime(t.created_at, '${offsetMin >= 0 ? '+' : ''}${offsetMin} minutes')`;
+    const toLocal = col => `datetime(${col}, '${offsetMin >= 0 ? '+' : ''}${offsetMin} minutes')`;
+    const local = toLocal('t.created_at');
+    const rlocal = toLocal('r.created_at');
     const bf = branch_id ? ' AND t.branch_id = ?' : '';
+    const rbf = branch_id ? ' AND r.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
 
     const { rows } = await db.execute({
@@ -1487,22 +1490,40 @@ router.get('/hourly-sales', requirePermission('reports'), async (req, res) => {
             GROUP BY dow, hour`,
       args: [s, e, ...bp],
     });
+    // Returns come off the hour they were processed in. Exchange returns
+    // ('replacement') are left out: the replacement sale already carries
+    // the credit as a discount, so its total is net of it.
+    const { rows: retRows } = await db.execute({
+      sql: `SELECT CAST(strftime('%w', ${rlocal}) AS INTEGER) as dow, CAST(strftime('%H', ${rlocal}) AS INTEGER) as hour,
+              COUNT(*) as count, COALESCE(SUM(r.total), 0) as amount
+            FROM returns r
+            WHERE r.status != 'cancelled' AND COALESCE(r.resolution, 'refund') != 'replacement'
+              AND date(${rlocal}) BETWEEN date(?) AND date(?)${rbf}
+            GROUP BY dow, hour`,
+      args: [s, e, ...bp],
+    });
 
     const round = n => parseFloat((n || 0).toFixed(2));
     const daysInRange = [0, 0, 0, 0, 0, 0, 0];
     for (let d = new Date(`${s}T00:00:00Z`), last = new Date(`${e}T00:00:00Z`); d <= last; d.setUTCDate(d.getUTCDate() + 1)) daysInRange[d.getUTCDay()]++;
     const names = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-    const days = names.map((name, dow) => ({ dow, name, days_in_range: daysInRange[dow], tickets: 0, revenue: 0, hours: Array.from({ length: 24 }, (_, hour) => ({ hour, tickets: 0, revenue: 0 })) }));
-    const hours = Array.from({ length: 24 }, (_, hour) => ({ hour, tickets: 0, revenue: 0 }));
-    const totals = { tickets: 0, revenue: 0 };
+    // gross = sales, returns = refunds/credit notes, revenue = gross − returns.
+    const blank = () => ({ tickets: 0, gross: 0, returns: 0, return_count: 0 });
+    const days = names.map((name, dow) => ({ dow, name, days_in_range: daysInRange[dow], ...blank(), hours: Array.from({ length: 24 }, (_, hour) => ({ hour, ...blank() })) }));
+    const hours = Array.from({ length: 24 }, (_, hour) => ({ hour, ...blank() }));
+    const totals = blank();
     for (const r of rows) {
-      const day = days[r.dow];
-      day.hours[r.hour].tickets += r.tickets; day.hours[r.hour].revenue += r.revenue;
-      day.tickets += r.tickets; day.revenue += r.revenue;
-      hours[r.hour].tickets += r.tickets; hours[r.hour].revenue += r.revenue;
-      totals.tickets += r.tickets; totals.revenue += r.revenue;
+      for (const o of [days[r.dow].hours[r.hour], days[r.dow], hours[r.hour], totals]) { o.tickets += r.tickets; o.gross += r.revenue; }
     }
-    const finish = o => { o.revenue = round(o.revenue); o.avg_ticket = o.tickets ? round(o.revenue / o.tickets) : null; return o; };
+    for (const r of retRows) {
+      for (const o of [days[r.dow].hours[r.hour], days[r.dow], hours[r.hour], totals]) { o.return_count += r.count; o.returns += r.amount; }
+    }
+    // Average per ticket is net revenue over sales tickets.
+    const finish = o => {
+      o.revenue = round(o.gross - o.returns); o.gross = round(o.gross); o.returns = round(o.returns);
+      o.avg_ticket = o.tickets ? round(o.revenue / o.tickets) : null;
+      return o;
+    };
     for (const d of days) { finish(d); d.hours.forEach(finish); }
     hours.forEach(finish); finish(totals);
 
