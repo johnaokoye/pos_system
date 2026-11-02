@@ -23673,7 +23673,7 @@ const App = {
             <div class="card-header"><span class="card-title">Items</span>
               <div style="display:flex;gap:6px">
                 <button class="btn btn-sm btn-outline" onclick="App.addQuoteItem()">+ Add Item</button>
-                <button class="btn btn-sm btn-outline" onclick="App.addQuoteCustomItem()">+ Custom Item</button>
+                <button class="btn btn-sm btn-outline" id="qt-add-custom-item-btn" onclick="App.addQuoteCustomItem()" title="Something not in inventory that Purchasing should order — a Purchase Request is auto-created when the customer accepts the quote">+ Q Item</button>
                 <button class="btn btn-sm btn-outline" onclick="App.addQuoteCommentItem()" title="A comment line — free text printed on the quote and invoice, with no price and nothing sent to Purchasing">+ C Item</button>
                 <button class="btn btn-sm btn-outline" onclick="App.addQuoteDeliveryItem()" title="A delivery charge — your description and a price before tax; tax is added at the store rate">+ Delivery</button>
                 <button class="btn btn-sm btn-outline" id="qt-add-q-item-btn" style="display:none" onclick="App.addQuoteCustomItem(null,{qItem:true})" title="Something not in inventory that Purchasing should order — a Purchase Request is auto-created when the project is accepted">+ Q Item</button>
@@ -23801,10 +23801,19 @@ const App = {
     // A rental's customer P.O. is taken at checkout instead.
     const poGroup = document.getElementById('qt-po-group');
     if (poGroup) poGroup.style.display = type!=='rental' ? '' : 'none';
-    // Retail's "+ Custom Item" is already a Q item; a Special Project's is a
+    // Retail's custom line is already a Q item (its button reads "+ Q Item"); a Special Project's is a
     // labour/fee line, so Q items get their own button there.
     const qItemBtn = document.getElementById('qt-add-q-item-btn');
     if (qItemBtn) qItemBtn.style.display = type==='special_project' ? '' : 'none';
+    // Same button either way: on retail it adds a Q item, so it's labelled
+    // that; on a Special Project it's the labour/fee line.
+    const customItemBtn = document.getElementById('qt-add-custom-item-btn');
+    if (customItemBtn) {
+      customItemBtn.textContent = type==='special_project' ? '+ Custom Item' : '+ Q Item';
+      customItemBtn.title = type==='special_project'
+        ? 'A labour or fee line (e.g. Labour, Equipment operator) — not sent to Purchasing'
+        : 'Something not in inventory that Purchasing should order — a Purchase Request is auto-created when the customer accepts the quote';
+    }
     const rentalItemBtn = document.getElementById('qt-add-rental-item-btn');
     if (rentalItemBtn) rentalItemBtn.style.display = type==='special_project' ? '' : 'none';
     if (rentalSection) rentalSection.style.display = type==='rental' ? '' : 'none';
@@ -24108,7 +24117,7 @@ const App = {
     div.className = 'po-receive-row';
     div.id = `qt-item-${idx}`;
     div.innerHTML = `
-      <input id="qti-desc-${idx}" style="flex:2" placeholder="${isSP && !isQ ? 'e.g. Labour, Chainsaw rental, Equipment operator' : 'Custom item description'}" value="${prefill?this.escapeAttr(prefill.product_name):''}" data-pr-id="${prefill&&prefill.purchase_request_id||''}" data-q-item="${isSP && isQ ? '1' : ''}">
+      <input id="qti-desc-${idx}" style="flex:2" placeholder="${isSP && !isQ ? 'e.g. Labour, Chainsaw rental, Equipment operator' : 'Item to order — description'}" value="${prefill?this.escapeAttr(prefill.product_name):''}" data-pr-id="${prefill&&prefill.purchase_request_id||''}" data-q-item="${isSP && isQ ? '1' : ''}">
       <input id="qti-qty-${idx}" type="number" min="1" value="${prefill?prefill.quantity:1}" style="width:70px" placeholder="Qty" oninput="App.calcQuoteTotal()">
       ${isSP ? `<input id="qti-cost-${idx}" type="number" step="0.01" value="${prefill&&prefill.unit_cost!=null?prefill.unit_cost:''}" style="width:90px" placeholder="Cost" title="Informational only — doesn't affect the total" oninput="App._updateQuoteItemMargin(${idx})">` : ''}
       <input id="qti-price-${idx}" type="number" step="0.01" value="${prefill?prefill.unit_price:''}" style="width:90px" placeholder="Amount" oninput="App.calcQuoteTotal();App._updateQuoteItemMargin(${idx})">
