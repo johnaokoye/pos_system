@@ -2983,6 +2983,7 @@ const App = {
       this.can('pos_change_quantity') ? `<button class="pos-grid-btn" onclick="App.posQuantitySelectedLine()">Quantity</button>` : '',
       `<button class="pos-grid-btn" onclick="App.showCommentItemModal()" title="Add a comment line — free text printed on the receipt/invoice, no price">C Item</button>`,
       `<button class="pos-grid-btn" onclick="App.showDeliveryItemModal()" title="Add a delivery charge — your description and a price before tax">Delivery</button>`,
+      this.can('pos_q_item') ? `<button class="pos-grid-btn" onclick="App.showQItemModal()" title="Sell something not in inventory — completing the sale sends it to Purchasing to order (a Purchase Request is created)">Q Item</button>` : '',
       this.can('pos_cancel_ticket') ? `<button class="pos-grid-btn void" onclick="App.posCancelTicket()">Cancel Ticket</button>` : '',
       this.can('pos_payment') ? `<button class="pos-grid-btn payment" style="grid-column:1 / -1" onclick="App.showPOSPaymentModal()">PAYMENT</button>` : '',
     ].filter(Boolean).join('');
@@ -3525,12 +3526,63 @@ const App = {
     document.getElementById('pos-item-input')?.focus();
   },
 
+  // "Q Item" (pos_q_item) — something not in inventory that Purchasing orders
+  // for the customer: description, whole quantity and price before tax,
+  // taxed at the store rate. Completing the sale creates a Purchase Request
+  // for it (raiseQItemPurchaseRequest in routes/transactions.js).
+  showQItemModal(editIdx = null) {
+    const editing = editIdx != null && this.cart[editIdx]?.is_q_item;
+    const line = editing ? this.cart[editIdx] : null;
+    const rate = parseFloat(this.settings?.tax_rate) || 0;
+    const save = `App.saveQItem(${editing ? editIdx : 'null'})`;
+    this.showModal(`
+      <div class="modal" style="max-width:460px">
+        <div class="modal-header"><span class="modal-title">${editing ? 'Edit Q Item' : 'Add Q Item'}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">For something not in inventory. When the sale is completed, a Purchase Request is created so Purchasing can order it for the customer.</p>
+          <div class="form-group"><label>Description *</label><input id="pos-qitem-desc" value="${this.escapeAttr(line ? line.name : '')}" placeholder="e.g. 3/4 inch brass gate valve, model GV-75"></div>
+          <div style="display:flex;gap:10px">
+            <div class="form-group" style="margin:0;width:110px"><label>Quantity *</label><input id="pos-qitem-qty" type="number" min="1" step="1" value="${line ? line.quantity : 1}"></div>
+            <div class="form-group" style="margin:0;flex:1"><label>Price each (before tax) *</label><input id="pos-qitem-price" type="number" min="0" step="0.01" value="${line ? line.price : ''}" placeholder="0.00"
+              onkeydown="if(event.key==='Enter'){event.preventDefault();${save}}"></div>
+          </div>
+          <p style="font-size:11px;color:var(--text-muted);margin:6px 0 0">Tax is added on top at ${rate}%.</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="${save}">${editing ? 'Save' : 'Add to Ticket'}</button>
+        </div>
+      </div>`);
+    setTimeout(() => document.getElementById('pos-qitem-desc')?.focus(), 50);
+  },
+
+  saveQItem(editIdx) {
+    const name = (document.getElementById('pos-qitem-desc')?.value || '').trim();
+    const quantity = Number(document.getElementById('pos-qitem-qty')?.value);
+    const priceVal = document.getElementById('pos-qitem-price')?.value;
+    const price = parseFloat(priceVal);
+    if (!name) { this.alert('Describe the item to order', 'warning'); return; }
+    if (!Number.isInteger(quantity) || quantity < 1) { this.alert('Enter a whole quantity of 1 or more', 'warning'); return; }
+    if (priceVal === '' || !(price >= 0)) { this.alert('Enter the price (before tax)', 'warning'); return; }
+    const rounded = Math.round(price * 100) / 100;
+    if (editIdx != null && this.cart[editIdx]?.is_q_item) {
+      Object.assign(this.cart[editIdx], { name, quantity, price: rounded });
+    } else {
+      this.cart.push({ product_id: null, is_q_item: 1, name, price: rounded, quantity, tax_rate: parseFloat(this.settings?.tax_rate) || 0, is_service: 1 });
+      this._selectedCartLine = null;
+    }
+    this.closeModal();
+    this.renderCart();
+    document.getElementById('pos-item-input')?.focus();
+  },
+
   posItemZoom() {
     const idx = this._selectedCartLine;
     if (idx == null || !this.cart[idx]) { this.alert('Click a ticket line first', 'warning'); return; }
     const item = this.cart[idx];
     if (item.is_comment) { this.showCommentItemModal(idx); return; }
     if (item.is_delivery) { this.showDeliveryItemModal(idx); return; }
+    if (item.is_q_item) { this.showQItemModal(idx); return; }
     if (!item.product_id) { this.alert('No catalog record for this line', 'warning'); return; }
     this.showProductCard(item.product_id);
   },
@@ -3593,6 +3645,8 @@ const App = {
       for (const item of this.cart) {
         if (item.is_comment) { this.addQuoteCommentItem({ product_name: item.name }); continue; }
         if (item.is_delivery) { this.addQuoteDeliveryItem({ product_name: item.name, unit_price: item.price }); continue; }
+        // A Q item (or any line with no product) is a retail quote's Q line.
+        if (!item.product_id) { this.addQuoteCustomItem({ product_name: item.name, quantity: item.quantity, unit_price: item.price }); continue; }
         if (item.variation_id) {
           // quotation_items has no variation_id/variation_name column —
           // encode the variant into the description instead of silently
@@ -4385,6 +4439,19 @@ const App = {
         <td style="white-space:nowrap"><button class="btn-remove" onclick="event.stopPropagation();App.removeFromCart(${idx})">×</button></td>
       </tr>`;
       }
+      if (item.is_q_item) {
+        const lineShare = lineShares[idx], lineTax = lineTaxes[idx], gross = item.price * item.quantity;
+        return `
+      <tr class="pos-ticket-row${this._selectedCartLine === idx ? ' selected' : ''}" onclick="App.selectCartLine(event,${idx})" ondblclick="App.showQItemModal(${idx})" title="Q item — not in inventory; Purchasing orders it when the sale is completed. Double-click to edit">
+        <td><span class="badge-pill badge-warning" style="font-size:10px">Q</span></td>
+        <td>${this.escapeAttr(item.name)}</td>
+        <td style="text-align:center"><span class="qty-val">${item.quantity}</span></td>
+        <td style="text-align:right">${this.fmt(item.price)}</td>
+        <td style="text-align:right;color:var(--text-muted)">${isExempt ? '—' : this.fmt(lineTax)}</td>
+        <td style="text-align:right;font-weight:600">${this.fmt(gross - lineShare + lineTax)}</td>
+        <td style="white-space:nowrap"><button class="btn-remove" onclick="event.stopPropagation();App.removeFromCart(${idx})">×</button></td>
+      </tr>`;
+      }
       const sku = item.sku || this.allProducts.find(p => p.id === item.product_id)?.sku || '—';
       const lineGross = item.price * item.quantity;
       const lineNet = this._cartLineNet(item);
@@ -4710,7 +4777,7 @@ const App = {
         // directly for that case only; a real product_id line still has its
         // price/tax authoritatively re-derived server-side, never trusted
         // from the client.
-        items: this.cart.map(i => ({ product_id: i.product_id, variation_id: i.variation_id||null, serial_number: i.serial_number||null, uom_id: i.uom_id ?? null, sell_unit: i.sell_unit || null, quantity: i.quantity, discount_percent: i.discountPercent||0, discount_fixed: i.discountFixed||0, discount_override_employee_id: i.discountOverrideEmployeeId||null, ...(i.product_id ? {} : { product_name: i.name, unit_price: i.price, tax_rate: i.tax_rate||0, is_comment: i.is_comment ? 1 : 0, is_delivery: i.is_delivery ? 1 : 0 }) })),
+        items: this.cart.map(i => ({ product_id: i.product_id, variation_id: i.variation_id||null, serial_number: i.serial_number||null, uom_id: i.uom_id ?? null, sell_unit: i.sell_unit || null, quantity: i.quantity, discount_percent: i.discountPercent||0, discount_fixed: i.discountFixed||0, discount_override_employee_id: i.discountOverrideEmployeeId||null, ...(i.product_id ? {} : { product_name: i.name, unit_price: i.price, tax_rate: i.tax_rate||0, is_comment: i.is_comment ? 1 : 0, is_delivery: i.is_delivery ? 1 : 0, is_q_item: i.is_q_item ? 1 : 0 }) })),
         discount_amount: discount,
         promotion_code: this.appliedDiscountCard ? (this.appliedDiscountCard.card_number || null) : (this.appliedPromoCode?.code || null),
         promotion_name: this.appliedDiscountCard ? `${this.appliedDiscountCard.type_name} ${this.appliedDiscountCard.label || 'Discount Card'}` : (this.appliedPromoCode?.promo_name || this.autoAppliedPromo?.name || null),
@@ -4773,6 +4840,7 @@ const App = {
           sell_unit: i.sell_unit || null,
           is_comment: i.is_comment ? 1 : 0,
           is_delivery: i.is_delivery ? 1 : 0,
+          is_q_item: i.is_q_item ? 1 : 0,
           discount_percent: i.discountPercent || 0,
           discount_fixed: i.discountFixed || 0,
           discount_override_employee_id: i.discountOverrideEmployeeId || null,
@@ -4938,9 +5006,10 @@ const App = {
           variation_id: item.variation_id || null,
           name: item.product_name,
           price: parseFloat(item.unit_price),
-          tax_rate: item.is_delivery ? (parseFloat(this.settings?.tax_rate) || 0) : product ? (product.tax_rate || 0) : derivedTaxRate,
+          tax_rate: (item.is_delivery || item.is_q_item) ? (parseFloat(this.settings?.tax_rate) || 0) : product ? (product.tax_rate || 0) : derivedTaxRate,
           quantity: item.quantity,
           is_delivery: item.is_delivery ? 1 : 0,
+          is_q_item: item.is_q_item ? 1 : 0,
           variation_name: item.variation_name || null,
           serial_number: item.serial_number || null,
           is_service: product?.product_type === 'service' ? 1 : 0,
@@ -16335,7 +16404,7 @@ const App = {
           </div>` : ''}
           <table style="margin-bottom:12px">
             <thead><tr><th>Item</th><th>SKU</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
-            <tbody>${tx.items.map(i => i.is_comment ? `<tr><td colspan="5" style="font-style:italic;white-space:pre-wrap;color:var(--text-muted)"><span class="badge-pill badge-info" style="font-size:10px;font-style:normal">C</span> ${this.escapeAttr(i.product_name)}</td></tr>` : `<tr><td>${i.product_name}</td><td style="font-family:monospace;font-size:12px">${i.sku||''}</td><td style="text-align:center">${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}</tbody>
+            <tbody>${tx.items.map(i => i.is_comment ? `<tr><td colspan="5" style="font-style:italic;white-space:pre-wrap;color:var(--text-muted)"><span class="badge-pill badge-info" style="font-size:10px;font-style:normal">C</span> ${this.escapeAttr(i.product_name)}</td></tr>` : `<tr><td>${i.product_name}${i.is_q_item ? ` <span class="badge-pill badge-warning" style="font-size:10px" title="Not in inventory — sent to Purchasing to order">Q</span>${i.purchase_request_id ? ` <a href="#" style="font-size:11px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${i.purchase_request_id})">${i.purchase_request_number || 'PR'}</a>` : ''}` : ''}</td><td style="font-family:monospace;font-size:12px">${i.sku||''}</td><td style="text-align:center">${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}</tbody>
           </table>
           <div style="text-align:right;border-top:1px solid var(--border);padding-top:10px">
             <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span>Subtotal</span><span>${this.fmt(tx.subtotal)}</span></div>
@@ -28859,6 +28928,7 @@ const App = {
       { key: 'pos_change_quantity', label: 'Change Quantity' },
       { key: 'pos_cancel_ticket', label: 'Cancel Ticket' },
       { key: 'pos_payment', label: 'Take Payment' },
+      { key: 'pos_q_item', label: 'Q Items (sell something not in inventory — raises a Purchase Request)' },
     ]},
     { key: 'drawers', label: 'Cash Drawers', subs: [
       { key: 'drawers_manage', label: 'Manage Drawers (setup & access)' },
