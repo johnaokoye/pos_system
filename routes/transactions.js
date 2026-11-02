@@ -6,6 +6,7 @@ const { getWcSettings, wcRequest } = require('./woocommerce');
 const { syncBinQty } = require('../lib/binSync');
 const { requireAuth, requirePermission, requireAnyPermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
+const { refreshStoreTz, storeToday } = require('../lib/storeTime');
 const { blockedMessage, creditLimitError } = require('../lib/creditBlock');
 const { resolveUnit, lineName, parseQty, stockUnits } = require('../lib/units');
 const { isSerialNumberProduct, serialNumberLabel, serialNumberOf, serialClashError } = require('../lib/serialNumber');
@@ -353,7 +354,7 @@ router.get('/customer-payments/:id', requireAnyPermission('transactions', 'pos_r
 // returns flow, online orders), not just the Transactions detail view.
 router.get('/:id', requireAuth, async (req, res) => {
   try {
-    const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, c.phone as customer_phone, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip, e.first_name || ' ' || e.last_name as employee_name, cbe.first_name || ' ' || cbe.last_name as created_by_name, spe.first_name || ' ' || spe.last_name as salesperson_name, ${CREDITED_SQL} as credited_id, ce.first_name || ' ' || ce.last_name as credited_name, b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone, q.id as source_quote_id, q.quote_number as source_quote_number, qe.first_name || ' ' || qe.last_name as quote_created_by, r.return_number as source_return_number, sh.carrier as shipment_carrier, sh.tracking_number as shipment_tracking_number, sh.status as shipment_status, sh.ship_date as shipment_ship_date, sh.estimated_delivery as shipment_estimated_delivery,
+    const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, c.phone as customer_phone, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip, e.first_name || ' ' || e.last_name as employee_name, cbe.first_name || ' ' || cbe.last_name as created_by_name, spe.first_name || ' ' || spe.last_name as salesperson_name, ${CREDITED_SQL} as credited_id, ce.first_name || ' ' || ce.last_name as credited_name, b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone, q.id as source_quote_id, q.quote_number as source_quote_number, q.valid_until as source_quote_valid_until, qe.first_name || ' ' || qe.last_name as quote_created_by, r.return_number as source_return_number, sh.carrier as shipment_carrier, sh.tracking_number as shipment_tracking_number, sh.status as shipment_status, sh.ship_date as shipment_ship_date, sh.estimated_delivery as shipment_estimated_delivery,
       ve.first_name || ' ' || ve.last_name as voided_by_name,
       ra.id as rental_agreement_id, ra.agreement_number as rental_agreement_number, ra.status as rental_status, ra.quotation_id as rental_quotation_id,
       ra.checkout_datetime as rental_checkout_datetime, ra.due_date as rental_due_date, ra.returned_at as rental_returned_at,
@@ -481,10 +482,29 @@ router.post('/', requirePermission('pos'), async (req, res) => {
     // don't change stock_qty). Matched to the quote's rental lines by product,
     // in order.
     const spRentalPool = new Map();
+    // Quoted prices: a catalog line rung up from a quote is charged the
+    // quoted unit price while the quote is still valid (valid_until on or
+    // after today on the store clock; none = no expiry), for up to the quoted
+    // quantity of that product in that unit — past expiry, or beyond the
+    // quoted quantity, it's today's catalog price. A quote already turned
+    // into a completed sale isn't honoured again.
+    const quotedPool = [];
     if (quote_id) {
-      const { rows: [srcQuote] } = await db.execute({ sql: 'SELECT quote_type, quote_number FROM quotations WHERE id = ?', args: [quote_id] });
+      const { rows: [srcQuote] } = await db.execute({
+        sql: `SELECT q.quote_type, q.quote_number, q.valid_until, q.status, ct.status AS converted_tx_status
+              FROM quotations q LEFT JOIN transactions ct ON ct.id = q.converted_to_tx WHERE q.id = ?`,
+        args: [quote_id],
+      });
       if (srcQuote?.quote_type === 'rental') {
         return res.status(400).json({ error: `${srcQuote.quote_number} is a rental quote — convert it to a rental agreement from Quotations (Convert), not at the POS` });
+      }
+      await refreshStoreTz();
+      const usable = srcQuote && !['declined', 'cancelled'].includes(srcQuote.status)
+        && !(srcQuote.status === 'converted' && srcQuote.converted_tx_status && srcQuote.converted_tx_status !== 'hold');
+      const unexpired = usable && (!srcQuote.valid_until || String(srcQuote.valid_until).slice(0, 10) >= storeToday());
+      if (unexpired) {
+        const { rows: quotedLines } = await db.execute({ sql: 'SELECT product_id, uom_id, quantity, unit_price FROM quotation_items WHERE quote_id = ? AND product_id IS NOT NULL AND COALESCE(is_rental_line, 0) = 0 AND serial_number IS NULL ORDER BY id', args: [quote_id] });
+        for (const l of quotedLines) quotedPool.push({ product_id: l.product_id, uom_id: l.uom_id ?? null, remaining: Number(l.quantity) || 0, unit_price: parseFloat(l.unit_price) || 0 });
       }
       const { rows: rentalLines } = await db.execute({ sql: 'SELECT product_id, unit_price FROM quotation_items WHERE quote_id = ? AND is_rental_line = 1 ORDER BY id', args: [quote_id] });
       for (const l of rentalLines) {
@@ -563,6 +583,10 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       const lineQty = parseQty(item.quantity, unit.allow_decimal);
       if (Number.isNaN(lineQty)) throw new Error(unit.allow_decimal ? `Enter a quantity above 0 for ${product.name}` : `${product.name} is sold in whole ${unit.sell_unit || 'unit'}s — the quantity can't be ${item.quantity}`);
       item.quantity = lineQty;
+      if (!spRentalLine && !item.variation_id && quotedPool.length) {
+        const q = quotedPool.find(e => e.product_id === product.id && e.uom_id === (unit.uom_id ?? null) && e.remaining + 1e-9 >= lineQty);
+        if (q) { unit_price = q.unit_price; q.remaining -= lineQty; }
+      }
       if (item.variation_id) {
         const { rows: [v] } = await db.execute({ sql: 'SELECT * FROM product_variations WHERE id = ? AND product_id = ?', args: [item.variation_id, item.product_id] });
         if (!v) throw new Error(`Variation ${item.variation_id} not found`);
