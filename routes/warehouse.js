@@ -460,7 +460,7 @@ router.get('/cycle-counts/:id/export', requirePermission('cycle-counts'), async 
     const { rows: items } = await db.execute({ sql: `SELECT ci.*, c.name as category_name FROM cycle_count_items ci LEFT JOIN products p ON ci.product_id = p.id LEFT JOIN categories c ON p.category_id = c.id WHERE ci.session_id = ? ORDER BY ci.bin_code, ci.product_name`, args: [req.params.id] });
 
     const csvRows = [['Item ID', 'SKU', 'Product Name', 'Category', 'Bin Code', 'Expected Qty', 'Counted Qty']];
-    items.forEach(i => csvRows.push([i.id, i.sku, i.product_name, i.category_name || '', i.bin_code || '', i.expected_qty, i.counted_qty !== null ? i.counted_qty : '']));
+    items.forEach(i => csvRows.push([i.id, i.sku, i.product_name, i.category_name || '', i.bin_code || '', i.expected_at_count ?? i.expected_qty, i.counted_qty !== null ? i.counted_qty : '']));
 
     const csv = csvRows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\r\n');
     // Served as octet-stream, not text/csv: on Windows with Excel installed,
@@ -552,35 +552,63 @@ function matchCountRows(items, rows) {
   return { totals, unmatched, skipped, matchedRows };
 }
 
+// The system's on-hand figure right now for a count line (alias ci): the bin's
+// quantity for a bin line, else the session branch's stock (0 with no
+// branch_inventory row, as on the Inventory page), else the global stock —
+// the same figures the session copied as expected_qty when it was created.
+function onHandSql(branchId) {
+  return {
+    sql: `CASE WHEN ci.bin_id IS NOT NULL
+      THEN COALESCE((SELECT a.quantity FROM product_bin_assignments a WHERE a.product_id = ci.product_id AND a.bin_id = ci.bin_id ORDER BY a.id LIMIT 1), 0)
+      ELSE ${branchId
+        ? 'COALESCE((SELECT bi.stock_qty FROM branch_inventory bi WHERE bi.product_id = ci.product_id AND bi.branch_id = ?), 0)'
+        : 'COALESCE((SELECT p.stock_qty FROM products p WHERE p.id = ci.product_id), 0)'} END`,
+    args: branchId ? [branchId] : [],
+  };
+}
+
 // Recomputes counted_qty/variance for the given lines from the session's
 // active uploads, in upload order: 'replace' sets the count, 'add' adds to it.
-// A line no active upload touches goes back to uncounted.
+// A line no active upload touches goes back to uncounted. The variance is
+// measured against the on-hand recorded by the latest active upload touching
+// the line (expected_at_count), so stock that moved between creating the
+// session and counting isn't counted as a variance. Uploads saved before
+// snapshots existed fall back to expected_qty.
 async function replayCounts(tx, sessionId, itemIds) {
   const ids = [...new Set(itemIds.map(Number))];
   const counts = new Map(ids.map(id => [id, null]));
+  const snaps = new Map(ids.map(id => [id, null]));
   for (const part of chunks(ids)) {
-    const { rows } = await tx.execute({ sql: `SELECT l.item_id, l.qty, u.mode FROM cycle_count_upload_lines l JOIN cycle_count_uploads u ON u.id = l.upload_id
+    const { rows } = await tx.execute({ sql: `SELECT l.item_id, l.qty, l.stock_snapshot, u.mode FROM cycle_count_upload_lines l JOIN cycle_count_uploads u ON u.id = l.upload_id
       WHERE u.session_id = ? AND u.undone_at IS NULL AND l.item_id IN (${part.map(() => '?').join(',')}) ORDER BY u.id, l.id`, args: [sessionId, ...part] });
     for (const r of rows) {
       const id = Number(r.item_id), cur = counts.get(id);
       counts.set(id, r.mode === 'add' ? (cur || 0) + Number(r.qty) : Number(r.qty));
+      snaps.set(id, r.stock_snapshot == null ? null : Number(r.stock_snapshot));
     }
   }
   for (const part of chunks(ids)) {
     await tx.batch(part.map(id => {
-      const c = counts.get(id);
-      return { sql: 'UPDATE cycle_count_items SET counted_qty = ?, variance = CASE WHEN ? IS NULL THEN 0 ELSE ? - expected_qty END WHERE id = ? AND session_id = ?', args: [c, c, c, id, sessionId] };
+      const c = counts.get(id), snap = c == null ? null : snaps.get(id);
+      return { sql: 'UPDATE cycle_count_items SET counted_qty = ?, expected_at_count = ?, variance = CASE WHEN ? IS NULL THEN 0 ELSE ? - COALESCE(?, expected_qty) END WHERE id = ? AND session_id = ?', args: [c, snap, c, c, snap, id, sessionId] };
     }));
   }
 }
 
-async function insertUpload(tx, { sessionId, deviceLabel, fileName, mode, contentHash, lines, employeeId }) {
+// snapshot: record each line's on-hand now (false for the baseline of counts
+// typed in before uploads were tracked — when they were taken isn't known).
+async function insertUpload(tx, { sessionId, branchId, deviceLabel, fileName, mode, contentHash, lines, employeeId, snapshot = true }) {
   const totalQty = lines.reduce((s, [, q]) => s + q, 0);
   const r = await tx.execute({ sql: 'INSERT INTO cycle_count_uploads (session_id, device_label, file_name, mode, content_hash, line_count, total_qty, employee_id) VALUES (?,?,?,?,?,?,?,?)',
     args: [sessionId, deviceLabel, fileName, mode, contentHash, lines.length, totalQty, employeeId] });
   const uploadId = Number(r.lastInsertRowid);
   for (const part of chunks(lines)) {
     await tx.batch(part.map(([itemId, qty]) => ({ sql: 'INSERT INTO cycle_count_upload_lines (upload_id, item_id, qty) VALUES (?,?,?)', args: [uploadId, itemId, qty] })));
+  }
+  if (snapshot) {
+    const oh = onHandSql(branchId);
+    await tx.execute({ sql: `UPDATE cycle_count_upload_lines SET stock_snapshot = (SELECT ${oh.sql} FROM cycle_count_items ci WHERE ci.id = cycle_count_upload_lines.item_id)
+      WHERE upload_id = ?`, args: [...oh.args, uploadId] });
   }
   return uploadId;
 }
@@ -631,11 +659,11 @@ router.post('/cycle-counts/:id/import', requirePermission('cycle-counts'), async
       if (!Number(n)) {
         const { rows: prior } = await tx.execute({ sql: 'SELECT id, counted_qty FROM cycle_count_items WHERE session_id = ? AND counted_qty IS NOT NULL', args: [sessionId] });
         if (prior.length) {
-          await insertUpload(tx, { sessionId, deviceLabel: 'Counts entered earlier', fileName: null, mode: 'replace', contentHash: null,
+          await insertUpload(tx, { sessionId, branchId: session.branch_id, deviceLabel: 'Counts entered earlier', fileName: null, mode: 'replace', contentHash: null, snapshot: false,
             lines: prior.map(p => [Number(p.id), Number(p.counted_qty)]), employeeId: null });
         }
       }
-      uploadId = await insertUpload(tx, { sessionId, deviceLabel, fileName, mode, contentHash, lines, employeeId: req.employee?.id || null });
+      uploadId = await insertUpload(tx, { sessionId, branchId: session.branch_id, deviceLabel, fileName, mode, contentHash, lines, employeeId: req.employee?.id || null });
       await replayCounts(tx, sessionId, lines.map(([id]) => id));
       await tx.execute({ sql: "UPDATE cycle_count_sessions SET status = 'review' WHERE id = ? AND status != 'committed'", args: [sessionId] });
       await tx.commit();
@@ -694,22 +722,28 @@ router.patch('/cycle-counts/:id/commit', requirePermission('cycle-counts'), asyn
       const claim = await tx.execute({ sql: "UPDATE cycle_count_sessions SET status = 'committed', committed_at = CURRENT_TIMESTAMP WHERE id = ? AND status != 'committed'", args: [session.id] });
       if (!claim.rowsAffected) throw new Error('Already committed');
       if (req.body?.zero_uncounted) {
-        await tx.execute({ sql: 'UPDATE cycle_count_items SET counted_qty = 0, variance = -expected_qty WHERE session_id = ? AND counted_qty IS NULL', args: [session.id] });
+        // Not found = 0 now, so the variance is against today's on-hand.
+        const oh = onHandSql(session.branch_id);
+        await tx.execute({ sql: `UPDATE cycle_count_items AS ci SET counted_qty = 0, expected_at_count = ${oh.sql}, variance = -(${oh.sql})
+          WHERE ci.session_id = ? AND ci.counted_qty IS NULL`, args: [...oh.args, ...oh.args, session.id] });
       }
       const { rows: varItems } = await tx.execute({ sql: 'SELECT * FROM cycle_count_items WHERE session_id = ? AND counted_qty IS NOT NULL AND variance != 0', args: [session.id] });
       const stmts = [];
       for (const item of varItems) {
         if (!item.product_id) continue;
         stmts.push({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [item.variance, item.product_id] });
+        // Every figure moves by the variance (counted − on-hand when counted)
+        // rather than being set to the count, so stock sold, received or
+        // transferred after the count stays in it.
         if (item.bin_id) {
-          stmts.push({ sql: 'UPDATE product_bin_assignments SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE product_id = ? AND bin_id = ?', args: [item.counted_qty, item.product_id, item.bin_id] });
+          stmts.push({ sql: 'UPDATE product_bin_assignments SET quantity = MAX(0, quantity + ?), updated_at = CURRENT_TIMESTAMP WHERE product_id = ? AND bin_id = ?', args: [item.variance, item.product_id, item.bin_id] });
         }
         if (session.branch_id) {
           stmts.push({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at)
             VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id=?), CURRENT_TIMESTAMP)
             ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, session.branch_id, item.variance, item.product_id, item.variance] });
         }
-        stmts.push({ sql: 'INSERT INTO stock_movements (product_id, branch_id, quantity_change, type, reference, reason) VALUES (?,?,?,?,?,?)', args: [item.product_id, session.branch_id || null, item.variance, 'adjustment', session.session_number, `Cycle count variance (expected ${item.expected_qty}, counted ${item.counted_qty})`] });
+        stmts.push({ sql: 'INSERT INTO stock_movements (product_id, branch_id, quantity_change, type, reference, reason) VALUES (?,?,?,?,?,?)', args: [item.product_id, session.branch_id || null, item.variance, 'adjustment', session.session_number, `Cycle count variance (on hand ${item.expected_at_count ?? item.expected_qty} when counted, counted ${item.counted_qty})`] });
       }
       // Batched: an initial count can put a variance on every line, and one
       // round trip per statement is slow against a remote database.

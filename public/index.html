@@ -32690,7 +32690,7 @@ const App = {
       <table class="table" style="font-size:13px">
         <thead><tr>
           <th>SKU</th><th>Product</th><th>Category</th><th>Bin</th>
-          <th style="text-align:right">Expected</th>
+          <th style="text-align:right" title="System on-hand when the line was counted (when its count was imported or saved)">Expected</th>
           <th style="text-align:right">Counted</th>
           <th style="text-align:right">Variance</th>
         </tr></thead>
@@ -32702,7 +32702,9 @@ const App = {
             <td>${i.product_name}</td>
             <td style="color:var(--text-muted)">${i.category_name||'—'}</td>
             <td>${i.bin_code||'—'}</td>
-            <td style="text-align:right">${i.expected_qty}</td>
+            <td style="text-align:right">${i.expected_at_count!=null&&Number(i.expected_at_count)!==Number(i.expected_qty)
+              ?`<span title="On hand when this line was counted. It was ${i.expected_qty} when the count was created — stock moved in between, so the variance is measured against ${i.expected_at_count}." style="border-bottom:1px dotted var(--text-muted);cursor:help">${i.expected_at_count}</span>`
+              :i.expected_qty}</td>
             <td style="text-align:right">${editable
               ?`<input type="number" min="0" value="${i.counted_qty!==null?i.counted_qty:''}" data-item-id="${i.id}" data-orig="${i.counted_qty!==null?i.counted_qty:''}"
                   style="width:70px;padding:3px 6px;border:1px solid var(--border);border-radius:4px;font-size:13px;text-align:right"
@@ -32828,7 +32830,7 @@ const App = {
     const counted = s.items.filter(i=>i.counted_qty!==null);
     const variances = counted.filter(i=>i.variance!==0).length;
     const uncounted = s.items.length - counted.length;
-    const uncountedWithStock = s.items.filter(i=>i.counted_qty===null && i.expected_qty!==0).length;
+    const uncountedWithStock = s.items.filter(i=>i.counted_qty===null && i.expected_qty!==0).length; // as of creation; commit zeroes against today's on-hand
     this.showModal(`
       <div class="modal" style="max-width:520px">
         <div class="modal-header"><span class="modal-title">Commit ${s.session_number}</span><button class="modal-close">✕</button></div>
@@ -32839,6 +32841,7 @@ const App = {
             <span style="text-align:left"><strong>Count the ${uncounted} uncounted line${uncounted!==1?'s':''} as 0</strong> — tick for a full or initial count, where anything not scanned wasn't found. ${uncountedWithStock} of them currently expect stock. Leave unticked to leave them unchanged.</span>
           </label>`:''}
           <p style="margin:12px 0 0"><strong>Adjustments to apply: <span id="cc-commit-total">${variances}</span></strong>. This can't be undone.</p>
+          <p style="margin:8px 0 0;font-size:12px;color:var(--text-muted)">Each variance is measured against the on-hand when that line's count was imported or saved, and added to today's stock — sales, receipts and transfers since then are kept.</p>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>

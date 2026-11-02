@@ -2730,6 +2730,13 @@ async function _init() {
     )`,
     // A purchase request raised for a Shop Use request's stock shortage.
     'ALTER TABLE purchase_requests ADD COLUMN shop_use_request_id INTEGER REFERENCES shop_use_requests(id)',
+    // Cycle counts allow for stock that moves while a count is open: each
+    // upload line records the system on-hand when it was saved, and the line's
+    // variance is measured against that (expected_at_count) rather than the
+    // figure copied when the session was created. Commit applies it as a delta,
+    // so sales/receipts after the count stay in the stock.
+    'ALTER TABLE cycle_count_upload_lines ADD COLUMN stock_snapshot REAL',
+    'ALTER TABLE cycle_count_items ADD COLUMN expected_at_count REAL',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
