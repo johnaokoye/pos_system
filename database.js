@@ -2682,6 +2682,9 @@ async function _init() {
     // POS "Q Item" (pos_q_item): something not in inventory on a ticket. It
     // can be held, but never sold — the ticket goes to a quote (Create Quote).
     'ALTER TABLE transaction_items ADD COLUMN is_q_item INTEGER NOT NULL DEFAULT 0',
+    // Vendor payment request "pay by" date (YYYY-MM-DD) — e.g. a supplier's
+    // deposit deadline on an advance requested from a PO. NULL = no deadline.
+    'ALTER TABLE payment_requests ADD COLUMN required_date TEXT',
     // POS "$" line discount: the fixed amount taken off the line (discount_percent
     // then holds the equivalent %, for the limit check and promotions). NULL = a % discount.
     'ALTER TABLE transaction_items ADD COLUMN discount_fixed REAL',
@@ -3407,6 +3410,9 @@ async function _init() {
       // with whoever can approve them.
       if (!('purchasing_delete' in perms)) { perms.purchasing_delete = can(perms, 'purchasing_approve'); changed = true; }
       if (!('pr_delete' in perms)) { perms.pr_delete = can(perms, 'pr_approve'); changed = true; }
+      // Requesting an (advance) payment from an approved PO (2026-11-02)
+      // starts with whoever can create POs.
+      if (!('purchasing_request_payment' in perms)) { perms.purchasing_request_payment = can(perms, 'purchasing_create'); changed = true; }
       // Receiving customer account payments at the POS — standalone (not a
       // `pos` sub, which every full-POS group would inherit) and, by the
       // owner's choice (2026-10-19), only for the cashier groups.

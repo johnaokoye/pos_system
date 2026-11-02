@@ -1010,6 +1010,7 @@ const App = {
     this.checkLowStock();
     this._startTransferInbox();
     this._startShopUseInbox();
+    this._startPayablesInbox();
     this._resumeDownloadAfterLogin();
   },
 
@@ -1078,6 +1079,101 @@ const App = {
       this._trfRememberSeen(seen);
     }
     this._trfInboxFirst = false;
+  },
+
+  // ─── Accounts Payable notifications ─────────────────────────────────────
+  // Payment requests waiting on the signed-in person — to approve
+  // (payables_approve; never their own) or, once approved, to pay
+  // (payables_payments): GET /payables/payment-requests/inbox, polled every
+  // minute. Each one not seen before (per request + stage) pops a notice
+  // that stays until dismissed; the waiting count shows on the Accounts menu
+  // item and the Accounts Payable tile. Seen ones are remembered per user in
+  // this browser, like the transfer inbox above.
+  _startPayablesInbox() {
+    clearInterval(this._apInboxTimer);
+    this._apInboxCount = 0;
+    this._apInboxFirst = true;
+    if (!this.can('payables_approve') && !this.can('payables_payments')) return this._paintPayablesBadges();
+    this._pollPayablesInbox();
+    this._apInboxTimer = setInterval(() => this._pollPayablesInbox(), 60000);
+  },
+
+  _stopPayablesInbox() {
+    clearInterval(this._apInboxTimer);
+    this._apInboxTimer = null;
+    this._apInboxCount = 0;
+    this._paintPayablesBadges();
+  },
+
+  _apSeenKey() { return `apInboxSeen:${this.currentUser?.id}`; },
+
+  // "Pay by" text for a request, flagged when the date is close or past.
+  _prqPayByHtml(date, { short = false } = {}) {
+    if (!date) return short ? '—' : '';
+    const today = this._storeDay(new Date());
+    const days = Math.round((new Date(date + 'T00:00:00Z') - new Date(today + 'T00:00:00Z')) / 86400000);
+    const when = days < 0 ? `${-days} day${days === -1 ? '' : 's'} overdue` : days === 0 ? 'today' : days === 1 ? 'tomorrow' : `in ${days} days`;
+    const color = days < 0 ? 'var(--danger,#dc2626)' : days <= 3 ? 'var(--warning,#b45309)' : 'inherit';
+    return `<span style="color:${color};${days <= 3 ? 'font-weight:600' : ''}">${short ? '' : 'Pay by '}${this._apDate(date)}${days <= 7 ? ` <span style="font-size:11px">(${when})</span>` : ''}</span>`;
+  },
+
+  async _pollPayablesInbox() {
+    if (!this.currentUser || (!this.can('payables_approve') && !this.can('payables_payments'))) return;
+    let inbox;
+    try { inbox = await this.api('GET', '/payables/payment-requests/inbox'); } catch { return; }
+    if (!this.currentUser) return;
+    this._apInboxCount = inbox.count;
+    this._paintPayablesBadges();
+    let seen;
+    try { seen = new Set(JSON.parse(localStorage.getItem(this._apSeenKey()) || '[]')); } catch { seen = new Set(); }
+    const key = r => `${r.id}:${r.stage}`;
+    const fresh = inbox.requests.filter(r => !seen.has(key(r)));
+    if (fresh.length) {
+      if (this._apInboxFirst && fresh.length > 1) {
+        const toApprove = fresh.filter(r => r.stage === 'approve').length, toPay = fresh.length - toApprove;
+        this._notify({
+          title: `💵 ${fresh.length} payment requests waiting`,
+          body: [toApprove ? `${toApprove} to approve` : '', toPay ? `${toPay} approved and ready to pay` : ''].filter(Boolean).join(' · ')
+            + (fresh.some(r => r.required_date) ? `<div style="margin-top:4px">Earliest pay-by: ${this._prqPayByHtml(fresh.filter(r => r.required_date).map(r => r.required_date).sort()[0], { short: true })}</div>` : ''),
+          actions: [{ label: 'Open Accounts Payable', primary: true, run: () => this._openPayablesRequests() }],
+        });
+      } else {
+        for (const r of fresh.slice().reverse()) {
+          const what = r.request_type === 'advance' ? `Advance on ${this.escapeAttr(r.po_number || 'PO')}` : (this._prqTypeLabel[r.request_type] || r.request_type);
+          this._notify({
+            title: r.stage === 'approve' ? `💵 Payment request ${r.request_number}` : `💵 ${r.request_number} approved — ready to pay`,
+            body: `<strong>${this.escapeAttr(r.supplier_name)}</strong> · ${this.fmt(r.amount)} · ${what}`
+              + `${r.requested_by_name ? `<div style="color:var(--text-muted)">Requested by ${this.escapeAttr(r.requested_by_name)}</div>` : ''}`
+              + `${r.required_date ? `<div>${this._prqPayByHtml(r.required_date)}</div>` : ''}`
+              + `${r.notes ? `<div style="color:var(--text-muted);margin-top:4px">${this.escapeAttr(r.notes)}</div>` : ''}`,
+            actions: [{ label: r.stage === 'approve' ? 'Review' : 'Open', primary: true, run: () => this._openPayablesRequests(r.id) }],
+          });
+        }
+      }
+      fresh.forEach(r => seen.add(key(r)));
+      try { localStorage.setItem(this._apSeenKey(), JSON.stringify([...seen].slice(-300))); } catch {}
+    }
+    this._apInboxFirst = false;
+  },
+
+  async _openPayablesRequests(requestId) {
+    this._apTab = 'requests';
+    this._prqFilter = { status: 'open', supplier_id: '', q: '' };
+    await this.showSection('payables');
+    if (requestId) this.viewPaymentRequest(requestId);
+  },
+
+  // Waiting count on the Accounts menu item and the Accounts Payable tile.
+  _paintPayablesBadges() {
+    const n = this._apInboxCount || 0;
+    for (const el of [document.querySelector('.nav-item[data-section="accounts-hub"]'), document.querySelector('.hub-tile[data-section="payables"]')]) {
+      if (!el) continue;
+      let pill = el.querySelector('.count-pill.ap-inbox');
+      if (!n) { pill?.remove(); continue; }
+      if (!pill) { pill = document.createElement('span'); pill.className = 'count-pill ap-inbox'; el.appendChild(pill); }
+      pill.textContent = n > 99 ? '99+' : n;
+      pill.title = `${n} payment request${n === 1 ? '' : 's'} waiting on you (to approve or pay)`;
+    }
   },
 
   // A notice that stays on screen (bottom-right) until closed or acted on —
@@ -1485,6 +1581,7 @@ const App = {
       <div class="hub-grid" style="margin-bottom:${reportsPanel ? '16px' : '0'}">${tiles}</div>
       ${reportsPanel}`;
     this._paintTransferBadges();
+    this._paintPayablesBadges();
 
     if (showReports) this.loadWarehouseHubReports();
   },
@@ -1565,6 +1662,7 @@ const App = {
     this.api('POST', '/employees/logout').catch(() => {});
     this._stopTransferInbox();
     this._stopShopUseInbox();
+    this._stopPayablesInbox();
     this.currentUser = null;
     this.currentDrawerSession = null;
     this._posHasDrawers = false;
@@ -1636,6 +1734,7 @@ const App = {
       if (res.status === 401 && url !== '/employees/login' && this.currentUser) {
         this._stopTransferInbox();
         this._stopShopUseInbox();
+        this._stopPayablesInbox();
         this.currentUser = null;
         this.showLoginScreen();
       }
@@ -21940,11 +22039,14 @@ const App = {
   },
 
   async viewPO(id) {
-    const [po, attachments, billing] = await Promise.all([
+    const [po, attachments, billing, payReqs] = await Promise.all([
       this.api('GET', `/purchase-orders/${id}`),
       this.api('GET', `/purchase-orders/${id}/attachments`),
       this.can('payables') ? this.api('GET', `/payables/po/${id}`).catch(() => null) : null,
+      this.api('GET', `/payables/payment-requests/for-po/${id}`).catch(() => null),
     ]);
+    const canReqPay = this.can('purchasing_request_payment') || this.can('payables_requests');
+    const canOpenPrq = this.can('payables') || this.can('payables_approve');
     const statusColor = { draft:'badge-warning', sent:'badge-info', approved:'badge-teal', partial:'badge-purple', received:'badge-success', cancelled:'badge-danger' };
     const docTypeLabel = this._poDocTypeLabels;
     const fileIcon = mime => {
@@ -22035,6 +22137,16 @@ const App = {
               <span>${this.fmt(b.amount)} <span class="badge-pill ${this._apStatusBadge[b.display_status] || ''}" style="margin-left:6px">${b.display_status}</span></span>
             </div>`).join('')}
           </div>` : ''}
+          ${payReqs && (payReqs.requests.length || (['approved','partial'].includes(po.status) && canReqPay)) ? `<div style="margin-top:20px;border-top:1px solid var(--border);padding-top:14px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+              <span style="font-weight:700;font-size:14px">Payment Requests</span>
+            </div>
+            ${payReqs.room ? `<div style="font-size:13px;margin-bottom:8px">Paid so far: <strong>${this.fmt(payReqs.room.paid)}</strong>${payReqs.room.requested > 0 ? ` &nbsp;·&nbsp; Requested, not yet paid: <strong>${this.fmt(payReqs.room.requested)}</strong>` : ''} &nbsp;·&nbsp; Left to request: <strong>${this.fmt(payReqs.room.available)}</strong></div>` : ''}
+            ${payReqs.requests.map(r => `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;font-size:13px;${canOpenPrq ? 'cursor:pointer' : ''};${r.status === 'cancelled' ? 'opacity:.6' : ''}" ${canOpenPrq ? `onclick="App.viewPaymentRequest(${r.id})"` : ''}>
+              <span><strong>${r.request_number}</strong> · ${this.escapeAttr(r.summary || this._prqTypeLabel[r.request_type])}${r.required_date && !['paid','cancelled'].includes(r.status) ? ` · ${this._prqPayByHtml(r.required_date)}` : ''}${r.requested_by_name ? `<span style="color:var(--text-muted)"> · ${this.escapeAttr(r.requested_by_name)}</span>` : ''}</span>
+              <span style="white-space:nowrap">${this.fmt(r.amount)} <span class="badge-pill ${this._prqStatusBadge[r.status] || ''}" style="margin-left:6px">${this._prqStatusLabel[r.status] || r.status}</span></span>
+            </div>`).join('') || '<div style="font-size:13px;color:var(--text-muted)">No payment requested yet. If the supplier needs a deposit or advance before supplying, use <strong>💵 Request Payment</strong> below — Accounts Payable is notified.</div>'}
+          </div>` : ''}
           ${po.status==='approved' ? `<div style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px;font-size:13px">
             <strong>Approved by:</strong> ${po.approved_by_name||'-'} on ${this.fmtDateTime(po.approved_at)}
             ${this._approvalSigImg(po.approval_signature)}
@@ -22104,6 +22216,7 @@ const App = {
           ${['draft','cancelled'].includes(po.status) && !po.reinstated_from_status && this.can('purchasing_delete') ? `<button class="btn btn-outline" style="color:var(--danger,#dc2626);border-color:var(--danger,#dc2626)" title="Remove this PO permanently" onclick="App.deletePO(${po.id}, '${this.escapeAttr(po.po_number)}')">🗑 Delete PO</button>` : ''}
           ${['received','partial'].includes(po.status) && !po.approved_at && this.can('purchasing_approve') ? `<button class="btn btn-outline" title="Received before approval was required — send it for approval; stock and receipts stay as they are" onclick="App.reinstatePOForApproval(${po.id})">↩ Send Back for Approval</button>` : ''}
           ${(po.status==='approved'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-success" onclick="App.closeModal();App.showReceivePO(${po.id})">Receive Items</button>` : ''}
+          ${(po.status==='approved'||po.status==='partial') && canReqPay ? `<button class="btn btn-outline" title="Ask Accounts Payable for an advance or deposit payment on this PO" onclick="App.showPoPaymentRequestForm(${po.id})">💵 Request Payment</button>` : ''}
           ${(po.status==='received'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn" style="background:#f59e0b;color:#fff;border:none" onclick="App.closeModal();App.showProcessDamaged(${po.id})">⚠️ Process Damaged</button>` : ''}
           ${(po.status==='received'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-secondary" onclick="App.emailGRN(${po.id},'${(po.supplier_email||'').replace(/'/g,"\\'")}')">✉️ Email GRN</button>` : ''}
           <button class="btn btn-secondary" onclick="App.printApprovedPO(${po.id})">🖨️ Print</button>
@@ -22336,6 +22449,70 @@ const App = {
         list.innerHTML = '<div style="font-size:13px;color:var(--text-muted);padding:6px 0" id="po-att-empty">No documents attached yet.</div>';
       }
     } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // "Request Payment" on an approved PO: an advance/deposit the supplier
+  // needs before supplying, optionally by a pay-by date. Goes straight to
+  // A/P's approval queue (POST /payables/payment-requests/from-po/:id), and
+  // A/P is notified (see _pollPayablesInbox).
+  async showPoPaymentRequestForm(poId) {
+    let po, info;
+    try {
+      [po, info] = await Promise.all([this.api('GET', `/purchase-orders/${poId}`), this.api('GET', `/payables/payment-requests/for-po/${poId}`)]);
+    } catch (e) { return this.alert(e.message, 'error'); }
+    const room = info.room || { available: 0, paid: 0, requested: 0, total_base: 0 };
+    if (room.missing_rate) return this.alert(`${po.po_number} has no exchange rate — set one on the PO first`, 'error');
+    if (!(room.available > 0)) return this.alert(`Nothing is left to request on ${po.po_number} — it's fully paid or already requested`, 'warning');
+    const pct = p => Math.min(room.available, Math.round(room.total_base * p) / 100);
+    this.showModal(`
+      <div class="modal" style="max-width:560px">
+        <div class="modal-header"><span class="modal-title">Request Payment — ${po.po_number}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div style="font-size:13px;margin-bottom:12px;padding:10px 12px;background:var(--bg-secondary,#f8f9fa);border:1px solid var(--border);border-radius:6px">
+            <strong>${this.escapeAttr(po.supplier_name || '')}</strong><br>
+            PO total ${this.fmt(room.total_base)}${po.currency ? ` <span style="color:var(--text-muted)">(${this._fmtPO(po.total, po)})</span>` : ''} · paid ${this.fmt(room.paid)}${room.requested > 0 ? ` · ${this.fmt(room.requested)} already requested` : ''} · <strong>${this.fmt(room.available)} left to request</strong>
+          </div>
+          <div class="input-row">
+            <div class="form-group"><label>Amount *</label><input id="popr-amount" type="number" step="0.01" min="0" max="${room.available}" placeholder="0.00"></div>
+            <div class="form-group"><label>Pay by</label><input id="popr-date" type="date" min="${this._storeDay(new Date())}"><div style="font-size:11px;color:var(--text-muted);margin-top:3px">Optional — when the supplier needs it</div></div>
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin:-6px 0 12px">
+            ${[25, 50, 100].map(p => `<button type="button" class="btn btn-sm btn-outline" onclick="document.getElementById('popr-amount').value='${pct(p).toFixed(2)}'">${p}% (${this.fmt(pct(p))})</button>`).join('')}
+            <button type="button" class="btn btn-sm btn-outline" onclick="document.getElementById('popr-amount').value='${room.available.toFixed(2)}'">All that's left</button>
+          </div>
+          <div class="form-group"><label>Description</label><input id="popr-desc" placeholder="e.g. 50% deposit to start production" value="Advance payment on ${po.po_number}"></div>
+          <div class="form-group"><label>Notes for Accounts Payable</label><textarea id="popr-notes" rows="2" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;resize:vertical" placeholder="Why it's needed, supplier's payment terms, bank details reference..."></textarea></div>
+          <div class="form-group" style="margin:0"><label>Supporting Documents</label>
+            <input type="file" id="popr-files" multiple accept=".pdf,.jpg,.jpeg,.png,.gif,.webp,.doc,.docx,.xls,.xlsx,.txt">
+            <div style="font-size:11px;color:var(--text-muted);margin-top:3px">The supplier's proforma invoice or deposit request — up to 20 MB each.</div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal();App.viewPO(${po.id})">Cancel</button>
+          <button class="btn btn-primary" onclick="App.submitPoPaymentRequest(${po.id})">Send to Accounts Payable</button>
+        </div>
+      </div>`);
+    setTimeout(() => document.getElementById('popr-amount')?.focus(), 50);
+  },
+
+  async submitPoPaymentRequest(poId) {
+    const amount = parseFloat(document.getElementById('popr-amount').value);
+    if (!(amount > 0)) return this.alert('Enter the amount to pay', 'error');
+    const data = {
+      amount,
+      required_date: document.getElementById('popr-date').value || null,
+      description: document.getElementById('popr-desc').value.trim(),
+      notes: document.getElementById('popr-notes').value.trim(),
+    };
+    const files = [...(document.getElementById('popr-files').files || [])];
+    try {
+      const saved = await this.api('POST', `/payables/payment-requests/from-po/${poId}`, data);
+      try { await this._uploadPaymentRequestFiles(saved.id, files); }
+      catch (e) { this.alert(`${saved.request_number} sent, but a document didn't upload — ${e.message}`, 'warning'); }
+      this.closeModal();
+      this.alert(`${saved.request_number} sent to Accounts Payable for approval`);
+      this.viewPO(poId);
+    } catch (e) { this.alert(e.message, 'error'); }
   },
 
   async deletePO(id, number) {
@@ -25985,11 +26162,12 @@ const App = {
     tab = fullAp ? (this._apTab || 'bills') : 'requests';
     const c = document.getElementById('content');
     c.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
-    let aging, awaiting;
+    let aging, awaiting, toPay;
     try {
-      [aging, awaiting] = await Promise.all([
+      [aging, awaiting, toPay] = await Promise.all([
         fullAp ? this.api('GET', `/payables/aging?as_of=${this._apToday()}`) : null,
         this.api('GET', '/payables/payment-requests?status=submitted'),
+        this.api('GET', '/payables/payment-requests?status=approved'),
       ]);
     }
     catch (e) { if (this.section === 'payables') c.innerHTML = `<div class="empty-state"><p>${this.escapeAttr(e.message)}</p></div>`; return; }
@@ -26011,6 +26189,7 @@ const App = {
         ${tile('Overdue', this.fmt(overdue), overdue > 0 ? 'var(--danger)' : '')}
         ${tile('Not Yet Due', this.fmt(t.current))}` : ''}
         ${tile('Awaiting Approval', `${awaiting.length}${awaiting.length ? ` <span style="font-size:13px;font-weight:500;color:var(--text-muted)">· ${this.fmt(awaiting.reduce((sum, r) => sum + r.amount, 0))}</span>` : ''}`, awaiting.length ? 'var(--warning, #b45309)' : '')}
+        ${tile('Approved — To Pay', `${toPay.length}${toPay.length ? ` <span style="font-size:13px;font-weight:500;color:var(--text-muted)">· ${this.fmt(toPay.reduce((sum, r) => sum + r.amount, 0))}</span>` : ''}${(() => { const d = toPay.concat(awaiting).map(r => r.required_date).filter(Boolean).sort()[0]; return d ? `<div style="font-size:12px;font-weight:500;margin-top:2px">Next pay-by: ${this._prqPayByHtml(d, { short: true })}</div>` : ''; })()}`, toPay.length ? 'var(--primary)' : '')}
         ${aging?.advances_unapplied > 0 ? tile('Advances Not Yet Billed', this.fmt(aging.advances_unapplied)) : ''}
       </div>
       <div class="var-tab-bar" style="padding:0;margin-bottom:14px">
@@ -26231,6 +26410,7 @@ const App = {
 
   // Refreshes whichever screen the A/P action was taken from.
   _afterApChange() {
+    this._pollPayablesInbox();
     if (this.section === 'payables') this.renderPayables();
     else if (this.section === 'suppliers') this.renderSuppliers();
     if (this._viewingPOId && this.section === 'purchasing') this.viewPO(this._viewingPOId);
@@ -26334,8 +26514,8 @@ const App = {
         <input id="prq-f-search" placeholder="Request #, vendor, bill #, PO #, description..." value="${this.escapeAttr(f.q)}" style="flex:1;min-width:200px">
       </div>
       <div class="card"><div class="table-wrap"><table>
-        <thead><tr><th>Request #</th><th>Date</th><th>Vendor</th><th>Type</th><th>For</th><th style="text-align:right">Amount</th><th>Requested By</th><th>Status</th></tr></thead>
-        <tbody id="prq-tbody"><tr><td colspan="8" class="empty-state">Loading...</td></tr></tbody>
+        <thead><tr><th>Request #</th><th>Date</th><th>Vendor</th><th>Type</th><th>For</th><th style="text-align:right">Amount</th><th>Pay By</th><th>Requested By</th><th>Status</th></tr></thead>
+        <tbody id="prq-tbody"><tr><td colspan="9" class="empty-state">Loading...</td></tr></tbody>
       </table></div></div>`;
     const load = async () => {
       const qs = new URLSearchParams({ status: f.status });
@@ -26352,9 +26532,10 @@ const App = {
           <td>${this._prqTypeLabel[r.request_type] || r.request_type}</td>
           <td style="font-size:12px;max-width:260px">${r.request_type === 'advance' ? `PO ${this.escapeAttr(r.po_number || '')}` : this.escapeAttr(r.summary || '—')}${r.attachment_count ? ` <span title="Supporting documents" style="color:var(--text-muted)">📎${r.attachment_count}</span>` : ''}</td>
           <td style="text-align:right" class="fw-600">${this.fmt(r.amount)}</td>
+          <td style="white-space:nowrap">${['paid', 'cancelled'].includes(r.status) ? (r.required_date ? this._apDate(r.required_date) : '—') : this._prqPayByHtml(r.required_date, { short: true })}</td>
           <td>${this.escapeAttr(r.requested_by_name || '—')}</td>
           <td><span class="badge-pill ${this._prqStatusBadge[r.status] || ''}">${this._prqStatusLabel[r.status] || r.status}</span></td>
-        </tr>`).join('') : '<tr><td colspan="8" class="empty-state">No payment requests found</td></tr>';
+        </tr>`).join('') : '<tr><td colspan="9" class="empty-state">No payment requests found</td></tr>';
     };
     document.getElementById('prq-f-status').addEventListener('change', e => { f.status = e.target.value; load(); });
     document.getElementById('prq-f-vendor').addEventListener('change', e => { f.supplier_id = e.target.value; load(); });
@@ -26397,6 +26578,7 @@ const App = {
             </div>
           </div>
           <div id="prq-body" style="margin-bottom:12px"></div>
+          <div class="form-group" style="max-width:240px"><label>Pay by</label><input id="prq-date" type="date" value="${r.required_date || ''}"><div style="font-size:11px;color:var(--text-muted);margin-top:3px">Optional — when the vendor needs it</div></div>
           <div class="form-group"><label>Purpose / Notes for the approver</label>
             <textarea id="prq-notes" rows="2" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;resize:vertical" placeholder="Why this payment is needed, any deadline...">${this.escapeAttr(r.notes || '')}</textarea>
           </div>
@@ -26559,6 +26741,7 @@ const App = {
       supplier_id: document.getElementById('prq-vendor').value,
       request_type: type,
       notes: document.getElementById('prq-notes').value.trim(),
+      required_date: document.getElementById('prq-date')?.value || null,
       lines,
       submit,
     };
@@ -26636,6 +26819,7 @@ const App = {
             <div>
               <strong>Vendor:</strong> ${this.escapeAttr(r.supplier_name)} (${r.supplier_number})<br>
               <strong>Type:</strong> ${this._prqTypeLabel[r.request_type]}<br>
+              ${r.required_date ? `<strong>Pay by:</strong> ${['paid', 'cancelled'].includes(r.status) ? this._apDate(r.required_date) : this._prqPayByHtml(r.required_date, { short: true })}<br>` : ''}
               ${r.po_number ? `<strong>Purchase Order:</strong> ${this.can('purchasing') ? `<a href="#" style="color:var(--primary)" onclick="event.preventDefault();App.closeModal();App.showSection('purchasing').then(()=>App.viewPO(${r.po_id}))">${r.po_number}</a>` : r.po_number}<br>` : ''}
             </div>
             <div>
@@ -26666,6 +26850,7 @@ const App = {
   async _afterPrqChange(id, message) {
     this.alert(message);
     this.closeModal();
+    this._pollPayablesInbox();
     if (this.section === 'payables') this.renderPayables();
     if (id) this.viewPaymentRequest(id);
   },
@@ -29094,6 +29279,7 @@ const App = {
       { key: 'purchasing_approve', label: 'Approve Orders' },
       { key: 'purchasing_receive', label: 'Receive Orders' },
       { key: 'purchasing_delete', label: 'Delete Orders (draft/cancelled, nothing received or billed)' },
+      { key: 'purchasing_request_payment', label: 'Request Payment on an approved PO (advance / deposit, sent to Accounts Payable)' },
     ]},
     { key: 'transfers', label: 'Branch Transfers', subs: [
       { key: 'transfers_create', label: 'Create Transfers' },

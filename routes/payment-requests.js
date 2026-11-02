@@ -4,7 +4,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { db } = require('../database');
-const { requirePermission, requireAnyPermission } = require('../lib/permissions');
+const { requirePermission, requireAnyPermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { resolveApprovalSignature } = require('../lib/signatures');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
@@ -109,6 +109,9 @@ async function validateRequest(body, requestId = 0) {
   if (!supplier) return { error: 'Vendor not found' };
   if (!TYPES.includes(request_type)) return { error: 'Choose the kind of payment' };
   const notes = String(body.notes || '').trim() || null;
+  const rawDate = String(body.required_date || '').trim();
+  if (rawDate && !/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) return { error: 'The pay-by date is not a valid date' };
+  const required_date = rawDate || null;
   let lines = [];
   let po_id = null;
 
@@ -153,7 +156,7 @@ async function validateRequest(body, requestId = 0) {
     lines = [{ bill_id: null, description, amount }];
   }
   const amount = round2(lines.reduce((s, l) => s + l.amount, 0));
-  return { supplier_id, request_type, po_id, notes, lines, amount };
+  return { supplier_id, request_type, po_id, notes, required_date, lines, amount };
 }
 
 async function saveLines(executor, requestId, lines) {
@@ -220,6 +223,76 @@ router.get('/options', requirePermission('payables_requests'), async (req, res) 
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── From a purchase order (Purchasing) ─────────────────────
+// Purchasing asks A/P for an advance payment on an approved PO — e.g. a
+// supplier who wants a deposit before shipping, by a given date. It goes
+// straight to the approval queue as a submitted advance request; A/P is
+// notified through the inbox below. Needs purchasing_request_payment (or
+// payables_requests). Only for an approved or part-received PO.
+const canRequestFromPo = requireAnyPermission('purchasing_request_payment', 'payables_requests');
+
+router.get('/for-po/:poId', requireAnyPermission('purchasing', 'payables', 'payables_approve'), async (req, res) => {
+  try {
+    const { rows } = await db.execute({ sql: `${REQ_SELECT} WHERE r.po_id = ? ORDER BY r.id DESC`, args: [req.params.poId] });
+    const room = await poAdvanceRoom(db, req.params.poId);
+    res.json({ requests: rows, room: room ? { total_base: room.total_base, paid: room.paid, requested: room.requested, available: room.available, missing_rate: room.missing_rate } : null });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/from-po/:poId', canRequestFromPo, async (req, res) => {
+  try {
+    const { rows: [po] } = await db.execute({ sql: 'SELECT id, po_number, supplier_id, status FROM purchase_orders WHERE id = ?', args: [req.params.poId] });
+    if (!po) return res.status(404).json({ error: 'Purchase order not found' });
+    if (!['approved', 'partial'].includes(po.status)) {
+      return res.status(400).json({ error: `A payment can only be requested on an approved purchase order (${po.po_number} is ${po.status})` });
+    }
+    const v = await validateRequest({
+      supplier_id: po.supplier_id, request_type: 'advance', po_id: po.id,
+      amount: req.body.amount, description: req.body.description, notes: req.body.notes, required_date: req.body.required_date,
+    });
+    if (v.error) return res.status(400).json({ error: v.error });
+    const tx = await db.transaction('write');
+    let committed = false;
+    try {
+      const request_number = await nextNumber(tx, 'payment_requests', 'request_number', 'PRQ-', 6);
+      const result = await tx.execute({
+        sql: `INSERT INTO payment_requests (request_number, supplier_id, request_type, po_id, amount, notes, required_date, status, requested_by, submitted_at)
+              VALUES (?,?,?,?,?,?,?,'submitted',?,CURRENT_TIMESTAMP)`,
+        args: [request_number, v.supplier_id, v.request_type, v.po_id, v.amount, v.notes, v.required_date, req.employee?.id || null],
+      });
+      const id = Number(result.lastInsertRowid);
+      await saveLines(tx, id, v.lines);
+      await tx.commit();
+      committed = true;
+      res.status(201).json(await loadRequest(id));
+    } catch (e) {
+      if (!committed) await tx.rollback().catch(() => {});
+      throw e;
+    }
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── A/P notifications ──────────────────────────────────────
+// What's waiting on the signed-in person, polled by the frontend every
+// minute: requests to approve (payables_approve — not their own) and
+// approved requests to pay (payables_payments). Soonest pay-by date first.
+router.get('/inbox', canView, async (req, res) => {
+  try {
+    const perms = req.employee?.permissions;
+    const me = req.employee?.id || 0;
+    const parts = [];
+    const args = [];
+    if (can(perms, 'payables_approve')) { parts.push("(r.status = 'submitted' AND COALESCE(r.requested_by, 0) != ?)"); args.push(me); }
+    if (can(perms, 'payables_payments')) parts.push("r.status = 'approved'");
+    if (!parts.length) return res.json({ count: 0, requests: [] });
+    const { rows } = await db.execute({
+      sql: `${REQ_SELECT} WHERE (${parts.join(' OR ')}) ORDER BY CASE WHEN r.required_date IS NULL THEN 1 ELSE 0 END, r.required_date, r.id LIMIT 100`,
+      args,
+    });
+    res.json({ count: rows.length, requests: rows.map(r => ({ ...r, stage: r.status === 'submitted' ? 'approve' : 'pay' })) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/:id', canView, async (req, res) => {
   try {
     const r = await loadRequest(req.params.id);
@@ -240,9 +313,9 @@ router.post('/', requirePermission('payables_requests'), async (req, res) => {
     try {
       const request_number = await nextNumber(tx, 'payment_requests', 'request_number', 'PRQ-', 6);
       const result = await tx.execute({
-        sql: `INSERT INTO payment_requests (request_number, supplier_id, request_type, po_id, amount, notes, status, requested_by, submitted_at)
-              VALUES (?,?,?,?,?,?,?,?,${submit ? 'CURRENT_TIMESTAMP' : 'NULL'})`,
-        args: [request_number, v.supplier_id, v.request_type, v.po_id, v.amount, v.notes, submit ? 'submitted' : 'draft', req.employee?.id || null],
+        sql: `INSERT INTO payment_requests (request_number, supplier_id, request_type, po_id, amount, notes, required_date, status, requested_by, submitted_at)
+              VALUES (?,?,?,?,?,?,?,?,?,${submit ? 'CURRENT_TIMESTAMP' : 'NULL'})`,
+        args: [request_number, v.supplier_id, v.request_type, v.po_id, v.amount, v.notes, v.required_date, submit ? 'submitted' : 'draft', req.employee?.id || null],
       });
       const id = Number(result.lastInsertRowid);
       await saveLines(tx, id, v.lines);
@@ -270,10 +343,10 @@ router.put('/:id', requirePermission('payables_requests'), async (req, res) => {
     let committed = false;
     try {
       await tx.execute({
-        sql: `UPDATE payment_requests SET supplier_id=?, request_type=?, po_id=?, amount=?, notes=?, status=?,
+        sql: `UPDATE payment_requests SET supplier_id=?, request_type=?, po_id=?, amount=?, notes=?, required_date=?, status=?,
                 submitted_at=${submit ? 'CURRENT_TIMESTAMP' : 'NULL'}, rejected_by=NULL, rejected_at=NULL, rejection_reason=NULL
               WHERE id=?`,
-        args: [v.supplier_id, v.request_type, v.po_id, v.amount, v.notes, submit ? 'submitted' : 'draft', cur.id],
+        args: [v.supplier_id, v.request_type, v.po_id, v.amount, v.notes, v.required_date, submit ? 'submitted' : 'draft', cur.id],
       });
       await saveLines(tx, cur.id, v.lines);
       await tx.commit();
@@ -452,12 +525,16 @@ router.get('/:id/attachments', canView, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/:id/attachments', requirePermission('payables_requests'), (req, res, next) => {
+router.post('/:id/attachments', canRequestFromPo, (req, res, next) => {
   upload.single('file')(req, res, err => err ? res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'File is larger than 20 MB' : err.message }) : next());
 }, async (req, res) => {
   try {
-    const { rows: [r] } = await db.execute({ sql: 'SELECT id, status FROM payment_requests WHERE id = ?', args: [req.params.id] });
+    const { rows: [r] } = await db.execute({ sql: 'SELECT id, status, requested_by FROM payment_requests WHERE id = ?', args: [req.params.id] });
     if (!r) return res.status(404).json({ error: 'Payment request not found' });
+    // Purchasing (no payables_requests) only adds documents to requests they raised from a PO.
+    if (!req.apiKey && !can(req.employee?.permissions, 'payables_requests') && Number(r.requested_by) !== Number(req.employee?.id)) {
+      return res.status(403).json({ error: 'You can only add documents to payment requests you raised' });
+    }
     if (r.status === 'cancelled') return res.status(400).json({ error: 'This request is cancelled' });
     if (!req.file) return res.status(400).json({ error: 'No file uploaded or file type not allowed' });
     const cloudResult = await cloudUpload(req.file.buffer, {
