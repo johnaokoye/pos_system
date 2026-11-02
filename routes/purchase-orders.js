@@ -881,4 +881,64 @@ router.delete('/:id/attachments/:aid', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Delete a PO outright (purchasing_delete) — only one that never went
+// anywhere: a draft or cancelled PO with nothing received, no A/P bill, no
+// vendor payment / payment request against it. Anything further along keeps
+// its record (cancel it instead). A purchase request converted into it goes
+// back to approved so it can be converted again.
+router.delete('/:id', requirePermission('purchasing_delete'), async (req, res) => {
+  try {
+    const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });
+    if (!po) return res.status(404).json({ error: 'Not found' });
+    if (!['draft', 'cancelled'].includes(po.status) || po.reinstated_from_status) {
+      return res.status(400).json({ error: `This PO is ${po.status} — only a draft or cancelled PO can be deleted (cancel it first)` });
+    }
+    const { rows: [use] } = await db.execute({
+      sql: `SELECT
+        (SELECT COUNT(*) FROM po_receipts WHERE po_id = ?) AS receipts,
+        (SELECT COUNT(*) FROM purchase_order_items WHERE po_id = ? AND COALESCE(quantity_received, 0) > 0) AS received_lines,
+        (SELECT COUNT(*) FROM ap_bills WHERE po_id = ?) AS bills,
+        (SELECT COUNT(*) FROM ap_payments WHERE po_id = ?) AS payments,
+        (SELECT COUNT(*) FROM payment_requests WHERE po_id = ?) AS payment_requests`,
+      args: [po.id, po.id, po.id, po.id, po.id],
+    });
+    const blockers = [];
+    if (use.receipts || use.received_lines) blockers.push('goods were received on it');
+    if (use.bills) blockers.push('it has an A/P bill');
+    if (use.payments) blockers.push('a vendor payment was made against it');
+    if (use.payment_requests) blockers.push('a payment request was raised against it');
+    if (blockers.length) return res.status(400).json({ error: `${po.po_number} can't be deleted — ${blockers.join(', ')}` });
+
+    const { rows: atts } = await db.execute({ sql: 'SELECT stored_name FROM po_attachments WHERE po_id = ?', args: [po.id] });
+    const { rows: items } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ?', args: [po.id] });
+    const tx = await db.transaction('write');
+    let committed = false;
+    try {
+      await tx.execute({
+        sql: 'INSERT INTO deleted_documents (doc_table, doc_id, doc_number, snapshot, deleted_by) VALUES (?, ?, ?, ?, ?)',
+        args: ['purchase_orders', po.id, po.po_number, JSON.stringify({ ...po, items }), req.employee?.id ?? null],
+      });
+      await tx.execute({ sql: `UPDATE purchase_requests SET status = 'approved', converted_to_po_id = NULL WHERE converted_to_po_id = ? AND status = 'converted'`, args: [po.id] });
+      await tx.execute({ sql: 'UPDATE purchase_requests SET converted_to_po_id = NULL WHERE converted_to_po_id = ?', args: [po.id] });
+      await tx.execute({ sql: 'DELETE FROM po_attachments WHERE po_id = ?', args: [po.id] });
+      await tx.execute({ sql: 'DELETE FROM purchase_order_items WHERE po_id = ?', args: [po.id] });
+      await tx.execute({ sql: 'DELETE FROM purchase_orders WHERE id = ?', args: [po.id] });
+      await tx.commit();
+      committed = true;
+    } catch (e) {
+      if (!committed) await tx.rollback();
+      throw e;
+    }
+    // Files go only once the rows are gone — a failed delete leaves them intact.
+    for (const a of atts) {
+      try {
+        if (a.stored_name.startsWith('https://')) await cloudDestroy(a.stored_name, 'raw');
+        else if (fs.existsSync(path.join(localUploadDir, a.stored_name))) fs.unlinkSync(path.join(localUploadDir, a.stored_name));
+      } catch (e) { /* orphaned file is harmless */ }
+    }
+    console.log(`[purchase-orders] ${po.po_number} deleted by employee ${req.employee?.id ?? 'api'}`);
+    res.json({ success: true, po_number: po.po_number });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 module.exports = router;

@@ -438,4 +438,48 @@ router.delete('/:id/attachments/:aid', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Delete a purchase request (pr_delete) — any stage short of being converted
+// to a PO (delete the PO first, which puts the request back to approved).
+// Quote / work-order lines it was raised for are unlinked so they can be
+// requested again.
+router.delete('/:id', requirePermission('pr_delete'), async (req, res) => {
+  try {
+    const { rows: [pr] } = await db.execute({ sql: 'SELECT * FROM purchase_requests WHERE id = ?', args: [req.params.id] });
+    if (!pr) return res.status(404).json({ error: 'Not found' });
+    if (pr.converted_to_po_id || !['draft', 'submitted', 'approved', 'rejected'].includes(pr.status)) {
+      return res.status(400).json({ error: `${pr.pr_number} has been converted to a PO and can't be deleted — delete or cancel the PO instead` });
+    }
+    const { rows: atts } = await db.execute({ sql: 'SELECT stored_name FROM pr_attachments WHERE pr_id = ?', args: [pr.id] });
+    const { rows: items } = await db.execute({ sql: 'SELECT * FROM purchase_request_items WHERE pr_id = ?', args: [pr.id] });
+    const tx = await db.transaction('write');
+    let committed = false;
+    try {
+      await tx.execute({
+        sql: 'INSERT INTO deleted_documents (doc_table, doc_id, doc_number, snapshot, deleted_by) VALUES (?, ?, ?, ?, ?)',
+        args: ['purchase_requests', pr.id, pr.pr_number, JSON.stringify({ ...pr, items }), req.employee?.id ?? null],
+      });
+      await tx.execute({ sql: 'UPDATE quotation_items SET purchase_request_id = NULL WHERE purchase_request_id = ?', args: [pr.id] });
+      await tx.execute({ sql: 'UPDATE work_order_items SET purchase_request_id = NULL WHERE purchase_request_id = ?', args: [pr.id] });
+      await tx.execute({ sql: 'DELETE FROM pr_attachments WHERE pr_id = ?', args: [pr.id] });
+      await tx.execute({ sql: 'DELETE FROM purchase_request_items WHERE pr_id = ?', args: [pr.id] });
+      await tx.execute({ sql: 'DELETE FROM purchase_requests WHERE id = ?', args: [pr.id] });
+      await tx.commit();
+      committed = true;
+    } catch (e) {
+      if (!committed) await tx.rollback();
+      throw e;
+    }
+    for (const a of atts) {
+      try {
+        if (a.stored_name.startsWith('https://')) {
+          const resourceType = (a.stored_name.match(/\/(image|raw|video)\/upload\//) || [])[1] || 'raw';
+          await cloudDestroy(a.stored_name, resourceType);
+        } else if (fs.existsSync(path.join(localUploadDir, a.stored_name))) fs.unlinkSync(path.join(localUploadDir, a.stored_name));
+      } catch (e) { /* orphaned file is harmless */ }
+    }
+    console.log(`[purchase-requests] ${pr.pr_number} deleted by employee ${req.employee?.id ?? 'api'}`);
+    res.json({ success: true, pr_number: pr.pr_number });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 module.exports = router;

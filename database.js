@@ -1192,6 +1192,18 @@ async function _init() {
       uploaded_by INTEGER REFERENCES employees(id),
       uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // Deleted documents (POs / purchase requests): who removed what, with a
+    // JSON snapshot of the row and its lines. lib/nextNumber.js also reads it
+    // so a deleted document's number is never issued again.
+    { sql: `CREATE TABLE IF NOT EXISTS deleted_documents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      doc_table TEXT NOT NULL,
+      doc_id INTEGER NOT NULL,
+      doc_number TEXT NOT NULL,
+      snapshot TEXT,
+      deleted_by INTEGER REFERENCES employees(id),
+      deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`, args: [] },
     // Supporting documents on a purchase request — supplier quotes, briefs/
     // specs, anything backing the ask. Same storage pattern as quote_attachments.
     { sql: `CREATE TABLE IF NOT EXISTS pr_attachments (
@@ -3388,6 +3400,10 @@ async function _init() {
       // Quick Transfer (send + receive in one step) starts with whoever can
       // already send transfers — the inventory team.
       if (!('transfers_quick' in perms)) { perms.transfers_quick = can(perms, 'transfers_approve'); changed = true; }
+      // Deleting POs / purchase requests (a new power, 2026-11-02) starts
+      // with whoever can approve them.
+      if (!('purchasing_delete' in perms)) { perms.purchasing_delete = can(perms, 'purchasing_approve'); changed = true; }
+      if (!('pr_delete' in perms)) { perms.pr_delete = can(perms, 'pr_approve'); changed = true; }
       // Receiving customer account payments at the POS — standalone (not a
       // `pos` sub, which every full-POS group would inherit) and, by the
       // owner's choice (2026-10-19), only for the cashier groups.

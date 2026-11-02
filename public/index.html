@@ -21050,6 +21050,7 @@ const App = {
           ${supplierPriced && ['approved','converted','received'].includes(pr.status) ? `<button class="btn btn-secondary" onclick="App.printPumpAuthorization(${pr.id})">🖨️ Print Authorization</button>
             <button class="btn btn-secondary" onclick="App.emailPumpAuthorization(${pr.id},'${(pr.supplier_email||'').replace(/'/g,"\\'")}')">✉️ Email Authorization</button>` : ''}
           ${pr.status==='approved' ? `<button class="btn btn-teal" onclick="App.closeModal();App.showConvertPRtoPO(${pr.id})">Convert to PO</button>` : ''}
+          ${['draft','submitted','approved','rejected'].includes(pr.status) && !pr.converted_to_po_id && this.can('pr_delete') ? `<button class="btn btn-outline" style="color:var(--danger,#dc2626);border-color:var(--danger,#dc2626)" title="Remove this request permanently" onclick="App.deletePR(${pr.id}, '${this.escapeAttr(pr.pr_number)}')">🗑 Delete</button>` : ''}
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
@@ -21156,6 +21157,16 @@ const App = {
         this.alert(`Authorization sent to ${to}`);
       } catch(e) { this.alert(e.message, 'error'); }
     }, { pdfOption: true });
+  },
+
+  async deletePR(id, number) {
+    if (!confirm(`Delete purchase request ${number}? This removes it and its attached documents permanently and can't be undone.`)) return;
+    try {
+      await this.api('DELETE', `/purchase-requests/${id}`);
+      this.closeModal();
+      this.alert(`${number} deleted`);
+      this.renderPurchasing('requests');
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   async updatePRStatus(id, status) {
@@ -21952,6 +21963,7 @@ const App = {
           ${po.status==='sent' && this.can('purchasing_approve') ? `<button class="btn btn-danger" onclick="App.showRejectPOModal(${po.id})">Reject</button>` : ''}
           ${po.status==='sent' && this.can('purchasing_approve') ? `<button class="btn btn-primary" onclick="${sp && sp.over.length ? `if(!confirm('Some lines are over the authorized maximum quantity. Approve anyway?'))return;` : ''}App.showApprovePOModal(${po.id})">Approve PO</button>` : ''}
           ${po.status!=='cancelled'&&po.status!=='received'&&!po.reinstated_from_status ? `<button class="btn btn-danger" onclick="App.updatePOStatus(${po.id},'cancelled')">Cancel PO</button>` : ''}
+          ${['draft','cancelled'].includes(po.status) && !po.reinstated_from_status && this.can('purchasing_delete') ? `<button class="btn btn-outline" style="color:var(--danger,#dc2626);border-color:var(--danger,#dc2626)" title="Remove this PO permanently" onclick="App.deletePO(${po.id}, '${this.escapeAttr(po.po_number)}')">🗑 Delete PO</button>` : ''}
           ${['received','partial'].includes(po.status) && !po.approved_at && this.can('purchasing_approve') ? `<button class="btn btn-outline" title="Received before approval was required — send it for approval; stock and receipts stay as they are" onclick="App.reinstatePOForApproval(${po.id})">↩ Send Back for Approval</button>` : ''}
           ${(po.status==='approved'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-success" onclick="App.closeModal();App.showReceivePO(${po.id})">Receive Items</button>` : ''}
           ${(po.status==='received'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn" style="background:#f59e0b;color:#fff;border:none" onclick="App.closeModal();App.showProcessDamaged(${po.id})">⚠️ Process Damaged</button>` : ''}
@@ -22185,6 +22197,16 @@ const App = {
       if (list && !list.querySelector('[id^="po-att-"]')) {
         list.innerHTML = '<div style="font-size:13px;color:var(--text-muted);padding:6px 0" id="po-att-empty">No documents attached yet.</div>';
       }
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async deletePO(id, number) {
+    if (!confirm(`Delete purchase order ${number}? This removes it and its attached documents permanently and can't be undone. A purchase request converted into it goes back to Approved.`)) return;
+    try {
+      await this.api('DELETE', `/purchase-orders/${id}`);
+      this.closeModal();
+      this.alert(`${number} deleted`);
+      this.renderPurchasing();
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
@@ -28917,11 +28939,13 @@ const App = {
       { key: 'pr_create', label: 'Create Requests' },
       { key: 'pr_approve', label: 'Approve Requests' },
       { key: 'pr_convert', label: 'Convert to PO' },
+      { key: 'pr_delete', label: 'Delete Requests (not yet converted to a PO)' },
     ]},
     { key: 'purchasing', label: 'Purchase Orders', subs: [
       { key: 'purchasing_create', label: 'Create Orders' },
       { key: 'purchasing_approve', label: 'Approve Orders' },
       { key: 'purchasing_receive', label: 'Receive Orders' },
+      { key: 'purchasing_delete', label: 'Delete Orders (draft/cancelled, nothing received or billed)' },
     ]},
     { key: 'transfers', label: 'Branch Transfers', subs: [
       { key: 'transfers_create', label: 'Create Transfers' },
