@@ -474,6 +474,24 @@ router.post('/', requirePermission('pos'), async (req, res) => {
     const isTaxExempt = tax_exempt ? 1 : 0;
     const { rows: [taxRateSetting] } = await db.execute({ sql: "SELECT value FROM settings WHERE key = 'tax_rate'", args: [] });
     const storeTaxRate = parseFloat(taxRateSetting?.value) || 0;
+    // Retail vs rental: a rental quote becomes a rental agreement (Convert on
+    // the quote), never a POS sale. A Special Project's rental lines are paid
+    // for here, but they stay rentals — charged at the quoted rental price and
+    // never taken off stock (the rental agreement holds the unit; rentals
+    // don't change stock_qty). Matched to the quote's rental lines by product,
+    // in order.
+    const spRentalPool = new Map();
+    if (quote_id) {
+      const { rows: [srcQuote] } = await db.execute({ sql: 'SELECT quote_type, quote_number FROM quotations WHERE id = ?', args: [quote_id] });
+      if (srcQuote?.quote_type === 'rental') {
+        return res.status(400).json({ error: `${srcQuote.quote_number} is a rental quote — convert it to a rental agreement from Quotations (Convert), not at the POS` });
+      }
+      const { rows: rentalLines } = await db.execute({ sql: 'SELECT product_id, unit_price FROM quotation_items WHERE quote_id = ? AND is_rental_line = 1 ORDER BY id', args: [quote_id] });
+      for (const l of rentalLines) {
+        if (!spRentalPool.has(l.product_id)) spRentalPool.set(l.product_id, []);
+        spRentalPool.get(l.product_id).push(l);
+      }
+    }
     let subtotal = 0, tax_amount = 0;
     const processedItems = [];
     for (const item of items) {
@@ -520,6 +538,10 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       }
       const { rows: [product] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] });
       if (!product) throw new Error(`Product ${item.product_id} not found`);
+      const spRentalLine = product.is_rental ? (spRentalPool.get(product.id) || []).shift() : null;
+      if (product.is_rental && !product.rental_allow_sale && !spRentalLine) {
+        throw new Error(`${product.name} is a rental item and isn't for sale — rent it from the Rentals screen`);
+      }
       // SN line: always its own qty-1 row carrying the serial, no stock.
       // Blank serial → dropped, not refused (serials are optional).
       if (isSerialNumberProduct(product)) {
@@ -537,7 +559,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       // Unit of measure (lib/units.js): the unit's price, and quantity × its
       // size in stock units off stock. Never on a variation.
       const unit = await resolveUnit(db, product, item.variation_id ? null : (item.uom_id ?? item.sell_unit));
-      let variation = null, unit_price = unit.price;
+      let variation = null, unit_price = spRentalLine ? (parseFloat(spRentalLine.unit_price) || 0) : unit.price;
       const lineQty = parseQty(item.quantity, unit.allow_decimal);
       if (Number.isNaN(lineQty)) throw new Error(unit.allow_decimal ? `Enter a quantity above 0 for ${product.name}` : `${product.name} is sold in whole ${unit.sell_unit || 'unit'}s — the quantity can't be ${item.quantity}`);
       item.quantity = lineQty;
@@ -582,7 +604,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       const lineTax = isTaxExempt ? 0 : parseFloat((lineTotal * product.tax_rate / 100).toFixed(2));
       subtotal += lineTotal;
       tax_amount += lineTax;
-      processedItems.push({ product, variation, unit, quantity: item.quantity, unit_price, lineTotal, lineTax, taxRate: product.tax_rate || 0, discount: discountAmount, discountPercent, discountOverrideBy, discountFixed: discountPercent > 0 ? discountFixed : null });
+      processedItems.push({ product, variation, unit, quantity: item.quantity, unit_price, lineTotal, lineTax, taxRate: product.tax_rate || 0, discount: discountAmount, discountPercent, discountOverrideBy, discountFixed: discountPercent > 0 ? discountFixed : null, spRental: !!spRentalLine });
     }
 
     if (!processedItems.some(p => !p.isComment)) return res.status(400).json({ error: 'No items in transaction' });
@@ -675,14 +697,15 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         await tx.execute({ sql: 'INSERT INTO transaction_payments (transaction_id, payment_method, amount, approval_code) VALUES (?,?,?,?)', args: [txId, leg.payment_method, leg.amount, leg.approval_code || null] });
       }
 
-      for (const { product, variation, unit, customName, isComment, isDelivery, serialNumber, quantity: lineQty, unit_price, lineTotal, lineTax, ticketDiscount, discount, discountPercent, discountOverrideBy, discountFixed } of processedItems) {
+      for (const { product, variation, unit, customName, isComment, isDelivery, spRental, serialNumber, quantity: lineQty, unit_price, lineTotal, lineTax, ticketDiscount, discount, discountPercent, discountOverrideBy, discountFixed } of processedItems) {
         const itemName = customName || (serialNumber ? serialNumberLabel(serialNumber) : variation ? `${product.name} — ${variation.name}` : lineName(product.name, unit));
         const itemSku = customName ? '' : (variation ? variation.sku : product.sku);
         const unitsPer = unit?.units_per || 1;
         await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,discount_percent,discount_override_by,serial_number,sell_unit,units_per,uom_id,ticket_discount,is_comment,is_delivery,discount_fixed) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [txId, product ? product.id : null, itemName, itemSku, lineQty, unit_price, discount, lineTax, lineTotal, variation?.id||null, variation?.name||null, discountPercent || 0, discountOverrideBy || null, serialNumber || null, variation ? null : unit?.sell_unit || null, variation ? 1 : unitsPer, variation ? null : unit?.uom_id ?? null, ticketDiscount ?? null, isComment ? 1 : 0, isDelivery ? 1 : 0, discountFixed || null] });
         // A custom/temp line has no catalog product — nothing to deduct; an
-        // SN line is a stockless placeholder for the serial.
-        if (!product || serialNumber) continue;
+        // SN line is a stockless placeholder for the serial; a Special
+        // Project rental line is rented, not sold (the agreement holds it).
+        if (!product || serialNumber || spRental) continue;
         // Stock is in the stock unit: a line moves quantity × its unit's size.
         const quantity = stockUnits(lineQty, unitsPer);
         if (variation) {

@@ -5127,7 +5127,9 @@ const App = {
       const qs = customerId
         ? await this.api('GET', `/quotations?customer_id=${customerId}`)
         : await this.api('GET', '/quotations?limit=50');
-      quotes = qs.filter(q => !['converted','declined','cancelled'].includes(q.status));
+      // Rental quotes become rental agreements (Convert on the quote), never
+      // a POS sale, so they aren't offered here.
+      quotes = qs.filter(q => !['converted','declined','cancelled'].includes(q.status) && q.quote_type !== 'rental');
     } catch(e) {}
 
     const renderList = (list) => list.length
@@ -5171,14 +5173,14 @@ const App = {
     if (!input) return;
     const q = input.value.trim().toLowerCase();
     if (!q) {
-      const filtered = (this._quoteSearchData || []).filter(x => !['converted','declined','cancelled'].includes(x.status));
+      const filtered = (this._quoteSearchData || []).filter(x => !['converted','declined','cancelled'].includes(x.status) && x.quote_type !== 'rental');
       document.getElementById('qt-list').innerHTML = filtered.length
         ? filtered.map(x => this._quoteRow(x)).join('') : '<p style="color:var(--text-muted);text-align:center;padding:20px 0">No open quotes found</p>';
       return;
     }
     try {
       const results = await this.api('GET', `/quotations?quote_number=${encodeURIComponent(q)}&limit=30`);
-      const filtered = results.filter(x => !['converted','declined','cancelled'].includes(x.status))
+      const filtered = results.filter(x => !['converted','declined','cancelled'].includes(x.status) && x.quote_type !== 'rental')
         .filter(x => x.quote_number.toLowerCase().includes(q) || (x.customer_name||'').toLowerCase().includes(q));
       document.getElementById('qt-list').innerHTML = filtered.length
         ? filtered.map(x => this._quoteRow(x)).join('') : '<p style="color:var(--text-muted);text-align:center;padding:20px 0">No matching quotes</p>';
@@ -5204,6 +5206,7 @@ const App = {
       if (quote.status === 'converted') { this.alert('This quote has already been converted to a transaction', 'error'); return; }
       if (['declined','cancelled'].includes(quote.status)) { this.alert(`Cannot load a ${quote.status} quote`, 'error'); return; }
       if (!quote.items || !quote.items.length) { this.alert('Quote has no items', 'error'); return; }
+      if (quote.quote_type === 'rental') { this.alert(`${quote.quote_number} is a rental quote — convert it to a rental agreement from Quotations, not at the POS`, 'error'); return; }
 
       if (this.cart.length && !confirm(`Loading ${quote.quote_number} will replace your current cart. Continue?`)) return;
 
