@@ -460,7 +460,6 @@ router.delete('/:id', requirePermission('pr_delete'), async (req, res) => {
       });
       await tx.execute({ sql: 'UPDATE quotation_items SET purchase_request_id = NULL WHERE purchase_request_id = ?', args: [pr.id] });
       await tx.execute({ sql: 'UPDATE work_order_items SET purchase_request_id = NULL WHERE purchase_request_id = ?', args: [pr.id] });
-      await tx.execute({ sql: 'UPDATE transaction_items SET purchase_request_id = NULL WHERE purchase_request_id = ?', args: [pr.id] });
       await tx.execute({ sql: 'DELETE FROM pr_attachments WHERE pr_id = ?', args: [pr.id] });
       await tx.execute({ sql: 'DELETE FROM purchase_request_items WHERE pr_id = ?', args: [pr.id] });
       await tx.execute({ sql: 'DELETE FROM purchase_requests WHERE id = ?', args: [pr.id] });

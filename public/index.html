@@ -2983,7 +2983,7 @@ const App = {
       this.can('pos_change_quantity') ? `<button class="pos-grid-btn" onclick="App.posQuantitySelectedLine()">Quantity</button>` : '',
       `<button class="pos-grid-btn" onclick="App.showCommentItemModal()" title="Add a comment line — free text printed on the receipt/invoice, no price">C Item</button>`,
       `<button class="pos-grid-btn" onclick="App.showDeliveryItemModal()" title="Add a delivery charge — your description and a price before tax">Delivery</button>`,
-      this.can('pos_q_item') ? `<button class="pos-grid-btn" onclick="App.showQItemModal()" title="Sell something not in inventory — completing the sale sends it to Purchasing to order (a Purchase Request is created)">Q Item</button>` : '',
+      this.can('pos_q_item') ? `<button class="pos-grid-btn" onclick="App.showQItemModal()" title="Add something not in inventory — the ticket then goes to a quote (Create Quote), and Purchasing orders it once the customer accepts">Q Item</button>` : '',
       this.can('pos_cancel_ticket') ? `<button class="pos-grid-btn void" onclick="App.posCancelTicket()">Cancel Ticket</button>` : '',
       this.can('pos_payment') ? `<button class="pos-grid-btn payment" style="grid-column:1 / -1" onclick="App.showPOSPaymentModal()">PAYMENT</button>` : '',
     ].filter(Boolean).join('');
@@ -3392,8 +3392,33 @@ const App = {
     } catch (e) { if (btn) btn.disabled = false; this.alert(e.message, 'error'); }
   },
 
+  // A ticket with a Q item (not in inventory) can't be paid for or put on
+  // layaway at the till — it has to wait on Purchasing, so it goes to a
+  // quotation; accepting the quote raises the Purchase Request. Returns true
+  // (and explains, offering Create Quote) when the ticket is held up by one.
+  _posQItemBlocksSale() {
+    const q = this.cart.filter(i => i.is_q_item);
+    if (!q.length) return false;
+    const canQuote = this.can('quotations');
+    this.showModal(`
+      <div class="modal" style="max-width:460px">
+        <div class="modal-header"><span class="modal-title">Q Item — Create a Quote</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="margin:0 0 10px">This ticket has ${q.length === 1 ? 'a Q item' : `${q.length} Q items`} — not in inventory, so ${q.length === 1 ? 'it has' : 'they have'} to be ordered first:</p>
+          <ul style="margin:0 0 10px 18px;padding:0">${q.map(i => `<li>${this.escapeAttr(i.name)} × ${i.quantity}</li>`).join('')}</ul>
+          <p style="font-size:13px;color:var(--text-muted);margin:0">It can't be paid for at the till. Create a quote for the customer instead — once they accept it, a Purchase Request goes to Purchasing, and the quote is recalled at the POS to complete the sale.</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Back to Ticket</button>
+          ${canQuote ? `<button class="btn btn-primary" onclick="App.closeModal();App.posCreateQuoteFromCart()">Create Quote</button>` : ''}
+        </div>
+      </div>`);
+    return true;
+  },
+
   showPOSPaymentModal() {
     if (!this.cart.length) { this.alert('Cart is empty', 'warning'); return; }
+    if (this._posQItemBlocksSale()) return;
     // Available Credit and/or Cash Back already cover the whole ticket — no
     // cash/card/other tender is actually changing hands, so skip straight to
     // completing the sale instead of forcing a tender pick (previously the
@@ -3528,8 +3553,9 @@ const App = {
 
   // "Q Item" (pos_q_item) — something not in inventory that Purchasing orders
   // for the customer: description, whole quantity and price before tax,
-  // taxed at the store rate. Completing the sale creates a Purchase Request
-  // for it (raiseQItemPurchaseRequest in routes/transactions.js).
+  // taxed at the store rate. The ticket can be held but not paid for — it
+  // goes to a quote (Create Quote; see _posQItemBlocksSale), and accepting
+  // the quote raises the Purchase Request.
   showQItemModal(editIdx = null) {
     const editing = editIdx != null && this.cart[editIdx]?.is_q_item;
     const line = editing ? this.cart[editIdx] : null;
@@ -3539,7 +3565,7 @@ const App = {
       <div class="modal" style="max-width:460px">
         <div class="modal-header"><span class="modal-title">${editing ? 'Edit Q Item' : 'Add Q Item'}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
-          <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">For something not in inventory. When the sale is completed, a Purchase Request is created so Purchasing can order it for the customer.</p>
+          <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">For something not in inventory. A ticket with a Q item can't be paid for at the till — use <strong>Create Quote</strong>. Once the customer accepts the quote, a Purchase Request goes to Purchasing to order it.</p>
           <div class="form-group"><label>Description *</label><input id="pos-qitem-desc" value="${this.escapeAttr(line ? line.name : '')}" placeholder="e.g. 3/4 inch brass gate valve, model GV-75"></div>
           <div style="display:flex;gap:10px">
             <div class="form-group" style="margin:0;width:110px"><label>Quantity *</label><input id="pos-qitem-qty" type="number" min="1" step="1" value="${line ? line.quantity : 1}"></div>
@@ -3716,6 +3742,7 @@ const App = {
   // items are layaway-eligible there (createLayawayPlan() itself, and
   // everything downstream — collections, cancellation — is untouched).
   async posCreateLayawayFromCart() {
+    if (this._posQItemBlocksSale()) return;
     await this.showLayawayCheckoutModal();
     // Set only after the modal opens (which resets it to false itself) —
     // so an abandoned/cancelled POS-seeded attempt can't leak into clearing
@@ -4442,7 +4469,7 @@ const App = {
       if (item.is_q_item) {
         const lineShare = lineShares[idx], lineTax = lineTaxes[idx], gross = item.price * item.quantity;
         return `
-      <tr class="pos-ticket-row${this._selectedCartLine === idx ? ' selected' : ''}" onclick="App.selectCartLine(event,${idx})" ondblclick="App.showQItemModal(${idx})" title="Q item — not in inventory; Purchasing orders it when the sale is completed. Double-click to edit">
+      <tr class="pos-ticket-row${this._selectedCartLine === idx ? ' selected' : ''}" onclick="App.selectCartLine(event,${idx})" ondblclick="App.showQItemModal(${idx})" title="Q item — not in inventory; this ticket goes to a quote (Create Quote). Double-click to edit">
         <td><span class="badge-pill badge-warning" style="font-size:10px">Q</span></td>
         <td>${this.escapeAttr(item.name)}</td>
         <td style="text-align:center"><span class="qty-val">${item.quantity}</span></td>
@@ -4709,6 +4736,7 @@ const App = {
 
   async processPayment(method) {
     if (!this.cart.length) { this.alert('Cart is empty', 'warning'); return; }
+    if (this._posQItemBlocksSale()) return;
 
     if (method === 'credit') {
       if (!this.cartCustomer) { this.alert('Please select a customer to use charge account', 'error'); return; }
@@ -16404,7 +16432,7 @@ const App = {
           </div>` : ''}
           <table style="margin-bottom:12px">
             <thead><tr><th>Item</th><th>SKU</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
-            <tbody>${tx.items.map(i => i.is_comment ? `<tr><td colspan="5" style="font-style:italic;white-space:pre-wrap;color:var(--text-muted)"><span class="badge-pill badge-info" style="font-size:10px;font-style:normal">C</span> ${this.escapeAttr(i.product_name)}</td></tr>` : `<tr><td>${i.product_name}${i.is_q_item ? ` <span class="badge-pill badge-warning" style="font-size:10px" title="Not in inventory — sent to Purchasing to order">Q</span>${i.purchase_request_id ? ` <a href="#" style="font-size:11px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${i.purchase_request_id})">${i.purchase_request_number || 'PR'}</a>` : ''}` : ''}</td><td style="font-family:monospace;font-size:12px">${i.sku||''}</td><td style="text-align:center">${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}</tbody>
+            <tbody>${tx.items.map(i => i.is_comment ? `<tr><td colspan="5" style="font-style:italic;white-space:pre-wrap;color:var(--text-muted)"><span class="badge-pill badge-info" style="font-size:10px;font-style:normal">C</span> ${this.escapeAttr(i.product_name)}</td></tr>` : `<tr><td>${i.product_name}</td><td style="font-family:monospace;font-size:12px">${i.sku||''}</td><td style="text-align:center">${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}</tbody>
           </table>
           <div style="text-align:right;border-top:1px solid var(--border);padding-top:10px">
             <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span>Subtotal</span><span>${this.fmt(tx.subtotal)}</span></div>
@@ -28928,7 +28956,7 @@ const App = {
       { key: 'pos_change_quantity', label: 'Change Quantity' },
       { key: 'pos_cancel_ticket', label: 'Cancel Ticket' },
       { key: 'pos_payment', label: 'Take Payment' },
-      { key: 'pos_q_item', label: 'Q Items (sell something not in inventory — raises a Purchase Request)' },
+      { key: 'pos_q_item', label: 'Q Items (add something not in inventory — the ticket goes to a quote)' },
     ]},
     { key: 'drawers', label: 'Cash Drawers', subs: [
       { key: 'drawers_manage', label: 'Manage Drawers (setup & access)' },

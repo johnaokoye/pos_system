@@ -2679,10 +2679,9 @@ async function _init() {
     // price, taxed at the store rate; no product and never sent to Purchasing.
     'ALTER TABLE quotation_items ADD COLUMN is_delivery INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE transaction_items ADD COLUMN is_delivery INTEGER NOT NULL DEFAULT 0',
-    // POS "Q Item" (pos_q_item): something not in inventory, sold at the till;
-    // completing the sale raises a Purchase Request for it (purchase_request_id).
+    // POS "Q Item" (pos_q_item): something not in inventory on a ticket. It
+    // can be held, but never sold — the ticket goes to a quote (Create Quote).
     'ALTER TABLE transaction_items ADD COLUMN is_q_item INTEGER NOT NULL DEFAULT 0',
-    'ALTER TABLE transaction_items ADD COLUMN purchase_request_id INTEGER REFERENCES purchase_requests(id)',
     // POS "$" line discount: the fixed amount taken off the line (discount_percent
     // then holds the equivalent %, for the limit check and promotions). NULL = a % discount.
     'ALTER TABLE transaction_items ADD COLUMN discount_fixed REAL',

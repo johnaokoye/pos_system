@@ -91,6 +91,9 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
   try {
     const { customer_id, employee_id, created_by, branch_id, items, discount_amount, notes, promotion_code, promotion_name } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in cart' });
+    if (!req.apiKey && items.some(i => i.is_q_item && !i.product_id) && !can(req.employee?.permissions, 'pos_q_item')) {
+      return res.status(403).json({ error: 'Missing permission: pos_q_item (Q items)' });
+    }
     const discountSource = ['manual', 'promo_code', 'auto_promo', 'card'].includes(req.body.discount_source) ? req.body.discount_source : null;
     const ticketPct = discountSource === 'manual' ? Math.min(100, Math.max(0, parseFloat(req.body.ticket_discount_percent) || 0)) || null : null;
     let salespersonId;
@@ -250,32 +253,6 @@ router.get('/pending-exchanges', requirePermission('pos'), async (req, res) => {
 // message: the return must be an uncancelled exchange whose credit no other
 // sale has spent, for the same customer. Checked before the sale and again
 // inside its write transaction so two tills can't spend it twice.
-// POS Q items (pos_q_item): the sale raises one draft Purchase Request
-// for all its Q lines, inside the sale's own DB transaction — like an
-// accepted retail quote's (flagItemsForPurchasing in routes/quotations.js),
-// the sold price is the starting est. cost for Purchasing to correct.
-async function raiseQItemPurchaseRequest(tx, { txId, transaction_number, branch_id, employeeId, customer_id, lines }) {
-  let customerName = '';
-  if (customer_id) {
-    const { rows: [c] } = await tx.execute({ sql: "SELECT TRIM(COALESCE(first_name,'') || ' ' || COALESCE(last_name,'')) AS name, business_name, phone FROM customers WHERE id = ?", args: [customer_id] });
-    if (c) customerName = [c.business_name || c.name, c.phone].filter(Boolean).join(', ');
-  }
-  const pr_number = await nextNumber(tx, 'purchase_requests', 'pr_number', 'PR-', 6);
-  const result = await tx.execute({
-    sql: "INSERT INTO purchase_requests (pr_number, branch_id, employee_id, notes, request_type, status) VALUES (?,?,?,?,'sale_items','draft')",
-    args: [pr_number, branch_id || null, employeeId, `Auto-created from POS sale ${transaction_number} — Q item${lines.length === 1 ? '' : 's'} paid for at the till${customerName ? ` (customer: ${customerName})` : ''}`],
-  });
-  const prId = Number(result.lastInsertRowid);
-  for (const l of lines) {
-    await tx.execute({
-      sql: "INSERT INTO purchase_request_items (pr_id, product_name, quantity, unit_cost, item_type, notes, total) VALUES (?,?,?,?,'sale',?,?)",
-      args: [prId, l.name, l.quantity, l.unit_price, `Sold at ${l.unit_price}/unit on ${transaction_number}`, parseFloat((l.unit_price * l.quantity).toFixed(2))],
-    });
-    await tx.execute({ sql: 'UPDATE transaction_items SET purchase_request_id = ? WHERE id = ?', args: [prId, l.id] });
-  }
-  return prId;
-}
-
 async function exchangeCreditError(conn, returnId, customerId) {
   const { rows: [ret] } = await conn.execute({
     sql: `SELECT r.id, r.return_number, r.resolution, r.status, r.customer_id, r.total, ${EXCHANGE_SPENT_SQL} as spent FROM returns r WHERE r.id = ?`,
@@ -394,7 +371,7 @@ router.get('/:id', requireAuth, async (req, res) => {
       LEFT JOIN work_orders wo ON wo.assessment_transaction_id = t.id OR wo.deposit_transaction_id = t.id OR wo.final_transaction_id = t.id
       WHERE t.id = ?`, args: [req.params.id] });
     if (!tx) return res.status(404).json({ error: 'Transaction not found' });
-    const { rows: items } = await db.execute({ sql: `SELECT ti.*, oe.first_name || ' ' || oe.last_name AS discount_override_name, pr.pr_number AS purchase_request_number, pr.status AS purchase_request_status FROM transaction_items ti LEFT JOIN employees oe ON oe.id = ti.discount_override_by LEFT JOIN purchase_requests pr ON pr.id = ti.purchase_request_id WHERE ti.transaction_id = ? ORDER BY ti.id`, args: [req.params.id] });
+    const { rows: items } = await db.execute({ sql: `SELECT ti.*, oe.first_name || ' ' || oe.last_name AS discount_override_name FROM transaction_items ti LEFT JOIN employees oe ON oe.id = ti.discount_override_by WHERE ti.transaction_id = ? ORDER BY ti.id`, args: [req.params.id] });
     tx.items = items;
     const { rows: payments } = await db.execute({ sql: 'SELECT * FROM transaction_payments WHERE transaction_id = ? ORDER BY id', args: [req.params.id] });
     tx.payments = payments;
@@ -459,8 +436,11 @@ router.post('/', requirePermission('pos'), async (req, res) => {
     const { customer_id, employee_id, created_by, drawer_session_id, items, discount_amount, promotion_code, promotion_name, payment_method, amount_tendered, notes, source_return_id, store_credit_applied, cash_back_applied, quote_id, tax_exempt, tax_exemption_number, approval_code, tenders } = req.body;
     let { branch_id } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in transaction' });
-    if (!req.apiKey && items.some(i => i.is_q_item && !i.product_id) && !can(req.employee?.permissions, 'pos_q_item')) {
-      return res.status(403).json({ error: 'Missing permission: pos_q_item (Q items)' });
+    // A POS Q item (not in inventory) can't be sold at the till — it has to
+    // wait on Purchasing, so the ticket goes to a quotation instead (Create
+    // Quote); accepting the quote raises the Purchase Request.
+    if (items.some(i => i.is_q_item && !i.product_id)) {
+      return res.status(400).json({ error: 'This ticket has a Q item (not in inventory) — it can\'t be paid for at the till. Use Create Quote; the item is ordered once the customer accepts the quote.' });
     }
     let salespersonId;
 
@@ -524,24 +504,6 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         subtotal += lineTotal;
         tax_amount += lineTax;
         processedItems.push({ product: null, variation: null, customName: product_name, isDelivery: 1, quantity: 1, unit_price: lineTotal, lineTotal, lineTax, taxRate: storeTaxRate, discount: 0, discountPercent: 0, discountOverrideBy: null });
-        continue;
-      }
-      // POS "Q Item": something not in inventory that Purchasing orders for
-      // the customer — description, whole quantity and pre-tax price, taxed
-      // at the store rate. Completing the sale raises a Purchase Request for
-      // it (raiseQItemPurchaseRequest below).
-      if (!item.product_id && item.is_q_item) {
-        const product_name = String(item.product_name || '').trim();
-        if (!product_name) throw new Error('A Q item needs a description');
-        const quantity = Number(item.quantity);
-        if (!Number.isInteger(quantity) || quantity < 1) throw new Error(`Enter a whole quantity of 1 or more for the Q item "${product_name}"`);
-        const unit_price = parseFloat(item.unit_price);
-        if (!(unit_price >= 0)) throw new Error(`Enter a price for the Q item "${product_name}"`);
-        const lineTotal = parseFloat((unit_price * quantity).toFixed(2));
-        const lineTax = isTaxExempt ? 0 : parseFloat((lineTotal * storeTaxRate / 100).toFixed(2));
-        subtotal += lineTotal;
-        tax_amount += lineTax;
-        processedItems.push({ product: null, variation: null, customName: product_name, isQItem: 1, quantity, unit_price, lineTotal, lineTax, taxRate: storeTaxRate, discount: 0, discountPercent: 0, discountOverrideBy: null });
         continue;
       }
       if (!item.product_id) {
@@ -713,13 +675,11 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         await tx.execute({ sql: 'INSERT INTO transaction_payments (transaction_id, payment_method, amount, approval_code) VALUES (?,?,?,?)', args: [txId, leg.payment_method, leg.amount, leg.approval_code || null] });
       }
 
-      const qLines = [];
-      for (const { product, variation, unit, customName, isComment, isDelivery, isQItem, serialNumber, quantity: lineQty, unit_price, lineTotal, lineTax, ticketDiscount, discount, discountPercent, discountOverrideBy, discountFixed } of processedItems) {
+      for (const { product, variation, unit, customName, isComment, isDelivery, serialNumber, quantity: lineQty, unit_price, lineTotal, lineTax, ticketDiscount, discount, discountPercent, discountOverrideBy, discountFixed } of processedItems) {
         const itemName = customName || (serialNumber ? serialNumberLabel(serialNumber) : variation ? `${product.name} — ${variation.name}` : lineName(product.name, unit));
         const itemSku = customName ? '' : (variation ? variation.sku : product.sku);
         const unitsPer = unit?.units_per || 1;
-        const itemResult = await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,discount_percent,discount_override_by,serial_number,sell_unit,units_per,uom_id,ticket_discount,is_comment,is_delivery,discount_fixed,is_q_item) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [txId, product ? product.id : null, itemName, itemSku, lineQty, unit_price, discount, lineTax, lineTotal, variation?.id||null, variation?.name||null, discountPercent || 0, discountOverrideBy || null, serialNumber || null, variation ? null : unit?.sell_unit || null, variation ? 1 : unitsPer, variation ? null : unit?.uom_id ?? null, ticketDiscount ?? null, isComment ? 1 : 0, isDelivery ? 1 : 0, discountFixed || null, isQItem ? 1 : 0] });
-        if (isQItem) qLines.push({ id: Number(itemResult.lastInsertRowid), name: itemName, quantity: lineQty, unit_price });
+        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,discount_percent,discount_override_by,serial_number,sell_unit,units_per,uom_id,ticket_discount,is_comment,is_delivery,discount_fixed) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [txId, product ? product.id : null, itemName, itemSku, lineQty, unit_price, discount, lineTax, lineTotal, variation?.id||null, variation?.name||null, discountPercent || 0, discountOverrideBy || null, serialNumber || null, variation ? null : unit?.sell_unit || null, variation ? 1 : unitsPer, variation ? null : unit?.uom_id ?? null, ticketDiscount ?? null, isComment ? 1 : 0, isDelivery ? 1 : 0, discountFixed || null] });
         // A custom/temp line has no catalog product — nothing to deduct; an
         // SN line is a stockless placeholder for the serial.
         if (!product || serialNumber) continue;
@@ -769,8 +729,6 @@ router.post('/', requirePermission('pos'), async (req, res) => {
           await tx.execute({ sql: 'UPDATE customers SET loyalty_points = MAX(0, loyalty_points - ?), cash_back_last_redeemed_at = CURRENT_TIMESTAMP WHERE id = ?', args: [pointsToDeduct, customer_id] });
         }
       }
-
-      if (qLines.length) await raiseQItemPurchaseRequest(tx, { txId, transaction_number, branch_id, employeeId: employee_id || 1, customer_id, lines: qLines });
 
       if (quote_id) {
         await tx.execute({ sql: `UPDATE quotations SET status = 'converted', converted_to_tx = ? WHERE id = ? AND status NOT IN ('converted','declined','cancelled')`, args: [txId, quote_id] });
