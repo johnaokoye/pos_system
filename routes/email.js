@@ -39,8 +39,13 @@ function createTransporter(s) {
   });
 }
 
+// $1,234.50 — every amount on an emailed/printed/PDF document goes through here.
+function num2(n) {
+  return (parseFloat(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
 function fmt(n) {
-  return '$' + parseFloat(n || 0).toFixed(2);
+  const v = parseFloat(n) || 0;
+  return (v < 0 ? '-$' : '$') + num2(Math.abs(v));
 }
 
 // Statement is the only document built here that's also used for actual
@@ -2676,7 +2681,7 @@ function drawerReportPdfModel(sess, s) {
   }
   for (const g of r.denominations) {
     const foreign = g.currency !== r.base_currency;
-    const cur = n => foreign ? `${g.currency} ${Number(n).toFixed(2)}` : fmt(n);
+    const cur = n => foreign ? `${g.currency} ${num2(n)}` : fmt(n);
     tables.push({ heading: `Cash Count - ${g.currency}${foreign && g.base_per_unit ? ` (1 ${g.currency} = ${g.base_per_unit} ${r.base_currency})` : ''}`, columns: [{ label: 'Denomination', width: 3 }, { label: 'Qty', width: 1, align: 'center' }, { label: 'Amount', width: 2, align: 'right' }],
       rows: [...g.lines.map(l => ({ cells: [l.label, l.quantity, cur(l.amount)] })),
         { cells: [`Total ${g.currency}`, '', cur(g.total)], sub: foreign && g.base_equivalent != null ? `= ${fmt(g.base_equivalent)} ${r.base_currency}` : '' }] });

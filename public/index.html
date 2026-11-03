@@ -1589,7 +1589,7 @@ const App = {
       this.updateDrawerBadge();
       this.renderPOSBranchBar();
       this.renderRentalDrawerBanner();
-      this.alert(`Drawer opened — float $${float.toFixed(2)}`);
+      this.alert(`Drawer opened — float $${App._n2(float)}`);
     } catch(e) { if (errEl) errEl.textContent = e.message; }
   },
 
@@ -1996,6 +1996,8 @@ const App = {
   // everything after it (bit us in quotation/PR notes editing).
   escapeAttr(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); },
   fmt(n) { return new Intl.NumberFormat('en-US', { style: 'currency', currency: this.activeCurrency || this.settings.currency || 'USD' }).format(n || 0); },
+  // An amount with thousands separators and 2 decimals, no currency sign (1,234.50) — for text, never an input's value.
+  _n2(n) { return (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); },
   // Short money for narrow chart columns (JMD 2.63M); pair with fmt() in a tooltip.
   fmtCompact(n) { return new Intl.NumberFormat('en-US', { style: 'currency', currency: this.activeCurrency || this.settings.currency || 'USD', notation: 'compact', maximumFractionDigits: 2 }).format(n || 0).replace(/\u00a0/g, ' '); },
   // Mirrors lib/rentals.js's rateBasisLabel — "1 month @ $4,000.00/mo + 3
@@ -2268,7 +2270,7 @@ const App = {
     if (altEl) {
       if (rate !== 1) {
         altEl.style.display = '';
-        altEl.innerHTML = `<div style="display:flex;justify-content:space-between;margin-bottom:4px"><span style="color:var(--text-muted)">Amount in ${code}</span><span style="font-weight:600">${code} ${totalAlt.toFixed(2)}</span></div><div style="display:flex;justify-content:space-between"><span style="color:var(--text-muted)">Equivalent (${base})</span><span>${this.fmt(total)}</span></div>`;
+        altEl.innerHTML = `<div style="display:flex;justify-content:space-between;margin-bottom:4px"><span style="color:var(--text-muted)">Amount in ${code}</span><span style="font-weight:600">${code} ${this._n2(totalAlt)}</span></div><div style="display:flex;justify-content:space-between"><span style="color:var(--text-muted)">Equivalent (${base})</span><span>${this.fmt(total)}</span></div>`;
       } else { altEl.style.display = 'none'; }
     }
     const lbl = document.getElementById('ctm-label');
@@ -2283,7 +2285,7 @@ const App = {
       const changeAlt = parseFloat((tendered - totalAlt).toFixed(2));
       const changeBase = parseFloat((changeAlt / rate).toFixed(2));
       if (tenderedInfoEl) {
-        if (rate !== 1) { tenderedInfoEl.style.display = ''; tenderedInfoEl.innerHTML = `Tendered: <strong>${code} ${tendered.toFixed(2)}</strong>`; }
+        if (rate !== 1) { tenderedInfoEl.style.display = ''; tenderedInfoEl.innerHTML = `Tendered: <strong>${code} ${this._n2(tendered)}</strong>`; }
         else { tenderedInfoEl.style.display = 'none'; }
       }
       changeEl.style.display = '';
@@ -2301,11 +2303,11 @@ const App = {
         const changeCode = changeCurrencySel ? changeCurrencySel.value : base;
         const changeAmountAlt = parseFloat((changeBase * changeRate).toFixed(2));
         changeEl.style.background = '#e8f5e9'; changeValEl.style.color = 'var(--success)';
-        changeValEl.textContent = changeRate !== 1 ? `${changeCode} ${changeAmountAlt.toFixed(2)}` : this.fmt(changeBase);
+        changeValEl.textContent = changeRate !== 1 ? `${changeCode} ${this._n2(changeAmountAlt)}` : this.fmt(changeBase);
       } else {
         if (changeCurrencyGroup) changeCurrencyGroup.style.display = 'none';
         changeEl.style.background = '#fff3e0'; changeValEl.style.color = 'var(--danger)';
-        changeValEl.textContent = rate !== 1 ? `Short ${this.fmt(Math.abs(changeBase))}` : `Short ${code} ${Math.abs(changeAlt).toFixed(2)}`;
+        changeValEl.textContent = rate !== 1 ? `Short ${this.fmt(Math.abs(changeBase))}` : `Short ${code} ${this._n2(Math.abs(changeAlt))}`;
       }
     } else {
       if (changeEl) changeEl.style.display = 'none';
@@ -2343,7 +2345,7 @@ const App = {
   // when no cash result is on hand (card/other tenders) or no alt was chosen.
   _changeDisplay(cashResult, changeBase) {
     if (cashResult?.changeRate && cashResult.changeRate !== 1) {
-      return `${cashResult.changeCurrency} ${cashResult.changeAmountAlt.toFixed(2)}`;
+      return `${cashResult.changeCurrency} ${this._n2(cashResult.changeAmountAlt)}`;
     }
     return this.fmt(changeBase);
   },
@@ -3211,7 +3213,7 @@ const App = {
          </select>`
       : `<span style="font-weight:600;font-size:14px;color:var(--brand-black)">${this.posBranch?.name || 'No Branch'}</span>`;
     const drawerInfo = this.currentDrawerSession
-      ? `<span style="margin-left:16px;font-size:12px;color:var(--accent);background:rgba(0,126,55,0.1);padding:3px 10px;border-radius:12px">🗄 ${this.currentDrawerSession.drawer_name||'Drawer'} · $${parseFloat(this.currentDrawerSession.opening_float||0).toFixed(2)} float</span>`
+      ? `<span style="margin-left:16px;font-size:12px;color:var(--accent);background:rgba(0,126,55,0.1);padding:3px 10px;border-radius:12px">🗄 ${this.currentDrawerSession.drawer_name||'Drawer'} · $${this._n2(this.currentDrawerSession.opening_float)} float</span>`
       : '';
     bar.innerHTML = `
       <svg viewBox="0 0 24 24" style="fill:var(--accent)" width="16" height="16"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/></svg>
@@ -5784,7 +5786,7 @@ const App = {
     return payments.map((p, i) => {
       const refLabel = p.payment_method === 'direct_deposit' ? 'Ref #' : p.payment_method === 'gift_card' ? 'Gift Card #' : (p.payment_method === 'credit_card' || p.payment_method === 'debit_card') ? 'Approval' : null;
       const foreign = foreignCash && foreignCash[i];
-      const foreignLine = foreign ? `<div class="receipt-row" style="font-size:10px;color:#666"><span>Tendered (${foreign.currency})</span><span>${foreign.currency} ${foreign.tenderedAlt.toFixed(2)}</span></div>` : '';
+      const foreignLine = foreign ? `<div class="receipt-row" style="font-size:10px;color:#666"><span>Tendered (${foreign.currency})</span><span>${foreign.currency} ${this._n2(foreign.tenderedAlt)}</span></div>` : '';
       return `<div class="receipt-row"><span>${p.payment_method.replace('_',' ').toUpperCase()}</span><span>${this.fmt(p.amount)}</span></div>${foreignLine}${p.approval_code && refLabel ? `<div class="receipt-row" style="font-size:10px;color:#666"><span>${refLabel}</span><span>${p.approval_code}</span></div>` : ''}`;
     }).join('');
   },
@@ -5931,7 +5933,7 @@ const App = {
             <hr>
             <div class="receipt-row receipt-total"><span>TOTAL</span><span>${this.fmt(tx.total)}</span></div>
             ${tx.payment_method === 'split' ? this._splitPaymentReceiptRows(tx, splitForeignCash) : `<div class="receipt-row"><span>Payment</span><span>${tx.payment_method.replace('_',' ').toUpperCase()}</span></div>
-            ${tx.amount_tendered > tx.total ? (cashResult?.rate && cashResult.rate !== 1 ? `<div class="receipt-row"><span>Tendered (${cashResult.currency})</span><span>${cashResult.currency} ${cashResult.tenderedAlt.toFixed(2)}</span></div><div class="receipt-row" style="font-size:10px;color:#666"><span>Equivalent</span><span>${this.fmt(tx.amount_tendered)}</span></div><div class="receipt-row"><span>Change</span><span>${this._changeDisplay(cashResult, change)}</span></div>` : `<div class="receipt-row"><span>Tendered</span><span>${this.fmt(tx.amount_tendered)}</span></div><div class="receipt-row"><span>Change</span><span>${this._changeDisplay(cashResult, change)}</span></div>`) : ''}
+            ${tx.amount_tendered > tx.total ? (cashResult?.rate && cashResult.rate !== 1 ? `<div class="receipt-row"><span>Tendered (${cashResult.currency})</span><span>${cashResult.currency} ${this._n2(cashResult.tenderedAlt)}</span></div><div class="receipt-row" style="font-size:10px;color:#666"><span>Equivalent</span><span>${this.fmt(tx.amount_tendered)}</span></div><div class="receipt-row"><span>Change</span><span>${this._changeDisplay(cashResult, change)}</span></div>` : `<div class="receipt-row"><span>Tendered</span><span>${this.fmt(tx.amount_tendered)}</span></div><div class="receipt-row"><span>Change</span><span>${this._changeDisplay(cashResult, change)}</span></div>`) : ''}
             ${tx.approval_code ? `<div class="receipt-row"><span>${tx.payment_method === 'direct_deposit' ? 'Deposit Ref #' : tx.payment_method === 'gift_card' ? 'Gift Card #' : 'Approval Code'}</span><span style="font-family:monospace;font-weight:600">${tx.approval_code}</span></div>` : ''}`}
             <hr>
             <div style="text-align:center;margin-top:4px">${footer}</div>
@@ -6080,13 +6082,13 @@ const App = {
         const refLabel = p.payment_method === 'direct_deposit' ? 'Ref #' : p.payment_method === 'gift_card' ? 'Gift Card #' : (p.payment_method === 'credit_card' || p.payment_method === 'debit_card') ? 'Approval' : null;
         tenderRows.push([p.payment_method.replace('_',' ').toUpperCase(), this.fmt(p.amount)]);
         const foreign = splitForeignCash && splitForeignCash[i];
-        if (foreign) tenderRows.push([`Tendered (${foreign.currency})`, `${foreign.currency} ${foreign.tenderedAlt.toFixed(2)}`]);
+        if (foreign) tenderRows.push([`Tendered (${foreign.currency})`, `${foreign.currency} ${this._n2(foreign.tenderedAlt)}`]);
         if (p.approval_code && refLabel) tenderRows.push([refLabel, p.approval_code]);
       });
     } else {
       if (tx.amount_tendered > tx.total) {
         if (cashResult?.rate && cashResult.rate !== 1) {
-          tenderRows.push([`Tendered (${cashResult.currency})`, `${cashResult.currency} ${cashResult.tenderedAlt.toFixed(2)}`], ['Equivalent', this.fmt(tx.amount_tendered)], ['Change', this._changeDisplay(cashResult, change)]);
+          tenderRows.push([`Tendered (${cashResult.currency})`, `${cashResult.currency} ${this._n2(cashResult.tenderedAlt)}`], ['Equivalent', this.fmt(tx.amount_tendered)], ['Change', this._changeDisplay(cashResult, change)]);
         } else {
           tenderRows.push(['Tendered', this.fmt(tx.amount_tendered)], ['Change', this._changeDisplay(cashResult, change)]);
         }
@@ -22054,7 +22056,7 @@ const App = {
   _fmtPO(n, po) {
     const code = (po && po.currency) || this._baseCurrency();
     try { return new Intl.NumberFormat('en-US', { style: 'currency', currency: code, currencyDisplay: po && po.currency ? 'code' : 'symbol' }).format(n || 0); }
-    catch (e) { return `${code} ${(Number(n) || 0).toFixed(2)}`; }
+    catch (e) { return `${code} ${this._n2(n)}`; }
   },
   // A PR/PO's internal notes — what it's for, for the approver. Never on
   // anything the supplier sees.
@@ -27572,7 +27574,7 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
     const info = document.getElementById('prq-po-info');
     const po = (this._prq.options?.pos || []).find(p => String(p.id) === id);
     if (!info) return;
-    info.innerHTML = po ? `PO total ${this.fmt(po.total_base)}${po.currency ? ` (${po.currency} ${Number(po.total).toFixed(2)})` : ''} · paid so far ${this.fmt(po.paid)}${po.requested > 0 ? ` · ${this.fmt(po.requested)} on other requests` : ''} · <strong>${this.fmt(po.available)} left</strong>` : '';
+    info.innerHTML = po ? `PO total ${this.fmt(po.total_base)}${po.currency ? ` (${po.currency} ${this._n2(po.total)})` : ''} · paid so far ${this.fmt(po.paid)}${po.requested > 0 ? ` · ${this.fmt(po.requested)} on other requests` : ''} · <strong>${this.fmt(po.available)} left</strong>` : '';
   },
 
   // The lines as the server wants them, read from whichever panel is showing.
@@ -33097,9 +33099,9 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
             <td style="white-space:nowrap"><strong>${s.drawer_name||'—'}</strong></td>
             <td>${s.branch_name||'—'}</td>
             <td>${s.employee_name||'—'}</td>
-            <td>$${parseFloat(s.opening_float||0).toFixed(2)}</td>
+            <td>$${this._n2(s.opening_float)}</td>
             <td><span class="badge badge-info">${s.tx_count}</span></td>
-            <td><strong>$${parseFloat(s.tx_total||0).toFixed(2)}</strong></td>
+            <td><strong>$${this._n2(s.tx_total)}</strong></td>
             <td style="color:${stale?'var(--danger)':'var(--text-muted)'};font-size:12px">${openedLabel(s.opened_at)}${stale ? '<br><span class="badge-pill badge-danger" style="font-size:10px" title="Opened on a previous day and still holding this drawer">previous day</span>' : ''}</td>
             <td><span class="badge ${sc[s.status]||'badge-secondary'}">${s.status === 'closed' ? 'unreconciled' : s.status}</span></td>
             <td style="text-align:right;white-space:nowrap">
@@ -33656,7 +33658,7 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
   _calcVariance(counted, expected) {
     const v = parseFloat((counted - expected).toFixed(2));
     const style = v < 0 ? 'color:var(--danger)' : v > 0 ? 'color:var(--success)' : 'color:var(--text-muted)';
-    return `<span style="${style}">${v >= 0 ? '+' : ''}${v.toFixed(2)}</span>`;
+    return `<span style="${style}">${v >= 0 ? '+' : ''}${this._n2(v)}</span>`;
   },
 
   updateReconcileVariance(key, expected) {
