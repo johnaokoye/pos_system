@@ -3600,11 +3600,33 @@ const App = {
     }).filter(a => a.amount > 0);
   },
 
+  // Invoice mode: the amount received follows the invoices ticked, but can be
+  // raised above them — the rest is left on account as unapplied credit.
+  // (Tax Exempt always equals the GCT cleared.)
   _rpRecalc(prefix) {
-    const total = this._rpAllocations(prefix).reduce((t, a) => t + a.amount, 0);
-    if (prefix === 'rp' && this._rp.mode === 'invoices') { const amt = document.getElementById('rp-amount'); if (amt) amt.value = total ? total.toFixed(2) : ''; }
+    const total = Math.round(this._rpAllocations(prefix).reduce((t, a) => t + a.amount, 0) * 100) / 100;
+    if (prefix === 'rp' && this._rp.mode === 'invoices') {
+      const amt = document.getElementById('rp-amount');
+      if (amt) {
+        const exempt = this._rp.method === 'tax_exempt';
+        if (exempt || !this._rp.amountEdited || (parseFloat(amt.value) || 0) < total) { amt.value = total ? total.toFixed(2) : ''; if (!exempt) this._rp.amountEdited = false; }
+      }
+    }
     const el = document.getElementById(`${prefix}-applied-total`);
     if (el) el.textContent = this.fmt(total);
+    if (prefix === 'rp') this._rpExtraNote(total);
+  },
+
+  // "x left on account" under the amount when the payment is more than what's applied.
+  _rpExtraNote(applied) {
+    const note = document.getElementById('rp-extra-note');
+    if (!note) return;
+    const amount = Math.round((parseFloat(document.getElementById('rp-amount')?.value) || 0) * 100) / 100;
+    if (applied == null) applied = Math.round(this._rpAllocations('rp').reduce((t, a) => t + a.amount, 0) * 100) / 100;
+    const extra = Math.round((amount - applied) * 100) / 100;
+    note.innerHTML = this._rp.mode === 'invoices' && this._rp.method !== 'tax_exempt' && extra > 0.005
+      ? `<span class="color-success">${this.fmt(applied)} applied to invoices · <strong>${this.fmt(extra)} left on account</strong> as unapplied credit</span>`
+      : this._rp.mode === 'invoices' && extra < -0.005 ? `<span class="color-danger">Less than the ${this.fmt(applied)} applied to the invoices ticked</span>` : '';
   },
 
   _rpRender() {
@@ -3612,7 +3634,7 @@ const App = {
     const c = summary.customer;
     // Nothing owing and no earlier payment left to apply — say so rather
     // than offering a payment the server will refuse.
-    if (!(Number(c.account_balance) > 0.005) && !summary.open_payments.length) {
+    if (!(Number(c.account_balance) > 0.005) && !summary.open_payments.length && !summary.invoices.length) {
       document.getElementById('rp-body').innerHTML = `<div style="padding:12px 14px;border:1px solid var(--border);border-radius:6px;font-size:13px">
         <strong>${this.escapeAttr(`${c.first_name || ''} ${c.last_name || ''}`.trim())}</strong> has nothing owing on account (balance ${this.fmt(c.account_balance)}), so there's no payment to receive.
         ${c.customer_type !== 'credit' ? '<div style="margin-top:6px;color:var(--text-muted)">This is a cash customer — payments on account are only for credit customers.</div>' : ''}
@@ -3626,9 +3648,9 @@ const App = {
     const taxExempt = this._rp.method === 'tax_exempt';
     document.getElementById('rp-body').innerHTML = `
       <div style="display:flex;gap:20px;flex-wrap:wrap;font-size:13px;padding:10px 12px;border:1px solid var(--border);border-radius:6px;margin-bottom:12px">
-        <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Balance Owed</div><div class="fw-600 color-danger" style="font-size:18px">${this.fmt(c.account_balance)}</div></div>
-        <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Open Invoices</div><div class="fw-600" style="font-size:18px">${summary.invoices.length}</div></div>
-        ${summary.unapplied_total > 0 ? `<div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Paid, Not Yet Applied</div><div class="fw-600 color-success" style="font-size:18px">${this.fmt(summary.unapplied_total)}</div></div>` : ''}
+        <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Open Invoices (${summary.invoices.length})</div><div class="fw-600 color-danger" style="font-size:18px">${this.fmt(summary.invoices.reduce((t, i) => t + Number(i.balance_due || 0), 0))}</div></div>
+        ${summary.unapplied_total > 0 ? `<div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Credit On Account</div><div class="fw-600 color-success" style="font-size:18px">${this.fmt(summary.unapplied_total)}</div><div style="font-size:10px;color:var(--text-muted)">kept unless applied below</div></div>` : ''}
+        <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Net Balance</div><div class="fw-600 ${Number(c.account_balance) > 0.005 ? '' : 'color-success'}" style="font-size:18px">${this.fmt(c.account_balance)}</div></div>
         ${c.account_blocked ? `<div style="align-self:center"><span class="badge-pill badge-danger">Account Blocked</span></div>` : ''}
       </div>
       <div style="display:flex;gap:18px;margin-bottom:10px;font-size:13px">
@@ -3639,10 +3661,11 @@ const App = {
         ? '<strong>Tax Exempt:</strong> clears the GCT on the invoices you tick — no money is taken and nothing goes in the drawer. Each invoice defaults to the GCT still on it.'
         : mode === 'open'
         ? 'The payment comes off the balance now without being applied to any invoice. It can be applied to invoices later from this screen.'
-        : 'Tick the invoices being paid. Each one defaults to its full balance due — change the amount for a part payment. The payment total is the sum.'}</p>
+        : 'Tick the invoices being paid. Each one defaults to its full balance due — change the amount for a part payment. The amount received is their sum; raise it if the customer paid more, and the rest stays on account as unapplied credit. Existing credit on the account is not used.'}</p>
       ${mode === 'invoices' ? `${this._rpInvoiceRows('rp')}<div style="text-align:right;font-size:12px;margin-top:6px">Applied: <strong id="rp-applied-total">${this.fmt(0)}</strong></div>` : ''}
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:12px">
-        <div class="form-group" style="margin:0"><label>${taxExempt ? 'GCT Cleared' : 'Amount Received *'}</label><input type="number" id="rp-amount" step="0.01" min="0" max="${Number(c.account_balance).toFixed(2)}" ${mode === 'invoices' ? 'readonly' : ''} placeholder="0.00"></div>
+        <div class="form-group" style="margin:0"><label>${taxExempt ? 'GCT Cleared' : 'Amount Received *'}</label><input type="number" id="rp-amount" step="0.01" min="0" ${taxExempt ? 'readonly' : ''} oninput="App._rp.amountEdited = true; App._rpExtraNote()" placeholder="0.00">
+          <div id="rp-extra-note" style="font-size:11px;margin-top:3px"></div></div>
         <div class="form-group" style="margin:0"><label>Paid By *</label><select id="rp-method" onchange="App._rpMethodChanged(true)">${methods.map(([v, l]) => `<option value="${v}" ${this._rp.method === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
         <div class="form-group" style="margin:0" id="rp-ref-wrap"><label id="rp-ref-label">Reference</label><input id="rp-ref" placeholder="Optional for cash"></div>
       </div>
@@ -3687,7 +3710,13 @@ const App = {
     const payment_method = document.getElementById('rp-method').value;
     const reference = document.getElementById('rp-ref').value.trim();
     if (!(amount > 0)) { this.alert(mode === 'invoices' ? 'Tick at least one invoice to pay' : 'Enter the amount received', 'error'); return; }
-    if (amount - summary.customer.account_balance > 0.005) { this.alert(`That's more than the ${this.fmt(summary.customer.account_balance)} owed`, 'error'); return; }
+    if (mode === 'invoices') {
+      const applied = this._rpAllocations('rp').reduce((t, a) => t + a.amount, 0);
+      if (!(applied > 0)) { this.alert('Tick at least one invoice to pay', 'error'); return; }
+      if (applied - amount > 0.005) { this.alert(`The amount received is less than the ${this.fmt(applied)} applied to the invoices`, 'error'); return; }
+      const extra = Math.round((amount - applied) * 100) / 100;
+      if (extra > 0.005 && payment_method !== 'tax_exempt' && !confirm(`${this.fmt(applied)} goes to the invoices ticked and ${this.fmt(extra)} stays on the account as unapplied credit. Continue?`)) return;
+    }
     if (payment_method !== 'cash' && payment_method !== 'tax_exempt' && !reference) { this.alert('Enter the approval code, cheque number or deposit reference', 'error'); return; }
     const btn = document.getElementById('rp-submit');
     if (btn) btn.disabled = true;
