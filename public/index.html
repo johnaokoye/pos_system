@@ -22571,6 +22571,7 @@ const App = {
                   ${r.status === 'received' && ['received','partial'].includes(po.status) && this.can('purchasing_receive') ? `<button class="btn btn-sm btn-danger" onclick="App.showReversePOReceipt(${po.id}, ${r.id})">↩ Reverse</button>` : ''}
                 </div>
                 <div style="font-size:12px;color:var(--text-muted);margin-top:3px">${r.items.map(i => `${this.escapeAttr(i.product_name)} × ${i.quantity}`).join(' · ')}</div>
+                ${(r.price_changes || []).length ? `<div style="font-size:12px;margin-top:3px">${r.price_changes.map(c => `<div>💲 ${this.escapeAttr(c.product_name)}: ${c.new_unit_cost != null ? `cost ${this._fmtPO(c.old_unit_cost, po)} → <strong>${this._fmtPO(c.new_unit_cost, po)}</strong>` : ''}${c.new_unit_cost != null && c.new_price != null ? ' · ' : ''}${c.new_price != null ? `price ${c.old_price != null ? this.fmt(c.old_price) : '—'} → <strong>${this.fmt(c.new_price)}</strong>` : ''}${c.changed_by_name ? ` <span style="color:var(--text-muted)">(${this.escapeAttr(c.changed_by_name)})</span>` : ''}</div>`).join('')}</div>` : ''}
                 ${r.status === 'reversed' ? `<div style="font-size:12px;color:var(--text-muted);margin-top:3px">Reversed ${this.fmtDateTime(r.reversed_at)}${r.reversed_by_name ? ` by ${this.escapeAttr(r.reversed_by_name)}` : ''} — ${this.escapeAttr(r.reverse_reason)}</div>` : ''}
               </div>`).join('')}
           </div>` : ''}
@@ -23118,43 +23119,107 @@ const App = {
     const po = await this.api('GET', `/purchase-orders/${id}`);
     const pendingItems = po.items.filter(i => (i.quantity_received||0) < i.quantity_ordered);
     if (!pendingItems.length) { this.alert('All items already received', 'warning'); return; }
+    this._recvPO = po;
+    const canPrice = this.can('inventory_edit');
+    const canRaise = this.can('purchasing_approve');
+    const step = n => (Number.isInteger(n) ? '1' : 'any');
     this.showModal(`
-      <div class="modal" style="max-width:600px">
+      <div class="modal" style="max-width:980px">
         <div class="modal-header"><span class="modal-title">Receive Items - ${po.po_number}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
-          <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px">Enter quantities received for each item. Stock will be updated automatically.</p>
-          ${pendingItems.map(i => `
-            <div class="po-receive-row">
-              <div style="flex:1">
-                <div class="fw-600">${i.product_name}${i.item_type === 'service' ? ' <span class="badge-pill badge-info" style="font-size:10px">Service</span>' : ''}</div>
-                <div style="font-size:12px;color:var(--text-muted)">${i.item_type === 'service' ? 'Receive once delivered — no stock change · ' : ''}Ordered: ${i.quantity_ordered} | Received: ${i.quantity_received||0} | Pending: ${i.quantity_ordered-(i.quantity_received||0)}</div>
-              </div>
-              <input id="recv-${i.id}" type="number" min="0" step="any" max="${i.quantity_ordered-(i.quantity_received||0)}" value="${i.quantity_ordered-(i.quantity_received||0)}" style="width:80px" placeholder="Qty">
-            </div>`).join('')}
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:6px">Enter the quantities received. If the supplier's price changed since the PO, enter the new <strong>unit cost</strong> (${po.currency ? `in ${po.currency}, ` : ''}per the line's unit, before tax and vendor discount) — the PO line, the item's cost and the A/P bill use it. ${canPrice ? 'Change the <strong>selling price</strong> here too if the shelf price should move with it.' : ''}</p>
+          ${canRaise ? '' : '<p style="font-size:12px;color:var(--text-muted);margin:0 0 10px">You can lower a cost; raising one above the approved cost needs someone who can approve POs.</p>'}
+          <div class="table-wrap"><table class="data-table" style="width:100%">
+            <thead><tr><th>Item</th><th style="text-align:right;width:90px">Receive</th><th style="text-align:right;width:130px">Unit cost</th><th style="text-align:right;width:130px">Selling price</th><th style="text-align:right;width:80px">Margin</th></tr></thead>
+            <tbody>${pendingItems.map(i => {
+              const pending = Math.round((i.quantity_ordered - (i.quantity_received || 0)) * 1000) / 1000;
+              const service = i.item_type === 'service' || !i.product_id;
+              const lockedCost = (i.quantity_received || 0) > 0;
+              const ul = this._orderLineUnit(i);
+              const hasPrice = !service && i.sell_price != null;
+              return `<tr>
+                <td><div class="fw-600">${this.escapeAttr(ul.name)}${i.item_type === 'service' ? ' <span class="badge-pill badge-info" style="font-size:10px">Service</span>' : ''}</div>
+                  <div style="font-size:12px;color:var(--text-muted)">${ul.unit !== 'Each' ? `${this.escapeAttr(ul.unit)} · ` : ''}Ordered ${i.quantity_ordered} · Received ${i.quantity_received || 0} · Pending ${pending}${i.item_type === 'service' ? ' · no stock change' : ''}</div></td>
+                <td style="text-align:right"><input id="recv-${i.id}" type="number" min="0" step="any" value="${pending}" style="width:80px;text-align:right" placeholder="Qty"></td>
+                <td style="text-align:right"><input id="recv-cost-${i.id}" type="number" min="0" step="0.01" value="${Number(i.unit_cost || 0).toFixed(2)}" data-orig="${Number(i.unit_cost || 0)}" style="width:110px;text-align:right" ${lockedCost ? `disabled title="Already part-received at this cost — it can't change now"` : ''} oninput="App._recvLineCalc(${i.id})">
+                  <div id="recv-cost-note-${i.id}" style="font-size:11px;color:var(--text-muted)">${lockedCost ? 'part-received' : `PO ${this._fmtPO(i.unit_cost, po)}`}</div></td>
+                <td style="text-align:right">${hasPrice ? `<input id="recv-price-${i.id}" type="number" min="0" step="0.01" value="${Number(i.sell_price).toFixed(2)}" data-orig="${Number(i.sell_price)}" style="width:110px;text-align:right" ${canPrice ? '' : 'disabled title="Changing selling prices needs Edit Inventory permission"'} oninput="App._recvLineCalc(${i.id})">
+                  <div id="recv-price-note-${i.id}" style="font-size:11px;color:var(--text-muted)">now ${this.fmt(i.sell_price)}</div>` : `<span style="color:var(--text-muted);font-size:12px">${service ? '—' : 'not sold in this unit'}</span>`}</td>
+                <td style="text-align:right" id="recv-margin-${i.id}"></td>
+              </tr>`;
+            }).join('')}</tbody>
+          </table></div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
           <button class="btn btn-success" onclick="App.confirmReceivePO(${po.id}, [${pendingItems.map(i=>i.id).join(',')}])">Confirm Receipt</button>
         </div>
       </div>`);
+    pendingItems.forEach(i => this._recvLineCalc(i.id));
   },
 
-  // Step 2 of receiving: read the counts back before stock moves, flagging
-  // lines left out and anything over what's still pending.
+  // Net cost per line unit in base currency (after the vendor discount) for the margin.
+  _recvNetCost(i, cost) {
+    const rate = this._recvPO?.currency ? (Number(this._recvPO.exchange_rate) || 0) : 1;
+    const net = i.vendor_discount_percent != null ? cost * (1 - Number(i.vendor_discount_percent) / 100)
+      : cost - (i.quantity_ordered ? (Number(i.vendor_discount) || 0) / i.quantity_ordered : 0);
+    return Math.max(0, net) * rate;
+  },
+
+  _recvLineCalc(id) {
+    const i = (this._recvPO?.items || []).find(x => x.id === id);
+    if (!i) return;
+    const costEl = document.getElementById(`recv-cost-${id}`), priceEl = document.getElementById(`recv-price-${id}`);
+    const cost = Number(costEl?.value) || 0, price = priceEl ? Number(priceEl.value) || 0 : null;
+    const costChanged = costEl && !costEl.disabled && Math.abs(cost - Number(costEl.dataset.orig)) >= 0.005;
+    const costNote = document.getElementById(`recv-cost-note-${id}`);
+    if (costNote && !costEl.disabled) {
+      const up = cost > Number(costEl.dataset.orig);
+      costNote.innerHTML = costChanged ? `<span style="color:${up ? 'var(--danger)' : 'var(--success)'};font-weight:700">${up ? '▲' : '▼'} was ${this._fmtPO(costEl.dataset.orig, this._recvPO)}</span>` : `PO ${this._fmtPO(i.unit_cost, this._recvPO)}`;
+    }
+    if (costEl) costEl.style.borderColor = costChanged ? 'var(--primary)' : '';
+    const priceNote = document.getElementById(`recv-price-note-${id}`);
+    if (priceEl && priceNote) {
+      const pc = Math.abs(price - Number(priceEl.dataset.orig)) >= 0.005;
+      priceNote.innerHTML = pc ? `<span style="color:var(--primary);font-weight:700">was ${this.fmt(priceEl.dataset.orig)}</span>` : `now ${this.fmt(priceEl.dataset.orig)}`;
+      priceEl.style.borderColor = pc ? 'var(--primary)' : '';
+    }
+    const m = document.getElementById(`recv-margin-${id}`);
+    if (!m) return;
+    if (!(price > 0)) { m.innerHTML = '<span style="color:var(--text-muted)">—</span>'; return; }
+    const pct = (price - this._recvNetCost(i, cost)) / price * 100;
+    m.innerHTML = `<span style="font-weight:700;color:${pct < 0 ? 'var(--danger)' : pct < 15 ? 'var(--warning,#b7791f)' : 'var(--success)'}">${pct.toFixed(1)}%</span>`;
+  },
+
+  // Step 2 of receiving: read the counts — and any cost / price changes —
+  // back before stock moves, flagging lines left out and anything over what's still pending.
   async confirmReceivePO(poId, itemIds) {
-    const po = await this.api('GET', `/purchase-orders/${poId}`);
+    const po = this._recvPO && this._recvPO.id === poId ? this._recvPO : await this.api('GET', `/purchase-orders/${poId}`);
     const lines = itemIds.map(id => {
       const i = po.items.find(x => x.id === id);
-      return { i, qty: Number(document.getElementById(`recv-${id}`).value) || 0, pending: i.quantity_ordered - (i.quantity_received || 0) };
+      const costEl = document.getElementById(`recv-cost-${id}`), priceEl = document.getElementById(`recv-price-${id}`);
+      const cost = costEl && !costEl.disabled ? Number(costEl.value) : null;
+      const price = priceEl && !priceEl.disabled ? Number(priceEl.value) : null;
+      return {
+        i, qty: Number(document.getElementById(`recv-${id}`).value) || 0, pending: i.quantity_ordered - (i.quantity_received || 0),
+        cost, costChanged: cost != null && Math.abs(cost - (Number(i.unit_cost) || 0)) >= 0.005,
+        price, priceChanged: price != null && Math.abs(price - (Number(i.sell_price) || 0)) >= 0.005,
+      };
     });
-    const items = lines.filter(l => l.qty > 0).map(l => ({ item_id: l.i.id, quantity_received: l.qty }));
+    for (const l of lines) {
+      if (l.qty > 0 && l.cost != null && !(l.cost >= 0)) return this.alert(`Enter a valid cost for ${l.i.product_name}`, 'error');
+      if (l.qty > 0 && l.price != null && !(l.price >= 0)) return this.alert(`Enter a valid selling price for ${l.i.product_name}`, 'error');
+      if (l.qty > 0 && l.costChanged && l.cost > l.i.unit_cost && !this.can('purchasing_approve')) return this.alert(`Raising the cost of ${l.i.product_name} needs someone who can approve POs`, 'error');
+    }
+    const items = lines.filter(l => l.qty > 0).map(l => ({ item_id: l.i.id, quantity_received: l.qty, ...(l.costChanged ? { unit_cost: l.cost } : {}), ...(l.priceChanged ? { selling_price: l.price } : {}) }));
     if (!items.length) { this.alert('Enter at least one quantity', 'error'); return; }
     this._pendingPOReceipt = { poId, items };
     const flag = l => l.qty <= 0 ? '<span class="badge-pill badge-warning" style="font-size:10px">Not receiving</span>'
       : l.qty > l.pending ? `<span class="badge-pill badge-danger" style="font-size:10px">Over by ${Math.round((l.qty - l.pending) * 1000) / 1000}</span>`
       : l.qty < l.pending ? `<span class="badge-pill badge-info" style="font-size:10px">Short ${Math.round((l.pending - l.qty) * 1000) / 1000}</span>` : '';
+    const changes = lines.filter(l => l.qty > 0 && (l.costChanged || l.priceChanged));
     this.showSecondaryModal(`
-      <div class="modal" style="max-width:640px">
+      <div class="modal" style="max-width:700px">
         <div class="modal-header"><span class="modal-title">Confirm Counts — ${po.po_number}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">Check these counts against what's physically here. Stock${po.supplier_id ? ' and the A/P bill' : ''} will be updated with exactly these quantities.</p>
@@ -23166,6 +23231,16 @@ const App = {
               <td style="text-align:right;font-weight:700">${l.qty}</td>
               <td>${flag(l)}</td></tr>`).join('')}</tbody>
           </table>
+          ${changes.length ? `<div style="margin-top:14px;font-weight:700;font-size:13px">Price changes</div>
+          <table class="data-table" style="width:100%;margin-top:6px">
+            <thead><tr><th>Item</th><th style="text-align:right">Unit cost</th><th style="text-align:right">Selling price</th></tr></thead>
+            <tbody>${changes.map(l => `<tr>
+              <td>${this.escapeAttr(l.i.product_name)}</td>
+              <td style="text-align:right">${l.costChanged ? `${this._fmtPO(l.i.unit_cost, po)} → <strong>${this._fmtPO(l.cost, po)}</strong>` : '<span style="color:var(--text-muted)">unchanged</span>'}</td>
+              <td style="text-align:right">${l.priceChanged ? `${this.fmt(l.i.sell_price)} → <strong>${this.fmt(l.price)}</strong>` : '<span style="color:var(--text-muted)">unchanged</span>'}</td>
+            </tr>`).join('')}</tbody>
+          </table>
+          <p style="font-size:12px;color:var(--text-muted);margin:6px 0 0">A new cost updates the PO line and total, the item's cost and the A/P bill for this receipt. A new selling price takes effect at the POS straight away.</p>` : ''}
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeSecondaryModal()">Back — Change Counts</button>
@@ -23180,9 +23255,11 @@ const App = {
     try {
       await this.api('PATCH', `/purchase-orders/${poId}/receive`, { items });
       this._pendingPOReceipt = null;
+      this._recvPO = null;
       this.closeSecondaryModal();
       this.closeModal();
-      this.alert('Items received and stock updated');
+      const changed = items.filter(i => i.unit_cost !== undefined || i.selling_price !== undefined).length;
+      this.alert(`Items received and stock updated${changed ? ` — ${changed} price change${changed > 1 ? 's' : ''} applied` : ''}`);
       this.renderPurchasing();
     } catch(e) { this.alert(e.message, 'error'); }
   },

@@ -7,7 +7,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
-const { requirePermission } = require('../lib/permissions');
+const { requirePermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { autoBills, createBill, dueDateFor, today, PAID_SQL, round2 } = require('../lib/payables');
 const { resolveApprovalSignature } = require('../lib/signatures');
@@ -19,8 +19,15 @@ const { allocateTicketDiscount } = require('../lib/ticketDiscount');
 // line converted into this PO) — lets the PO detail view click straight
 // through to the document that drove the purchase, alongside the PR itself
 // (see the source_pr_* subqueries below).
-const PO_ITEMS_SELECT = `SELECT poi.*, q.quote_number, q.id as quotation_id, wo.wo_number, wo.id as work_order_id
+// sell_price: what the line's unit sells for now — the product price for a
+// stock-unit line, the alternate unit's own price otherwise (NULL = an
+// order-only unit) — offered for editing when the line is received.
+const PO_ITEMS_SELECT = `SELECT poi.*, q.quote_number, q.id as quotation_id, wo.wo_number, wo.id as work_order_id,
+    CASE WHEN poi.uom_id IS NULL OR poi.uom_id = pr.base_unit_id THEN pr.price ELSE pu.price END AS sell_price,
+    pr.price AS product_price, pr.cost AS product_cost
   FROM purchase_order_items poi
+  LEFT JOIN products pr ON pr.id = poi.product_id
+  LEFT JOIN product_units pu ON pu.product_id = poi.product_id AND pu.unit_id = poi.uom_id
   LEFT JOIN quotation_items qi ON poi.quotation_item_id = qi.id
   LEFT JOIN quotations q ON qi.quote_id = q.id
   LEFT JOIN work_order_items woi ON poi.work_order_item_id = woi.id
@@ -399,19 +406,62 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
     // Stock cost and A/P are in base currency; the PO may not be
     const rate = poRate(po);
 
+    const perms = req.employee?.permissions;
     const tx = await db.transaction('write');
     try {
-      let receiptValue = 0, receiptTax = 0, receiptId = null;
-      for (const { item_id, quantity_received } of (items || [])) {
+      let receiptValue = 0, receiptTax = 0, receiptId = null, repriced = false;
+      const priceChanges = [];
+      for (const { item_id, quantity_received, unit_cost: newCostRaw, selling_price: newPriceRaw } of (items || [])) {
         const qty = Math.round((Number(quantity_received) || 0) * 1000) / 1000; // part quantities for measured units
         if (!qty || qty <= 0) continue;
-        const { rows: [item] } = await tx.execute({ sql: 'SELECT * FROM purchase_order_items WHERE id = ? AND po_id = ?', args: [item_id, req.params.id] });
+        let { rows: [item] } = await tx.execute({ sql: 'SELECT * FROM purchase_order_items WHERE id = ? AND po_id = ?', args: [item_id, req.params.id] });
         if (!item) continue;
         // Logged as one receipt so it can be reversed as a unit later.
         if (!receiptId) {
           const receipt_number = await nextNumber(tx, 'po_receipts', 'receipt_number', 'RCV-', 6);
           const r = await tx.execute({ sql: 'INSERT INTO po_receipts (receipt_number, po_id, branch_id, received_by) VALUES (?,?,?,?)', args: [receipt_number, po.id, po.branch_id || null, req.employee?.id || null] });
           receiptId = Number(r.lastInsertRowid);
+        }
+        // A new unit cost (in the PO's currency, per the line's unit) reprices
+        // the PO line before it's received — the vendor dropped the price after
+        // the PO went out. The line keeps its vendor discount and the GCT rate
+        // it was ordered at; stock cost, the PO total and the A/P bill all
+        // follow. A line already part-received keeps its cost, since earlier
+        // receipts were costed and billed at it.
+        if (newCostRaw !== undefined && newCostRaw !== null && newCostRaw !== '') {
+          const newCost = Number(newCostRaw);
+          if (!(newCost >= 0)) throw new Error(`Enter a valid cost for "${item.product_name}"`);
+          const oldCost = Number(item.unit_cost) || 0;
+          if (Math.abs(newCost - oldCost) >= 0.00005) {
+            if ((Number(item.quantity_received) || 0) > 0) throw new Error(`"${item.product_name}" was already part-received at ${oldCost.toFixed(2)} — its cost can't be changed now; ask A/P to adjust the bill instead`);
+            if (newCost > oldCost && !can(perms, 'purchasing_approve')) throw new Error(`Raising the cost of "${item.product_name}" above the approved ${oldCost.toFixed(2)} needs someone who can approve POs`);
+            const line = priceLine({
+              name: item.product_name, quantity: item.quantity_ordered, unit_cost: newCost,
+              vendor_discount: item.vendor_discount, vendor_discount_percent: item.vendor_discount_percent, tax_option: item.tax_option || 'none',
+            }, Number(item.tax_rate) || 0);
+            await tx.execute({ sql: 'UPDATE purchase_order_items SET unit_cost = ?, total = ?, vendor_discount = ?, tax_amount = ? WHERE id = ?', args: [line.unit_cost, line.total, line.vendor_discount, line.tax_amount, item.id] });
+            priceChanges.push({ item, old_unit_cost: oldCost, new_unit_cost: line.unit_cost });
+            repriced = true;
+            ({ rows: [item] } = await tx.execute({ sql: 'SELECT * FROM purchase_order_items WHERE id = ?', args: [item.id] }));
+          }
+        }
+        // A new selling price for the line's unit: the product's price for a
+        // stock-unit line, the alternate unit's own price otherwise.
+        if (item.product_id && newPriceRaw !== undefined && newPriceRaw !== null && newPriceRaw !== '') {
+          const newPrice = Math.round(Number(newPriceRaw) * 100) / 100;
+          if (!(newPrice >= 0)) throw new Error(`Enter a valid selling price for "${item.product_name}"`);
+          const { rows: [prod] } = await tx.execute({ sql: 'SELECT price, base_unit_id FROM products WHERE id = ?', args: [item.product_id] });
+          const baseLine = item.uom_id == null || (prod && item.uom_id === prod.base_unit_id);
+          const { rows: [pu] } = baseLine ? { rows: [] } : await tx.execute({ sql: 'SELECT price FROM product_units WHERE product_id = ? AND unit_id = ?', args: [item.product_id, item.uom_id] });
+          const oldPrice = baseLine ? (prod ? Number(prod.price) : null) : (pu ? (pu.price == null ? null : Number(pu.price)) : null);
+          if (prod && (baseLine || pu) && (oldPrice == null || Math.abs(newPrice - oldPrice) >= 0.005)) {
+            if (!can(perms, 'inventory_edit')) throw new Error('Changing selling prices needs Edit Inventory permission');
+            if (baseLine) await tx.execute({ sql: 'UPDATE products SET price = ? WHERE id = ?', args: [newPrice, item.product_id] });
+            else await tx.execute({ sql: 'UPDATE product_units SET price = ? WHERE product_id = ? AND unit_id = ?', args: [newPrice, item.product_id, item.uom_id] });
+            const existing = priceChanges.find(c => c.item.id === item.id);
+            if (existing) Object.assign(existing, { old_price: oldPrice, new_price: newPrice });
+            else priceChanges.push({ item, old_price: oldPrice, new_price: newPrice });
+          }
         }
         const value = receivedValue(item, qty);
         receiptValue += value.goods;
@@ -441,6 +491,16 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
         await tx.execute({ sql: 'INSERT INTO po_receipt_items (receipt_id, po_item_id, product_id, quantity, stock_units, prev_cost, new_cost) VALUES (?,?,?,?,?,?,?)', args: [receiptId, item.id, item.product_id || null, qty, singles, prevCost, newCost] });
       }
       if (!receiptId) throw new Error('Enter at least one quantity to receive');
+      for (const c of priceChanges) {
+        await tx.execute({ sql: `INSERT INTO po_receipt_price_changes (po_id, po_item_id, receipt_id, product_id, uom_id, old_unit_cost, new_unit_cost, old_price, new_price, changed_by)
+            VALUES (?,?,?,?,?,?,?,?,?,?)`,
+          args: [po.id, c.item.id, receiptId, c.item.product_id || null, c.item.uom_id ?? null, c.old_unit_cost ?? null, c.new_unit_cost ?? null, c.old_price ?? null, c.new_price ?? null, req.employee?.id || null] });
+      }
+      if (repriced) {
+        const { rows: [t] } = await tx.execute({ sql: 'SELECT COALESCE(SUM(total), 0) AS sub, COALESCE(SUM(tax_amount), 0) AS tax FROM purchase_order_items WHERE po_id = ?', args: [po.id] });
+        const sub = round2(t.sub), tax = round2(t.tax);
+        await tx.execute({ sql: 'UPDATE purchase_orders SET subtotal = ?, tax_amount = ?, total = ? WHERE id = ?', args: [sub, tax, round2(sub + tax), po.id] });
+      }
 
       const { rows: poItems } = await tx.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ?', args: [req.params.id] });
       const allReceived = poItems.every(i => (i.quantity_received || 0) >= i.quantity_ordered);
@@ -562,7 +622,16 @@ async function poReceipts(poId) {
           WHERE ri.receipt_id IN (SELECT id FROM po_receipts WHERE po_id = ?) ORDER BY ri.id`,
     args: [poId],
   });
-  for (const r of receipts) r.items = items.filter(i => i.receipt_id === r.id);
+  const { rows: changes } = await db.execute({
+    sql: `SELECT c.*, poi.product_name, e.first_name || ' ' || e.last_name AS changed_by_name FROM po_receipt_price_changes c
+          JOIN purchase_order_items poi ON poi.id = c.po_item_id LEFT JOIN employees e ON e.id = c.changed_by
+          WHERE c.po_id = ? ORDER BY c.id`,
+    args: [poId],
+  });
+  for (const r of receipts) {
+    r.items = items.filter(i => i.receipt_id === r.id);
+    r.price_changes = changes.filter(c => c.receipt_id === r.id);
+  }
   return receipts;
 }
 

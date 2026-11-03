@@ -1178,6 +1178,23 @@ async function _init() {
       prev_cost REAL,
       new_cost REAL
     )` },
+    // Cost / selling price changes made while receiving a PO (the vendor
+    // dropped the price after the PO went out, or the shelf price moves with
+    // it). One row per line per change; receipt_id ties it to the receipt.
+    { sql: `CREATE TABLE IF NOT EXISTS po_receipt_price_changes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      po_id INTEGER NOT NULL REFERENCES purchase_orders(id),
+      po_item_id INTEGER NOT NULL REFERENCES purchase_order_items(id),
+      receipt_id INTEGER REFERENCES po_receipts(id),
+      product_id INTEGER REFERENCES products(id),
+      uom_id INTEGER,
+      old_unit_cost REAL,
+      new_unit_cost REAL,
+      old_price REAL,
+      new_price REAL,
+      changed_by INTEGER REFERENCES employees(id),
+      changed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     // Goods received with no purchase order (routes/direct-receipts.js):
     // stock goes on hand at once, entered cost becomes products.cost, and an
     // A/P bill is raised on the same rule as PO receipts. Reversible as a unit.
@@ -3786,6 +3803,7 @@ async function _init() {
     'CREATE INDEX IF NOT EXISTS idx_po_receipts_po_id ON po_receipts(po_id)',
     'CREATE INDEX IF NOT EXISTS idx_po_receipt_items_receipt_id ON po_receipt_items(receipt_id)',
     'CREATE INDEX IF NOT EXISTS idx_direct_receipts_supplier_id ON direct_receipts(supplier_id)',
+    'CREATE INDEX IF NOT EXISTS idx_po_receipt_price_changes_po_id ON po_receipt_price_changes(po_id)',
     'CREATE INDEX IF NOT EXISTS idx_direct_receipt_items_receipt_id ON direct_receipt_items(receipt_id)',
     'CREATE INDEX IF NOT EXISTS idx_direct_receipt_items_product_id ON direct_receipt_items(product_id)',
     'CREATE INDEX IF NOT EXISTS idx_ap_payments_supplier_id ON ap_payments(supplier_id)',
