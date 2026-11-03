@@ -1178,6 +1178,46 @@ async function _init() {
       prev_cost REAL,
       new_cost REAL
     )` },
+    // Goods received with no purchase order (routes/direct-receipts.js):
+    // stock goes on hand at once, entered cost becomes products.cost, and an
+    // A/P bill is raised on the same rule as PO receipts. Reversible as a unit.
+    { sql: `CREATE TABLE IF NOT EXISTS direct_receipts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      receipt_number TEXT UNIQUE NOT NULL,
+      supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
+      branch_id INTEGER REFERENCES branches(id),
+      vendor_invoice_number TEXT,
+      notes TEXT,
+      subtotal REAL NOT NULL DEFAULT 0,
+      tax_amount REAL NOT NULL DEFAULT 0,
+      total REAL NOT NULL DEFAULT 0,
+      bill_id INTEGER REFERENCES ap_bills(id),
+      status TEXT NOT NULL DEFAULT 'received',
+      received_by INTEGER REFERENCES employees(id),
+      received_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      reversed_by INTEGER REFERENCES employees(id),
+      reversed_at DATETIME,
+      reverse_reason TEXT
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS direct_receipt_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      receipt_id INTEGER NOT NULL REFERENCES direct_receipts(id),
+      product_id INTEGER NOT NULL REFERENCES products(id),
+      product_name TEXT NOT NULL,
+      sku TEXT,
+      uom_id INTEGER,
+      purchase_unit TEXT,
+      units_per REAL NOT NULL DEFAULT 1,
+      quantity REAL NOT NULL,
+      stock_units REAL NOT NULL,
+      unit_cost REAL NOT NULL DEFAULT 0,
+      tax_option TEXT NOT NULL DEFAULT 'none',
+      tax_rate REAL NOT NULL DEFAULT 0,
+      tax_amount REAL NOT NULL DEFAULT 0,
+      total REAL NOT NULL DEFAULT 0,
+      prev_cost REAL,
+      new_cost REAL
+    )` },
     // Supporting documents on a quotation (retail, rental or Special
     // Project) — customer POs, supplier quotes, drawings/specs. Same
     // Cloudinary-or-local storage pattern as po_attachments.
@@ -3413,6 +3453,9 @@ async function _init() {
       // Requesting an (advance) payment from an approved PO (2026-11-02)
       // starts with whoever can create POs.
       if (!('purchasing_request_payment' in perms)) { perms.purchasing_request_payment = can(perms, 'purchasing_create'); changed = true; }
+      // Receiving goods with no PO (2026-11-03) starts with whoever can
+      // already receive POs.
+      if (!('purchasing_receive_direct' in perms)) { perms.purchasing_receive_direct = can(perms, 'purchasing_receive'); changed = true; }
       // Receiving customer account payments at the POS — standalone (not a
       // `pos` sub, which every full-POS group would inherit) and, by the
       // owner's choice (2026-10-19), only for the cashier groups.
@@ -3742,6 +3785,9 @@ async function _init() {
     'CREATE INDEX IF NOT EXISTS idx_ap_bills_po_id ON ap_bills(po_id)',
     'CREATE INDEX IF NOT EXISTS idx_po_receipts_po_id ON po_receipts(po_id)',
     'CREATE INDEX IF NOT EXISTS idx_po_receipt_items_receipt_id ON po_receipt_items(receipt_id)',
+    'CREATE INDEX IF NOT EXISTS idx_direct_receipts_supplier_id ON direct_receipts(supplier_id)',
+    'CREATE INDEX IF NOT EXISTS idx_direct_receipt_items_receipt_id ON direct_receipt_items(receipt_id)',
+    'CREATE INDEX IF NOT EXISTS idx_direct_receipt_items_product_id ON direct_receipt_items(product_id)',
     'CREATE INDEX IF NOT EXISTS idx_ap_payments_supplier_id ON ap_payments(supplier_id)',
     'CREATE INDEX IF NOT EXISTS idx_ap_payment_allocations_bill_id ON ap_payment_allocations(bill_id)',
     'CREATE INDEX IF NOT EXISTS idx_ap_payment_allocations_payment_id ON ap_payment_allocations(payment_id)',

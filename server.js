@@ -116,6 +116,7 @@ app.use('/api/settings',         require('./routes/settings'));
 app.use('/api/branches',         require('./routes/branches'));
 app.use('/api/suppliers',        require('./routes/suppliers'));
 app.use('/api/purchase-orders',   require('./routes/purchase-orders'));
+app.use('/api/direct-receipts',   require('./routes/direct-receipts'));
 app.use('/api/purchase-requests', require('./routes/purchase-requests'));
 app.use('/api/security-groups',  require('./routes/security-groups'));
 app.use('/api/quotations',       require('./routes/quotations'));

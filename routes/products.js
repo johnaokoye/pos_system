@@ -1044,12 +1044,22 @@ router.get('/:id/movements', requirePermission('inventory'), async (req, res) =>
         JOIN branches tb ON t.to_branch_id = tb.id
         WHERE ti.product_id = ? AND t.status = 'received' AND ti.quantity_received > 0
         UNION ALL
-        SELECT 'adjustment', sm.created_at, sm.quantity_change,
-          COALESCE(b.name, 'All Branches'), NULL, COALESCE(sm.reason, 'Manual adjustment')
+        SELECT CASE WHEN sm.type IN ('received', 'receipt_reversed') THEN sm.type ELSE 'adjustment' END, sm.created_at, sm.quantity_change,
+          COALESCE(b.name, 'All Branches'), sm.reference, COALESCE(sm.reason, 'Manual adjustment')
         FROM stock_movements sm
         LEFT JOIN branches b ON sm.branch_id = b.id
         WHERE sm.product_id = ?
-      ) ORDER BY date DESC LIMIT 15`, args: [id, id, id, id] });
+        UNION ALL
+        -- PO receipts move stock without a stock_movements row (only their reversal logs one).
+        SELECT 'received', r.received_at, ri.stock_units,
+          COALESCE(b.name, 'All Branches'), r.receipt_number, 'Received on ' || po.po_number || COALESCE(' from ' || s.name, '')
+        FROM po_receipt_items ri
+        JOIN po_receipts r ON r.id = ri.receipt_id
+        JOIN purchase_orders po ON po.id = r.po_id
+        LEFT JOIN suppliers s ON s.id = po.supplier_id
+        LEFT JOIN branches b ON b.id = r.branch_id
+        WHERE ri.product_id = ? AND ri.stock_units > 0
+      ) ORDER BY date DESC LIMIT 15`, args: [id, id, id, id, id] });
     res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
