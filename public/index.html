@@ -8230,7 +8230,7 @@ const App = {
     const row = (j, withTime) => `<tr>
       ${withTime ? `<td style="white-space:nowrap" class="fw-600">${time(j.start)}${j.end ? ` – ${time(j.end)}` : ''}</td>` : `<td style="white-space:nowrap;font-size:12px">Due ${this.fmtDate(j.agreement.due_date)}</td>`}
       <td>${legBadge(j.leg)}</td>
-      <td class="fw-600"><a href="#" onclick="event.preventDefault();App.viewRentalAgreement(${j.agreement.id})">${j.agreement.agreement_number}</a></td>
+      <td class="fw-600">${j.agreement.agreement_number}</td>
       <td>${j.agreement.customer_name || '—'}${j.agreement.customer_phone ? `<div style="font-size:11px"><a href="tel:${j.agreement.customer_phone}">${j.agreement.customer_phone}</a></div>` : ''}</td>
       <td style="font-size:12px;max-width:220px">${addr(j)}</td>
       <td style="font-size:12px;max-width:180px">${j.agreement.item_summary || '—'}</td>
