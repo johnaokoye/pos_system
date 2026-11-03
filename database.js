@@ -2742,6 +2742,11 @@ async function _init() {
     // Vendor payment request "pay by" date (YYYY-MM-DD) — e.g. a supplier's
     // deposit deadline on an advance requested from a PO. NULL = no deadline.
     'ALTER TABLE payment_requests ADD COLUMN required_date TEXT',
+    // Requested payment date (required_date, set by the requester) vs the
+    // date the approver schedules the payment for — kept separately.
+    'ALTER TABLE payment_requests ADD COLUMN scheduled_date TEXT',
+    'ALTER TABLE payment_requests ADD COLUMN scheduled_by INTEGER',
+    'ALTER TABLE payment_requests ADD COLUMN scheduled_at DATETIME',
     // POS "$" line discount: the fixed amount taken off the line (discount_percent
     // then holds the equivalent %, for the limit check and promotions). NULL = a % discount.
     'ALTER TABLE transaction_items ADD COLUMN discount_fixed REAL',

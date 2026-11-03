@@ -31,6 +31,7 @@ const REQ_SELECT = `SELECT r.*, s.name AS supplier_name, s.supplier_number, po.p
   rj.first_name || ' ' || rj.last_name AS rejected_by_name,
   pd.first_name || ' ' || pd.last_name AS paid_by_name,
   cx.first_name || ' ' || cx.last_name AS cancelled_by_name,
+  sc.first_name || ' ' || sc.last_name AS scheduled_by_name,
   p.payment_number, p.payment_date, p.method AS payment_method, p.reference AS payment_reference, p.status AS payment_status,
   (SELECT COUNT(*) FROM payment_request_attachments a WHERE a.request_id = r.id) AS attachment_count,
   (SELECT GROUP_CONCAT(COALESCE(b.bill_number, l.description), ', ') FROM payment_request_lines l
@@ -43,7 +44,17 @@ const REQ_SELECT = `SELECT r.*, s.name AS supplier_name, s.supplier_number, po.p
   LEFT JOIN employees rj ON rj.id = r.rejected_by
   LEFT JOIN employees pd ON pd.id = r.paid_by
   LEFT JOIN employees cx ON cx.id = r.cancelled_by
+  LEFT JOIN employees sc ON sc.id = r.scheduled_by
   LEFT JOIN ap_payments p ON p.id = r.payment_id`;
+
+// A YYYY-MM-DD date from the body, or null; { error } when it isn't one.
+function parseDay(v, label) {
+  const raw = String(v || '').trim();
+  if (!raw) return { value: null };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw) || Number.isNaN(Date.parse(`${raw}T00:00:00Z`))) return { error: `The ${label} is not a valid date` };
+  return { value: raw };
+}
+const NEED_REQUESTED_DATE = 'Enter the requested payment date — when the vendor needs to be paid';
 
 async function loadRequest(id) {
   const { rows: [r] } = await db.execute({ sql: `${REQ_SELECT} WHERE r.id = ?`, args: [id] });
@@ -110,7 +121,7 @@ async function validateRequest(body, requestId = 0) {
   if (!TYPES.includes(request_type)) return { error: 'Choose the kind of payment' };
   const notes = String(body.notes || '').trim() || null;
   const rawDate = String(body.required_date || '').trim();
-  if (rawDate && !/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) return { error: 'The pay-by date is not a valid date' };
+  if (rawDate && !/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) return { error: 'The requested payment date is not a valid date' };
   const required_date = rawDate || null;
   let lines = [];
   let po_id = null;
@@ -251,6 +262,7 @@ router.post('/from-po/:poId', canRequestFromPo, async (req, res) => {
       amount: req.body.amount, description: req.body.description, notes: req.body.notes, required_date: req.body.required_date,
     });
     if (v.error) return res.status(400).json({ error: v.error });
+    if (!v.required_date) return res.status(400).json({ error: NEED_REQUESTED_DATE });
     const tx = await db.transaction('write');
     let committed = false;
     try {
@@ -286,7 +298,7 @@ router.get('/inbox', canView, async (req, res) => {
     if (can(perms, 'payables_payments')) parts.push("r.status = 'approved'");
     if (!parts.length) return res.json({ count: 0, requests: [] });
     const { rows } = await db.execute({
-      sql: `${REQ_SELECT} WHERE (${parts.join(' OR ')}) ORDER BY CASE WHEN r.required_date IS NULL THEN 1 ELSE 0 END, r.required_date, r.id LIMIT 100`,
+      sql: `${REQ_SELECT} WHERE (${parts.join(' OR ')}) ORDER BY CASE WHEN COALESCE(r.scheduled_date, r.required_date) IS NULL THEN 1 ELSE 0 END, COALESCE(r.scheduled_date, r.required_date), r.id LIMIT 100`,
       args,
     });
     res.json({ count: rows.length, requests: rows.map(r => ({ ...r, stage: r.status === 'submitted' ? 'approve' : 'pay' })) });
@@ -308,6 +320,7 @@ router.post('/', requirePermission('payables_requests'), async (req, res) => {
     const v = await validateRequest(req.body);
     if (v.error) return res.status(400).json({ error: v.error });
     const submit = !!req.body.submit;
+    if (submit && !v.required_date) return res.status(400).json({ error: NEED_REQUESTED_DATE });
     const tx = await db.transaction('write');
     let committed = false;
     try {
@@ -339,12 +352,14 @@ router.put('/:id', requirePermission('payables_requests'), async (req, res) => {
     const v = await validateRequest(req.body, cur.id);
     if (v.error) return res.status(400).json({ error: v.error });
     const submit = !!req.body.submit;
+    if (submit && !v.required_date) return res.status(400).json({ error: NEED_REQUESTED_DATE });
     const tx = await db.transaction('write');
     let committed = false;
     try {
       await tx.execute({
         sql: `UPDATE payment_requests SET supplier_id=?, request_type=?, po_id=?, amount=?, notes=?, required_date=?, status=?,
-                submitted_at=${submit ? 'CURRENT_TIMESTAMP' : 'NULL'}, rejected_by=NULL, rejected_at=NULL, rejection_reason=NULL
+                submitted_at=${submit ? 'CURRENT_TIMESTAMP' : 'NULL'}, rejected_by=NULL, rejected_at=NULL, rejection_reason=NULL,
+                scheduled_date=NULL, scheduled_by=NULL, scheduled_at=NULL
               WHERE id=?`,
         args: [v.supplier_id, v.request_type, v.po_id, v.amount, v.notes, v.required_date, submit ? 'submitted' : 'draft', cur.id],
       });
@@ -373,6 +388,7 @@ router.post('/:id/submit', requirePermission('payables_requests'), async (req, r
     if (r.status !== 'draft') return res.status(400).json({ error: `Only a draft can be submitted (this one is ${r.status})` });
     const err = await recheck(r);
     if (err) return res.status(400).json({ error: err });
+    if (!r.required_date) return res.status(400).json({ error: `${NEED_REQUESTED_DATE} — edit the request to add it` });
     await db.execute({ sql: "UPDATE payment_requests SET status = 'submitted', submitted_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'draft'", args: [r.id] });
     res.json(await loadRequest(r.id));
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -399,15 +415,36 @@ router.post('/:id/approve', requirePermission('payables_approve'), async (req, r
     }
     const err = await recheck(r);
     if (err) return res.status(400).json({ error: `${err} — send it back for changes instead` });
+    // The approver schedules the payment — may differ from the requested date.
+    const sched = parseDay(req.body.scheduled_date, 'scheduled payment date');
+    if (sched.error) return res.status(400).json({ error: sched.error });
+    if (!sched.value) return res.status(400).json({ error: 'Enter the scheduled payment date — when this will be paid' });
     let sigUrl;
     try { sigUrl = await resolveApprovalSignature(db, approverId, req.body.signature); }
     catch (e) { return res.status(e.status || 500).json({ error: e.message, code: e.code }); }
     const result = await db.execute({
-      sql: "UPDATE payment_requests SET status = 'approved', approved_by = ?, approved_at = CURRENT_TIMESTAMP, approval_signature = ? WHERE id = ? AND status = 'submitted'",
-      args: [approverId, sigUrl, r.id],
+      sql: `UPDATE payment_requests SET status = 'approved', approved_by = ?, approved_at = CURRENT_TIMESTAMP, approval_signature = ?,
+              scheduled_date = ?, scheduled_by = ?, scheduled_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'submitted'`,
+      args: [approverId, sigUrl, sched.value, approverId, r.id],
     });
     if (!result.rowsAffected) return res.status(409).json({ error: 'This request changed while you were approving it — reopen it and try again' });
     res.json(await loadRequest(r.id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Moves an approved (not yet paid) request's scheduled payment date. The
+// requested date is never changed here.
+router.patch('/:id/schedule', requirePermission('payables_approve'), async (req, res) => {
+  try {
+    const sched = parseDay(req.body.scheduled_date, 'scheduled payment date');
+    if (sched.error) return res.status(400).json({ error: sched.error });
+    if (!sched.value) return res.status(400).json({ error: 'Enter the scheduled payment date' });
+    const result = await db.execute({
+      sql: "UPDATE payment_requests SET scheduled_date = ?, scheduled_by = ?, scheduled_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'approved'",
+      args: [sched.value, req.employee?.id || null, req.params.id],
+    });
+    if (!result.rowsAffected) return res.status(400).json({ error: 'Only an approved request that hasn\'t been paid can be rescheduled' });
+    res.json(await loadRequest(req.params.id));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

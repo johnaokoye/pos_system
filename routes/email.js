@@ -1561,6 +1561,8 @@ ${PRINT_PAGE_STYLE}
         <td style="vertical-align:top;text-align:right;font-size:13px;color:#444;line-height:1.6">
           <div><strong>Requested:</strong> ${day(r.created_at)}</div>
           <div><strong>Type:</strong> ${PAYMENT_REQUEST_TYPE[r.request_type] || esc(r.request_type)}</div>
+          <div><strong>Requested Payment Date:</strong> ${r.required_date ? day(r.required_date) : '—'}</div>
+          <div><strong>Scheduled Payment Date:</strong> ${r.scheduled_date ? `${day(r.scheduled_date)}${r.scheduled_by_name ? ` <span style="color:#888">(${esc(r.scheduled_by_name)})</span>` : ''}` : '—'}</div>
           ${r.po_number ? `<div><strong>Purchase Order:</strong> ${esc(r.po_number)}</div>` : ''}
         </td>
       </tr></table>

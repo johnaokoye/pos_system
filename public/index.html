@@ -1313,13 +1313,13 @@ const App = {
   _apSeenKey() { return `apInboxSeen:${this.currentUser?.id}`; },
 
   // "Pay by" text for a request, flagged when the date is close or past.
-  _prqPayByHtml(date, { short = false } = {}) {
+  _prqPayByHtml(date, { short = false, label = 'Pay by ' } = {}) {
     if (!date) return short ? '—' : '';
     const today = this._storeDay(new Date());
     const days = Math.round((new Date(date + 'T00:00:00Z') - new Date(today + 'T00:00:00Z')) / 86400000);
     const when = days < 0 ? `${-days} day${days === -1 ? '' : 's'} overdue` : days === 0 ? 'today' : days === 1 ? 'tomorrow' : `in ${days} days`;
     const color = days < 0 ? 'var(--danger,#dc2626)' : days <= 3 ? 'var(--warning,#b45309)' : 'inherit';
-    return `<span style="color:${color};${days <= 3 ? 'font-weight:600' : ''}">${short ? '' : 'Pay by '}${this._apDate(date)}${days <= 7 ? ` <span style="font-size:11px">(${when})</span>` : ''}</span>`;
+    return `<span style="color:${color};${days <= 3 ? 'font-weight:600' : ''}">${short ? '' : label}${this._apDate(date)}${days <= 7 ? ` <span style="font-size:11px">(${when})</span>` : ''}</span>`;
   },
 
   async _pollPayablesInbox() {
@@ -1339,7 +1339,7 @@ const App = {
         this._notify({
           title: `💵 ${fresh.length} payment requests waiting`,
           body: [toApprove ? `${toApprove} to approve` : '', toPay ? `${toPay} approved and ready to pay` : ''].filter(Boolean).join(' · ')
-            + (fresh.some(r => r.required_date) ? `<div style="margin-top:4px">Earliest pay-by: ${this._prqPayByHtml(fresh.filter(r => r.required_date).map(r => r.required_date).sort()[0], { short: true })}</div>` : ''),
+            + (fresh.some(r => r.scheduled_date || r.required_date) ? `<div style="margin-top:4px">Earliest date: ${this._prqPayByHtml(fresh.filter(r => r.scheduled_date || r.required_date).map(r => r.scheduled_date || r.required_date).sort()[0], { short: true })}</div>` : ''),
           actions: [{ label: 'Open Accounts Payable', primary: true, run: () => this._openPayablesRequests() }],
         });
       } else {
@@ -1349,7 +1349,8 @@ const App = {
             title: r.stage === 'approve' ? `💵 Payment request ${r.request_number}` : `💵 ${r.request_number} approved — ready to pay`,
             body: `<strong>${this.escapeAttr(r.supplier_name)}</strong> · ${this.fmt(r.amount)} · ${what}`
               + `${r.requested_by_name ? `<div style="color:var(--text-muted)">Requested by ${this.escapeAttr(r.requested_by_name)}</div>` : ''}`
-              + `${r.required_date ? `<div>${this._prqPayByHtml(r.required_date)}</div>` : ''}`
+              + `${r.required_date ? `<div>${this._prqPayByHtml(r.required_date, { label: 'Requested for ' })}</div>` : ''}`
+              + `${r.stage === 'pay' && r.scheduled_date ? `<div>${this._prqPayByHtml(r.scheduled_date, { label: 'Scheduled for ' })}</div>` : ''}`
               + `${r.notes ? `<div style="color:var(--text-muted);margin-top:4px">${this.escapeAttr(r.notes)}</div>` : ''}`,
             actions: [{ label: r.stage === 'approve' ? 'Review' : 'Open', primary: true, run: () => this._openPayablesRequests(r.id) }],
           });
@@ -22569,7 +22570,7 @@ const App = {
             </div>
             ${payReqs.room ? `<div style="font-size:13px;margin-bottom:8px">Paid so far: <strong>${this.fmt(payReqs.room.paid)}</strong>${payReqs.room.requested > 0 ? ` &nbsp;·&nbsp; Requested, not yet paid: <strong>${this.fmt(payReqs.room.requested)}</strong>` : ''} &nbsp;·&nbsp; Left to request: <strong>${this.fmt(payReqs.room.available)}</strong></div>` : ''}
             ${payReqs.requests.map(r => `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;font-size:13px;${canOpenPrq ? 'cursor:pointer' : ''};${r.status === 'cancelled' ? 'opacity:.6' : ''}" ${canOpenPrq ? `onclick="App.viewPaymentRequest(${r.id})"` : ''}>
-              <span><strong>${r.request_number}</strong> · ${this.escapeAttr(r.summary || this._prqTypeLabel[r.request_type])}${r.required_date && !['paid','cancelled'].includes(r.status) ? ` · ${this._prqPayByHtml(r.required_date)}` : ''}${r.requested_by_name ? `<span style="color:var(--text-muted)"> · ${this.escapeAttr(r.requested_by_name)}</span>` : ''}</span>
+              <span><strong>${r.request_number}</strong> · ${this.escapeAttr(r.summary || this._prqTypeLabel[r.request_type])}${r.required_date && !['paid','cancelled'].includes(r.status) ? ` · ${this._prqPayByHtml(r.required_date, { label: 'Requested for ' })}` : ''}${r.scheduled_date && !['paid','cancelled'].includes(r.status) ? ` · ${this._prqPayByHtml(r.scheduled_date, { label: 'Scheduled for ' })}` : ''}${r.requested_by_name ? `<span style="color:var(--text-muted)"> · ${this.escapeAttr(r.requested_by_name)}</span>` : ''}</span>
               <span style="white-space:nowrap">${this.fmt(r.amount)} <span class="badge-pill ${this._prqStatusBadge[r.status] || ''}" style="margin-left:6px">${this._prqStatusLabel[r.status] || r.status}</span></span>
             </div>`).join('') || '<div style="font-size:13px;color:var(--text-muted)">No payment requested yet. If the supplier needs a deposit or advance before supplying, use <strong>💵 Request Payment</strong> below — Accounts Payable is notified.</div>'}
           </div>` : ''}
@@ -22901,7 +22902,7 @@ const App = {
           </div>
           <div class="input-row">
             <div class="form-group"><label>Amount *</label><input id="popr-amount" type="number" step="0.01" min="0" max="${room.available}" placeholder="0.00"></div>
-            <div class="form-group"><label>Pay by</label><input id="popr-date" type="date" min="${this._storeDay(new Date())}"><div style="font-size:11px;color:var(--text-muted);margin-top:3px">Optional — when the supplier needs it</div></div>
+            <div class="form-group"><label>Requested Payment Date *</label><input id="popr-date" type="date" min="${this._storeDay(new Date())}"><div style="font-size:11px;color:var(--text-muted);margin-top:3px">When the supplier needs to be paid — the approver sets the scheduled date</div></div>
           </div>
           <div style="display:flex;gap:6px;flex-wrap:wrap;margin:-6px 0 12px">
             ${[25, 50, 100].map(p => `<button type="button" class="btn btn-sm btn-outline" onclick="document.getElementById('popr-amount').value='${pct(p).toFixed(2)}'">${p}% (${this.fmt(pct(p))})</button>`).join('')}
@@ -27077,7 +27078,7 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
         ${tile('Overdue', this.fmt(overdue), overdue > 0 ? 'var(--danger)' : '')}
         ${tile('Not Yet Due', this.fmt(t.current))}` : ''}
         ${tile('Awaiting Approval', `${awaiting.length}${awaiting.length ? ` <span style="font-size:13px;font-weight:500;color:var(--text-muted)">· ${this.fmt(awaiting.reduce((sum, r) => sum + r.amount, 0))}</span>` : ''}`, awaiting.length ? 'var(--warning, #b45309)' : '')}
-        ${tile('Approved — To Pay', `${toPay.length}${toPay.length ? ` <span style="font-size:13px;font-weight:500;color:var(--text-muted)">· ${this.fmt(toPay.reduce((sum, r) => sum + r.amount, 0))}</span>` : ''}${(() => { const d = toPay.concat(awaiting).map(r => r.required_date).filter(Boolean).sort()[0]; return d ? `<div style="font-size:12px;font-weight:500;margin-top:2px">Next pay-by: ${this._prqPayByHtml(d, { short: true })}</div>` : ''; })()}`, toPay.length ? 'var(--primary)' : '')}
+        ${tile('Approved — To Pay', `${toPay.length}${toPay.length ? ` <span style="font-size:13px;font-weight:500;color:var(--text-muted)">· ${this.fmt(toPay.reduce((sum, r) => sum + r.amount, 0))}</span>` : ''}${(() => { const d = toPay.map(r => r.scheduled_date || r.required_date).filter(Boolean).sort()[0]; return d ? `<div style="font-size:12px;font-weight:500;margin-top:2px">Next scheduled: ${this._prqPayByHtml(d, { short: true })}</div>` : ''; })()}`, toPay.length ? 'var(--primary)' : '')}
         ${aging?.advances_unapplied > 0 ? tile('Advances Not Yet Billed', this.fmt(aging.advances_unapplied)) : ''}
       </div>
       <div class="var-tab-bar" style="padding:0;margin-bottom:14px">
@@ -27402,8 +27403,8 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
         <input id="prq-f-search" placeholder="Request #, vendor, bill #, PO #, description..." value="${this.escapeAttr(f.q)}" style="flex:1;min-width:200px">
       </div>
       <div class="card"><div class="table-wrap"><table>
-        <thead><tr><th>Request #</th><th>Date</th><th>Vendor</th><th>Type</th><th>For</th><th style="text-align:right">Amount</th><th>Pay By</th><th>Requested By</th><th>Status</th></tr></thead>
-        <tbody id="prq-tbody"><tr><td colspan="9" class="empty-state">Loading...</td></tr></tbody>
+        <thead><tr><th>Request #</th><th>Date</th><th>Vendor</th><th>Type</th><th>For</th><th style="text-align:right">Amount</th><th title="Payment date the requester asked for">Requested Pay Date</th><th title="Payment date set by the approver">Scheduled Pay Date</th><th>Requested By</th><th>Status</th></tr></thead>
+        <tbody id="prq-tbody"><tr><td colspan="10" class="empty-state">Loading...</td></tr></tbody>
       </table></div></div>`;
     const load = async () => {
       const qs = new URLSearchParams({ status: f.status });
@@ -27420,10 +27421,11 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
           <td>${this._prqTypeLabel[r.request_type] || r.request_type}</td>
           <td style="font-size:12px;max-width:260px">${r.request_type === 'advance' ? `PO ${this.escapeAttr(r.po_number || '')}` : this.escapeAttr(r.summary || '—')}${r.attachment_count ? ` <span title="Supporting documents" style="color:var(--text-muted)">📎${r.attachment_count}</span>` : ''}</td>
           <td style="text-align:right" class="fw-600">${this.fmt(r.amount)}</td>
-          <td style="white-space:nowrap">${['paid', 'cancelled'].includes(r.status) ? (r.required_date ? this._apDate(r.required_date) : '—') : this._prqPayByHtml(r.required_date, { short: true })}</td>
+          <td style="white-space:nowrap">${['paid', 'cancelled'].includes(r.status) || r.scheduled_date ? (r.required_date ? this._apDate(r.required_date) : '—') : this._prqPayByHtml(r.required_date, { short: true })}</td>
+          <td style="white-space:nowrap">${!r.scheduled_date ? '<span style="color:var(--text-muted)">—</span>' : ['paid', 'cancelled'].includes(r.status) ? this._apDate(r.scheduled_date) : this._prqPayByHtml(r.scheduled_date, { short: true })}</td>
           <td>${this.escapeAttr(r.requested_by_name || '—')}</td>
           <td><span class="badge-pill ${this._prqStatusBadge[r.status] || ''}">${this._prqStatusLabel[r.status] || r.status}</span></td>
-        </tr>`).join('') : '<tr><td colspan="9" class="empty-state">No payment requests found</td></tr>';
+        </tr>`).join('') : '<tr><td colspan="10" class="empty-state">No payment requests found</td></tr>';
     };
     document.getElementById('prq-f-status').addEventListener('change', e => { f.status = e.target.value; load(); });
     document.getElementById('prq-f-vendor').addEventListener('change', e => { f.supplier_id = e.target.value; load(); });
@@ -27466,7 +27468,7 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
             </div>
           </div>
           <div id="prq-body" style="margin-bottom:12px"></div>
-          <div class="form-group" style="max-width:240px"><label>Pay by</label><input id="prq-date" type="date" value="${r.required_date || ''}"><div style="font-size:11px;color:var(--text-muted);margin-top:3px">Optional — when the vendor needs it</div></div>
+          <div class="form-group" style="max-width:300px"><label>Requested Payment Date *</label><input id="prq-date" type="date" value="${r.required_date || ''}"><div style="font-size:11px;color:var(--text-muted);margin-top:3px">When the vendor needs to be paid (needed to submit). The approver sets the scheduled date.</div></div>
           <div class="form-group"><label>Purpose / Notes for the approver</label>
             <textarea id="prq-notes" rows="2" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;resize:vertical" placeholder="Why this payment is needed, any deadline...">${this.escapeAttr(r.notes || '')}</textarea>
           </div>
@@ -27707,7 +27709,10 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
             <div>
               <strong>Vendor:</strong> ${this.escapeAttr(r.supplier_name)} (${r.supplier_number})<br>
               <strong>Type:</strong> ${this._prqTypeLabel[r.request_type]}<br>
-              ${r.required_date ? `<strong>Pay by:</strong> ${['paid', 'cancelled'].includes(r.status) ? this._apDate(r.required_date) : this._prqPayByHtml(r.required_date, { short: true })}<br>` : ''}
+              <strong>Requested payment date:</strong> ${r.required_date ? (['paid', 'cancelled'].includes(r.status) || r.scheduled_date ? this._apDate(r.required_date) : this._prqPayByHtml(r.required_date, { short: true })) : '<span style="color:var(--text-muted)">not given</span>'}<br>
+              <strong>Scheduled payment date:</strong> ${r.scheduled_date
+                ? `${['paid', 'cancelled'].includes(r.status) ? this._apDate(r.scheduled_date) : this._prqPayByHtml(r.scheduled_date, { short: true })}${r.scheduled_date !== r.required_date && r.required_date ? ' <span class="badge-pill badge-warning" style="font-size:10px">differs from requested</span>' : ''}<div style="font-size:11px;color:var(--text-muted)">set by ${this.escapeAttr(r.scheduled_by_name || '—')} · ${this.fmtDateTime(r.scheduled_at)}${r.status === 'approved' && canApprove ? ` · <a href="#" onclick="event.preventDefault();App.reschedulePaymentRequest(${r.id})">Change</a>` : ''}</div>`
+                : `<span style="color:var(--text-muted)">${['submitted', 'draft'].includes(r.status) ? 'set by the approver' : '—'}</span><br>`}
               ${r.po_number ? `<strong>Purchase Order:</strong> ${this.can('purchasing') ? `<a href="#" style="color:var(--primary)" onclick="event.preventDefault();App.closeModal();App.showSection('purchasing').then(()=>App.viewPO(${r.po_id}))">${r.po_number}</a>` : r.po_number}<br>` : ''}
             </div>
             <div>
@@ -27758,12 +27763,43 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
       context: r ? `<div style="font-size:13px;margin-bottom:12px;padding:10px 12px;background:var(--bg-secondary,#f9fafb);border-radius:6px">
         <strong>${this.escapeAttr(r.supplier_name)}</strong> · ${this._prqTypeLabel[r.request_type]}${r.po_number ? ` on ${r.po_number}` : ''}<br>
         Total: <strong>${this.fmt(r.amount)}</strong> · requested by ${this.escapeAttr(r.requested_by_name || '—')}
-        ${r.notes ? `<div style="margin-top:4px;color:var(--text-muted)">${this.escapeAttr(r.notes)}</div>` : ''}</div>` : '',
+        <div style="margin-top:4px">Requested payment date: <strong>${r.required_date ? this._apDate(r.required_date) : 'not given'}</strong></div>
+        ${r.notes ? `<div style="margin-top:4px;color:var(--text-muted)">${this.escapeAttr(r.notes)}</div>` : ''}</div>
+        <div class="form-group"><label>Scheduled Payment Date *</label><input id="prq-sched-date" type="date" value="${r.required_date || this._storeDay(new Date())}">
+          <div style="font-size:11px;color:var(--text-muted);margin-top:3px">When this will be paid — can differ from the requested date. Both are kept.</div></div>` : '',
       approve: async (signature) => {
-        await this.api('POST', `/payables/payment-requests/${id}/approve`, { signature });
+        const scheduled_date = document.getElementById('prq-sched-date')?.value || '';
+        if (!scheduled_date) throw new Error('Enter the scheduled payment date');
+        await this.api('POST', `/payables/payment-requests/${id}/approve`, { signature, scheduled_date });
         this._afterPrqChange(id, 'Payment request approved');
       },
     });
+  },
+
+  async reschedulePaymentRequest(id) {
+    const r = await this.api('GET', `/payables/payment-requests/${id}`).catch(() => null);
+    if (!r) return;
+    this.showModal(`
+      <div class="modal" style="max-width:420px">
+        <div class="modal-header"><span class="modal-title">Change Scheduled Date — ${r.request_number}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;margin-top:0">Requested payment date: <strong>${r.required_date ? this._apDate(r.required_date) : 'not given'}</strong> (stays as it is)</p>
+          <div class="form-group"><label>Scheduled Payment Date *</label><input id="prq-resched-date" type="date" value="${r.scheduled_date || r.required_date || ''}"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal();App.viewPaymentRequest(${id})">Cancel</button>
+          <button class="btn btn-primary" onclick="App._saveReschedulePaymentRequest(${id})">Save</button>
+        </div>
+      </div>`);
+  },
+
+  async _saveReschedulePaymentRequest(id) {
+    const scheduled_date = document.getElementById('prq-resched-date')?.value || '';
+    if (!scheduled_date) return this.alert('Enter the scheduled payment date', 'error');
+    try {
+      await this.api('PATCH', `/payables/payment-requests/${id}/schedule`, { scheduled_date });
+      this._afterPrqChange(id, 'Scheduled payment date changed');
+    } catch (e) { this.alert(e.message, 'error'); }
   },
 
   async rejectPaymentRequest(id) {
