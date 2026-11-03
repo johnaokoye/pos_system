@@ -9,6 +9,7 @@ const { nextNumber } = require('../lib/nextNumber');
 const { resolveApprovalSignature } = require('../lib/signatures');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 const { round2, PAID_SQL, createBill, applyPoAdvances } = require('../lib/payables');
+const { resolvePoCurrency } = require('../lib/poLines');
 
 // Vendor payment requests (mounted at /api/payables/payment-requests). A
 // vendor is only ever paid from an approved request:
@@ -61,6 +62,7 @@ async function loadRequest(id) {
   if (!r) return null;
   const { rows: lines } = await db.execute({
     sql: `SELECT l.*, b.bill_number, b.vendor_invoice_number, b.bill_date, b.due_date, b.amount AS bill_amount,
+            b.currency AS bill_currency, b.exchange_rate AS bill_rate, b.amount_fx AS bill_amount_fx,
             b.amount - ${PAID_SQL} AS bill_balance
           FROM payment_request_lines l LEFT JOIN ap_bills b ON b.id = l.bill_id
           WHERE l.request_id = ? ORDER BY l.id`,
@@ -91,9 +93,10 @@ async function poAdvanceRoom(executor, poId, excludeRequestId = 0) {
     args: [poId, excludeRequestId],
   });
   const total = round2(Number(po.total) * rate);
+  const available = round2(Math.max(0, total - round2(paid.v) - round2(pending.v)));
   return {
-    ...po, missing_rate: !rate, total_base: total, paid: round2(paid.v), requested: round2(pending.v),
-    available: round2(Math.max(0, total - round2(paid.v) - round2(pending.v))),
+    ...po, missing_rate: !rate, total_base: total, paid: round2(paid.v), requested: round2(pending.v), available,
+    available_fx: po.currency && rate ? round2(available / rate) : null,
   };
 }
 
@@ -101,7 +104,7 @@ async function poAdvanceRoom(executor, poId, excludeRequestId = 0) {
 async function billRoom(executor, billIds, excludeRequestId = 0) {
   if (!billIds.length) return new Map();
   const { rows } = await executor.execute({
-    sql: `SELECT b.id, b.bill_number, b.supplier_id, b.status, b.amount - ${PAID_SQL} AS balance,
+    sql: `SELECT b.id, b.bill_number, b.supplier_id, b.status, b.currency, b.exchange_rate, b.amount - ${PAID_SQL} AS balance,
             (SELECT COALESCE(SUM(l.amount), 0) FROM payment_request_lines l JOIN payment_requests r ON r.id = l.request_id
              WHERE l.bill_id = b.id AND r.status IN ${ACTIVE} AND r.id != ?)
             + (SELECT COALESCE(SUM(cl.amount), 0) FROM contra_lines cl JOIN contras k ON k.id = cl.contra_id
@@ -127,9 +130,19 @@ async function validateRequest(body, requestId = 0) {
   const required_date = rawDate || null;
   let lines = [];
   let po_id = null;
+  // Paying in a foreign currency: lines carry amount_fx (in that currency)
+  // and amount (base). A bill or PO in the same currency converts at its own
+  // booked rate, so paying the foreign amount owed clears it exactly; anything
+  // else converts at the payment rate.
+  let pay;
+  try { pay = await resolvePoCurrency(body.currency, body.exchange_rate); } catch (e) { return { error: e.message }; }
+  const fx = !!pay.currency;
+  if (fx && !(pay.exchange_rate > 0)) return { error: `Enter the ${pay.currency} exchange rate (JMD per ${pay.currency})` };
+  const fxAmount = l => round2(fx ? (l.amount_fx ?? l.amount) : 0);
+  const money = (v, code) => `${code ? `${code} ` : ''}${Number(v).toFixed(2)}`;
 
   if (request_type === 'invoice') {
-    lines = (body.lines || []).map(l => ({ bill_id: Number(l.bill_id), amount: round2(l.amount) })).filter(l => l.bill_id);
+    lines = (body.lines || []).map(l => ({ bill_id: Number(l.bill_id), amount: round2(l.amount), amount_fx: fx ? fxAmount(l) : null })).filter(l => l.bill_id);
     if (!lines.length) return { error: 'Select at least one invoice to pay' };
     if (new Set(lines.map(l => l.bill_id)).size !== lines.length) return { error: 'An invoice is listed more than once' };
     const room = await billRoom(db, lines.map(l => l.bill_id), requestId);
@@ -137,9 +150,21 @@ async function validateRequest(body, requestId = 0) {
       const b = room.get(l.bill_id);
       if (!b || Number(b.supplier_id) !== supplier_id) return { error: 'One of the invoices does not belong to this vendor' };
       if (b.status === 'void') return { error: `Bill ${b.bill_number} is void` };
-      if (!(l.amount > 0)) return { error: `Enter the amount to pay on bill ${b.bill_number}` };
       const left = round2(b.balance - b.requested);
-      if (l.amount > left) {
+      if (fx) {
+        if (!(l.amount_fx > 0)) return { error: `Enter the amount to pay on bill ${b.bill_number}` };
+        if (b.currency === pay.currency && Number(b.exchange_rate) > 0) {
+          const rate = Number(b.exchange_rate);
+          const leftFx = round2(Math.max(0, left) / rate);
+          if (l.amount_fx - leftFx > 0.005) return { error: `${money(l.amount_fx, pay.currency)} is more than the ${money(leftFx, pay.currency)} left on bill ${b.bill_number}${b.requested > 0 ? ' (part of it is already on another request)' : ''}` };
+          // Paying all that's left clears it exactly, whatever the rounding.
+          l.amount = l.amount_fx >= leftFx - 0.005 ? left : round2(l.amount_fx * rate);
+        } else {
+          l.amount = round2(l.amount_fx * pay.exchange_rate);
+        }
+      }
+      if (!(l.amount > 0)) return { error: `Enter the amount to pay on bill ${b.bill_number}` };
+      if (l.amount > left + 0.005) {
         return { error: b.requested > 0
           ? `${l.amount.toFixed(2)} is more than the ${Math.max(0, left).toFixed(2)} left on bill ${b.bill_number} (${b.requested.toFixed(2)} is already on another request)`
           : `${l.amount.toFixed(2)} is more than the ${b.balance.toFixed(2)} still owed on bill ${b.bill_number}` };
@@ -147,8 +172,10 @@ async function validateRequest(body, requestId = 0) {
       l.description = null;
     }
   } else if (request_type === 'quick') {
-    lines = (body.lines || []).map(l => ({ bill_id: null, description: String(l.description || '').trim(), amount: round2(l.amount) }))
-      .filter(l => l.description || l.amount);
+    lines = (body.lines || []).map(l => {
+      const amount_fx = fx ? fxAmount(l) : null;
+      return { bill_id: null, description: String(l.description || '').trim(), amount: fx ? round2(amount_fx * pay.exchange_rate) : round2(l.amount), amount_fx };
+    }).filter(l => l.description || l.amount);
     if (!lines.length) return { error: 'Add at least one payment line' };
     for (const l of lines) {
       if (!l.description) return { error: 'Every payment line needs a description' };
@@ -162,20 +189,31 @@ async function validateRequest(body, requestId = 0) {
     if (Number(po.supplier_id) !== supplier_id) return { error: 'That purchase order belongs to a different vendor' };
     if (['draft', 'cancelled'].includes(po.status)) return { error: `An advance can't be requested on a ${po.status} purchase order` };
     if (po.missing_rate) return { error: `${po.po_number} has no exchange rate — set one on the PO first` };
-    const amount = round2(body.amount ?? (body.lines || [])[0]?.amount);
+    let amount = round2(body.amount ?? (body.lines || [])[0]?.amount);
+    let amount_fx = null;
+    if (fx) {
+      amount_fx = round2(body.amount_fx ?? body.amount ?? (body.lines || [])[0]?.amount_fx ?? (body.lines || [])[0]?.amount);
+      if (!(amount_fx > 0)) return { error: 'Enter the advance amount' };
+      if (po.currency === pay.currency) {
+        // A USD advance on a USD PO is booked at the PO's rate, like its bills.
+        if (amount_fx - po.available_fx > 0.005) return { error: `${money(amount_fx, pay.currency)} is more than the ${money(po.available_fx, pay.currency)} left to pay on ${po.po_number}` };
+        amount = amount_fx >= po.available_fx - 0.005 ? po.available : round2(amount_fx * Number(po.exchange_rate));
+      } else amount = round2(amount_fx * pay.exchange_rate);
+    }
     if (!(amount > 0)) return { error: 'Enter the advance amount' };
-    if (amount > po.available) return { error: `${amount.toFixed(2)} is more than the ${po.available.toFixed(2)} left to pay on ${po.po_number}` };
+    if (amount > po.available + 0.005) return { error: `${amount.toFixed(2)} is more than the ${po.available.toFixed(2)} left to pay on ${po.po_number}` };
     const description = String(body.description ?? (body.lines || [])[0]?.description ?? '').trim() || `Advance payment on ${po.po_number}`;
-    lines = [{ bill_id: null, description, amount }];
+    lines = [{ bill_id: null, description, amount, amount_fx }];
   }
   const amount = round2(lines.reduce((s, l) => s + l.amount, 0));
-  return { supplier_id, request_type, po_id, notes, required_date, lines, amount };
+  const amount_fx = fx ? round2(lines.reduce((s, l) => s + (l.amount_fx || 0), 0)) : null;
+  return { supplier_id, request_type, po_id, notes, required_date, lines, amount, currency: pay.currency, exchange_rate: fx ? pay.exchange_rate : null, amount_fx };
 }
 
 async function saveLines(executor, requestId, lines) {
   await executor.execute({ sql: 'DELETE FROM payment_request_lines WHERE request_id = ?', args: [requestId] });
   for (const l of lines) {
-    await executor.execute({ sql: 'INSERT INTO payment_request_lines (request_id, bill_id, description, amount) VALUES (?,?,?,?)', args: [requestId, l.bill_id || null, l.description || null, l.amount] });
+    await executor.execute({ sql: 'INSERT INTO payment_request_lines (request_id, bill_id, description, amount, amount_fx) VALUES (?,?,?,?,?)', args: [requestId, l.bill_id || null, l.description || null, l.amount, l.amount_fx ?? null] });
   }
 }
 
@@ -214,7 +252,7 @@ router.get('/options', requirePermission('payables_requests'), async (req, res) 
     });
     const room = await billRoom(db, billRows.map(b => Number(b.id)), exclude);
     const { rows: billInfo } = billRows.length ? await db.execute({
-      sql: `SELECT b.id, b.bill_number, b.vendor_invoice_number, b.bill_date, b.due_date, b.amount, b.description, po.po_number
+      sql: `SELECT b.id, b.bill_number, b.vendor_invoice_number, b.bill_date, b.due_date, b.amount, b.description, po.po_number, b.currency, b.exchange_rate, b.amount_fx
             FROM ap_bills b LEFT JOIN purchase_orders po ON po.id = b.po_id WHERE b.id IN (${billRows.map(() => '?').join(',')})
             ORDER BY b.due_date, b.id`,
       args: billRows.map(b => b.id),
@@ -230,7 +268,7 @@ router.get('/options', requirePermission('payables_requests'), async (req, res) 
     const pos = [];
     for (const p of poRows) {
       const po = await poAdvanceRoom(db, p.id, exclude);
-      pos.push({ id: po.id, po_number: po.po_number, status: po.status, currency: po.currency, total: round2(po.total), total_base: po.total_base, paid: po.paid, requested: po.requested, available: po.available, missing_rate: po.missing_rate });
+      pos.push({ id: po.id, po_number: po.po_number, status: po.status, currency: po.currency, exchange_rate: po.exchange_rate, total: round2(po.total), total_base: po.total_base, paid: po.paid, requested: po.requested, available: po.available, available_fx: po.available_fx, missing_rate: po.missing_rate });
     }
     res.json({ bills, pos });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -261,7 +299,8 @@ router.post('/from-po/:poId', canRequestFromPo, async (req, res) => {
     }
     const v = await validateRequest({
       supplier_id: po.supplier_id, request_type: 'advance', po_id: po.id,
-      amount: req.body.amount, description: req.body.description, notes: req.body.notes, required_date: req.body.required_date,
+      amount: req.body.amount, amount_fx: req.body.amount_fx, description: req.body.description, notes: req.body.notes, required_date: req.body.required_date,
+      currency: req.body.currency, exchange_rate: req.body.exchange_rate,
     });
     if (v.error) return res.status(400).json({ error: v.error });
     if (!v.required_date) return res.status(400).json({ error: NEED_REQUESTED_DATE });
@@ -270,9 +309,9 @@ router.post('/from-po/:poId', canRequestFromPo, async (req, res) => {
     try {
       const request_number = await nextNumber(tx, 'payment_requests', 'request_number', 'PRQ-', 6);
       const result = await tx.execute({
-        sql: `INSERT INTO payment_requests (request_number, supplier_id, request_type, po_id, amount, notes, required_date, status, requested_by, submitted_at)
-              VALUES (?,?,?,?,?,?,?,'submitted',?,CURRENT_TIMESTAMP)`,
-        args: [request_number, v.supplier_id, v.request_type, v.po_id, v.amount, v.notes, v.required_date, req.employee?.id || null],
+        sql: `INSERT INTO payment_requests (request_number, supplier_id, request_type, po_id, amount, notes, required_date, status, requested_by, submitted_at, currency, exchange_rate, amount_fx)
+              VALUES (?,?,?,?,?,?,?,'submitted',?,CURRENT_TIMESTAMP,?,?,?)`,
+        args: [request_number, v.supplier_id, v.request_type, v.po_id, v.amount, v.notes, v.required_date, req.employee?.id || null, v.currency, v.exchange_rate, v.amount_fx],
       });
       const id = Number(result.lastInsertRowid);
       await saveLines(tx, id, v.lines);
@@ -328,9 +367,9 @@ router.post('/', requirePermission('payables_requests'), async (req, res) => {
     try {
       const request_number = await nextNumber(tx, 'payment_requests', 'request_number', 'PRQ-', 6);
       const result = await tx.execute({
-        sql: `INSERT INTO payment_requests (request_number, supplier_id, request_type, po_id, amount, notes, required_date, status, requested_by, submitted_at)
-              VALUES (?,?,?,?,?,?,?,?,?,${submit ? 'CURRENT_TIMESTAMP' : 'NULL'})`,
-        args: [request_number, v.supplier_id, v.request_type, v.po_id, v.amount, v.notes, v.required_date, submit ? 'submitted' : 'draft', req.employee?.id || null],
+        sql: `INSERT INTO payment_requests (request_number, supplier_id, request_type, po_id, amount, notes, required_date, status, requested_by, submitted_at, currency, exchange_rate, amount_fx)
+              VALUES (?,?,?,?,?,?,?,?,?,${submit ? 'CURRENT_TIMESTAMP' : 'NULL'},?,?,?)`,
+        args: [request_number, v.supplier_id, v.request_type, v.po_id, v.amount, v.notes, v.required_date, submit ? 'submitted' : 'draft', req.employee?.id || null, v.currency, v.exchange_rate, v.amount_fx],
       });
       const id = Number(result.lastInsertRowid);
       await saveLines(tx, id, v.lines);
@@ -359,11 +398,11 @@ router.put('/:id', requirePermission('payables_requests'), async (req, res) => {
     let committed = false;
     try {
       await tx.execute({
-        sql: `UPDATE payment_requests SET supplier_id=?, request_type=?, po_id=?, amount=?, notes=?, required_date=?, status=?,
+        sql: `UPDATE payment_requests SET supplier_id=?, request_type=?, po_id=?, amount=?, notes=?, required_date=?, status=?, currency=?, exchange_rate=?, amount_fx=?,
                 submitted_at=${submit ? 'CURRENT_TIMESTAMP' : 'NULL'}, rejected_by=NULL, rejected_at=NULL, rejection_reason=NULL,
                 scheduled_date=NULL, scheduled_by=NULL, scheduled_at=NULL
               WHERE id=?`,
-        args: [v.supplier_id, v.request_type, v.po_id, v.amount, v.notes, v.required_date, submit ? 'submitted' : 'draft', cur.id],
+        args: [v.supplier_id, v.request_type, v.po_id, v.amount, v.notes, v.required_date, submit ? 'submitted' : 'draft', v.currency, v.exchange_rate, v.amount_fx, cur.id],
       });
       await saveLines(tx, cur.id, v.lines);
       await tx.commit();
@@ -491,6 +530,15 @@ router.post('/:id/pay', requirePermission('payables_payments'), async (req, res)
     const r = await loadRequest(req.params.id);
     if (!r) return res.status(404).json({ error: 'Payment request not found' });
     if (r.status !== 'approved') return res.status(400).json({ error: r.status === 'paid' ? 'This request has already been paid' : 'Only an approved request can be paid' });
+    // Foreign-currency request: the rate on the day it's paid (defaults to the
+    // request's). Lines against a bill/PO in the same currency keep their
+    // booked-rate amounts — the gap to this rate is the realised FX
+    // gain/loss; everything else converts at this rate.
+    const fx = !!r.currency;
+    const payRate = fx ? (parseFloat(req.body.exchange_rate) > 0 ? parseFloat(req.body.exchange_rate) : Number(r.exchange_rate)) : null;
+    if (fx && !(payRate > 0)) return res.status(400).json({ error: `Enter the ${r.currency} exchange rate used for this payment` });
+    let poCurrency = null;
+    if (fx && r.request_type === 'advance') ({ rows: [{ currency: poCurrency } = {}] } = await db.execute({ sql: 'SELECT currency FROM purchase_orders WHERE id = ?', args: [r.po_id] }));
 
     const tx = await db.transaction('write');
     let committed = false;
@@ -498,33 +546,44 @@ router.post('/:id/pay', requirePermission('payables_payments'), async (req, res)
       // Claimed first, so two people paying the same request can't both succeed.
       const claim = await tx.execute({ sql: "UPDATE payment_requests SET status = 'paid', paid_by = ?, paid_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'approved'", args: [req.employee?.id || null, r.id] });
       if (!claim.rowsAffected) throw Object.assign(new Error('This request has already been paid'), { status: 400 });
-      const amount = round2(r.lines.reduce((s, l) => s + Number(l.amount), 0));
       const allocations = [];
+      // Base value of a line: booked-rate for same-currency bills/POs, else the payment rate.
+      const lineBase = (l, docCurrency) => (!fx ? round2(l.amount) : docCurrency === r.currency ? round2(l.amount) : round2(Number(l.amount_fx) * payRate));
+      let amount = 0;
       if (r.request_type === 'invoice') {
         for (const l of r.lines) {
           const { rows: [bill] } = await tx.execute({ sql: `SELECT b.*, ${PAID_SQL} AS paid FROM ap_bills b WHERE b.id = ?`, args: [l.bill_id] });
           if (!bill || bill.status === 'void') throw Object.assign(new Error(`Bill ${l.bill_number || l.bill_id} is void — cancel this request and raise a new one`), { status: 400 });
           const balance = round2(bill.amount - bill.paid);
-          if (round2(l.amount) > balance) throw Object.assign(new Error(`Only ${balance.toFixed(2)} is still owed on bill ${bill.bill_number} — cancel this request and raise a new one`), { status: 400 });
-          allocations.push({ bill_id: bill.id, amount: round2(l.amount) });
+          const base = lineBase(l, bill.currency);
+          if (base - balance > 0.005) throw Object.assign(new Error(`Only ${balance.toFixed(2)} is still owed on bill ${bill.bill_number} — cancel this request and raise a new one`), { status: 400 });
+          allocations.push({ bill_id: bill.id, amount: base, amount_fx: fx ? round2(l.amount_fx) : null });
         }
+        amount = round2(allocations.reduce((t, a) => t + a.amount, 0));
       } else if (r.request_type === 'quick') {
         for (const l of r.lines) {
+          const base = lineBase(l, null);
           const billId = await createBill(tx, {
-            supplier_id: r.supplier_id, bill_date: payment_date, due_date: payment_date, amount: l.amount, tax_amount: 0,
+            supplier_id: r.supplier_id, bill_date: payment_date, due_date: payment_date, amount: base, tax_amount: 0,
             description: l.description, source: 'payment_request', created_by: req.employee?.id,
+            currency: fx ? r.currency : null, exchange_rate: fx ? payRate : null, amount_fx: fx ? l.amount_fx : null,
           });
-          allocations.push({ bill_id: billId, amount: round2(l.amount) });
+          allocations.push({ bill_id: billId, amount: base, amount_fx: fx ? round2(l.amount_fx) : null });
         }
+        amount = round2(allocations.reduce((t, a) => t + a.amount, 0));
+      } else {
+        amount = round2(r.lines.reduce((t, l) => t + lineBase(l, poCurrency), 0));
       }
+      const amount_fx = fx ? round2(r.lines.reduce((t, l) => t + Number(l.amount_fx || 0), 0)) : null;
       const payment_number = await nextNumber(tx, 'ap_payments', 'payment_number', 'APP-', 6);
       const result = await tx.execute({
-        sql: 'INSERT INTO ap_payments (payment_number, supplier_id, payment_date, amount, method, reference, notes, po_id, payment_request_id, created_by) VALUES (?,?,?,?,?,?,?,?,?,?)',
-        args: [payment_number, r.supplier_id, payment_date, amount, method, reference, notes || r.request_number, r.request_type === 'advance' ? r.po_id : null, r.id, req.employee?.id || null],
+        sql: 'INSERT INTO ap_payments (payment_number, supplier_id, payment_date, amount, method, reference, notes, po_id, payment_request_id, created_by, currency, exchange_rate, amount_fx) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        args: [payment_number, r.supplier_id, payment_date, amount, method, reference, notes || r.request_number, r.request_type === 'advance' ? r.po_id : null, r.id, req.employee?.id || null,
+          fx ? r.currency : null, fx ? payRate : null, amount_fx],
       });
       const paymentId = Number(result.lastInsertRowid);
       for (const a of allocations) {
-        await tx.execute({ sql: 'INSERT INTO ap_payment_allocations (payment_id, bill_id, amount) VALUES (?,?,?)', args: [paymentId, a.bill_id, a.amount] });
+        await tx.execute({ sql: 'INSERT INTO ap_payment_allocations (payment_id, bill_id, amount, amount_fx) VALUES (?,?,?,?)', args: [paymentId, a.bill_id, a.amount, a.amount_fx ?? null] });
       }
       if (r.request_type === 'advance') await applyPoAdvances(tx, r.po_id);
       await tx.execute({ sql: 'UPDATE payment_requests SET payment_id = ? WHERE id = ?', args: [paymentId, r.id] });

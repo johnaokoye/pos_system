@@ -531,6 +531,7 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
           tax_amount: parseFloat((tax * rate).toFixed(2)),
           description: `Goods received on ${po.po_number}${po.currency ? ` (${po.currency} ${(receiptValue + tax).toFixed(2)} @ ${rate})` : ''}`,
           source: 'receipt', created_by: req.employee?.id,
+          currency: po.currency || null, exchange_rate: po.currency ? rate : null, amount_fx: po.currency ? receiptValue + tax : null,
         });
         await tx.execute({ sql: 'UPDATE po_receipts SET bill_id = ? WHERE id = ?', args: [billId, receiptId] });
       }

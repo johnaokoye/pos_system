@@ -3,6 +3,19 @@ const router = express.Router();
 const { db } = require('../database');
 const { requirePermission } = require('../lib/permissions');
 const { round2, today, dueDateFor, PAID_SQL, UNAPPLIED_SQL, createBill, applyPoAdvances, poBilling } = require('../lib/payables');
+const { resolvePoCurrency } = require('../lib/poLines');
+
+// A bill entered in a foreign currency: { currency, exchange_rate, amount_fx }
+// with the base amount worked out (amount_fx × rate). Base bills return nulls.
+async function billCurrency(body, current = {}) {
+  if (body.currency === undefined) return { currency: current.currency || null, exchange_rate: current.exchange_rate || null, amount_fx: current.amount_fx ?? null };
+  const pay = await resolvePoCurrency(body.currency, body.exchange_rate);
+  if (!pay.currency) return { currency: null, exchange_rate: null, amount_fx: null };
+  if (!(pay.exchange_rate > 0)) throw Object.assign(new Error(`Enter the ${pay.currency} exchange rate`), { status: 400 });
+  const amount_fx = round2(body.amount_fx);
+  if (!(amount_fx > 0)) throw Object.assign(new Error(`Enter the bill amount in ${pay.currency}`), { status: 400 });
+  return { currency: pay.currency, exchange_rate: pay.exchange_rate, amount_fx, amount: round2(amount_fx * pay.exchange_rate) };
+}
 
 // Accounts payable: bills (what vendors invoice us), payments against them,
 // and aging. Viewing needs `payables`; entering/editing bills needs
@@ -25,6 +38,8 @@ function decorateBill(b, asOf) {
   b.paid = round2(b.paid);
   b.tax_amount = round2(b.tax_amount);
   b.balance = b.status === 'void' ? 0 : round2(b.amount - b.paid);
+  // A foreign-currency bill's balance in its own currency (base ÷ booked rate).
+  b.balance_fx = b.currency && Number(b.exchange_rate) > 0 ? round2(b.balance / Number(b.exchange_rate)) : null;
   b.display_status = b.status === 'void' ? 'void'
     : b.balance <= 0 ? 'paid'
     : b.due_date < asOf ? 'overdue'
@@ -62,7 +77,8 @@ router.get('/bills/:id', requirePermission('payables'), async (req, res) => {
     if (!bill) return res.status(404).json({ error: 'Bill not found' });
     decorateBill(bill, asOfDate(req));
     const { rows: payments } = await db.execute({
-      sql: `SELECT a.amount AS applied, p.id, p.payment_number, p.payment_date, p.method, p.reference, p.status
+      sql: `SELECT a.amount AS applied, a.amount_fx AS applied_fx, p.id, p.payment_number, p.payment_date, p.method, p.reference, p.status,
+              p.currency, p.exchange_rate, p.amount_fx
             FROM ap_payment_allocations a JOIN ap_payments p ON p.id = a.payment_id
             WHERE a.bill_id = ? ORDER BY p.payment_date, p.id`,
       args: [req.params.id],
@@ -102,6 +118,9 @@ async function validateBill(body, billId) {
 
 router.post('/bills', requirePermission('payables_bills'), async (req, res) => {
   try {
+    let cur;
+    try { cur = await billCurrency(req.body); } catch (e) { return res.status(e.status || 500).json({ error: e.message }); }
+    if (cur.currency) { req.body.amount = cur.amount; if (req.body.tax_fx != null) req.body.tax_amount = round2(Number(req.body.tax_fx) * cur.exchange_rate); }
     const err = await validateBill(req.body);
     if (err) return res.status(400).json({ error: err });
     const { rows: [supplier] } = await db.execute({ sql: 'SELECT payment_terms FROM suppliers WHERE id = ?', args: [req.body.supplier_id] });
@@ -112,6 +131,7 @@ router.post('/bills', requirePermission('payables_bills'), async (req, res) => {
       due_date: req.body.due_date || dueDateFor(supplier.payment_terms, req.body.bill_date),
       source: req.body.po_id ? 'po' : 'manual',
       created_by: req.employee?.id,
+      currency: cur.currency, exchange_rate: cur.exchange_rate, amount_fx: cur.amount_fx,
     });
     const { rows: [bill] } = await db.execute({ sql: `${billSelect} WHERE b.id = ?`, args: [id] });
     res.status(201).json(decorateBill(bill, today()));
@@ -124,6 +144,10 @@ router.put('/bills/:id', requirePermission('payables_bills'), async (req, res) =
     if (!bill) return res.status(404).json({ error: 'Bill not found' });
     if (bill.status === 'void') return res.status(400).json({ error: 'A void bill cannot be edited' });
     const body = { ...req.body, supplier_id: req.body.supplier_id || bill.supplier_id };
+    let cur;
+    try { cur = await billCurrency(body, bill); } catch (e) { return res.status(e.status || 500).json({ error: e.message }); }
+    if (cur.currency && body.currency !== undefined) { body.amount = cur.amount; if (body.tax_fx != null) body.tax_amount = round2(Number(body.tax_fx) * cur.exchange_rate); }
+    if (bill.paid > 0 && (cur.currency || null) !== (bill.currency || null)) return res.status(400).json({ error: 'The currency cannot be changed once payments are applied' });
     if (bill.paid > 0 && Number(body.supplier_id) !== Number(bill.supplier_id)) return res.status(400).json({ error: 'The vendor cannot be changed once payments are applied' });
     const err = await validateBill(body, bill.id);
     if (err) return res.status(400).json({ error: err });
@@ -133,9 +157,10 @@ router.put('/bills/:id', requirePermission('payables_bills'), async (req, res) =
     const tax = body.tax_amount === undefined ? round2(bill.tax_amount) : round2(body.tax_amount);
     if (tax > amount) return res.status(400).json({ error: 'GCT cannot be more than the bill amount' });
     await db.execute({
-      sql: 'UPDATE ap_bills SET supplier_id=?, vendor_invoice_number=?, po_id=?, branch_id=?, bill_date=?, due_date=?, amount=?, tax_amount=?, description=? WHERE id=?',
+      sql: 'UPDATE ap_bills SET supplier_id=?, vendor_invoice_number=?, po_id=?, branch_id=?, bill_date=?, due_date=?, amount=?, tax_amount=?, description=?, currency=?, exchange_rate=?, amount_fx=? WHERE id=?',
       args: [body.supplier_id, String(body.vendor_invoice_number || '').trim() || null, body.po_id || null, body.branch_id || null,
-        body.bill_date, body.due_date || bill.due_date, amount, tax, body.description || null, bill.id],
+        body.bill_date, body.due_date || bill.due_date, amount, tax, body.description || null,
+        cur.currency, cur.exchange_rate, cur.currency ? (body.currency !== undefined ? cur.amount_fx : round2(amount / cur.exchange_rate)) : null, bill.id],
     });
     if (body.po_id) await applyPoAdvances(db, body.po_id);
     const { rows: [updated] } = await db.execute({ sql: `${billSelect} WHERE b.id = ?`, args: [bill.id] });

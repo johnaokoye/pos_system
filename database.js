@@ -2877,6 +2877,27 @@ async function _init() {
     'ALTER TABLE ap_payments ADD COLUMN po_id INTEGER REFERENCES purchase_orders(id)',
     'ALTER TABLE ap_payments ADD COLUMN payment_request_id INTEGER REFERENCES payment_requests(id)',
     'ALTER TABLE ap_payments ADD COLUMN contra_id INTEGER REFERENCES contras(id)',
+    // Foreign-currency A/P. Amounts (ap_bills.amount, payment amounts and
+    // allocations) stay in base currency; these say what currency the
+    // document was really in. A bill: currency + exchange_rate (base per
+    // unit, its booked rate) + amount_fx (the vendor's figure). A payment
+    // request / payment: the currency it's paid in, the payment rate and
+    // amount_fx (what's actually paid in that currency); each allocation's
+    // amount_fx is its share. A bill paid in its own currency is cleared at
+    // its booked rate (amount = amount_fx × bill rate), so paying the USD
+    // owed clears it; the gap to the payment rate is a realised FX
+    // gain/loss (RetailPOS Books posts it). NULL currency = base.
+    'ALTER TABLE ap_bills ADD COLUMN currency TEXT',
+    'ALTER TABLE ap_bills ADD COLUMN exchange_rate REAL',
+    'ALTER TABLE ap_bills ADD COLUMN amount_fx REAL',
+    'ALTER TABLE payment_requests ADD COLUMN currency TEXT',
+    'ALTER TABLE payment_requests ADD COLUMN exchange_rate REAL',
+    'ALTER TABLE payment_requests ADD COLUMN amount_fx REAL',
+    'ALTER TABLE payment_request_lines ADD COLUMN amount_fx REAL',
+    'ALTER TABLE ap_payments ADD COLUMN currency TEXT',
+    'ALTER TABLE ap_payments ADD COLUMN exchange_rate REAL',
+    'ALTER TABLE ap_payments ADD COLUMN amount_fx REAL',
+    'ALTER TABLE ap_payment_allocations ADD COLUMN amount_fx REAL',
     'ALTER TABLE account_payments ADD COLUMN contra_id INTEGER REFERENCES contras(id)',
     // The customer account of a business that's also this supplier — the
     // link a contra (routes/contras.js) needs.
@@ -3801,6 +3822,16 @@ async function _init() {
       await db.execute({ sql: aSql, args: [r1Id, null, empId,'call','Initial contact - TechCorp','Introduced our product range',yesterday,1] });
     } catch(e) {}
   }
+
+  // Bills raised from a foreign-currency PO before bills carried a currency:
+  // take the PO's currency and rate so they can be paid in that currency.
+  try {
+    await db.execute(`UPDATE ap_bills SET currency = (SELECT po.currency FROM purchase_orders po WHERE po.id = ap_bills.po_id),
+        exchange_rate = (SELECT po.exchange_rate FROM purchase_orders po WHERE po.id = ap_bills.po_id),
+        amount_fx = ROUND(amount / (SELECT po.exchange_rate FROM purchase_orders po WHERE po.id = ap_bills.po_id), 2)
+      WHERE currency IS NULL AND po_id IS NOT NULL AND EXISTS (SELECT 1 FROM purchase_orders po WHERE po.id = ap_bills.po_id
+        AND po.currency IS NOT NULL AND po.currency != '' AND po.exchange_rate > 0)`);
+  } catch (e) { console.error('[db] bill currency backfill:', e.message); }
 
   // Petty cash categories, mapped to RetailPOS Books' expense accounts (all
   // editable under Cash Drawers → Petty Cash Accounts).

@@ -1523,13 +1523,15 @@ function buildPaymentRequestHtml(r, s, origin) {
   const day = v => v ? fmtDate(v) : '—';
   const th = (label, align = 'left') => `<th style="padding:8px;text-align:${align};font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">${label}</th>`;
   const td = (v, align = 'left', extra = '') => `<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:${align};${extra}">${v}</td>`;
+  // Paid in a foreign currency: amounts in that currency, base value alongside.
+  const reqAmt = (amount, fx) => r.currency ? `${esc(r.currency)} ${num2(fx)}<div style="font-size:11px;color:#888;font-weight:400">≈ ${fmt(amount)}</div>` : fmt(amount);
   let head, rows;
   if (r.request_type === 'invoice') {
     head = th('Bill #') + th('Vendor Invoice #') + th('Due') + th('Balance Owed', 'right') + th('Amount Requested', 'right');
-    rows = r.lines.map(l => `<tr>${td(esc(l.bill_number || ''))}${td(esc(l.vendor_invoice_number || '—'))}${td(day(l.due_date))}${td(r.status === 'paid' ? '—' : fmt(l.bill_balance), 'right')}${td(fmt(l.amount), 'right', 'font-weight:600')}</tr>`).join('');
+    rows = r.lines.map(l => `<tr>${td(esc(l.bill_number || ''))}${td(esc(l.vendor_invoice_number || '—'))}${td(day(l.due_date))}${td(r.status === 'paid' ? '—' : `${fmt(l.bill_balance)}${l.bill_currency && Number(l.bill_rate) > 0 ? `<div style="font-size:11px;color:#888">${esc(l.bill_currency)} ${num2(l.bill_balance / l.bill_rate)}</div>` : ''}`, 'right')}${td(reqAmt(l.amount, l.amount_fx), 'right', 'font-weight:600')}</tr>`).join('');
   } else {
     head = th('Description') + th('Amount Requested', 'right');
-    rows = r.lines.map(l => `<tr>${td(esc(l.description || ''))}${td(fmt(l.amount), 'right', 'font-weight:600')}</tr>`).join('');
+    rows = r.lines.map(l => `<tr>${td(esc(l.description || ''))}${td(reqAmt(l.amount, l.amount_fx), 'right', 'font-weight:600')}</tr>`).join('');
   }
   const statusColor = { paid: '#15803d', approved: '#15803d', rejected: '#dc2626', cancelled: '#6b7280' }[r.status] || '#b45309';
   const vendorAddr = [r.supplier_address, [r.supplier_city, r.supplier_state, r.supplier_zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
@@ -1575,7 +1577,8 @@ ${PRINT_PAGE_STYLE}
         <thead><tr style="background:#f9fafb">${head}</tr></thead>
         <tbody>${rows}</tbody>
       </table>
-      <div style="text-align:right;margin-top:10px;font-size:16px;font-weight:700;color:${BRAND.black}">Total Requested: ${fmt(r.amount)}</div>
+      <div style="text-align:right;margin-top:10px;font-size:16px;font-weight:700;color:${BRAND.black}">Total Requested: ${r.currency ? `${esc(r.currency)} ${num2(r.amount_fx)}` : fmt(r.amount)}</div>
+      ${r.currency ? `<div style="text-align:right;font-size:12px;color:#666">To be paid in ${esc(r.currency)} · ≈ ${fmt(r.amount)} at ${r.exchange_rate} per ${esc(r.currency)}</div>` : ''}
       ${r.notes ? `<div style="margin-top:14px;font-size:13px;color:#444"><strong>Purpose / Notes:</strong> ${esc(r.notes)}</div>` : ''}
       ${r.attachment_count ? `<div style="margin-top:6px;font-size:12px;color:#666">${r.attachment_count} supporting document${r.attachment_count === 1 ? '' : 's'} on file.</div>` : ''}
       ${r.status === 'rejected' ? `<div style="margin-top:14px;padding:10px 12px;border:1px solid #fecaca;background:#fef2f2;border-radius:6px;font-size:13px;color:#991b1b"><strong>Rejected</strong> by ${esc(r.rejected_by_name || '—')} on ${day(r.rejected_at)}: ${esc(r.rejection_reason || '')}</div>` : ''}
