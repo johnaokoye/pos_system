@@ -1412,8 +1412,22 @@ const App = {
       pill.textContent = n > 99 ? '99+' : n;
       pill.title = `${n} transfer request${n === 1 ? '' : 's'} waiting to be sent`;
     };
-    paint(document.querySelector('.nav-item[data-section="warehouse-hub"]'), 'trf-inbox');
     paint(document.querySelector('.hub-tile[data-section="transfers"]'), 'trf-inbox');
+    this._paintWarehouseNavBadge();
+  },
+
+  // The Warehouse menu item carries one pill: transfer requests to send plus
+  // Shop Use requests waiting on you.
+  _paintWarehouseNavBadge() {
+    const el = document.querySelector('.nav-item[data-section="warehouse-hub"]');
+    if (!el) return;
+    el.querySelector('.count-pill.trf-inbox')?.remove();
+    const t = this._trfInboxCount || 0, u = this._suInboxCount || 0, n = t + u;
+    let pill = el.querySelector('.count-pill.wh-inbox');
+    if (!n) { pill?.remove(); return; }
+    if (!pill) { pill = document.createElement('span'); pill.className = 'count-pill wh-inbox'; el.appendChild(pill); }
+    pill.textContent = n > 99 ? '99+' : n;
+    pill.title = [t ? `${t} transfer request${t === 1 ? '' : 's'} waiting to be sent` : '', u ? `${u} Shop Use request${u === 1 ? '' : 's'} waiting on you` : ''].filter(Boolean).join(' · ');
   },
 
   // server.js redirects a logged-out browser hitting a document download
@@ -1787,6 +1801,7 @@ const App = {
       ${reportsPanel}`;
     this._paintTransferBadges();
     this._paintPayablesBadges();
+    this._paintShopUseBadges();
 
     if (showReports) this.loadWarehouseHubReports();
   },
@@ -28837,6 +28852,7 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
 
   async renderShopUse(tab) {
     if (tab) this._suTab = tab;
+    this._pollShopUseInbox();
     const tabs = [['dashboard', 'Dashboard'], ['requests', 'Requests']];
     if (this.can('shop_use_issue')) tabs.push(['issue', 'Issue']);
     tabs.push(['tools', 'Tool Register']);
@@ -29976,18 +29992,38 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
   // Approvers are told when a request is routed to them, and requesters when
   // theirs is decided — GET /shop-use/inbox polled every minute, each item
   // shown once per user in this browser (same pattern as transfer requests).
+  // The count waiting on you (to approve, to issue, or your own request sent
+  // back) shows on the Warehouse menu item and the Shop Use tile.
   _startShopUseInbox() {
     clearInterval(this._suInboxTimer);
     this._suInboxFirst = true;
-    if (!this._suCanOpen()) return;
+    this._suInboxCount = 0;
+    if (!this._suCanOpen()) return this._paintShopUseBadges();
     this._pollShopUseInbox();
     this._suInboxTimer = setInterval(() => this._pollShopUseInbox(), 60000);
   },
-  _stopShopUseInbox() { clearInterval(this._suInboxTimer); this._suInboxTimer = null; },
+  _stopShopUseInbox() { clearInterval(this._suInboxTimer); this._suInboxTimer = null; this._suInboxCount = 0; this._paintShopUseBadges(); },
+  _paintShopUseBadges() {
+    const n = this._suInboxCount || 0;
+    const el = document.querySelector('.hub-tile[data-section="shop-use"]');
+    if (el) {
+      let pill = el.querySelector('.count-pill.su-inbox');
+      if (!n) pill?.remove();
+      else {
+        if (!pill) { pill = document.createElement('span'); pill.className = 'count-pill su-inbox'; el.appendChild(pill); }
+        pill.textContent = n > 99 ? '99+' : n;
+        pill.title = `${n} Shop Use request${n === 1 ? '' : 's'} waiting on you (to approve, issue or correct)`;
+      }
+    }
+    this._paintWarehouseNavBadge();
+  },
   async _pollShopUseInbox() {
     if (!this.currentUser || !this._suCanOpen()) return;
     let inbox;
     try { inbox = await this.api('GET', '/shop-use/inbox'); } catch { return; }
+    if (!this.currentUser) return;
+    this._suInboxCount = inbox.count || 0;
+    this._paintShopUseBadges();
     const key = `suInboxSeen:${this.currentUser.id}`;
     let seen;
     try { seen = new Set(JSON.parse(localStorage.getItem(key) || '[]')); } catch { seen = new Set(); }
@@ -30003,6 +30039,19 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
           actions: [{ label: 'Review', primary: true, run: () => this.viewShopUseRequest(r.id) }] });
       }
     }
+    const toIssue = inbox.to_issue || [];
+    const freshI = toIssue.filter(r => !seen.has(`i${r.id}:${r.version}`));
+    if (this._suInboxFirst && freshI.length > 1) {
+      this._notify({ title: `🧰 ${freshI.length} approved Shop Use requests to issue`, body: freshI.slice(0, 8).map(r => `${r.request_number} · ${this.escapeAttr(r.requested_by_name || '')} · ${this.fmt(r.value_outstanding)}`).join('<br>') + (freshI.length > 8 ? `<br>…and ${freshI.length - 8} more` : ''),
+        actions: [{ label: 'Open Issue', primary: true, run: () => this.showSection('shop-use').then(() => this.renderShopUse('issue')) }] });
+    } else {
+      for (const r of freshI) {
+        this._notify({ title: `🧰 Shop Use ${r.request_number} ${r.fulfillment_status === 'partial' ? 'part-issued — rest to issue' : 'approved — ready to issue'}`,
+          body: `<strong>${this.escapeAttr(r.requested_by_name || '')}</strong> · ${this.escapeAttr(r.branch_name || '')} / ${this.escapeAttr(r.department || '')} · ${this.escapeAttr(r.category_label)} · ${this.fmt(r.value_outstanding)}${r.source_branch_name ? `<div style="color:var(--text-muted)">From ${this.escapeAttr(r.source_branch_name)}</div>` : ''}`,
+          actions: [{ label: 'Open', primary: true, run: () => this.viewShopUseRequest(r.id) }] });
+      }
+    }
+    freshI.forEach(r => seen.add(`i${r.id}:${r.version}`));
     if (!this._suInboxFirst) {
       const word = { approved: 'approved', rejected: 'rejected', returned: 'returned for correction' };
       for (const r of freshD) {

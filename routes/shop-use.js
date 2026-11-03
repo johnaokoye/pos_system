@@ -1535,7 +1535,8 @@ router.get('/dashboard', inModule, async (req, res) => {
 });
 
 // Polled by the app for notifications: requests waiting on me to approve,
-// and decisions on my own requests.
+// approved requests waiting to be issued (shop_use_issue), decisions on my
+// own requests, and `count` — what's waiting on me — for the menu badge.
 router.get('/inbox', inModule, async (req, res) => {
   try {
     const me = Number(req.employee?.id) || 0;
@@ -1552,7 +1553,16 @@ router.get('/inbox', inModule, async (req, res) => {
             WHERE r.requested_by = ? AND r.approval_status IN ('approved', 'rejected', 'returned') AND r.decided_at >= datetime('now', '-14 days')`,
       args: [me],
     });
-    res.json({ approvals, decisions });
+    // Approved requests with something still to hand over — for whoever issues stock.
+    const { rows: toIssue } = can(perms(req), 'shop_use_issue') ? await db.execute(`SELECT r.id, r.request_number, r.version, r.category, r.department,
+        r.fulfillment_status, r.decided_at, e.first_name || ' ' || e.last_name AS requested_by_name, b.name AS branch_name, sb.name AS source_branch_name,
+        (SELECT COALESCE(SUM(MAX(0, l.qty_approved - l.qty_issued - l.qty_cancelled) * l.unit_cost), 0) FROM shop_use_request_lines l WHERE l.request_id = r.id AND l.qty_approved IS NOT NULL) AS value_outstanding
+      FROM shop_use_requests r LEFT JOIN employees e ON e.id = r.requested_by LEFT JOIN branches b ON b.id = r.branch_id LEFT JOIN branches sb ON sb.id = r.source_branch_id
+      WHERE r.approval_status = 'approved' AND r.fulfillment_status IN ('not_issued', 'partial') ORDER BY r.decided_at`) : { rows: [] };
+    const to_issue = toIssue.map(r => ({ ...r, category_label: categoryLabel(r.category), value_outstanding: round2(r.value_outstanding) }));
+    // Waiting on me: to approve, to issue, or my own request sent back for correction.
+    const count = approvals.length + to_issue.length + decisions.filter(d => d.approval_status === 'returned').length;
+    res.json({ approvals, decisions, to_issue, count });
   } catch (e) { sendError(res, e); }
 });
 
