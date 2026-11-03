@@ -1515,7 +1515,7 @@ function poUnapprovedLabel(po) {
 // it stands in approval (with the approver's signature once approved).
 const PAYMENT_REQUEST_STATUS = { draft: 'DRAFT — NOT SUBMITTED', submitted: 'AWAITING APPROVAL', approved: 'APPROVED — NOT YET PAID', rejected: 'REJECTED', paid: 'APPROVED & PAID', cancelled: 'CANCELLED' };
 const PAYMENT_REQUEST_TYPE = { invoice: 'Invoice payment', quick: 'Quick payment (no invoice)', advance: 'Advance payment' };
-const AP_METHODS = { cheque: 'Cheque', bank_transfer: 'Bank Transfer', cash: 'Cash', card: 'Card', other: 'Other' };
+const AP_METHODS = { cheque: 'Cheque', bank_transfer: 'Bank Transfer', cash: 'Cash', card: 'Card', other: 'Other', contra: 'Contra (offset)' };
 
 function buildPaymentRequestHtml(r, s, origin) {
   const storeName = s.store_name || 'My Store';
@@ -1606,6 +1606,106 @@ router.get('/payment-request-preview/:id', requireAnyPermission('payables', 'pay
     res.setHeader('Content-Type', 'text/html');
     res.setHeader('X-Pos-Document', 'payment-request');
     res.send(buildPaymentRequestHtml(r, s, `${req.protocol}://${req.get('host')}`));
+  } catch(e) { res.status(500).send(`<p>Error: ${esc(e.message)}</p>`); }
+});
+
+// Contra statement (routes/contras.js): both sides of the offset — our
+// invoices to the customer and their bills to us — with each document's
+// balance before, the amount offset and what's left, plus who raised,
+// approved and posted it.
+function buildContraHtml(k, s, origin, balances) {
+  const storeName = s.store_name || 'My Store';
+  const absUrl = (p) => !p ? null : (/^https?:\/\//.test(p) ? p : `${origin}${p}`);
+  const day = v => v ? fmtDate(v) : '—';
+  const th = (label, align = 'left') => `<th style="padding:7px 8px;text-align:${align};font-size:11px;color:#666;border-bottom:1px solid #e8e8e8;text-transform:uppercase">${label}</th>`;
+  const td = (v, align = 'left', extra = '') => `<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:${align};${extra}">${v}</td>`;
+  const money = v => v == null ? '—' : fmt(v);
+  const sum = (lines, f) => lines.reduce((t, l) => t + (Number(l[f]) || 0), 0);
+  const side = (title, lines, isBill) => `
+      <div style="font-weight:700;font-size:14px;margin:18px 0 6px;color:${BRAND.black}">${title}</div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;font-size:12px">
+        <thead><tr style="background:#f9fafb">${th(isBill ? 'Bill #' : 'Invoice #')}${isBill ? th('Their Inv #') : ''}${th('Date')}${th('Total', 'right')}${th('Balance Before', 'right')}${th('Offset', 'right')}${th('Remaining', 'right')}</tr></thead>
+        <tbody>${lines.map(l => `<tr>${td(`${esc(l.number || '')}${l.is_legacy ? ' <span style="color:#888;font-size:10px">LEGACY</span>' : ''}`)}${isBill ? td(esc(l.vendor_invoice_number || '—')) : ''}${td(day(l.doc_date))}${td(money(l.doc_total), 'right')}${td(money(l.balance_before), 'right')}${td(fmt(l.amount), 'right', 'font-weight:700')}${td(money(l.balance_after), 'right')}</tr>`).join('')}
+          <tr style="background:#f9fafb;font-weight:700">${td('Total', 'left', `font-weight:700`)}${isBill ? td('') : ''}${td('')}${td('')}${td(fmt(sum(lines, 'balance_before')), 'right')}${td(fmt(sum(lines, 'amount')), 'right')}${td(fmt(sum(lines, 'balance_after')), 'right')}</tr>
+        </tbody>
+      </table>`;
+  const statusColor = { posted: '#15803d', approved: '#15803d', rejected: '#dc2626', cancelled: '#6b7280' }[k.status] || '#b45309';
+  const statusLabel = { draft: 'DRAFT', submitted: 'AWAITING APPROVAL', approved: 'APPROVED — NOT YET POSTED', posted: 'POSTED', rejected: 'REJECTED', cancelled: 'CANCELLED' }[k.status] || esc(k.status);
+  const sigBox = (label, name, when, img) => `<td style="width:25%;vertical-align:bottom;padding:0 6px">
+      ${img ? `<img src="${esc(absUrl(img))}" alt="Signature" style="max-height:48px;max-width:150px;display:block;margin-bottom:2px">` : '<div style="height:36px"></div>'}
+      <div style="border-top:1px solid #111;padding-top:4px;font-size:11px;color:#444"><strong>${label}</strong><br>${name ? esc(name) : '&nbsp;'}${when ? `<br>${fmtDateTime(when)}` : ''}</div>
+    </td>`;
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Contra Statement ${esc(k.contra_number)}</title>
+${PRINT_PAGE_STYLE}
+</head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
+<table class="page-wrap" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
+<tr><td align="center">
+  <table class="page" width="720" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+    <tr><td style="${BRAND_HEADER_STYLE}">
+      <div style="color:#fff;font-size:22px;font-weight:700">${esc(storeName)}</div>
+    </td></tr>
+    <tr><td style="padding:20px 24px">
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:14px"><tr>
+        <td style="vertical-align:top">
+          <div style="font-size:20px;font-weight:700;color:${BRAND.black}">CONTRA STATEMENT</div>
+          <div style="font-size:13px;color:#888;margin-top:2px">${esc(k.contra_number)}</div>
+          <div style="display:inline-block;margin-top:6px;padding:3px 8px;border:2px solid ${statusColor};color:${statusColor};font-size:12px;font-weight:700;letter-spacing:.5px">${statusLabel}</div>
+        </td>
+        <td style="vertical-align:top;text-align:right;font-size:13px;color:#444;line-height:1.6">
+          <div><strong>Contra date:</strong> ${day(k.contra_date)}</div>
+          <div><strong>Amount offset:</strong> ${fmt(k.amount)}</div>
+          ${k.ar_payment_number ? `<div><strong>A/R ref:</strong> ${esc(k.ar_payment_number)} · <strong>A/P ref:</strong> ${esc(k.ap_payment_number || '')}</div>` : ''}
+        </td>
+      </tr></table>
+      <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px"><tr>
+        <td style="width:50%;vertical-align:top;padding-right:8px"><div style="background:#f9fafb;border:1px solid #e8e8e8;border-radius:6px;padding:10px 12px;line-height:1.5">
+          <strong>As our customer</strong><br>${esc(k.customer_name)}${k.customer_number ? ` <span style="color:#888">(${esc(k.customer_number)})</span>` : ''}
+          ${balances ? `<br><span style="color:#666">Owes us now: ${fmt(balances.customer)}</span>` : ''}</div></td>
+        <td style="width:50%;vertical-align:top;padding-left:8px"><div style="background:#f9fafb;border:1px solid #e8e8e8;border-radius:6px;padding:10px 12px;line-height:1.5">
+          <strong>As our supplier</strong><br>${esc(k.supplier_name)}${k.supplier_number ? ` <span style="color:#888">(${esc(k.supplier_number)})</span>` : ''}
+          ${balances ? `<br><span style="color:#666">We owe them now: ${fmt(balances.supplier)}</span>` : ''}</div></td>
+      </tr></table>
+      ${side(`Our invoices to ${esc(k.customer_name)} (Accounts Receivable)`, k.ar_lines, false)}
+      ${side(`${esc(k.supplier_name)} bills to us (Accounts Payable)`, k.ap_lines, true)}
+      <div style="margin-top:14px;padding:10px 12px;border:1px solid #e8e8e8;border-radius:6px;font-size:13px;line-height:1.6">
+        <strong>${fmt(k.amount)}</strong> owed to ${esc(k.supplier_name)} is set off against ${fmt(k.amount)} owed by ${esc(k.customer_name)}. No cash or bank payment is made; any amounts remaining above stay outstanding on each side.
+      </div>
+      ${k.notes ? `<div style="margin-top:10px;font-size:13px;color:#444"><strong>Notes:</strong> ${esc(k.notes)}</div>` : ''}
+      ${k.status === 'rejected' ? `<div style="margin-top:12px;padding:10px 12px;border:1px solid #fecaca;background:#fef2f2;border-radius:6px;font-size:13px;color:#991b1b"><strong>Rejected</strong> by ${esc(k.rejected_by_name || '—')} on ${day(k.rejected_at)}: ${esc(k.rejection_reason || '')}</div>` : ''}
+      ${k.status === 'cancelled' ? `<div style="margin-top:12px;padding:10px 12px;border:1px solid #e5e7eb;background:#f9fafb;border-radius:6px;font-size:13px;color:#444"><strong>Cancelled</strong> by ${esc(k.cancelled_by_name || '—')} on ${day(k.cancelled_at)}: ${esc(k.cancel_reason || '')}</div>` : ''}
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:34px"><tr>
+        ${sigBox('Prepared by', k.created_by_name, k.created_at, null)}
+        ${sigBox('Submitted by', k.submitted_by_name, k.submitted_at, null)}
+        ${sigBox('Approved by', k.approved_by_name, k.approved_at, k.approval_signature)}
+        ${sigBox('Posted by', k.posted_by_name, k.posted_at, null)}
+      </tr></table>
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:30px"><tr>
+        <td style="width:50%;padding:0 6px"><div style="height:36px"></div><div style="border-top:1px solid #111;padding-top:4px;font-size:11px;color:#444"><strong>Acknowledged for ${esc(k.supplier_name)}</strong><br>Name / Date</div></td>
+        <td style="width:50%;padding:0 6px"></td>
+      </tr></table>
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body>
+</html>`;
+}
+
+router.get('/contra-preview/:id', requireAnyPermission('payables', 'payables_approve', 'payables_contra'), async (req, res) => {
+  try {
+    const { loadContra } = require('./contras');
+    const k = await loadContra(req.params.id);
+    if (!k) return res.status(404).send('<p>Contra not found</p>');
+    const { rows: [c] } = await db.execute({ sql: 'SELECT account_balance FROM customers WHERE id = ?', args: [k.customer_id] });
+    const { rows: [o] } = await db.execute({ sql: `SELECT COALESCE(SUM(b.amount - (SELECT COALESCE(SUM(a.amount), 0) FROM ap_payment_allocations a JOIN ap_payments p ON p.id = a.payment_id AND p.status = 'posted' WHERE a.bill_id = b.id)), 0) AS owed
+      FROM ap_bills b WHERE b.supplier_id = ? AND b.status = 'open'`, args: [k.supplier_id] });
+    const s = await getSettings();
+    res.setHeader('Content-Type', 'text/html');
+    res.setHeader('X-Pos-Document', 'contra');
+    res.send(buildContraHtml(k, s, `${req.protocol}://${req.get('host')}`, { customer: Number(c?.account_balance) || 0, supplier: Number(o?.owed) || 0 }));
   } catch(e) { res.status(500).send(`<p>Error: ${esc(e.message)}</p>`); }
 });
 

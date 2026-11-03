@@ -207,6 +207,7 @@ router.post('/payments/:id/void', requirePermission('payables_void'), async (req
     const { rows: [payment] } = await db.execute({ sql: 'SELECT * FROM ap_payments WHERE id = ?', args: [req.params.id] });
     if (!payment) return res.status(404).json({ error: 'Payment not found' });
     if (payment.status === 'void') return res.status(400).json({ error: 'This payment is already void' });
+    if (payment.method === 'contra') return res.status(400).json({ error: `This is the supplier side of contra ${payment.reference || ''} — a contra offset can't be voided on one side only` });
     await db.execute({
       sql: "UPDATE ap_payments SET status = 'void', void_reason = ?, voided_by = ?, voided_at = CURRENT_TIMESTAMP WHERE id = ?",
       args: [reason, req.employee?.id || null, payment.id],

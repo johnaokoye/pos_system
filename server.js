@@ -108,6 +108,7 @@ app.use('/api/customers',        require('./routes/customers'));
 app.use('/api/customer-imports', require('./routes/customer-imports'));
 app.use('/api/supplier-imports', require('./routes/supplier-imports'));
 app.use('/api/payables/payment-requests', require('./routes/payment-requests'));
+app.use('/api/payables/contras', require('./routes/contras'));
 app.use('/api/payables', require('./routes/payables'));
 app.use('/api/transactions',     require('./routes/transactions'));
 app.use('/api/employees',        require('./routes/employees'));

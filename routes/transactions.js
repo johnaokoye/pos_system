@@ -324,7 +324,7 @@ router.get('/customer-payments', requirePermission('transactions'), async (req, 
       LEFT JOIN customers c ON p.customer_id = c.id
       LEFT JOIN employees e ON p.employee_id = e.id
       LEFT JOIN branches b ON p.branch_id = b.id
-      WHERE p.payment_method NOT IN ('writeoff', 'credit_note', 'tax_exempt')`;
+      WHERE p.payment_method NOT IN ('writeoff', 'credit_note', 'tax_exempt', 'contra')`;
     const args = [];
     if (start) { sql += ' AND date(p.created_at) >= date(?)'; args.push(start); }
     if (end) { sql += ' AND date(p.created_at) <= date(?)'; args.push(end); }

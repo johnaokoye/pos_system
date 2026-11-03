@@ -1606,6 +1606,66 @@ async function _init() {
       created_by INTEGER REFERENCES employees(id),
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // Contra / barter offsets (routes/contras.js): a business that's both a
+    // customer and a supplier (suppliers.contra_customer_id) settles what we
+    // owe them (A/P bills) against what they owe us (A/R invoices) with no
+    // cash. draft → submitted → approved → posted (or rejected / cancelled).
+    // Posting writes a 'contra' account_payments row (ar_payment_id) and a
+    // 'contra' ap_payments row (ap_payment_id), both allocated to the lines,
+    // and queues one GL entry for RetailPOS Books: Dr A/P / Cr A/R (gl_*).
+    { sql: `CREATE TABLE IF NOT EXISTS contras (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      contra_number TEXT UNIQUE NOT NULL,
+      supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
+      customer_id INTEGER NOT NULL REFERENCES customers(id),
+      amount REAL NOT NULL,
+      contra_date DATE,
+      notes TEXT,
+      status TEXT NOT NULL DEFAULT 'draft',
+      created_by INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      submitted_by INTEGER REFERENCES employees(id),
+      submitted_at DATETIME,
+      approved_by INTEGER REFERENCES employees(id),
+      approved_at DATETIME,
+      approval_signature TEXT,
+      rejected_by INTEGER REFERENCES employees(id),
+      rejected_at DATETIME,
+      rejection_reason TEXT,
+      posted_by INTEGER REFERENCES employees(id),
+      posted_at DATETIME,
+      cancelled_by INTEGER REFERENCES employees(id),
+      cancelled_at DATETIME,
+      cancel_reason TEXT,
+      ar_payment_id INTEGER REFERENCES account_payments(id),
+      ap_payment_id INTEGER REFERENCES ap_payments(id),
+      gl_status TEXT,
+      gl_ref TEXT,
+      gl_error TEXT,
+      gl_posted_at DATETIME
+    )` },
+    // One invoice or bill being offset. side 'ar' = our invoice to them
+    // (transaction_id or legacy_invoice_id), 'ap' = their bill to us
+    // (bill_id). balance_before/after are snapshotted when it's posted.
+    { sql: `CREATE TABLE IF NOT EXISTS contra_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      contra_id INTEGER NOT NULL REFERENCES contras(id),
+      side TEXT NOT NULL,
+      transaction_id INTEGER REFERENCES transactions(id),
+      legacy_invoice_id INTEGER REFERENCES ar_legacy_invoices(id),
+      bill_id INTEGER REFERENCES ap_bills(id),
+      amount REAL NOT NULL,
+      balance_before REAL,
+      balance_after REAL
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS contra_audit (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      contra_id INTEGER NOT NULL REFERENCES contras(id),
+      action TEXT NOT NULL,
+      employee_id INTEGER REFERENCES employees(id),
+      details TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS ap_payment_allocations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       payment_id INTEGER NOT NULL REFERENCES ap_payments(id),
@@ -2816,6 +2876,11 @@ async function _init() {
     // payment_request_id is the approved request it was paid from.
     'ALTER TABLE ap_payments ADD COLUMN po_id INTEGER REFERENCES purchase_orders(id)',
     'ALTER TABLE ap_payments ADD COLUMN payment_request_id INTEGER REFERENCES payment_requests(id)',
+    'ALTER TABLE ap_payments ADD COLUMN contra_id INTEGER REFERENCES contras(id)',
+    'ALTER TABLE account_payments ADD COLUMN contra_id INTEGER REFERENCES contras(id)',
+    // The customer account of a business that's also this supplier — the
+    // link a contra (routes/contras.js) needs.
+    'ALTER TABLE suppliers ADD COLUMN contra_customer_id INTEGER REFERENCES customers(id)',
     // What a request / PO is for, for the approver — kept off everything the
     // supplier sees (unlike notes, which print on the PO and pump authorization).
     'ALTER TABLE purchase_requests ADD COLUMN internal_notes TEXT',
@@ -3501,6 +3566,9 @@ async function _init() {
       // Receiving goods with no PO (2026-11-03) starts with whoever can
       // already receive POs.
       if (!('purchasing_receive_direct' in perms)) { perms.purchasing_receive_direct = can(perms, 'purchasing_receive'); changed = true; }
+      // Raising contra / barter offsets (2026-11-03) starts with whoever can
+      // raise payment requests.
+      if (!('payables_contra' in perms)) { perms.payables_contra = can(perms, 'payables_requests'); changed = true; }
       // Receiving customer account payments at the POS — standalone (not a
       // `pos` sub, which every full-POS group would inherit) and, by the
       // owner's choice (2026-10-19), only for the cashier groups.

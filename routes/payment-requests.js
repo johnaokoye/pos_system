@@ -103,7 +103,9 @@ async function billRoom(executor, billIds, excludeRequestId = 0) {
   const { rows } = await executor.execute({
     sql: `SELECT b.id, b.bill_number, b.supplier_id, b.status, b.amount - ${PAID_SQL} AS balance,
             (SELECT COALESCE(SUM(l.amount), 0) FROM payment_request_lines l JOIN payment_requests r ON r.id = l.request_id
-             WHERE l.bill_id = b.id AND r.status IN ${ACTIVE} AND r.id != ?) AS requested
+             WHERE l.bill_id = b.id AND r.status IN ${ACTIVE} AND r.id != ?)
+            + (SELECT COALESCE(SUM(cl.amount), 0) FROM contra_lines cl JOIN contras k ON k.id = cl.contra_id
+             WHERE cl.side = 'ap' AND cl.bill_id = b.id AND k.status IN ('submitted', 'approved')) AS requested
           FROM ap_bills b WHERE b.id IN (${billIds.map(() => '?').join(',')})`,
     args: [excludeRequestId, ...billIds],
   });
