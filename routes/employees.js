@@ -6,6 +6,7 @@ const { createSession, destroySession, setSessionCookie, clearSessionCookie, rea
 const { logActivity, clientIp } = require('../lib/sessionActivity');
 const { requireAuth, requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
+const { uploadSignature } = require('../lib/signatures');
 
 // True once a password has been migrated to a bcrypt hash (bcryptjs always
 // produces $2a$/$2b$-prefixed output). Plaintext legacy passwords never
@@ -263,6 +264,67 @@ router.get('/me/signature', requireAuth, async (req, res) => {
   try {
     const { rows: [emp] } = await db.execute({ sql: 'SELECT approval_signature FROM employees WHERE id = ?', args: [req.employee.id] });
     res.json({ approval_signature: emp?.approval_signature || null });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Saving a signature ahead of time (My Profile, or an admin on the Employees
+// screen) so approvals just apply it. `signature` is a PNG/JPEG/WebP data URL
+// — drawn on the pad or an uploaded picture the browser has already cropped
+// and cleaned. A new file is written each time and documents keep the path
+// they were stamped with, so replacing or removing it never changes an
+// earlier approval.
+const SIG_MAX_BYTES = 2 * 1024 * 1024;
+async function saveSignature(employeeId, dataUrl) {
+  const m = /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/=]+)$/.exec(String(dataUrl || ''));
+  if (!m) throw Object.assign(new Error('Draw the signature or choose a PNG or JPEG picture of it'), { status: 400 });
+  if (Buffer.byteLength(m[2], 'base64') > SIG_MAX_BYTES) throw Object.assign(new Error('That picture is too large — use one under 2 MB'), { status: 400 });
+  const url = await uploadSignature(dataUrl, `employee-${employeeId}`, 'approval-signatures');
+  if (!url) throw Object.assign(new Error("The signature couldn't be read — try again"), { status: 400 });
+  await db.execute({ sql: 'UPDATE employees SET approval_signature = ? WHERE id = ?', args: [url, employeeId] });
+  return url;
+}
+
+router.put('/me/signature', requireAuth, async (req, res) => {
+  try { res.json({ approval_signature: await saveSignature(req.employee.id, req.body.signature) }); }
+  catch(e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
+router.delete('/me/signature', requireAuth, async (req, res) => {
+  try {
+    await db.execute({ sql: 'UPDATE employees SET approval_signature = NULL WHERE id = ?', args: [req.employee.id] });
+    res.json({ approval_signature: null });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// The same for another employee, from the Employees screen.
+async function loadEmployeeForSignature(req, res) {
+  const id = parseInt(req.params.id, 10);
+  if (!(id > 0)) { res.status(400).json({ error: 'Invalid employee' }); return null; }
+  const { rows: [emp] } = await db.execute({ sql: 'SELECT id, approval_signature FROM employees WHERE id = ?', args: [id] });
+  if (!emp) { res.status(404).json({ error: 'Employee not found' }); return null; }
+  return emp;
+}
+
+router.get('/:id/signature', requirePermission('employees_edit'), async (req, res) => {
+  try {
+    const emp = await loadEmployeeForSignature(req, res);
+    if (emp) res.json({ approval_signature: emp.approval_signature || null });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.put('/:id/signature', requirePermission('employees_edit'), async (req, res) => {
+  try {
+    const emp = await loadEmployeeForSignature(req, res);
+    if (emp) res.json({ approval_signature: await saveSignature(emp.id, req.body.signature) });
+  } catch(e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
+router.delete('/:id/signature', requirePermission('employees_edit'), async (req, res) => {
+  try {
+    const emp = await loadEmployeeForSignature(req, res);
+    if (!emp) return;
+    await db.execute({ sql: 'UPDATE employees SET approval_signature = NULL WHERE id = ?', args: [emp.id] });
+    res.json({ approval_signature: null });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
