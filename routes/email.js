@@ -2674,7 +2674,7 @@ function drawerReportPdfModel(sess, s) {
     }] : []) });
   if ((sess.payouts || []).length) {
     tables.push({ heading: 'Petty Cash Paid Out', mainCol: 2, columns: [{ label: 'Voucher #', width: 1.3 }, { label: 'Paid To', width: 1.8 }, { label: 'Reason', width: 2.6 }, { label: 'Amount', width: 1.2, align: 'right' }],
-      rows: sess.payouts.map(p => ({ cells: [p.voucher_number, p.paid_to || '', p.reason || '', p.voided_at ? 'VOID' : fmt(p.amount)],
+      rows: sess.payouts.map(p => ({ cells: [p.voucher_number, p.paid_to || '', `${p.category_name ? `${p.category_name}: ` : ''}${p.reason || ''}`, p.voided_at ? 'VOID' : fmt(p.amount)],
         sub: [pdfDateTime(p.created_at), p.employee_name, p.voided_at ? `voided by ${p.voided_by_name || '-'}: ${p.void_reason || ''}` : ''].filter(Boolean).join(' · ') })) });
   }
   if ((sess.account_payments || []).length) {

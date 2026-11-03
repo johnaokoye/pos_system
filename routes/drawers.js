@@ -1,8 +1,160 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
-const { requireAuth, requirePermission, drawerScope } = require('../lib/permissions');
+const { requireAuth, requirePermission, requireAnyPermission, drawerScope } = require('../lib/permissions');
+const { storeDay } = require('../lib/storeTime');
 const { loadDrawerSession, currencySettings, round2 } = require('../lib/drawerReport');
+
+// ── Petty cash → General Ledger ───────────────────────────────────────────────
+// Each payout is given a category (petty_cash_categories → GL expense
+// account). Once its drawer session is reconciled — after which a payout can
+// no longer be voided — it's queued for RetailPOS Books, which posts
+// Dr <category account> / Cr <petty_cash_cash_account, default 1000 Cash on
+// Hand>, keyed pettycash:<payout id>, and acknowledges it (posted with the
+// journal entry #, or failed with the reason). Voided payouts are never posted.
+// These are declared before the /:id routes below.
+const canManagePettyCash = requireAnyPermission('settings', 'drawers_manage');
+const canSeePettyCashGl = requireAnyPermission('settings', 'drawers_manage', 'drawers_reconcile_all');
+const DEFAULT_PETTY_CASH_CASH_ACCOUNT = '1000';
+
+async function pettyCashCashAccount() {
+  const { rows: [r] } = await db.execute("SELECT value FROM settings WHERE key = 'petty_cash_cash_account'");
+  return String(r?.value || '').trim() || DEFAULT_PETTY_CASH_CASH_ACCOUNT;
+}
+const cleanCode = v => String(v || '').trim();
+
+router.get('/petty-cash/categories', requireAuth, async (req, res) => {
+  try {
+    const all = req.query.all === '1';
+    const { rows } = await db.execute(`SELECT * FROM petty_cash_categories ${all ? '' : 'WHERE active = 1'} ORDER BY sort_order, name`);
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/petty-cash/categories', canManagePettyCash, async (req, res) => {
+  try {
+    const name = String(req.body.name || '').trim().replace(/\s+/g, ' ');
+    const code = cleanCode(req.body.account_code);
+    if (!name) return res.status(400).json({ error: 'Enter the category name' });
+    if (!code) return res.status(400).json({ error: 'Enter the GL account code it posts to' });
+    const { rows: [dupe] } = await db.execute({ sql: 'SELECT id FROM petty_cash_categories WHERE LOWER(name) = LOWER(?)', args: [name] });
+    if (dupe) return res.status(400).json({ error: `There's already a category called ${name}` });
+    const { rows: [m] } = await db.execute('SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM petty_cash_categories');
+    const r = await db.execute({ sql: 'INSERT INTO petty_cash_categories (name, account_code, sort_order) VALUES (?,?,?)', args: [name, code, m.n] });
+    const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM petty_cash_categories WHERE id = ?', args: [Number(r.lastInsertRowid)] });
+    res.status(201).json(row);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Changing a category's account affects payouts paid from now on (and failed
+// ones retried); payouts already queued keep the account they were paid with.
+router.put('/petty-cash/categories/:cid', canManagePettyCash, async (req, res) => {
+  try {
+    const { rows: [cur] } = await db.execute({ sql: 'SELECT * FROM petty_cash_categories WHERE id = ?', args: [req.params.cid] });
+    if (!cur) return res.status(404).json({ error: 'Category not found' });
+    const name = req.body.name != null ? String(req.body.name).trim().replace(/\s+/g, ' ') : cur.name;
+    const code = req.body.account_code != null ? cleanCode(req.body.account_code) : cur.account_code;
+    const active = req.body.active != null ? (req.body.active ? 1 : 0) : cur.active;
+    if (!name) return res.status(400).json({ error: 'Enter the category name' });
+    if (!code) return res.status(400).json({ error: 'Enter the GL account code it posts to' });
+    const { rows: [dupe] } = await db.execute({ sql: 'SELECT id FROM petty_cash_categories WHERE LOWER(name) = LOWER(?) AND id != ?', args: [name, cur.id] });
+    if (dupe) return res.status(400).json({ error: `There's already a category called ${name}` });
+    await db.execute({ sql: 'UPDATE petty_cash_categories SET name = ?, account_code = ?, active = ? WHERE id = ?', args: [name, code, active, cur.id] });
+    const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM petty_cash_categories WHERE id = ?', args: [cur.id] });
+    res.json(row);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/petty-cash/settings', canSeePettyCashGl, async (req, res) => {
+  try { res.json({ cash_account: await pettyCashCashAccount() }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.put('/petty-cash/settings', canManagePettyCash, async (req, res) => {
+  try {
+    const code = cleanCode(req.body.cash_account);
+    if (!code) return res.status(400).json({ error: 'Enter the cash account code petty cash is paid from' });
+    await db.execute({ sql: "INSERT INTO settings (key, value) VALUES ('petty_cash_cash_account', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", args: [code] });
+    res.json({ cash_account: code });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+const PAYOUT_GL_SELECT = `SELECT p.*, c.name AS category_name, ds.status AS session_status, ds.branch_id, b.name AS branch_name,
+    d.name AS drawer_name, e.first_name || ' ' || e.last_name AS employee_name
+  FROM drawer_payouts p JOIN drawer_sessions ds ON ds.id = p.session_id
+  LEFT JOIN cash_drawers d ON d.id = ds.drawer_id LEFT JOIN branches b ON b.id = ds.branch_id
+  LEFT JOIN petty_cash_categories c ON c.id = p.category_id LEFT JOIN employees e ON e.id = p.employee_id`;
+
+// Posting status for the Petty Cash Accounts screen. status: waiting (drawer
+// not reconciled yet) | pending | failed | posted | all.
+router.get('/petty-cash/postings', canSeePettyCashGl, async (req, res) => {
+  try {
+    const status = String(req.query.status || 'open');
+    const where = ['p.gl_status IS NOT NULL', 'p.voided_at IS NULL'];
+    if (status === 'waiting') where.push("ds.status != 'reconciled'");
+    else if (['pending', 'failed', 'posted'].includes(status)) where.push(`p.gl_status = '${status}'`, "ds.status = 'reconciled'");
+    else if (status === 'open') where.push("p.gl_status != 'posted'");
+    const { rows } = await db.execute(`${PAYOUT_GL_SELECT} WHERE ${where.join(' AND ')} ORDER BY p.created_at DESC, p.id DESC LIMIT 300`);
+    res.json(rows.map(r => ({ ...r, gl_stage: r.gl_status === 'posted' ? 'posted' : r.session_status !== 'reconciled' ? 'waiting' : r.gl_status })));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Books' queue (API key petty_cash:read): payouts from reconciled drawers not
+// yet posted, oldest first.
+router.get('/petty-cash/postings-feed', canSeePettyCashGl, async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 200, 500);
+    const cash = await pettyCashCashAccount();
+    const { rows } = await db.execute({
+      sql: `${PAYOUT_GL_SELECT} WHERE p.gl_status = 'pending' AND p.voided_at IS NULL AND ds.status = 'reconciled' ORDER BY p.id LIMIT ?`,
+      args: [limit],
+    });
+    res.json(rows.map(p => ({
+      id: p.id, external_id: `pettycash:${p.id}`, voucher_number: p.voucher_number, date: storeDay(p.created_at),
+      amount: round2(p.amount), debit_account_code: p.account_code, credit_account_code: cash,
+      category: p.category_name, paid_to: p.paid_to, reason: p.reason, branch: p.branch_name, drawer: p.drawer_name,
+      drawer_session_id: p.session_id, paid_by: p.employee_name,
+    })));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Books' receipt (API key petty_cash:write): { id, status: 'posted',
+// external_ref, amount } or { id, status: 'failed', error }. A second
+// "posted" under a different journal entry is refused as a duplicate.
+router.post('/petty-cash/postings-ack', canSeePettyCashGl, async (req, res) => {
+  try {
+    const { rows: [p] } = await db.execute({ sql: 'SELECT * FROM drawer_payouts WHERE id = ?', args: [Number(req.body.id) || 0] });
+    if (!p || !p.gl_status) return res.status(404).json({ error: 'Petty cash posting not found' });
+    if (req.body.status === 'posted') {
+      const ref = String(req.body.external_ref || '').trim();
+      if (!ref) return res.status(400).json({ error: 'external_ref is required' });
+      if (p.gl_status === 'posted') {
+        if (p.gl_ref && p.gl_ref !== ref) return res.status(409).json({ error: `Already posted as ${p.gl_ref} — duplicate entry ${ref} refused`, external_ref: p.gl_ref });
+        return res.json({ success: true, already: true });
+      }
+      await db.execute({ sql: "UPDATE drawer_payouts SET gl_status = 'posted', gl_ref = ?, gl_error = NULL, gl_posted_at = CURRENT_TIMESTAMP, gl_attempts = COALESCE(gl_attempts, 0) + 1 WHERE id = ?", args: [ref, p.id] });
+      return res.json({ success: true });
+    }
+    if (req.body.status === 'failed') {
+      if (p.gl_status === 'posted') return res.status(409).json({ error: 'Already posted' });
+      await db.execute({ sql: "UPDATE drawer_payouts SET gl_status = 'failed', gl_error = ?, gl_attempts = COALESCE(gl_attempts, 0) + 1 WHERE id = ?", args: [String(req.body.error || 'Posting failed').slice(0, 1000), p.id] });
+      return res.json({ success: true });
+    }
+    res.status(400).json({ error: "status must be 'posted' or 'failed'" });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Puts a failed posting back in the queue, with the category's current
+// account (so fixing a category's account code and retrying is the cure).
+router.post('/petty-cash/postings/:pid/retry', canManagePettyCash, async (req, res) => {
+  try {
+    const { rows: [p] } = await db.execute({ sql: 'SELECT p.*, c.account_code AS category_account FROM drawer_payouts p LEFT JOIN petty_cash_categories c ON c.id = p.category_id WHERE p.id = ?', args: [req.params.pid] });
+    if (!p) return res.status(404).json({ error: 'Payout not found' });
+    if (p.gl_status !== 'failed') return res.status(400).json({ error: 'Only a failed posting can be retried' });
+    await db.execute({ sql: "UPDATE drawer_payouts SET gl_status = 'pending', gl_error = NULL, account_code = COALESCE(?, account_code) WHERE id = ?", args: [p.category_account || null, p.id] });
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // ── Cash Drawers (configuration) ─────────────────────────────────────────────
 
@@ -195,6 +347,8 @@ router.post('/sessions/:id/payouts', requirePermission('pos_petty_cash'), async 
     if (!(amount > 0)) return res.status(400).json({ error: 'Enter an amount above 0' });
     if (!voucher) return res.status(400).json({ error: 'Enter the petty cash voucher number' });
     if (!reason) return res.status(400).json({ error: 'Enter what the petty cash is for' });
+    const { rows: [category] } = await db.execute({ sql: 'SELECT * FROM petty_cash_categories WHERE id = ? AND active = 1', args: [Number(req.body.category_id) || 0] });
+    if (!category) return res.status(400).json({ error: 'Choose what kind of expense the petty cash is for (the category)' });
 
     const session = await loadDrawerSession(db, req.params.id);
     if (!session) return res.status(404).json({ error: 'Drawer session not found' });
@@ -207,7 +361,7 @@ router.post('/sessions/:id/payouts', requirePermission('pos_petty_cash'), async 
     const inDrawer = round2(session.report.float.opening + session.report.cash_sales - session.report.payouts_total);
     if (amount > inDrawer + 0.001) return res.status(400).json({ error: `Only ${inDrawer.toFixed(2)} cash is in this drawer` });
 
-    const result = await db.execute({ sql: 'INSERT INTO drawer_payouts (session_id, amount, voucher_number, paid_to, reason, employee_id) VALUES (?,?,?,?,?,?)', args: [session.id, amount, voucher, paidTo, reason, req.employee?.id || null] });
+    const result = await db.execute({ sql: 'INSERT INTO drawer_payouts (session_id, amount, voucher_number, paid_to, reason, employee_id, category_id, account_code, gl_status) VALUES (?,?,?,?,?,?,?,?,?)', args: [session.id, amount, voucher, paidTo, reason, req.employee?.id || null, category.id, category.account_code, 'pending'] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM drawer_payouts WHERE id = ?', args: [Number(result.lastInsertRowid)] });
     res.status(201).json(row);
   } catch(e) { res.status(500).json({ error: e.message }); }

@@ -19902,6 +19902,8 @@ const App = {
       { value: 'payables:read',   label: 'Accounts Payable — Read' },
       { value: 'shop_use:read',   label: 'Shop Use Postings — Read' },
       { value: 'shop_use:write',  label: 'Shop Use Postings — Acknowledge' },
+      { value: 'petty_cash:read',  label: 'Petty Cash Postings — Read' },
+      { value: 'petty_cash:write', label: 'Petty Cash Postings — Acknowledge' },
     ];
     this.showModal(`
       <div class="modal" style="max-width:480px">
@@ -33082,6 +33084,7 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
     const tabs = [
       this._drawerScope() && { key: 'sessions', label: this._drawerScope() === 'all' ? 'Sessions' : 'My Sessions' },
       this.currentUser?.permissions?.drawers_manage && { key: 'manage', label: 'Manage Drawers' },
+      this._pettyGlCanSee() && { key: 'petty-gl', label: 'Petty Cash Accounts' },
     ].filter(Boolean);
     this._drawerTabs = tabs.map(t => t.key);
     if (!this._drawerTabs.includes(this.drawerTab)) this.drawerTab = this._drawerTabs[0] || 'sessions';
@@ -33111,6 +33114,7 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
 
   async renderDrawerTab() {
     if (this.drawerTab === 'sessions') await this.renderDrawerSessions();
+    else if (this.drawerTab === 'petty-gl') await this.renderPettyCashGl();
     else await this.renderDrawerManage();
   },
 
@@ -33413,7 +33417,7 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
         <tbody>${payouts.map(p => `<tr style="${p.voided_at ? 'opacity:0.55' : ''}">
           <td><strong>${esc(p.voucher_number)}</strong><div style="font-size:11px;color:var(--text-muted,#777)">${this.fmtDateTime(p.created_at)}</div></td>
           <td>${esc(p.paid_to) || '—'}</td>
-          <td>${esc(p.reason)}${p.voided_at ? `<div style="font-size:11px;color:var(--danger,#c00)">Voided by ${esc(p.voided_by_name) || '—'}: ${esc(p.void_reason)}</div>` : ''}</td>
+          <td>${p.category_name ? `<span class="badge-pill badge-secondary" style="font-size:10px">${esc(p.category_name)}</span> ` : ''}${esc(p.reason)}${!p.voided_at && p.gl_status ? `<div style="font-size:11px;color:${p.gl_status === 'failed' ? 'var(--danger,#c00)' : 'var(--text-muted,#777)'}">${this._pettyGlLabel(p, s.status)}</div>` : ''}${p.voided_at ? `<div style="font-size:11px;color:var(--danger,#c00)">Voided by ${esc(p.voided_by_name) || '—'}: ${esc(p.void_reason)}</div>` : ''}</td>
           <td>${esc(p.employee_name) || '—'}</td>
           <td style="text-align:right">${p.voided_at ? '<s>' + m(p.amount) + '</s> VOID' : m(p.amount)}</td>
           ${canVoid ? `<td style="text-align:right">${p.voided_at ? '' : `<button class="btn btn-sm btn-secondary" onclick="App.voidDrawerPayout(${p.id}, ${s.id})">Void</button>`}</td>` : ''}
@@ -33605,7 +33609,7 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
               <tbody>${s.payouts.map(p => `<tr style="${p.voided_at ? 'opacity:0.55' : ''}">
                 <td style="padding:3px 6px"><strong>${this.escapeAttr(p.voucher_number)}</strong></td>
                 <td style="padding:3px 6px">${this.escapeAttr(p.paid_to || '—')}</td>
-                <td style="padding:3px 6px">${this.escapeAttr(p.reason || '')}</td>
+                <td style="padding:3px 6px">${p.category_name ? `${this.escapeAttr(p.category_name)}: ` : ''}${this.escapeAttr(p.reason || '')}</td>
                 <td style="padding:3px 6px;text-align:right">${p.voided_at ? `<s>${m(p.amount)}</s> VOID` : m(p.amount)}</td>
               </tr>`).join('')}
               <tr style="font-weight:600;border-top:2px solid var(--border)"><td style="padding:5px 6px" colspan="3">Total paid out (taken off expected cash)</td><td style="padding:5px 6px;text-align:right">${m(r.payouts_total)}</td></tr></tbody>
@@ -33784,9 +33788,11 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
   // POS "Petty Cash" — pay cash out of the cashier's open drawer against a
   // numbered petty cash request slip (permission pos_petty_cash). It comes
   // off the drawer's expected cash at reconciliation.
-  showPettyCashModal() {
+  async showPettyCashModal() {
     const session = this.currentDrawerSession;
     if (!session?.id) { this.alert('Open a cash drawer first — petty cash is paid from your open drawer', 'warning'); return; }
+    let cats = [];
+    try { cats = await this.api('GET', '/drawers/petty-cash/categories'); } catch (e) {}
     this.showModal(`
       <div class="modal" style="max-width:420px">
         <div class="modal-header"><span class="modal-title">Petty Cash Payout</span><button class="modal-close">✕</button></div>
@@ -33794,6 +33800,8 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
           <div class="form-group"><label>Voucher # *</label><input type="text" id="pc-voucher" placeholder="Petty cash request slip number" autocomplete="off"></div>
           <div class="form-group"><label>Amount *</label><input type="number" id="pc-amount" step="0.01" min="0.01" placeholder="0.00"></div>
           <div class="form-group"><label>Paid To</label><input type="text" id="pc-paid-to" placeholder="Who received the cash"></div>
+          <div class="form-group"><label>Expense Category *</label><select id="pc-category"><option value="">— Choose what it's for —</option>${cats.map(c => `<option value="${c.id}">${this.escapeAttr(c.name)}</option>`).join('')}</select>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:3px">Decides which expense account it's posted to in the books</div></div>
           <div class="form-group"><label>Reason *</label><input type="text" id="pc-reason" placeholder="What it's for"></div>
           <p style="font-size:12px;color:var(--text-muted);margin:0">Paid from ${this.escapeAttr(session.drawer_name || 'your open drawer')}. It's deducted from the drawer's expected cash at reconciliation.</p>
         </div>
@@ -33805,6 +33813,104 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
     document.getElementById('pc-voucher')?.focus();
   },
 
+  // ── Petty cash → General Ledger ──────────────────────────────────────────
+  // Categories map to RetailPOS Books expense accounts; payouts go to Books
+  // once their drawer is reconciled (routes/drawers.js).
+  _pettyGlCanSee() { const p = this.currentUser?.permissions || {}; return this.can('settings') || !!p.drawers_manage || !!p.drawers_reconcile_all; },
+  _pettyGlCanManage() { const p = this.currentUser?.permissions || {}; return this.can('settings') || !!p.drawers_manage; },
+  _pettyGlLabel(p, sessionStatus) {
+    if (p.gl_status === 'posted') return `Posted to the books${p.gl_ref ? ` — ${this.escapeAttr(p.gl_ref)}` : ''}`;
+    if (p.gl_status === 'failed') return `Not posted: ${this.escapeAttr(p.gl_error || 'failed')}`;
+    return (sessionStatus || p.session_status) === 'reconciled' ? `Waiting for RetailPOS Books (account ${this.escapeAttr(p.account_code || '')})` : `Goes to the books once this drawer is reconciled (account ${this.escapeAttr(p.account_code || '')})`;
+  },
+
+  async renderPettyCashGl() {
+    const el = document.getElementById('drawer-tab-content');
+    if (!el) return;
+    const hdr = document.getElementById('drawer-hdr-actions');
+    if (hdr) hdr.innerHTML = '';
+    const manage = this._pettyGlCanManage();
+    const f = this._pettyGlFilter || (this._pettyGlFilter = 'open');
+    el.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let cats, settings, rows;
+    try {
+      [cats, settings, rows] = await Promise.all([
+        this.api('GET', '/drawers/petty-cash/categories?all=1'),
+        this.api('GET', '/drawers/petty-cash/settings'),
+        this.api('GET', `/drawers/petty-cash/postings?status=${f}`),
+      ]);
+    } catch (e) { el.innerHTML = `<div class="empty-state"><p>${this.escapeAttr(e.message)}</p></div>`; return; }
+    if (this.drawerTab !== 'petty-gl') return;
+    const stage = { waiting: ['Drawer not reconciled', 'badge-secondary'], pending: ['Waiting for Books', 'badge-warning'], failed: ['Failed', 'badge-danger'], posted: ['Posted', 'badge-success'] };
+    el.innerHTML = `
+      <p style="font-size:13px;color:var(--text-muted);margin:4px 0 12px">Each petty cash payout is posted to RetailPOS Books once its drawer is reconciled: <strong>Dr</strong> the category's expense account, <strong>Cr</strong> the cash account below. Voided payouts are never posted.</p>
+      <div class="two-col" style="align-items:start;gap:16px">
+        <div class="card" style="padding:14px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><strong>Expense Categories</strong>${manage ? '<button class="btn btn-sm btn-primary" onclick="App._pettyGlEditCategory()">+ Category</button>' : ''}</div>
+          <table class="table"><thead><tr><th>Category</th><th>GL Account</th><th>Status</th>${manage ? '<th></th>' : ''}</tr></thead><tbody>
+            ${cats.map(c => `<tr style="${c.active ? '' : 'opacity:.55'}"><td>${this.escapeAttr(c.name)}</td><td class="fw-600">${this.escapeAttr(c.account_code)}</td><td>${c.active ? 'Active' : 'Hidden'}</td>
+              ${manage ? `<td style="text-align:right;white-space:nowrap"><button class="btn btn-sm btn-outline" onclick="App._pettyGlEditCategory(${c.id})">Edit</button></td>` : ''}</tr>`).join('') || '<tr><td colspan="4" class="empty-state">No categories</td></tr>'}
+          </tbody></table>
+          <div style="display:flex;gap:8px;align-items:end;margin-top:12px">
+            <div class="form-group" style="margin:0;flex:1"><label>Cash account credited (petty cash paid from)</label><input id="pgl-cash" value="${this.escapeAttr(settings.cash_account)}" ${manage ? '' : 'disabled'}></div>
+            ${manage ? '<button class="btn btn-sm btn-secondary" onclick="App._pettyGlSaveCash()">Save</button>' : ''}
+          </div>
+        </div>
+        <div class="card" style="padding:14px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:8px"><strong>Postings</strong>
+            <select id="pgl-filter" style="width:auto" onchange="App._pettyGlFilter=this.value;App.renderPettyCashGl()">
+              ${[['open', 'Not yet posted'], ['waiting', 'Drawer not reconciled'], ['pending', 'Waiting for Books'], ['failed', 'Failed'], ['posted', 'Posted'], ['all', 'All']].map(([v, l]) => `<option value="${v}" ${f === v ? 'selected' : ''}>${l}</option>`).join('')}
+            </select></div>
+          <div class="table-wrap" style="max-height:520px;overflow:auto"><table class="table"><thead><tr><th>Voucher #</th><th>Date</th><th>Category / Account</th><th style="text-align:right">Amount</th><th>Status</th></tr></thead><tbody>
+            ${rows.map(p => `<tr>
+              <td class="fw-600">${this.escapeAttr(p.voucher_number)}<div style="font-size:11px;color:var(--text-muted)">${this.escapeAttr(p.drawer_name || '')}${p.branch_name ? ` · ${this.escapeAttr(p.branch_name)}` : ''}</div></td>
+              <td style="font-size:12px">${this.fmtDateTime(p.created_at)}</td>
+              <td style="font-size:12px">${this.escapeAttr(p.category_name || '—')}<div style="color:var(--text-muted)">Dr ${this.escapeAttr(p.account_code || '—')} / Cr ${this.escapeAttr(settings.cash_account)}</div></td>
+              <td style="text-align:right">${this.fmt(p.amount)}</td>
+              <td><span class="badge-pill ${stage[p.gl_stage]?.[1] || ''}">${stage[p.gl_stage]?.[0] || p.gl_stage}</span>
+                ${p.gl_stage === 'posted' && p.gl_ref ? `<div style="font-size:11px;color:var(--text-muted)">${this.escapeAttr(p.gl_ref)}</div>` : ''}
+                ${p.gl_stage === 'failed' ? `<div style="font-size:11px;color:var(--danger,#c00);max-width:220px">${this.escapeAttr(p.gl_error || '')}</div>${manage ? `<button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="App._pettyGlRetry(${p.id})">Retry</button>` : ''}` : ''}</td>
+            </tr>`).join('') || '<tr><td colspan="5" class="empty-state">Nothing here</td></tr>'}
+          </tbody></table></div>
+        </div>
+      </div>`;
+  },
+
+  async _pettyGlEditCategory(id) {
+    let c = { name: '', account_code: '', active: 1 };
+    if (id) { try { c = (await this.api('GET', '/drawers/petty-cash/categories?all=1')).find(x => x.id === id) || c; } catch (e) {} }
+    this.showModal(`
+      <div class="modal" style="max-width:420px">
+        <div class="modal-header"><span class="modal-title">${id ? 'Edit' : 'New'} Petty Cash Category</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div class="form-group"><label>Category *</label><input id="pgc-name" value="${this.escapeAttr(c.name)}" placeholder="e.g. Cleaning Supplies"></div>
+          <div class="form-group"><label>GL Expense Account Code *</label><input id="pgc-code" value="${this.escapeAttr(c.account_code)}" placeholder="e.g. 6300">
+            <div style="font-size:11px;color:var(--text-muted);margin-top:3px">The RetailPOS Books account debited. A change applies to payouts made from now on (and failed ones you retry).</div></div>
+          ${id ? `<label style="display:flex;gap:6px;align-items:center;font-size:13px"><input type="checkbox" id="pgc-active" ${c.active ? 'checked' : ''} style="width:auto;margin:0"> Active (offered to cashiers)</label>` : ''}
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button><button class="btn btn-primary" onclick="App._pettyGlSaveCategory(${id || 0})">Save</button></div>
+      </div>`);
+  },
+
+  async _pettyGlSaveCategory(id) {
+    const body = { name: document.getElementById('pgc-name').value.trim(), account_code: document.getElementById('pgc-code').value.trim() };
+    if (id) body.active = document.getElementById('pgc-active')?.checked ? 1 : 0;
+    try {
+      await this.api(id ? 'PUT' : 'POST', `/drawers/petty-cash/categories${id ? `/${id}` : ''}`, body);
+      this.closeModal(); this.alert('Category saved'); this.renderPettyCashGl();
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  async _pettyGlSaveCash() {
+    try { await this.api('PUT', '/drawers/petty-cash/settings', { cash_account: document.getElementById('pgl-cash').value.trim() }); this.alert('Cash account saved'); }
+    catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  async _pettyGlRetry(id) {
+    try { await this.api('POST', `/drawers/petty-cash/postings/${id}/retry`, {}); this.alert('Queued again for RetailPOS Books'); this.renderPettyCashGl(); }
+    catch (e) { this.alert(e.message, 'error'); }
+  },
+
   async submitPettyCash() {
     const session = this.currentDrawerSession;
     const data = {
@@ -33812,9 +33918,11 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
       amount: parseFloat(document.getElementById('pc-amount')?.value),
       paid_to: document.getElementById('pc-paid-to')?.value.trim(),
       reason: document.getElementById('pc-reason')?.value.trim(),
+      category_id: parseInt(document.getElementById('pc-category')?.value) || null,
     };
     if (!data.voucher_number) { this.alert('Enter the voucher number', 'error'); return; }
     if (!(data.amount > 0)) { this.alert('Enter an amount above 0', 'error'); return; }
+    if (!data.category_id) { this.alert('Choose the expense category', 'error'); return; }
     if (!data.reason) { this.alert("Enter what it's for", 'error'); return; }
     const btn = document.getElementById('pc-submit');
     if (btn) btn.disabled = true;

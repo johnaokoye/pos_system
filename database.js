@@ -1767,6 +1767,17 @@ async function _init() {
     )` },
     // Finance's account mapping per category: the debit account (expense, or
     // an asset account for asset treatment) and the inventory account credited.
+    // Petty cash categories: what a drawer payout was for, and the GL expense
+    // account RetailPOS Books debits for it (credit: settings
+    // petty_cash_cash_account, default 1000 Cash on Hand). See routes/drawers.js.
+    { sql: `CREATE TABLE IF NOT EXISTS petty_cash_categories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      account_code TEXT NOT NULL,
+      active INTEGER NOT NULL DEFAULT 1,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS shop_use_accounts (
       category TEXT PRIMARY KEY,
       treatment TEXT NOT NULL DEFAULT 'expense',
@@ -2747,6 +2758,18 @@ async function _init() {
     'ALTER TABLE payment_requests ADD COLUMN scheduled_date TEXT',
     'ALTER TABLE payment_requests ADD COLUMN scheduled_by INTEGER',
     'ALTER TABLE payment_requests ADD COLUMN scheduled_at DATETIME',
+    // Petty cash payout → GL: its category and the expense account it maps to
+    // (snapshotted), and RetailPOS Books' posting status — gl_status 'pending'
+    // (new payouts with a category), 'posted' (gl_ref = journal entry #) or
+    // 'failed' (gl_error). Payouts from before categories have NULL and are
+    // never posted.
+    'ALTER TABLE drawer_payouts ADD COLUMN category_id INTEGER REFERENCES petty_cash_categories(id)',
+    'ALTER TABLE drawer_payouts ADD COLUMN account_code TEXT',
+    'ALTER TABLE drawer_payouts ADD COLUMN gl_status TEXT',
+    'ALTER TABLE drawer_payouts ADD COLUMN gl_ref TEXT',
+    'ALTER TABLE drawer_payouts ADD COLUMN gl_error TEXT',
+    'ALTER TABLE drawer_payouts ADD COLUMN gl_posted_at DATETIME',
+    'ALTER TABLE drawer_payouts ADD COLUMN gl_attempts INTEGER DEFAULT 0',
     // POS "$" line discount: the fixed amount taken off the line (discount_percent
     // then holds the equivalent %, for the limit check and promotions). NULL = a % discount.
     'ALTER TABLE transaction_items ADD COLUMN discount_fixed REAL',
@@ -3711,6 +3734,20 @@ async function _init() {
     } catch(e) {}
   }
 
+  // Petty cash categories, mapped to RetailPOS Books' expense accounts (all
+  // editable under Cash Drawers → Petty Cash Accounts).
+  try {
+    const { rows: [pcc] } = await db.execute('SELECT COUNT(*) AS n FROM petty_cash_categories');
+    if (!Number(pcc.n)) {
+      const defaults = [
+        ['Office Supplies', '6300'], ['Fuel – Motor Vehicle', '6105'], ['Fuel – Equipment/Machinery', '6104'],
+        ['Repairs – Building', '6101'], ['Repairs – Equipment/Machinery', '6102'], ['Motor Vehicle Expense', '6103'],
+        ['Utilities', '6200'], ['Miscellaneous', '6900'],
+      ];
+      await db.batch(defaults.map(([name, code], i) => ({ sql: 'INSERT OR IGNORE INTO petty_cash_categories (name, account_code, sort_order) VALUES (?,?,?)', args: [name, code, i] })), 'write');
+    }
+  } catch (e) { console.error('[db] petty cash category seed:', e.message); }
+
   // Seed default USD denominations
   const { rows: [denomCount] } = await db.execute({ sql: 'SELECT COUNT(*) as c FROM currency_denominations', args: [] });
   if (Number(denomCount.c) === 0) {
@@ -3764,6 +3801,7 @@ async function _init() {
   const indexes = [
     'CREATE INDEX IF NOT EXISTS idx_transactions_customer_id ON transactions(customer_id)',
     'CREATE INDEX IF NOT EXISTS idx_drawer_payouts_session ON drawer_payouts(session_id)',
+    'CREATE INDEX IF NOT EXISTS idx_drawer_payouts_gl ON drawer_payouts(gl_status)',
     'CREATE INDEX IF NOT EXISTS idx_salesperson_changes_tx ON salesperson_changes(transaction_id)',
     'CREATE INDEX IF NOT EXISTS idx_transactions_branch_id ON transactions(branch_id)',
     'CREATE INDEX IF NOT EXISTS idx_transactions_status ON transactions(status)',
