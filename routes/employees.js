@@ -4,7 +4,7 @@ const bcrypt = require('bcryptjs');
 const { db } = require('../database');
 const { createSession, destroySession, setSessionCookie, clearSessionCookie, readCookie } = require('../lib/sessionAuth');
 const { logActivity, clientIp } = require('../lib/sessionActivity');
-const { requireAuth, requirePermission } = require('../lib/permissions');
+const { requireAuth, requirePermission, canSignApprovals } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { uploadSignature } = require('../lib/signatures');
 
@@ -263,7 +263,7 @@ router.get('/me', requireAuth, async (req, res) => {
 router.get('/me/signature', requireAuth, async (req, res) => {
   try {
     const { rows: [emp] } = await db.execute({ sql: 'SELECT approval_signature FROM employees WHERE id = ?', args: [req.employee.id] });
-    res.json({ approval_signature: emp?.approval_signature || null });
+    res.json({ approval_signature: emp?.approval_signature || null, can_sign: canSignApprovals(req.employee.permissions) });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -284,7 +284,10 @@ async function saveSignature(employeeId, dataUrl) {
   return url;
 }
 
+const NOT_APPROVER = 'Only employees with approval permissions (purchase orders, purchase requests, payment requests, Special Projects or commissions) keep an approval signature';
+
 router.put('/me/signature', requireAuth, async (req, res) => {
+  if (!canSignApprovals(req.employee.permissions)) return res.status(403).json({ error: NOT_APPROVER });
   try { res.json({ approval_signature: await saveSignature(req.employee.id, req.body.signature) }); }
   catch(e) { res.status(e.status || 500).json({ error: e.message }); }
 });
@@ -300,22 +303,28 @@ router.delete('/me/signature', requireAuth, async (req, res) => {
 async function loadEmployeeForSignature(req, res) {
   const id = parseInt(req.params.id, 10);
   if (!(id > 0)) { res.status(400).json({ error: 'Invalid employee' }); return null; }
-  const { rows: [emp] } = await db.execute({ sql: 'SELECT id, approval_signature FROM employees WHERE id = ?', args: [id] });
+  const { rows: [emp] } = await db.execute({ sql: `SELECT e.id, e.approval_signature, sg.permissions FROM employees e
+      LEFT JOIN security_groups sg ON sg.id = e.security_group_id WHERE e.id = ?`, args: [id] });
   if (!emp) { res.status(404).json({ error: 'Employee not found' }); return null; }
+  let perms = {};
+  try { perms = emp.permissions ? JSON.parse(emp.permissions) : {}; } catch (e) {}
+  emp.can_sign = canSignApprovals(perms);
   return emp;
 }
 
 router.get('/:id/signature', requirePermission('employees_edit'), async (req, res) => {
   try {
     const emp = await loadEmployeeForSignature(req, res);
-    if (emp) res.json({ approval_signature: emp.approval_signature || null });
+    if (emp) res.json({ approval_signature: emp.approval_signature || null, can_sign: emp.can_sign });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 router.put('/:id/signature', requirePermission('employees_edit'), async (req, res) => {
   try {
     const emp = await loadEmployeeForSignature(req, res);
-    if (emp) res.json({ approval_signature: await saveSignature(emp.id, req.body.signature) });
+    if (!emp) return;
+    if (!emp.can_sign) return res.status(403).json({ error: `${NOT_APPROVER} — give their security group an approval permission first` });
+    res.json({ approval_signature: await saveSignature(emp.id, req.body.signature) });
   } catch(e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 

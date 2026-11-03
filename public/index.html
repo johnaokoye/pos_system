@@ -953,9 +953,22 @@ const App = {
   async showMyProfile() {
     const u = this.currentUser;
     if (!u) return;
-    let sig = null;
-    try { sig = (await this.api('GET', '/employees/me/signature')).approval_signature; } catch (e) {}
+    let sig = null, canSign = false;
+    try { ({ approval_signature: sig, can_sign: canSign } = await this.api('GET', '/employees/me/signature')); } catch (e) {}
     const branches = (u.branches || []).map(b => this.escapeAttr(b.name)).join(', ');
+    // Only approvers keep a signature; anyone who lost approval rights can still remove an old one.
+    const sigSection = canSign ? `
+          <div style="font-weight:700;margin-bottom:4px">Approval signature</div>
+          <p style="font-size:12px;color:var(--text-muted);margin:0 0 8px">Applied when you approve purchase orders, purchase requests, payment requests, Special Projects or commissions. Documents you've already approved keep the signature they were signed with.</p>
+          <div id="my-sig-box">${this._signaturePreviewHtml(sig)}</div>
+          <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+            <button class="btn btn-sm btn-primary" onclick="App._editMySignature()">${sig ? 'Replace signature' : 'Add signature'}</button>
+            ${sig ? `<button class="btn btn-sm btn-outline" onclick="App._removeMySignature()">Remove</button>` : ''}
+          </div>` : sig ? `
+          <div style="font-weight:700;margin-bottom:4px">Approval signature</div>
+          <p style="font-size:12px;color:var(--text-muted);margin:0 0 8px">You no longer have approval permissions, so this saved signature isn't used. You can remove it.</p>
+          <div>${this._signaturePreviewHtml(sig)}</div>
+          <div style="margin-top:8px"><button class="btn btn-sm btn-outline" onclick="App._removeMySignature()">Remove</button></div>` : '';
     this.showModal(`
       <div class="modal" style="max-width:520px">
         <div class="modal-header"><span class="modal-title">My Profile</span><button class="modal-close">✕</button></div>
@@ -967,13 +980,7 @@ const App = {
             <span style="color:var(--text-muted)">Security group</span><span>${this.escapeAttr(u.security_group_name || '—')}</span>
             ${branches ? `<span style="color:var(--text-muted)">Branches</span><span>${branches}</span>` : ''}
           </div>
-          <div style="font-weight:700;margin-bottom:4px">Approval signature</div>
-          <p style="font-size:12px;color:var(--text-muted);margin:0 0 8px">Applied when you approve purchase orders, purchase requests, payment requests, Special Projects, commissions and other sign-offs. Documents you've already approved keep the signature they were signed with.</p>
-          <div id="my-sig-box">${this._signaturePreviewHtml(sig)}</div>
-          <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
-            <button class="btn btn-sm btn-primary" onclick="App._editMySignature()">${sig ? 'Replace signature' : 'Add signature'}</button>
-            ${sig ? `<button class="btn btn-sm btn-outline" onclick="App._removeMySignature()">Remove</button>` : ''}
-          </div>
+          ${sigSection}
         </div>
         <div class="modal-footer">
           <button class="btn btn-outline" onclick="App.showChangePasswordModal(${u.id})">Change Password</button>
@@ -1111,9 +1118,15 @@ const App = {
   async _loadEmployeeSignature(empId) {
     const box = document.getElementById('ef-sig-box');
     if (!box) return;
-    let sig = null;
-    try { sig = (await this.api('GET', `/employees/${empId}/signature`)).approval_signature; } catch (e) { box.innerHTML = `<div style="font-size:12px;color:var(--text-muted)">${this.escapeAttr(e.message)}</div>`; return; }
+    let sig = null, canSign = false;
+    try { ({ approval_signature: sig, can_sign: canSign } = await this.api('GET', `/employees/${empId}/signature`)); } catch (e) { box.innerHTML = `<div style="font-size:12px;color:var(--text-muted)">${this.escapeAttr(e.message)}</div>`; return; }
     if (!document.getElementById('ef-sig-box')) return;
+    if (!canSign) {
+      box.innerHTML = `<div style="font-size:12px;color:var(--text-muted)">Only employees with approval permissions (purchase orders, purchase requests, payment requests, Special Projects or commissions) keep a signature — this employee's security group has none.${sig ? ' A signature saved earlier is no longer used:' : ''}</div>
+        ${sig ? `<div style="border:1px solid var(--border);border-radius:6px;background:#fff;padding:6px;text-align:center;margin-top:6px"><img src="${this.escapeAttr(sig)}" alt="Saved signature" style="max-height:70px;max-width:100%"></div>
+        <div style="margin-top:6px"><button type="button" class="btn btn-sm btn-outline" onclick="App._removeEmployeeSignature(${empId})">Remove</button></div>` : ''}`;
+      return;
+    }
     box.innerHTML = `${sig ? `<div style="border:1px solid var(--border);border-radius:6px;background:#fff;padding:6px;text-align:center"><img src="${this.escapeAttr(sig)}" alt="Saved signature" style="max-height:70px;max-width:100%"></div>` : '<div style="font-size:12px;color:var(--text-muted)">None saved — they\'ll be asked to draw one at their first approval.</div>'}
       <div style="display:flex;gap:8px;margin-top:6px">
         <button type="button" class="btn btn-sm btn-outline" onclick="App._editEmployeeSignature(${empId})">${sig ? 'Replace' : 'Add signature'}</button>
