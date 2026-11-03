@@ -3552,7 +3552,7 @@ const App = {
     if (!body) return;
     if (!customerId) { body.innerHTML = '<p style="font-size:13px;color:var(--text-muted)">Choose the customer who is paying.</p>'; this._rpFooter(''); return; }
     body.innerHTML = '<p style="font-size:13px;color:var(--text-muted)">Loading account…</p>';
-    try { this._rp = { summary: await this.api('GET', `/customer-payments/${customerId}`), mode: keep.mode || 'open', applying: null }; }
+    try { this._rp = { summary: await this.api('GET', `/customer-payments/${customerId}`), mode: keep.mode || 'open', method: keep.method || 'cash', applying: null }; }
     catch (e) { body.innerHTML = `<p class="color-danger">${this.escapeAttr(e.message)}</p>`; return; }
     this._rpRender();
   },
@@ -3562,18 +3562,23 @@ const App = {
     if (f) f.innerHTML = `<button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>${html}`;
   },
 
+  // The most an invoice can take: its balance, or under Tax Exempt (main form only) the GCT still to clear.
+  _rpCap(inv, prefix) { return prefix === 'rp' && this._rp.method === 'tax_exempt' ? Number(inv.gct_room) || 0 : Number(inv.balance_due) || 0; },
+
   _rpInvoiceRows(prefix) {
     const { invoices } = this._rp.summary;
     if (!invoices.length) return '<p style="font-size:12px;color:var(--text-muted);margin:6px 0">No open invoices on this account.</p>';
+    const gctCol = prefix === 'rp' && this._rp.method === 'tax_exempt';
     return `<div class="table-wrap" style="max-height:240px;overflow-y:auto"><table>
-      <thead><tr><th style="width:32px"></th><th>Invoice</th><th>Date</th><th>Total</th><th>Balance Due</th><th style="width:120px">Apply</th></tr></thead>
-      <tbody>${invoices.map((inv, i) => `<tr>
-        <td><input type="checkbox" class="${prefix}-pick" data-i="${i}" onchange="App._rpPick(this,'${prefix}')" style="width:auto;margin:0"></td>
+      <thead><tr><th style="width:32px"></th><th>Invoice</th><th>Date</th><th>Total</th><th>Balance Due</th>${gctCol ? '<th title="GCT on the invoice not yet cleared">GCT to Clear</th>' : ''}<th style="width:120px">Apply</th></tr></thead>
+      <tbody>${invoices.map((inv, i) => `<tr${gctCol && !(this._rpCap(inv, prefix) > 0.005) ? ' style="opacity:.5"' : ''}>
+        <td><input type="checkbox" class="${prefix}-pick" data-i="${i}" onchange="App._rpPick(this,'${prefix}')" style="width:auto;margin:0" ${gctCol && !(this._rpCap(inv, prefix) > 0.005) ? 'disabled title="No GCT left to clear on this invoice"' : ''}></td>
         <td class="fw-600" style="font-size:12px">${this.escapeAttr(inv.transaction_number)}${inv.kind === 'legacy' ? ' <span class="badge-pill badge-secondary" style="font-size:10px">Legacy</span>' : ''}</td>
         <td style="font-size:12px;color:var(--text-muted)">${inv.kind === 'legacy' ? this._apDate(inv.created_at) : this.fmtDate(inv.created_at)}</td>
         <td style="font-size:12px">${this.fmt(inv.total)}</td>
         <td style="font-size:12px" class="color-danger fw-600">${this.fmt(inv.balance_due)}</td>
-        <td><input type="number" class="${prefix}-amt" data-i="${i}" step="0.01" min="0" max="${Number(inv.balance_due).toFixed(2)}" disabled placeholder="0.00" oninput="App._rpRecalc('${prefix}')" style="width:110px;padding:4px 6px;font-size:12px"></td>
+        ${gctCol ? `<td style="font-size:12px" title="GCT on the invoice: ${this.fmt(inv.gct)}">${this.fmt(inv.gct_room)}</td>` : ''}
+        <td><input type="number" class="${prefix}-amt" data-i="${i}" step="0.01" min="0" max="${this._rpCap(inv, prefix).toFixed(2)}" disabled placeholder="0.00" oninput="App._rpRecalc('${prefix}')" style="width:110px;padding:4px 6px;font-size:12px"></td>
       </tr>`).join('')}</tbody>
     </table></div>`;
   },
@@ -3582,7 +3587,7 @@ const App = {
     const inv = this._rp.summary.invoices[cb.dataset.i];
     const amt = document.querySelector(`.${prefix}-amt[data-i="${cb.dataset.i}"]`);
     amt.disabled = !cb.checked;
-    amt.value = cb.checked ? Number(inv.balance_due).toFixed(2) : '';
+    amt.value = cb.checked ? this._rpCap(inv, prefix).toFixed(2) : '';
     this._rpRecalc(prefix);
   },
 
@@ -3615,6 +3620,9 @@ const App = {
       return;
     }
     const methods = [['cash', 'Cash'], ['credit_card', 'Credit Card'], ['debit_card', 'Debit Card'], ['check', 'Cheque'], ['direct_deposit', 'Direct Deposit']];
+    // TAX-EXEMPT clears the GCT on chosen invoices for a Tax Exempt customer — no money, no drawer.
+    if (c.tax_exempt) methods.push(['tax_exempt', 'Tax Exempt (clear GCT)']);
+    const taxExempt = this._rp.method === 'tax_exempt';
     document.getElementById('rp-body').innerHTML = `
       <div style="display:flex;gap:20px;flex-wrap:wrap;font-size:13px;padding:10px 12px;border:1px solid var(--border);border-radius:6px;margin-bottom:12px">
         <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Balance Owed</div><div class="fw-600 color-danger" style="font-size:18px">${this.fmt(c.account_balance)}</div></div>
@@ -3626,13 +3634,15 @@ const App = {
         <label style="display:flex;gap:6px;align-items:center;margin:0;cursor:pointer;font-weight:${mode === 'open' ? 600 : 400}"><input type="radio" name="rp-mode" value="open" ${mode === 'open' ? 'checked' : ''} onchange="App._rpSetMode('open')" style="width:auto;margin:0"> Open payment (on account)</label>
         <label style="display:flex;gap:6px;align-items:center;margin:0;cursor:pointer;font-weight:${mode === 'invoices' ? 600 : 400}"><input type="radio" name="rp-mode" value="invoices" ${mode === 'invoices' ? 'checked' : ''} onchange="App._rpSetMode('invoices')" style="width:auto;margin:0" ${summary.invoices.length ? '' : 'disabled'}> Pay specific invoices</label>
       </div>
-      <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px">${mode === 'open'
+      <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px">${taxExempt
+        ? '<strong>Tax Exempt:</strong> clears the GCT on the invoices you tick — no money is taken and nothing goes in the drawer. Each invoice defaults to the GCT still on it.'
+        : mode === 'open'
         ? 'The payment comes off the balance now without being applied to any invoice. It can be applied to invoices later from this screen.'
         : 'Tick the invoices being paid. Each one defaults to its full balance due — change the amount for a part payment. The payment total is the sum.'}</p>
       ${mode === 'invoices' ? `${this._rpInvoiceRows('rp')}<div style="text-align:right;font-size:12px;margin-top:6px">Applied: <strong id="rp-applied-total">${this.fmt(0)}</strong></div>` : ''}
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:12px">
-        <div class="form-group" style="margin:0"><label>Amount Received *</label><input type="number" id="rp-amount" step="0.01" min="0" max="${Number(c.account_balance).toFixed(2)}" ${mode === 'invoices' ? 'readonly' : ''} placeholder="0.00"></div>
-        <div class="form-group" style="margin:0"><label>Paid By *</label><select id="rp-method" onchange="App._rpMethodChanged()">${methods.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></div>
+        <div class="form-group" style="margin:0"><label>${taxExempt ? 'GCT Cleared' : 'Amount Received *'}</label><input type="number" id="rp-amount" step="0.01" min="0" max="${Number(c.account_balance).toFixed(2)}" ${mode === 'invoices' ? 'readonly' : ''} placeholder="0.00"></div>
+        <div class="form-group" style="margin:0"><label>Paid By *</label><select id="rp-method" onchange="App._rpMethodChanged(true)">${methods.map(([v, l]) => `<option value="${v}" ${this._rp.method === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
         <div class="form-group" style="margin:0" id="rp-ref-wrap"><label id="rp-ref-label">Reference</label><input id="rp-ref" placeholder="Optional for cash"></div>
       </div>
       <div class="form-group" style="margin:10px 0 0"><label>Notes</label><input id="rp-notes" placeholder="Optional"></div>
@@ -3649,14 +3659,24 @@ const App = {
     this._rpFooter(`<button class="btn btn-success" id="rp-submit" onclick="App._rpSubmit()">Receive Payment</button>`);
   },
 
-  _rpSetMode(mode) { this._rp.mode = mode; this._rpRender(); },
+  _rpSetMode(mode) {
+    if (mode === 'open' && this._rp.method === 'tax_exempt') { this.alert('Tax Exempt clears the GCT on particular invoices — pick the invoices', 'warning'); return this._rpRender(); }
+    this._rp.mode = mode; this._rpRender();
+  },
 
   // Card, cheque and deposit payments need their approval / cheque / deposit number.
-  _rpMethodChanged() {
+  _rpMethodChanged(fromSelect) {
     const m = document.getElementById('rp-method')?.value;
+    // Switching to or from Tax Exempt redraws the form (invoice mode, GCT column).
+    if (fromSelect && this._rp && (m === 'tax_exempt') !== (this._rp.method === 'tax_exempt')) {
+      this._rp.method = m;
+      if (m === 'tax_exempt') this._rp.mode = 'invoices';
+      return this._rpRender();
+    }
+    if (this._rp && m) this._rp.method = m;
     const label = document.getElementById('rp-ref-label'), ref = document.getElementById('rp-ref');
     if (!label || !ref) return;
-    const labels = { cash: ['Reference', 'Optional for cash'], credit_card: ['Approval Code *', 'Card approval code'], debit_card: ['Approval Code *', 'Card approval code'], check: ['Cheque # *', 'Cheque number'], direct_deposit: ['Deposit Ref # *', 'Bank deposit reference'] };
+    const labels = { tax_exempt: ['Exemption Ref #', this._rp?.summary?.customer?.tax_exemption_number || 'Tax exemption reference'], cash: ['Reference', 'Optional for cash'], credit_card: ['Approval Code *', 'Card approval code'], debit_card: ['Approval Code *', 'Card approval code'], check: ['Cheque # *', 'Cheque number'], direct_deposit: ['Deposit Ref # *', 'Bank deposit reference'] };
     [label.textContent, ref.placeholder] = labels[m] || labels.cash;
   },
 
@@ -3667,7 +3687,7 @@ const App = {
     const reference = document.getElementById('rp-ref').value.trim();
     if (!(amount > 0)) { this.alert(mode === 'invoices' ? 'Tick at least one invoice to pay' : 'Enter the amount received', 'error'); return; }
     if (amount - summary.customer.account_balance > 0.005) { this.alert(`That's more than the ${this.fmt(summary.customer.account_balance)} owed`, 'error'); return; }
-    if (payment_method !== 'cash' && !reference) { this.alert('Enter the approval code, cheque number or deposit reference', 'error'); return; }
+    if (payment_method !== 'cash' && payment_method !== 'tax_exempt' && !reference) { this.alert('Enter the approval code, cheque number or deposit reference', 'error'); return; }
     const btn = document.getElementById('rp-submit');
     if (btn) btn.disabled = true;
     try {
@@ -3678,8 +3698,12 @@ const App = {
         branch_id: this.currentDrawerSession?.branch_id || null,
       });
       this.closeModal();
-      this.alert(`Payment ${p.payment_number} received: ${this.fmt(p.amount)} from ${p.customer_name}${p.unapplied > 0.005 ? ' (on account)' : ''}. Balance now ${this.fmt(p.balance_after)}.`);
       if (this.cartCustomer?.id === p.customer_id) this.setCartCustomer(p.customer_id);
+      if (payment_method === 'tax_exempt') {
+        this.alert(`${p.payment_number}: GCT of ${this.fmt(p.amount)} cleared (tax exempt) for ${p.customer_name}. Balance now ${this.fmt(p.balance_after)}.`);
+        return;
+      }
+      this.alert(`Payment ${p.payment_number} received: ${this.fmt(p.amount)} from ${p.customer_name}${p.unapplied > 0.005 ? ' (on account)' : ''}. Balance now ${this.fmt(p.balance_after)}.`);
       this.showPaymentReceipt(p.id);
     } catch (e) { if (btn) btn.disabled = false; this.alert(e.message, 'error'); }
   },
