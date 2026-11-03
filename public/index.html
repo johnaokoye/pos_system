@@ -8181,7 +8181,6 @@ const App = {
           <td style="text-align:right;white-space:nowrap">
             ${a.status==='awaiting_issue' && this.can('rentals_issue') ? `<button class="btn btn-sm btn-primary" onclick="App.showIssueRentalModal(${a.id})">Issue</button>` : ''}
             ${a.status==='active' ? `<button class="btn btn-sm btn-outline" onclick="App.printRentalDeliveryNote(${a.id})">🖨️ Delivery Note</button>` : ''}
-            ${this.dispatchTab !== 'active' ? `<button class="btn btn-sm btn-outline" onclick="App.viewRentalAgreement(${a.id})">View</button>` : ''}
           </td>
         </tr>`).join('')}</tbody>
       </table>
@@ -8385,7 +8384,6 @@ const App = {
           <td style="text-align:right;white-space:nowrap">
             ${a.status==='awaiting_issue' && this.can('rentals_issue') ? `<button class="btn btn-sm btn-primary" onclick="App.showIssueRentalModal(${a.id})">Issue</button>` : ''}
             ${a.status==='active' ? `<button class="btn btn-sm btn-outline" onclick="App.printRentalDeliveryNote(${a.id})">🖨️ Delivery Note</button>` : ''}
-            <button class="btn btn-sm btn-outline" onclick="App.viewRentalAgreement(${a.id})">View</button>
           </td>
         </tr>`).join('')}</tbody>
       </table>
@@ -8417,7 +8415,7 @@ const App = {
           <td style="max-width:200px">${a.item_summary||'—'}</td>
           <td>${this.fmtDateTime(a.due_datetime)}</td>
           <td><span class="badge-pill" style="${bucketStyle[a.bucket]||''}">${bucketLabel[a.bucket]||a.bucket}</span></td>
-          <td style="text-align:right;white-space:nowrap"><button class="btn btn-sm btn-outline" onclick="App.viewRentalAgreement(${a.id})">View</button></td>
+          <td></td>
         </tr>`).join('')}</tbody>
       </table>
       </div>`;
