@@ -1688,6 +1688,7 @@ const App = {
     this.section = name;
     this._reportSection(name);
     this.closeModal();
+    if (name !== 'pos') this._closeBundleUpsell?.();
     this.closeSidebar();
     document.querySelectorAll('.nav-item').forEach(el => {
       const ds = el.dataset.section;
@@ -4169,6 +4170,7 @@ const App = {
       if (line) line.quantity = fmtQty(line.quantity + qty);
       else this.cart.push({ product_id: product.id, category_id: product.category_id || null, name: this._unitLineName(product.name, unit), price: unit.price, cost: (product.cost || 0) * unit.factor, tax_rate: product.tax_rate, quantity: qty, is_service: 0, uom_id: unit.uom_id, sell_unit: unit.name, units_per: unit.factor, allow_decimal: unit.allow_decimal });
       this._checkAutoPromos();
+      this._bundleUpsell(product.id);
       return;
     }
     if (this._isSerialNumberProduct(product)) {
@@ -4193,6 +4195,137 @@ const App = {
       this.cart.push({ product_id: product.id, category_id: product.category_id || null, name: product.name, price: product.price, cost: product.cost, tax_rate: product.tax_rate, quantity: qty, is_service: product.is_service || 0, ...(product.is_service ? { allow_decimal: 1 } : {}) });
     }
     this._checkAutoPromos();
+    this._bundleUpsell(product.id);
+  },
+
+  // ── Bundle upsell ─────────────────────────────────────────────
+  // When an item that's part of an active bundle promotion (no code needed —
+  // those apply at checkout by themselves) goes on the ticket, a card beside
+  // the cart says so: the bundle, its price or saving, which pieces are
+  // already on the ticket, and Add the rest. It doesn't take focus, so the
+  // scanner keeps working, and each bundle is offered once per ticket — not
+  // again once dismissed or once the ticket holds a complete set.
+  async _bundleUpsell(productId) {
+    if (this.section !== 'pos' || this._bundleAdding || !productId) return;
+    this._bundleSeen ||= new Set();
+    this._bundleCache ||= {};
+    let bundles;
+    const hit = this._bundleCache[productId];
+    if (hit && Date.now() - hit.at < 60000) bundles = hit.data;
+    else {
+      try { bundles = await this.api('GET', `/promotions/bundles-for/${productId}`); } catch (e) { return; }
+      this._bundleCache[productId] = { at: Date.now(), data: bundles };
+    }
+    if (this.section !== 'pos') return;
+    const offer = (bundles || []).filter(b => !this._bundleSeen.has(b.id) && this._bundleMissing(b).some(m => m.missing > 0));
+    if (!offer.length) return;
+    this._showBundleUpsell(offer, productId);
+  },
+
+  // Each component with how many the ticket has toward one more set, counted
+  // the way checkout counts them (computeBundleDiscount in lib/promotions.js:
+  // line quantity, lines with their own discount don't count).
+  _bundleMissing(b) {
+    const have = {};
+    for (const i of this.cart) {
+      if (!i.product_id || i.is_q_item || i.serial_number || this._cartLineDiscountPct(i) > 0) continue;
+      have[i.product_id] = (have[i.product_id] || 0) + (Number(i.quantity) || 0);
+    }
+    // Sets already complete stay complete; offer the next one only if this item started it.
+    const sets = Math.min(...b.components.map(c => Math.floor((have[c.product_id] || 0) / c.quantity)));
+    return b.components.map(c => {
+      const toward = (have[c.product_id] || 0) - sets * c.quantity;
+      return { ...c, have: Math.max(0, Math.min(c.quantity, toward)), missing: Math.max(0, c.quantity - Math.max(0, toward)) };
+    });
+  },
+
+  _showBundleUpsell(bundles, productId) {
+    this._closeBundleUpsell();
+    this._bundleOffer = bundles;
+    const trigger = (this.allProducts || []).find(p => p.id === productId);
+    const card = document.createElement('div');
+    card.id = 'bundle-upsell';
+    card.setAttribute('role', 'status');
+    card.style.cssText = 'position:fixed;bottom:150px;right:20px;width:380px;max-width:calc(100vw - 32px);max-height:calc(100vh - 160px);overflow:auto;z-index:950;background:var(--card-bg,#fff);color:var(--text);border:2px solid var(--primary);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.25);padding:14px 16px';
+    card.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:8px">
+        <div><div style="font-size:12px;font-weight:700;color:var(--primary);text-transform:uppercase;letter-spacing:.04em">🎁 Bundle offer</div>
+          <div style="font-size:13px;color:var(--text-muted)">${this.escapeAttr(trigger?.name || 'This item')} is part of ${bundles.length > 1 ? `${bundles.length} bundles` : 'a bundle'} — suggest it to the customer</div></div>
+        <button class="btn btn-sm btn-outline" title="Close" onclick="App._dismissBundleUpsell()">✕</button>
+      </div>
+      ${bundles.map((b, bi) => {
+        const lines = this._bundleMissing(b);
+        const missing = lines.filter(l => l.missing > 0);
+        const extra = missing.reduce((s, l) => s + l.missing * l.price, 0);
+        const deal = b.bundle_pricing === 'price' ? `Bundle price <strong>${this.fmt(b.set_price)}</strong>` : `<strong>${b.value}% off</strong> the set`;
+        return `<div style="border-top:1px solid var(--border);padding-top:10px;margin-top:10px">
+          <div class="fw-600" style="font-size:15px">${this.escapeAttr(b.name)}</div>
+          ${b.description ? `<div style="font-size:12px;color:var(--text-muted)">${this.escapeAttr(b.description)}</div>` : ''}
+          <div style="font-size:13px;margin:4px 0 8px">${deal} · regular ${this.fmt(b.regular_price)}${b.saving > 0 ? ` · <span style="color:var(--success);font-weight:700">customer saves ${this.fmt(b.saving)}</span>` : ''}</div>
+          <table style="width:100%;font-size:13px;border-collapse:collapse">
+            ${lines.map(l => `<tr>
+              <td style="padding:3px 0;width:22px">${l.missing ? '<span style="color:var(--text-muted)">○</span>' : '<span style="color:var(--success);font-weight:700">✓</span>'}</td>
+              <td style="padding:3px 0">${l.quantity > 1 ? `${l.quantity} × ` : ''}${this.escapeAttr(l.name)}${l.missing && l.stock_qty < l.missing ? ' <span class="badge-pill badge-danger" style="font-size:10px">low stock</span>' : ''}</td>
+              <td style="padding:3px 0;text-align:right;color:var(--text-muted);white-space:nowrap">${l.missing ? `need ${l.missing}` : 'on ticket'}</td>
+            </tr>`).join('')}
+          </table>
+          ${b.min_purchase > 0 ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px">Applies on tickets of ${this.fmt(b.min_purchase)} or more.</div>` : ''}
+          ${b.end_date ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">Ends ${this.fmtDate(b.end_date)}.</div>` : ''}
+          <div style="display:flex;gap:8px;margin-top:10px">
+            <button class="btn btn-sm btn-success" style="flex:1" onclick="App._addBundleRest(${bi})">Add the rest${extra > 0 ? ` (+${this.fmt(extra)} before saving)` : ''}</button>
+          </div>
+        </div>`;
+      }).join('')}
+      <div style="text-align:right;margin-top:10px"><button class="btn btn-sm btn-secondary" onclick="App._dismissBundleUpsell()">No thanks</button></div>`;
+    document.body.appendChild(card);
+    this._placeBundleUpsell();
+    if (!this._bundleResizeHooked) { this._bundleResizeHooked = true; window.addEventListener('resize', () => this._placeBundleUpsell()); }
+  },
+
+  // Sits in the bottom-right of the ticket lines — the empty space while
+  // ringing up — clear of the item box, button grid and totals.
+  _placeBundleUpsell() {
+    const card = document.getElementById('bundle-upsell');
+    const wrap = document.querySelector('.pos-ticket-table-wrap');
+    if (!card || !wrap) return;
+    const r = wrap.getBoundingClientRect();
+    if (r.width < 300 || r.height < 200) return; // narrow/phone layout: keep the default corner
+    card.style.right = `${Math.max(8, window.innerWidth - r.right + 12)}px`;
+    card.style.bottom = `${Math.max(8, window.innerHeight - r.bottom + 12)}px`;
+    card.style.width = `${Math.min(380, r.width - 24)}px`;
+    card.style.maxHeight = `${Math.max(200, r.height - 24)}px`;
+  },
+
+  _closeBundleUpsell() { document.getElementById('bundle-upsell')?.remove(); this._bundleOffer = null; },
+
+  // No thanks / ✕: don't offer these bundles again on this ticket.
+  _dismissBundleUpsell() {
+    for (const b of this._bundleOffer || []) (this._bundleSeen ||= new Set()).add(b.id);
+    this._closeBundleUpsell();
+  },
+
+  async _addBundleRest(idx) {
+    const b = (this._bundleOffer || [])[idx];
+    if (!b) return;
+    const skipped = [];
+    this._bundleAdding = true;
+    try {
+      for (const l of this._bundleMissing(b)) {
+        if (!l.missing) continue;
+        const p = (this.allProducts || []).find(x => x.id === l.product_id);
+        // Items that need a choice at the till (variant, serial number) are left for the cashier.
+        if (!p || p.has_variations > 0 || this._isSerialNumberProduct(p)) { skipped.push(l.name); continue; }
+        const before = this._cartStockUnits(p.id);
+        await this.addToCart(p.id, this._unitChoices(p)[0], l.missing);
+        if (this._cartStockUnits(p.id) === before) skipped.push(l.name);
+      }
+    } finally { this._bundleAdding = false; }
+    (this._bundleSeen ||= new Set()).add(b.id);
+    this._closeBundleUpsell();
+    this.renderCart();
+    if (skipped.length) this.alert(`Add ${skipped.join(', ')} yourself — ${skipped.length > 1 ? 'they need' : 'it needs'} a variant, serial number or more stock`, 'warning');
+    else this.alert(`${b.name} added — the bundle discount applies at checkout`);
+    setTimeout(() => document.getElementById('pos-item-input')?.focus(), 0);
   },
 
   removeFromCart(idx) {
@@ -4507,6 +4640,7 @@ const App = {
   },
 
   clearCart() {
+    this._bundleSeen = new Set(); this._closeBundleUpsell();
     this._ticketPoNumber = null;
     this.cart = []; this.cartCustomer = null; this.cartDiscount = 0; this._storeCreditApplied = 0; this._cashBackApplied = 0; this.appliedPromoCode = null; this.autoAppliedPromo = null; this._availablePromos = []; this._returnCredit = null; this._activeQuoteId = null; this._ticketCreatedBy = null; this._ticketSalesperson = null; this.appliedDiscountCard = null; this._manualTaxExempt = null; this._manualTicketDiscount = false; this._manualTicketDiscountPct = null;
     this.renderCart();
@@ -13695,6 +13829,7 @@ const App = {
     }
     this.closeModal();
     this.renderCart();
+    this._bundleUpsell(product.id);
   },
 
   // From All Branches (no branchId) the dialog asks which branch to adjust —

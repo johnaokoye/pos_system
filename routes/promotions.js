@@ -321,6 +321,53 @@ router.get('/discount-eligibility/:productId', requirePermission('pos'), async (
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Bundles a product is part of, for the POS upsell pop-up (a cashier adds one
+// piece → "this is part of a bundle"). Only bundles that apply at checkout on
+// their own: active, inside their dates/times/recurrence, and needing no code
+// (code promos never auto-apply). Each comes with its components (name, price,
+// stock) and the regular price of one set, so the POS can show the saving.
+router.get('/bundles-for/:productId', requirePermission('pos'), async (req, res) => {
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT p.* FROM promotions p
+            WHERE p.active = 1 AND p.type = 'bundle'
+              AND EXISTS (SELECT 1 FROM promotion_bundle_items bi WHERE bi.promotion_id = p.id AND bi.product_id = ?)
+              AND NOT EXISTS (SELECT 1 FROM promotion_codes c WHERE c.promotion_id = p.id)`,
+      args: [req.params.productId],
+    });
+    const promos = rows.filter(p => promoTimingStatus(p).active);
+    if (!promos.length) return res.json([]);
+    const { rows: items } = await db.execute({
+      sql: `SELECT bi.promotion_id, bi.product_id, bi.quantity, pr.name, pr.sku, pr.price, pr.stock_qty, pr.active,
+              (SELECT COUNT(*) FROM product_variations v WHERE v.product_id = pr.id AND v.active = 1) AS has_variations
+            FROM promotion_bundle_items bi JOIN products pr ON pr.id = bi.product_id
+            WHERE bi.promotion_id IN (${promos.map(() => '?').join(',')}) ORDER BY bi.id`,
+      args: promos.map(p => p.id),
+    });
+    const out = [];
+    for (const p of promos) {
+      const components = items.filter(i => i.promotion_id === p.id).map(i => ({
+        product_id: i.product_id, name: i.name, sku: i.sku, quantity: parseInt(i.quantity) || 1,
+        price: Number(i.price) || 0, stock_qty: Number(i.stock_qty) || 0, active: i.active, has_variations: Number(i.has_variations) || 0,
+      }));
+      // A bundle with a retired component can never be completed — don't offer it.
+      if (!components.length || components.some(c => c.active === 0)) continue;
+      const regular = Math.round(components.reduce((s, c) => s + c.price * c.quantity, 0) * 100) / 100;
+      const setPrice = p.bundle_pricing === 'price'
+        ? Math.min(regular, Number(p.bundle_price) || 0)
+        : Math.round(regular * (1 - (Number(p.value) || 0) / 100) * 100) / 100;
+      out.push({
+        id: p.id, name: p.name, description: p.description, bundle_pricing: p.bundle_pricing || 'percent',
+        value: Number(p.value) || 0, bundle_price: p.bundle_price != null ? Number(p.bundle_price) : null,
+        min_purchase: Number(p.min_purchase) || 0, end_date: p.end_date || null,
+        regular_price: regular, set_price: setPrice, saving: Math.max(0, Math.round((regular - setPrice) * 100) / 100),
+        components,
+      });
+    }
+    res.json(out);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Auto-apply: return ALL active promotions that require no code and match cart, sorted by discount desc
 // The next three are called from the POS cart during checkout (applying a
 // promo code to an in-progress sale), not the promotions management screen —
