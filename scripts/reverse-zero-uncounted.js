@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Step-by-step instructions: docs/cycle-count-reversal.md
+//
 // Reverses lines a committed cycle count wrongly set to 0, leaving the lines
 // that were actually counted untouched.
 //
