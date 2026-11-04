@@ -627,7 +627,7 @@ router.post('/', async (req, res) => {
     }
     // Retail quotes default to a 30-day validity window when the caller
     // doesn't specify one — the UI already pre-fills this (see
-    // _applyQuoteTypeVisibility in public/index.html), but this covers any
+    // _applyQuoteTypeVisibility in public/js/quotations.js), but this covers any
     // other caller (an API key, say) that posts a retail quote directly.
     const retailValidUntil = (!isRental && !isSpecialProject && !valid_until)
       ? new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10)

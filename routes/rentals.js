@@ -181,7 +181,7 @@ router.get('/agreements/pickup-reminders', requireRentalsManage, async (req, res
 // column list, no `ra.*` — no deposit/damage/tax/checkout/settlement figures
 // anywhere in this response, only what a driver actually needs: which job,
 // what item, where to take it, and who to ask for. See renderDriverDashboard
-// in public/index.html, the only consumer of this endpoint. Note that
+// in public/js/dashboards.js, the only consumer of this endpoint. Note that
 // canManageRentals()/requireRentalsManage() in lib/permissions.js also
 // carve out rentals_confirm_pickup/rentals_confirm_delivery — the two subs a
 // driver-only group would actually have — from unlocking the full routes

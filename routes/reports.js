@@ -489,7 +489,7 @@ router.get('/loyalty-engagement', requirePermission('reports'), async (req, res)
 
 // Discount card utilization. There's no dedicated discount-card-usage FK on
 // transactions (see routes/customers.js's validateDiscountCard /
-// public/index.html's checkout flow) — a card's use is recorded by
+// public/js/pos.js's checkout flow) — a card's use is recorded by
 // repurposing transactions.promotion_name to "{type} Discount Card", so
 // usage here is detected the same way, not via a real foreign key.
 router.get('/discount-card-utilization', requirePermission('reports'), async (req, res) => {

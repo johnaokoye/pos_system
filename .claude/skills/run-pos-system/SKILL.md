@@ -3,7 +3,7 @@ name: run-pos-system
 description: Build, run, and drive the RetailPOS system. Use when asked to start the app, take a screenshot, test a UI change, interact with the running app, or smoke-test the API.
 ---
 
-RetailPOS is a Node.js/Express server (port 3001) serving a single-file vanilla JS SPA. Drive it with `.claude/skills/run-pos-system/driver.mjs` (Playwright) for UI work, or `curl` for API smoke-tests.
+RetailPOS is a Node.js/Express server (port 3001) serving a vanilla JS SPA (`public/index.html` + `public/js/*.js`, no build step). Drive it with `.claude/skills/run-pos-system/driver.mjs` (Playwright) for UI work, or `curl` for API smoke-tests.
 
 All paths below are relative to the repo root (`/home/johnokoye/pos-system/`).
 

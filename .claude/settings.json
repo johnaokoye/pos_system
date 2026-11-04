@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node -e 'let d=\"\";process.stdin.on(\"data\",c=>d+=c);process.stdin.on(\"end\",()=>{let f=\"\";try{f=(JSON.parse(d).tool_input||{}).file_path||\"\";}catch(e){}if(/\\/routes\\/[^\\/]+\\.js$|\\/lib\\/[^\\/]+\\.js$|\\/database\\.js$|\\/public\\/index\\.html$/.test(f)){process.stdout.write(JSON.stringify({hookSpecificOutput:{hookEventName:\"PostToolUse\",additionalContext:\"This edit touched routes/*.js, lib/*.js, database.js, or public/index.html. If it added, changed, or removed user-facing behavior, check whether public/manual.html needs a matching update before wrapping up.\"}}));}});'",
+            "command": "node -e 'let d=\"\";process.stdin.on(\"data\",c=>d+=c);process.stdin.on(\"end\",()=>{let f=\"\";try{f=(JSON.parse(d).tool_input||{}).file_path||\"\";}catch(e){}if(/\\/routes\\/[^\\/]+\\.js$|\\/lib\\/[^\\/]+\\.js$|\\/database\\.js$|\\/public\\/index\\.html$|\\/public\\/js\\/[^\\/]+\\.js$/.test(f)){process.stdout.write(JSON.stringify({hookSpecificOutput:{hookEventName:\"PostToolUse\",additionalContext:\"This edit touched routes/*.js, lib/*.js, database.js, public/index.html or public/js/*.js. If it added, changed, or removed user-facing behavior, check whether public/manual.html needs a matching update before wrapping up.\"}}));}});'",
             "timeout": 10
           }
         ]

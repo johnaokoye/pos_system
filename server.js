@@ -35,8 +35,8 @@ const PORT = process.env.PORT || 3001;
 app.set('trust proxy', true);
 
 app.use(cors());
-// Gzips every response this app sends — API JSON, the ~750KB single-file
-// SPA (public/index.html), and static assets — before anything else so it
+// Gzips every response this app sends — API JSON, the SPA's
+// ~2.4MB of public/js and public/css, and other static assets — before anything else so it
 // covers the whole pipeline. Cheap CPU cost, large win on the wire for the
 // SPA payload and any sizeable API response (e.g. product/transaction lists).
 app.use(compression());
@@ -200,7 +200,7 @@ if (!process.env.VERCEL) {
           await db.execute({ sql: 'UPDATE rental_agreements SET overdue_notified_at = CURRENT_TIMESTAMP WHERE id = ?', args: [agreement.id] });
           // completed:false + a past due_date makes this surface in the CRM
           // Activities tab's existing Overdue bucket automatically, no new
-          // frontend code needed (public/index.html's renderCrmActivities).
+          // frontend code needed (public/js/crm.js's renderCrmActivities).
           await logActivity({
             customerId: agreement.customer_id, employeeId: agreement.employee_id,
             type: 'rental', subject: `Rental ${agreement.agreement_number} is overdue (due ${agreement.due_date})`,

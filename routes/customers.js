@@ -627,10 +627,10 @@ router.get('/rental-incomplete', requirePermission('customers_missing_rental_inf
 // it without editing each customer record).
 // Cash-back fields (points_threshold/reward_amount/redemption gates) join in
 // the same way, so POS can compute eligibility client-side without a second
-// round trip — see availableCashBack() in public/index.html.
+// round trip — see availableCashBack() in public/js/pos.js.
 // Customer category fields join the same way too — a category's
 // discount_percent auto-applies at checkout exactly like a discount card
-// (see setCartCustomer() in public/index.html), just without a card number,
+// (see setCartCustomer() in public/js/pos.js), just without a card number,
 // and only when no discount card is present (a card is a more deliberate,
 // specific assignment and wins if both exist on the same customer).
 const CUSTOMER_WITH_CARD_SELECT = `SELECT c.*, dct.name as discount_card_type_name, dct.discount_percent as discount_card_percent, dct.active as discount_card_type_active,

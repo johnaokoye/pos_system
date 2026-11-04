@@ -95,7 +95,7 @@ function logoImgTag(s, origin, maxHeight = 40) {
 }
 
 // A retail sale goes out as a Retail Tax Invoice (email subject, body and
-// PDF attachment) — same rule as App._txDocTitle() in public/index.html for
+// PDF attachment) — same rule as App._txDocTitle() in public/js/pos.js for
 // the letter-size printed copy.
 function receiptDocTitle(tx) {
   // A rental's checkout sale is the Rental Agreement (unless it's a Special
@@ -106,7 +106,7 @@ function receiptDocTitle(tx) {
 }
 
 // The invoice's "Bill To" lines after the (bold) customer name — account
-// code, then address. Mirrors App._billToLines() in public/index.html.
+// code, then address. Mirrors App._billToLines() in public/js/pos.js.
 function billToLines(tx) {
   const cityLine = [tx.customer_city, [tx.customer_state, tx.customer_zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
   return [tx.customer_number ? `Account #: ${tx.customer_number}` : '', tx.customer_address, cityLine].filter(Boolean);
@@ -447,7 +447,7 @@ function buildCancellationReceiptHtml(agreement, s) {
 </html>`;
 }
 
-// Mirrors printReceiptLetter's rental invoice in public/index.html — item(s)
+// Mirrors printReceiptLetter's rental invoice in public/js/pos.js — item(s)
 // rented pulled from the agreement (not just this transaction's line items,
 // which for a settlement are duration-adjustment/deposit lines with no
 // product name), plus both Issue and Return signature checkpoints whenever
@@ -489,7 +489,7 @@ function buildRentalInvoiceHtml(agreement, tx, s, origin) {
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(i.total)}</td>
     </tr>`).join('');
 
-  // Mirrors printReceiptLetter's rental breakdown in public/index.html — a
+  // Mirrors printReceiptLetter's rental breakdown in public/js/pos.js — a
   // CHECKOUT transaction (positive DEPOSIT line, not a settlement's reversed
   // one) shows Sub-Total Amount / Sales Tax / Sales Total / Rental Deposit /
   // Grand Total, since the deposit equals Sales Total (fee + tax) under the
@@ -581,7 +581,7 @@ function buildRentalInvoiceHtml(agreement, tx, s, origin) {
 
 // The single comprehensive "final rental agreement" document — checkout
 // through return through however the deposit was ultimately settled. Mirrors
-// printRentalAgreementSummary in public/index.html section-for-section so
+// printRentalAgreementSummary in public/js/rentals.js section-for-section so
 // the emailed copy matches what printing it produces; replaces what used to
 // be three separate narrower documents (tax invoice extras aside, the
 // deposit-only credit-note/refund receipts) with one.
@@ -1194,7 +1194,7 @@ router.post('/send-rental-summary/:id', requireAuth, async (req, res) => {
 });
 
 // Send the rental tax invoice — always the checkout transaction, same as
-// printRentalInvoice() in public/index.html, so the item(s) rented and
+// printRentalInvoice() in public/js/rentals.js, so the item(s) rented and
 // pricing come from a real product line rather than a settlement's
 // duration-adjustment/deposit lines. Issue and Return signatures (whichever
 // are on file) are pulled from the agreement itself either way.
@@ -2238,7 +2238,7 @@ function buildWorkOrderInvoiceHtml(wo, s, { print = false } = {}) {
 
   // Same balance-due math as the frontend's viewWorkOrder()/
   // showWOFinalPaymentModal() — kept in sync manually since there's no
-  // shared module between routes/ and public/index.html.
+  // shared module between routes/ and public/js/.
   const estimateTotal = (parseFloat(wo.estimate_labor) || 0) + (parseFloat(wo.estimate_consumables) || 0);
   const estimateTax = parseFloat((estimateTotal * (parseFloat(wo.estimate_tax_rate) || 0) / 100).toFixed(2));
   const partsTotal = (wo.items || []).reduce((sum, i) => sum + (parseFloat(i.total) || 0), 0);

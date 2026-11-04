@@ -15,7 +15,7 @@ const { allocateTicketDiscount, returnedDiscountShare } = require('../lib/ticket
 const { UNAPPLIED_SQL, paymentReceipt } = require('../lib/customerPayments');
 const { recordReturnCreditNote, useStoreCredit } = require('../lib/returnCreditNotes');
 
-// Mirrors availableCashBack() in public/index.html — the frontend uses this
+// Mirrors availableCashBack() in public/js/pos.js — the frontend uses this
 // same formula to decide whether to show the Cash Back bar; this copy is the
 // server-side clamp applied below so a stale/tampered client value can never
 // apply more than the customer is actually entitled to.
