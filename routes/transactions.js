@@ -657,6 +657,14 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       disc = Math.min(disc, parseFloat(ret.total));
     }
     const storeCredit = parseFloat(store_credit_applied || 0);
+    // Store credit can't be more than the customer's credit balance (old
+    // credit notes, return credit notes) — the POS caps it, this enforces it.
+    if (storeCredit > 0) {
+      if (!customer_id) return res.status(400).json({ error: 'Store credit needs a customer on the ticket' });
+      const { rows: [sc] } = await db.execute({ sql: 'SELECT account_balance FROM customers WHERE id = ?', args: [customer_id] });
+      const availableCredit = Math.max(0, -(Number(sc?.account_balance) || 0));
+      if (storeCredit > availableCredit + 0.005) return res.status(400).json({ error: `Only ${availableCredit.toFixed(2)} of credit is available on this customer's account` });
+    }
 
     // Server-side clamp against the customer's actual eligibility right now
     // — see computeAvailableCashBack() above.

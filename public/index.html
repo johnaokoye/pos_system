@@ -16240,6 +16240,7 @@ const App = {
               <div style="font-weight:700;font-size:16px;color:#c62828">${this.fmt(c.account_balance||0)}</div>
             </div>
           </div>` : ''}
+          ${!isCredit ? `<div id="cust-credits" style="margin-bottom:16px"></div>` : ''}
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">
             <h4 style="margin:0;flex:1">History</h4>
             <label style="font-size:12px">From</label>
@@ -16254,6 +16255,87 @@ const App = {
           <div id="ch-legacy" style="margin-top:16px">${this._buildCustomerLegacyHTML(legacy)}</div>
         </div>
       </div>`);
+    if (!isCredit) this._renderCustomerCredits(c.id);
+  },
+
+  // Cash customer's credit: what's available at the POS, each credit note
+  // (old-system ones entered here, and return credit notes) with what's left,
+  // + Add Old Credit Note (customers_legacy_credit) and Void
+  // (customers_legacy_credit_void, only while unused).
+  async _renderCustomerCredits(customerId, data) {
+    const el = document.getElementById('cust-credits');
+    if (!el) return;
+    if (!data) { try { data = await this.api('GET', `/customers/${customerId}/credits`); } catch (e) { el.innerHTML = ''; return; } }
+    const canAdd = this.can('customers_legacy_credit'), canVoid = this.can('customers_legacy_credit_void');
+    if (data.is_credit_account || (!data.notes.length && !data.voided.length && !canAdd)) { el.innerHTML = ''; return; }
+    const esc = v => this.escapeAttr(v == null ? '' : String(v));
+    el.innerHTML = `
+      <div style="border:1px solid var(--border);border-radius:8px;padding:12px">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:${data.notes.length ? '10px' : '0'}">
+          <div style="flex:1;min-width:180px">
+            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Available Credit</div>
+            <div style="font-weight:700;font-size:20px;color:${data.available > 0 ? 'var(--success)' : 'var(--text)'}">${this.fmt(data.available)}</div>
+            <div style="font-size:12px;color:var(--text-muted)">${data.available > 0 ? 'Offered as Available Credit when this customer is on a POS ticket' : 'No credit on the account'}</div>
+          </div>
+          ${canAdd ? `<button class="btn btn-sm btn-primary" onclick="App._showLegacyCreditForm(${customerId})">+ Add Old Credit Note</button>` : ''}
+        </div>
+        ${data.notes.length ? `<table style="margin:0"><thead><tr><th>Credit Note</th><th>Old #</th><th>Dated</th><th style="text-align:right">Amount</th><th style="text-align:right">Left</th>${canVoid ? '<th></th>' : ''}</tr></thead><tbody>
+          ${data.notes.map(n => `<tr>
+            <td class="fw-600">${esc(n.payment_number)}${n.return_id ? ' <span class="badge-pill badge-secondary" style="font-size:10px">Return</span>' : n.entered_in_pos ? ' <span class="badge-pill badge-purple" style="font-size:10px">Old system</span>' : ' <span class="badge-pill badge-secondary" style="font-size:10px">Books</span>'}</td>
+            <td>${n.return_id ? '—' : esc(String(n.reference || '').replace(/^Legacy CN /, ''))}</td>
+            <td style="white-space:nowrap">${n.legacy_credit_date ? this.fmtDate(n.legacy_credit_date) : this.fmtDate(n.created_at)}</td>
+            <td style="text-align:right">${this.fmt(n.amount)}</td>
+            <td style="text-align:right" class="fw-600">${n.remaining > 0.005 ? this.fmt(n.remaining) : '<span style="color:var(--text-muted)">Used</span>'}</td>
+            ${canVoid ? `<td style="text-align:right">${n.can_void ? `<button class="btn btn-sm btn-outline" onclick="App._voidLegacyCredit(${customerId}, ${n.id}, '${esc(n.payment_number)}')">Void</button>` : ''}</td>` : ''}
+          </tr>${!n.return_id ? `<tr><td colspan="${canVoid ? 6 : 5}" style="font-size:12px;color:var(--text-muted);padding-top:0;border-top:none">${n.entered_in_pos ? `Entered ${this.fmtDate(n.created_at)}${n.entered_by_name ? ` by ${esc(n.entered_by_name)}` : ''}` : 'From RetailPOS Books'}${(m => m ? ` · ${esc(m)}` : '')(String(n.notes || '').replace(/^Old system credit note .*? dated [0-9-]+( — )?/, ''))}</td></tr>` : ''}`).join('')}
+        </tbody></table>` : ''}
+        ${data.voided.length ? `<details style="margin-top:8px;font-size:12px"><summary style="cursor:pointer;color:var(--text-muted)">Voided (${data.voided.length})</summary>
+          ${data.voided.map(v => `<div style="padding:4px 0;color:var(--text-muted)">${esc(v.payment_number)} — old # ${esc(v.credit_note_number)}, ${this.fmt(v.amount)} — voided ${this.fmtDateTime(v.voided_at)}${v.voided_by_name ? ` by ${esc(v.voided_by_name)}` : ''}: ${esc(v.reason)}</div>`).join('')}
+        </details>` : ''}
+      </div>`;
+  },
+
+  _showLegacyCreditForm(customerId) {
+    const today = this._storeDay();
+    const html = `<div style="position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:3000;display:flex;align-items:center;justify-content:center;padding:16px" id="lcn-overlay">
+      <div class="modal" style="max-width:440px;width:100%">
+        <div class="modal-header"><span class="modal-title">Add Old Credit Note</span><button class="modal-close" onclick="document.getElementById('lcn-overlay').remove()">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-top:0">Credit this customer has from the old system. It goes on their account as Available Credit for use at the POS.</p>
+          <div class="form-group"><label>Old Credit Note # *</label><input id="lcn-number" autocomplete="off"></div>
+          <div class="form-group"><label>Date on the Credit Note *</label><input id="lcn-date" type="date" max="${today}"></div>
+          <div class="form-group"><label>Amount *</label><input id="lcn-amount" type="number" min="0.01" step="0.01"></div>
+          <div class="form-group"><label>Notes</label><input id="lcn-memo" placeholder="e.g. returned goods, overpayment"></div>
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" onclick="document.getElementById('lcn-overlay').remove()">Cancel</button><button class="btn btn-primary" id="lcn-save" onclick="App._saveLegacyCredit(${customerId})">Add Credit</button></div>
+      </div></div>`;
+    document.body.insertAdjacentHTML('beforeend', html);
+    document.getElementById('lcn-number').focus();
+  },
+
+  async _saveLegacyCredit(customerId) {
+    const v = id => document.getElementById(id).value.trim();
+    const body = { credit_note_number: v('lcn-number'), date: v('lcn-date'), amount: v('lcn-amount'), memo: v('lcn-memo') };
+    if (!body.credit_note_number || !body.date || !(parseFloat(body.amount) > 0)) return this.alert('Enter the old credit note #, its date and the amount', 'error');
+    if (!confirm(`Add ${this.fmt(parseFloat(body.amount))} of credit to this customer's account?`)) return;
+    const btn = document.getElementById('lcn-save'); btn.disabled = true;
+    try {
+      const out = await this.api('POST', `/customers/${customerId}/legacy-credit-notes`, body);
+      document.getElementById('lcn-overlay')?.remove();
+      this.alert(`${out.payment_number} added — ${this.fmt(out.available)} available`);
+      this._renderCustomerCredits(customerId, out);
+    } catch (e) { btn.disabled = false; this.alert(e.message, 'error'); }
+  },
+
+  async _voidLegacyCredit(customerId, paymentId, number) {
+    const reason = prompt(`Void ${number}? It comes off the customer's available credit.\n\nReason:`);
+    if (reason == null) return;
+    if (!reason.trim()) return this.alert('A reason is required', 'error');
+    try {
+      const out = await this.api('POST', `/customers/${customerId}/legacy-credit-notes/${paymentId}/void`, { reason: reason.trim() });
+      this.alert(`${number} voided`);
+      this._renderCustomerCredits(customerId, out);
+    } catch (e) { this.alert(e.message, 'error'); }
   },
 
   // Everything the History window (and its Print) shows for a customer —
@@ -30892,6 +30974,23 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
             </label>
           </div>
           <div class="form-group">
+            <label>Customer Credit</label>
+            <label class="perm-item" style="padding:10px 12px;border:1px solid var(--border);border-radius:6px;display:flex;align-items:flex-start;gap:10px;cursor:pointer;margin-top:6px">
+              <input type="checkbox" id="sg-legacy-credit" ${perms.customers_legacy_credit ? 'checked' : ''} style="margin-top:2px;flex-shrink:0">
+              <span>
+                <strong>Add Old Credit Notes</strong><br>
+                <span style="font-size:12px;color:var(--text-muted)">Put a credit note from the old system on a cash customer's account, to spend at the POS as Available Credit. Separate from Customers access, so it isn't granted with the Customers module.</span>
+              </span>
+            </label>
+            <label class="perm-item" style="padding:10px 12px;border:1px solid var(--border);border-radius:6px;display:flex;align-items:flex-start;gap:10px;cursor:pointer;margin-top:6px">
+              <input type="checkbox" id="sg-legacy-credit-void" ${perms.customers_legacy_credit_void ? 'checked' : ''} style="margin-top:2px;flex-shrink:0">
+              <span>
+                <strong>Void Old Credit Notes</strong><br>
+                <span style="font-size:12px;color:var(--text-muted)">Remove an old credit note entered by mistake, with a reason — only while none of it has been used.</span>
+              </span>
+            </label>
+          </div>
+          <div class="form-group">
             <label>Module Access &amp; Permissions</label>
             <div style="margin-top:6px">${moduleRows}</div>
           </div>
@@ -30951,7 +31050,7 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
     const description = document.getElementById('sg-desc').value.trim();
     if (!name) { this.alert('Name required', 'error'); return; }
     // Start from the stored blob so keys outside _permissionTree survive a save.
-    const permissions = { ...(id ? this._sgEditingPerms : {}), multi_branch_access: document.getElementById('sg-multi-branch')?.checked || false, pos_view_margin: document.getElementById('sg-pos-margin')?.checked || false, customers_credit_block: document.getElementById('sg-credit-block')?.checked || false, pos_receive_payment: document.getElementById('sg-receive-payment')?.checked || false, pos_petty_cash: document.getElementById('sg-petty-cash')?.checked || false, returns_override: document.getElementById('sg-returns-override')?.checked || false };
+    const permissions = { ...(id ? this._sgEditingPerms : {}), multi_branch_access: document.getElementById('sg-multi-branch')?.checked || false, pos_view_margin: document.getElementById('sg-pos-margin')?.checked || false, customers_credit_block: document.getElementById('sg-credit-block')?.checked || false, pos_receive_payment: document.getElementById('sg-receive-payment')?.checked || false, pos_petty_cash: document.getElementById('sg-petty-cash')?.checked || false, returns_override: document.getElementById('sg-returns-override')?.checked || false, customers_legacy_credit: document.getElementById('sg-legacy-credit')?.checked || false, customers_legacy_credit_void: document.getElementById('sg-legacy-credit-void')?.checked || false };
     this._permissionTree.forEach(mod => {
       permissions[mod.key] = document.getElementById(`perm-${mod.key}`)?.checked || false;
       mod.subs.forEach(s => { permissions[s.key] = document.getElementById(`perm-${s.key}`)?.checked || false; });

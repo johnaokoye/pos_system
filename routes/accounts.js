@@ -184,9 +184,21 @@ router.get('/payments-feed', async (req, res) => {
     // return_id / return_number / return_tax mark a credit note made by a
     // return (lib/returnCreditNotes.js) — Books books those; a credit note
     // without return_id is a legacy one Books entered itself.
+    // entered_in_pos marks an old-system credit note entered in the POS on a
+    // cash customer (routes/customers.js) — Books posts those too.
     const { rows } = await db.execute({ sql: `SELECT ap.id, ap.payment_number, ap.customer_id, ap.amount, ap.payment_method, ap.payment_mode, ap.reference, ap.notes, ap.created_at,
-        ap.return_id, r.return_number, r.tax_amount AS return_tax
+        ap.return_id, r.return_number, r.tax_amount AS return_tax, COALESCE(ap.entered_in_pos, 0) AS entered_in_pos, ap.legacy_credit_date
       FROM account_payments ap LEFT JOIN returns r ON r.id = ap.return_id WHERE ap.id > ? ORDER BY ap.id LIMIT ?`, args: [sinceId, limit] });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// POS-entered old credit notes that were voided (their account_payments row
+// is gone) — Books reverses the entry it posted for each (payment_id).
+router.get('/legacy-credit-voids', async (req, res) => {
+  try {
+    const sinceId = parseInt(req.query.since_id) || 0;
+    const { rows } = await db.execute({ sql: 'SELECT id, payment_id, payment_number, customer_id, credit_note_number, amount, reason, voided_at FROM legacy_credit_voids WHERE id > ? ORDER BY id LIMIT 500', args: [sinceId] });
     res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

@@ -13,6 +13,7 @@ const path = require('path');
 const fs = require('fs');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 const { getMissingRentalFields } = require('../lib/rentals');
+const { storeToday } = require('../lib/storeTime');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -754,6 +755,137 @@ router.get('/:id/payments', requireAuth, async (req, res) => {
     sql += ' ORDER BY created_at DESC';
     const { rows } = await db.execute({ sql, args });
     res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Old-system credit notes on a cash customer's account ─────────────────
+// Credit a cash customer was owed in the old system, entered here (credit
+// customers' come from RetailPOS Books, /accounts/legacy-credit-notes). It's
+// an open credit_note account_payments row (entered_in_pos = 1, no drawer
+// session) that takes the balance negative — the POS shows that as Available
+// Credit, and a sale using it draws the note down (useStoreCredit). Books
+// posts it from the payments feed (Dr Opening Balance Equity / Cr A/R) and
+// reverses it if it's voided (legacy_credit_voids).
+const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
+
+async function customerCredits(customerId) {
+  const { rows: [c] } = await db.execute({ sql: 'SELECT id, customer_type, credit_enabled, account_balance FROM customers WHERE id = ?', args: [customerId] });
+  if (!c) return null;
+  const { rows: notes } = await db.execute({
+    sql: `SELECT ap.id, ap.payment_number, ap.amount, ap.reference, ap.notes, ap.created_at, ap.return_id, ap.entered_in_pos, ap.legacy_credit_date,
+            ${UNAPPLIED_SQL} AS remaining,
+            COALESCE((SELECT SUM(scu.amount) FROM store_credit_uses scu WHERE scu.payment_id = ap.id), 0) AS used_on_sales,
+            TRIM(COALESCE(e.first_name, '') || ' ' || COALESCE(e.last_name, '')) AS entered_by_name,
+            (SELECT COUNT(*) FROM payment_allocations pa WHERE pa.payment_id = ap.id) + (SELECT COUNT(*) FROM legacy_invoice_allocations lia WHERE lia.payment_id = ap.id)
+              + (SELECT COUNT(*) FROM store_credit_uses scu WHERE scu.payment_id = ap.id) + (SELECT COUNT(*) FROM payment_allocation_changes pac WHERE pac.payment_id = ap.id) AS uses
+          FROM account_payments ap LEFT JOIN employees e ON e.id = ap.employee_id
+          WHERE ap.customer_id = ? AND ap.payment_method = 'credit_note' ORDER BY ap.created_at DESC, ap.id DESC`,
+    args: [customerId],
+  });
+  const { rows: voided } = await db.execute({
+    sql: `SELECT v.*, TRIM(COALESCE(e.first_name, '') || ' ' || COALESCE(e.last_name, '')) AS voided_by_name FROM legacy_credit_voids v LEFT JOIN employees e ON e.id = v.voided_by
+          WHERE v.customer_id = ? ORDER BY v.voided_at DESC`,
+    args: [customerId],
+  });
+  return {
+    customer_type: c.customer_type,
+    is_credit_account: c.customer_type === 'credit' || !!c.credit_enabled,
+    available: r2(Math.max(0, -(Number(c.account_balance) || 0))),
+    notes: notes.map(n => ({ ...n, remaining: r2(n.remaining), used_on_sales: r2(n.used_on_sales), can_void: !!n.entered_in_pos && Number(n.uses) === 0, uses: undefined })),
+    voided,
+  };
+}
+
+router.get('/:id/credits', requireAuth, async (req, res) => {
+  try {
+    const out = await customerCredits(req.params.id);
+    if (!out) return res.status(404).json({ error: 'Customer not found' });
+    res.json(out);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/:id/legacy-credit-notes', requirePermission('customers_legacy_credit'), async (req, res) => {
+  try {
+    const number = String(req.body.credit_note_number || '').trim();
+    const date = String(req.body.date || '').trim();
+    const amount = r2(parseFloat(req.body.amount));
+    const memo = String(req.body.memo || '').trim();
+    if (!number) return res.status(400).json({ error: "Enter the old system's credit note number" });
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || isNaN(new Date(date))) return res.status(400).json({ error: 'Enter the date of the credit note' });
+    if (date > storeToday()) return res.status(400).json({ error: "The credit note date can't be in the future" });
+    if (!(amount > 0)) return res.status(400).json({ error: 'Enter an amount more than 0' });
+
+    const { rows: [c] } = await db.execute({ sql: 'SELECT id, first_name, last_name, customer_type, credit_enabled, active FROM customers WHERE id = ?', args: [req.params.id] });
+    if (!c) return res.status(404).json({ error: 'Customer not found' });
+    if (c.customer_type === 'credit' || c.credit_enabled) return res.status(400).json({ error: `${c.first_name} ${c.last_name} has a credit account — enter their old credit notes in RetailPOS Books, where they can be applied to invoices` });
+    if (c.active === 0) return res.status(400).json({ error: 'This customer is inactive' });
+
+    // An old credit note number can only be on one account at a time.
+    const reference = `Legacy CN ${number}`;
+    const { rows: [dup] } = await db.execute({
+      sql: `SELECT ap.payment_number, c.first_name, c.last_name FROM account_payments ap JOIN customers c ON c.id = ap.customer_id
+            WHERE ap.payment_method = 'credit_note' AND ap.return_id IS NULL AND LOWER(ap.reference) = LOWER(?) LIMIT 1`,
+      args: [reference],
+    });
+    if (dup) return res.status(409).json({ error: `Old credit note ${number} is already on ${dup.first_name} ${dup.last_name}'s account (${dup.payment_number})` });
+
+    const payment_number = await nextNumber(db, 'account_payments', 'payment_number', 'CN-', 6);
+    const notes = `Old system credit note ${number} dated ${date}${memo ? ` — ${memo}` : ''}`;
+    const tx = await db.transaction('write');
+    let committed = false, id;
+    try {
+      const result = await tx.execute({
+        sql: `INSERT INTO account_payments (payment_number, customer_id, employee_id, amount, payment_method, payment_mode, reference, notes, entered_in_pos, legacy_credit_date)
+              VALUES (?,?,?,?,'credit_note','open',?,?,1,?)`,
+        args: [payment_number, c.id, req.employee?.id || null, amount, reference, notes, date],
+      });
+      id = Number(result.lastInsertRowid);
+      await tx.execute({ sql: 'UPDATE customers SET account_balance = account_balance - ? WHERE id = ?', args: [amount, c.id] });
+      await tx.commit();
+      committed = true;
+    } catch(e) {
+      if (!committed) await tx.rollback();
+      throw e;
+    }
+    const out = await customerCredits(c.id);
+    res.status(201).json({ id, payment_number, ...out });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Void one entered by mistake — only while none of it has been used.
+router.post('/:id/legacy-credit-notes/:pid/void', requirePermission('customers_legacy_credit_void'), async (req, res) => {
+  try {
+    const reason = String(req.body.reason || '').trim();
+    if (!reason) return res.status(400).json({ error: 'Give a reason for voiding it' });
+    const { rows: [cn] } = await db.execute({ sql: "SELECT * FROM account_payments WHERE id = ? AND customer_id = ? AND payment_method = 'credit_note'", args: [req.params.pid, req.params.id] });
+    if (!cn) return res.status(404).json({ error: 'Credit note not found' });
+    if (!cn.entered_in_pos) return res.status(400).json({ error: `${cn.payment_number} wasn't entered as an old credit note in the POS, so it can't be voided here` });
+
+    const tx = await db.transaction('write');
+    let committed = false;
+    try {
+      const { rows: [u] } = await tx.execute({
+        sql: `SELECT (SELECT COUNT(*) FROM payment_allocations WHERE payment_id = ?) + (SELECT COUNT(*) FROM legacy_invoice_allocations WHERE payment_id = ?)
+                + (SELECT COUNT(*) FROM store_credit_uses WHERE payment_id = ?) + (SELECT COUNT(*) FROM payment_allocation_changes WHERE payment_id = ?) AS n`,
+        args: [cn.id, cn.id, cn.id, cn.id],
+      });
+      if (Number(u.n) > 0) { await tx.rollback(); committed = true; return res.status(409).json({ error: `${cn.payment_number} has already been used, so it can't be voided` }); }
+      await tx.execute({
+        sql: `INSERT INTO legacy_credit_voids (payment_id, payment_number, customer_id, credit_note_number, amount, entered_by, entered_at, reason, voided_by) VALUES (?,?,?,?,?,?,?,?,?)`,
+        args: [cn.id, cn.payment_number, cn.customer_id, String(cn.reference || '').replace(/^Legacy CN /, ''), cn.amount, cn.employee_id, cn.created_at, reason, req.employee?.id || null],
+      });
+      // Kept in deleted_documents too, so its CN- number is never reissued.
+      await tx.execute({ sql: 'INSERT INTO deleted_documents (doc_table, doc_id, doc_number, snapshot, deleted_by) VALUES (?, ?, ?, ?, ?)',
+        args: ['account_payments', cn.id, cn.payment_number, JSON.stringify({ ...cn, void_reason: reason }), req.employee?.id ?? null] });
+      await tx.execute({ sql: 'DELETE FROM account_payments WHERE id = ?', args: [cn.id] });
+      await tx.execute({ sql: 'UPDATE customers SET account_balance = account_balance + ? WHERE id = ?', args: [cn.amount, cn.customer_id] });
+      await tx.commit();
+      committed = true;
+    } catch(e) {
+      if (!committed) await tx.rollback();
+      throw e;
+    }
+    res.json(await customerCredits(cn.customer_id));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

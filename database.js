@@ -2917,6 +2917,27 @@ async function _init() {
       amount REAL NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`,
+    // An old-system credit note entered in the POS on a cash customer's
+    // account (routes/customers.js /:id/legacy-credit-notes) — Books posts
+    // these from the payments feed (Books-entered ones it posted itself).
+    'ALTER TABLE account_payments ADD COLUMN entered_in_pos INTEGER DEFAULT 0',
+    'ALTER TABLE account_payments ADD COLUMN legacy_credit_date TEXT',
+    // A POS-entered legacy credit note voided before any of it was used —
+    // the row is deleted, so this keeps the record and tells Books to
+    // reverse its entry (GET /accounts/legacy-credit-voids).
+    `CREATE TABLE IF NOT EXISTS legacy_credit_voids (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      payment_id INTEGER NOT NULL,
+      payment_number TEXT,
+      customer_id INTEGER,
+      credit_note_number TEXT,
+      amount REAL NOT NULL,
+      entered_by INTEGER,
+      entered_at DATETIME,
+      reason TEXT NOT NULL,
+      voided_by INTEGER REFERENCES employees(id),
+      voided_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`,
     // A purchase request raised for a Shop Use request's stock shortage.
     'ALTER TABLE purchase_requests ADD COLUMN shop_use_request_id INTEGER REFERENCES shop_use_requests(id)',
     // Cycle counts allow for stock that moves while a count is open: each
@@ -3605,6 +3626,19 @@ async function _init() {
       }
       if (!('customers_credit_block' in perms)) {
         perms.customers_credit_block = /^(administrator|manager|accounts? receivables?)$/i.test(String(g.name || '').trim());
+        changed = true;
+      }
+      // Entering an old-system credit note on a cash customer's account, and
+      // voiding one entered by mistake (2026-11-04) — standalone (credit is
+      // as good as cash, so not inherited with the Customers module):
+      // entering starts on Administrator, Manager and Accounts Receivable,
+      // voiding on Administrator only.
+      if (!('customers_legacy_credit' in perms)) {
+        perms.customers_legacy_credit = /^(administrator|manager|accounts? receivables?)$/i.test(String(g.name || '').trim());
+        changed = true;
+      }
+      if (!('customers_legacy_credit_void' in perms)) {
+        perms.customers_legacy_credit_void = /^administrator$/i.test(String(g.name || '').trim());
         changed = true;
       }
       // Authorizing a return with a manager PIN — standalone (not a
