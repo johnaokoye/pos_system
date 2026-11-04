@@ -1,4 +1,4 @@
-// Settings, API keys, integrations, email dialogs, units, categories, brands, customer categories.
+// Settings, API keys, integrations, document email actions, categories, brands, customer categories.
 Object.assign(App, {
   // ─── Settings ─────────────────────────────────────────────
   async renderSettings() {
@@ -653,40 +653,6 @@ Object.assign(App, {
     }
   },
 
-  // `pdfOption` adds an "Attach as PDF" checkbox (quotations, invoices, POs, GRNs —
-  // see documentEmailContent in routes/email.js); onSend then gets
-  // { as_pdf } as its second argument. The last choice is remembered per
-  // browser, since a store tends to settle on one or the other.
-  showEmailModal(title, defaultEmail, onSend, { pdfOption = false } = {}) {
-    let pdfDefault = false;
-    try { pdfDefault = localStorage.getItem('pos_email_as_pdf') === '1'; } catch(e) {}
-    this.showModal(`
-      <div class="modal" style="max-width:400px">
-        <div class="modal-header"><span class="modal-title">${title}</span><button class="modal-close">✕</button></div>
-        <div class="modal-body">
-          <div class="form-group">
-            <label>Recipient Email *</label>
-            <input type="email" id="email-to" value="${defaultEmail||''}" placeholder="customer@example.com">
-          </div>
-          ${pdfOption ? `<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
-            <input type="checkbox" id="email-as-pdf" ${pdfDefault ? 'checked' : ''} style="width:16px;height:16px;margin:0">
-            Attach as PDF <span style="color:var(--text-muted);font-size:12px">(instead of in the email body)</span>
-          </label>` : ''}
-        </div>
-        <div class="modal-footer">
-          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-          <button class="btn btn-primary" id="email-send-btn">Send</button>
-        </div>
-      </div>`);
-    document.getElementById('email-send-btn').addEventListener('click', () => {
-      const to = document.getElementById('email-to').value.trim();
-      if (!to || !to.includes('@')) { this.alert('Please enter a valid email address', 'error'); return; }
-      const as_pdf = !!document.getElementById('email-as-pdf')?.checked;
-      if (pdfOption) { try { localStorage.setItem('pos_email_as_pdf', as_pdf ? '1' : '0'); } catch(e) {} }
-      onSend(to, { as_pdf });
-    });
-  },
-
   emailReceipt(txId, customerEmail) {
     this.showEmailModal('Email Receipt', customerEmail, async (to, { as_pdf }) => {
       this.closeModal();
@@ -726,85 +692,6 @@ Object.assign(App, {
         this.alert(`Goods received note sent to ${to}`);
       } catch(e) { this.alert(e.message, 'error'); }
     }, { pdfOption: true });
-  },
-
-  // Units of measure list (routes/units.js). Opened over the product form
-  // (fromForm) as a secondary modal so the form underneath isn't lost; its
-  // unit dropdowns are refreshed when this closes.
-  async showUnitsManager(fromForm = false) {
-    const uoms = await this.api('GET', '/units');
-    this._uoms = uoms;
-    const canManage = this.can('inventory_units') || this.can('settings');
-    const row = u => `<tr style="border-top:1px solid var(--border);${u.active ? '' : 'opacity:.55'}">
-      <td style="padding:6px 10px"><input id="uom-name-${u.id}" value="${this.escapeAttr(u.name)}" style="width:100%" ${canManage ? '' : 'disabled'}></td>
-      <td style="padding:6px 10px"><input id="uom-abbr-${u.id}" value="${this.escapeAttr(u.abbreviation || '')}" style="width:70px" ${canManage ? '' : 'disabled'}></td>
-      <td style="padding:6px 10px;text-align:center"><input type="checkbox" id="uom-dec-${u.id}" ${u.allow_decimal ? 'checked' : ''} ${canManage ? '' : 'disabled'} style="width:auto"></td>
-      <td style="padding:6px 10px;text-align:center"><input type="checkbox" id="uom-active-${u.id}" ${u.active ? 'checked' : ''} ${canManage ? '' : 'disabled'} style="width:auto"></td>
-      <td style="padding:6px 10px;text-align:center;font-size:13px">${u.product_count}</td>
-      <td style="padding:6px 10px;text-align:right;white-space:nowrap">${canManage ? `<button class="btn btn-secondary btn-sm" onclick="App._saveUnit(${u.id},${fromForm})">Save</button>${u.product_count ? '' : ` <button class="btn btn-danger btn-sm" onclick="App._deleteUnit(${u.id},${fromForm})">✕</button>`}` : ''}</td>
-    </tr>`;
-    const html = `
-      <div class="modal" style="max-width:640px">
-        <div class="modal-header"><span class="modal-title">Units of Measure</span><button class="modal-close" onclick="App._closeUnitsManager(${fromForm})">✕</button></div>
-        <div class="modal-body" style="padding:0">
-          <p style="font-size:12px;color:var(--text-muted);margin:10px 16px">Units an item can be stocked, sold or ordered in. Tick <strong>Decimals</strong> for measures sold in part quantities (2.5 yards, 1.25 kg). An inactive unit stays on items already using it but isn't offered for new ones.</p>
-          <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse">
-            <thead><tr style="background:var(--bg-secondary)"><th style="padding:8px 10px;text-align:left;font-size:13px">Name</th><th style="padding:8px 10px;text-align:left;font-size:13px">Abbrev.</th><th style="padding:8px 10px;font-size:13px">Decimals</th><th style="padding:8px 10px;font-size:13px">Active</th><th style="padding:8px 10px;font-size:13px">Items</th><th></th></tr></thead>
-            <tbody>${uoms.map(row).join('')}
-              ${canManage ? `<tr style="border-top:2px solid var(--border)">
-                <td style="padding:6px 10px"><input id="uom-name-new" placeholder="New unit, e.g. Yard" style="width:100%"></td>
-                <td style="padding:6px 10px"><input id="uom-abbr-new" placeholder="yd" style="width:70px"></td>
-                <td style="padding:6px 10px;text-align:center"><input type="checkbox" id="uom-dec-new" style="width:auto"></td>
-                <td></td><td></td>
-                <td style="padding:6px 10px;text-align:right"><button class="btn btn-primary btn-sm" onclick="App._saveUnit(null,${fromForm})">+ Add</button></td>
-              </tr>` : ''}
-            </tbody>
-          </table></div>
-        </div>
-        <div class="modal-footer"><button class="btn btn-secondary" onclick="App._closeUnitsManager(${fromForm})">Close</button></div>
-      </div>`;
-    if (fromForm) this.showSecondaryModal(html); else this.showModal(html);
-  },
-
-  async _saveUnit(id, fromForm) {
-    const k = id || 'new';
-    const data = {
-      name: document.getElementById(`uom-name-${k}`).value.trim(),
-      abbreviation: document.getElementById(`uom-abbr-${k}`).value.trim(),
-      allow_decimal: document.getElementById(`uom-dec-${k}`).checked ? 1 : 0,
-      active: id ? (document.getElementById(`uom-active-${k}`).checked ? 1 : 0) : 1,
-    };
-    if (!data.name) { this.alert('Enter the unit name', 'error'); return; }
-    try {
-      if (id) await this.api('PUT', `/units/${id}`, data);
-      else await this.api('POST', '/units', data);
-      this.alert('Unit saved');
-      this.showUnitsManager(fromForm);
-    } catch(e) { this.alert(e.message, 'error'); }
-  },
-
-  async _deleteUnit(id, fromForm) {
-    try { await this.api('DELETE', `/units/${id}`); this.showUnitsManager(fromForm); }
-    catch(e) { this.alert(e.message, 'error'); }
-  },
-
-  // Back on the product form: rebuild its unit dropdowns from the updated
-  // list, keeping whatever was already chosen.
-  _closeUnitsManager(fromForm) {
-    if (!fromForm) { this.closeModal(); return; }
-    this.closeSecondaryModal();
-    const base = document.getElementById('pf-base-unit');
-    if (!base) return;
-    const uoms = (this._uoms || []).filter(u => u.active);
-    const keep = base.value;
-    base.innerHTML = `<option value="">Each</option>` + uoms.filter(u => u.name.toLowerCase() !== 'each').map(u => `<option value="${u.id}">${this.escapeAttr(u.name)}</option>`).join('');
-    base.value = keep;
-    document.querySelectorAll('#pf-unit-rows .pf-unit-id').forEach(sel => {
-      const v = sel.value;
-      sel.innerHTML = `<option value="">Unit…</option>` + uoms.map(u => `<option value="${u.id}">${this.escapeAttr(u.name)}</option>`).join('');
-      sel.value = v;
-    });
-    this._pfRefreshUnitLabels();
   },
 
   async showCategoriesManager() {

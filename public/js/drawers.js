@@ -1,4 +1,4 @@
-// Cash drawers and petty cash GL.
+// Cash drawers, the POS drawer check, petty cash GL.
 Object.assign(App, {
   // ─── CASH DRAWERS ─────────────────────────────────────────────────────────
 
@@ -876,4 +876,159 @@ Object.assign(App, {
     } catch(e) { if (btn) btn.disabled = false; this.alert(e.message, 'error'); }
   },
 
+  // ─── POS drawer check and open ───────────────────────────────────
+  async checkPOSDrawer() {
+    if (this.currentDrawerSession) return;
+    if (!this.can('drawers')) { this._posHasDrawers = false; this.renderPOSBranchBar(); return; }
+
+    const branches = this.currentUser.branches || [];
+    const isMultiBranch = this.currentUser.permissions?.multi_branch_access && branches.length > 1;
+    const defaultBranch = branches.find(b => b.is_default) || branches[0];
+
+    // Check for an existing open session
+    try {
+      const sessions = await this.api('GET', `/drawers/sessions?employee_id=${this.currentUser.id}&status=open`);
+      if (sessions.length) {
+        const s = sessions[0];
+        const openedToday = this._storeDay(s.opened_at) === this._storeDay(new Date());
+        if (openedToday) {
+          // Same-day session — resume it silently
+          this.currentDrawerSession = s;
+          const sb = branches.find(b => b.id == s.branch_id);
+          if (sb) this.posBranch = sb;
+          this.updateDrawerBadge();
+          this.renderPOSBranchBar();
+          return;
+        }
+        // Stale session from a previous day — auto-close it so a new one can be opened
+        try { await this.api('PATCH', `/drawers/sessions/${s.id}/close`, {}); } catch(e) {}
+      }
+    } catch(e) {}
+
+    // Fetch all active drawers (includes active_session_id / active_employee_name for in-use detection)
+    let allDrawers;
+    try { allDrawers = await this.api('GET', '/drawers'); } catch(e) { return; }
+
+    const branchIds = branches.length ? branches.map(b => b.id) : null;
+    const branchDrawers = allDrawers.filter(d => !branchIds || branchIds.some(id => id == d.branch_id));
+    this._posHasDrawers = branchDrawers.length > 0;
+    this.renderPOSBranchBar();
+    if (!branchDrawers.length) return;
+
+    this.showPOSDrawerModal(branches, branchDrawers, isMultiBranch, defaultBranch);
+  },
+
+  _buildDrawerSelHTML(drawers) {
+    const available = drawers.filter(d => !d.active_session_id);
+    const inUse = drawers.filter(d => d.active_session_id);
+    const selHTML = available.length
+      ? available.map(d => `<option value="${d.id}">${d.name}</option>`).join('')
+      : '<option value="">— No drawers available —</option>';
+    const inUseHTML = inUse.length
+      ? `<div style="margin-top:10px;padding:8px 10px;background:#fef3cd;border:1px solid #ffc107;border-radius:4px;font-size:12px">
+           <strong style="color:#856404">Currently in use:</strong>
+           ${inUse.map(d => `<div style="margin-top:3px;color:#856404">${d.name} — ${d.active_employee_name || 'another user'}</div>`).join('')}
+         </div>`
+      : '';
+    return { selHTML, inUseHTML, hasAvailable: available.length > 0 };
+  },
+
+  showPOSDrawerModal(branches, allDrawers, isMultiBranch, defaultBranch) {
+    document.getElementById('pos-drawer-overlay')?.remove();
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.id = 'pos-drawer-overlay';
+    overlay.style.cssText = 'z-index:9400';
+
+    const branchId = (this.posBranch || defaultBranch)?.id || '';
+    const drawersForBranch = allDrawers.filter(d => d.branch_id == branchId);
+    this._posAllDrawers = allDrawers;
+    const { selHTML, inUseHTML, hasAvailable } = this._buildDrawerSelHTML(drawersForBranch);
+
+    overlay.innerHTML = `
+      <div class="modal" style="max-width:420px">
+        <div class="modal-header">
+          <span class="modal-title">Open Cash Drawer</span>
+        </div>
+        <div class="modal-body">
+          ${isMultiBranch ? `
+          <div class="form-group"><label>Branch *</label>
+            <select id="pos-drawer-branch" onchange="App.onPOSDrawerBranchChange()">
+              ${branches.map(b => `<option value="${b.id}" ${b.id==branchId?'selected':''}>${b.name}</option>`).join('')}
+            </select>
+          </div>` : `
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px">
+            Branch: <strong>${defaultBranch?.name || '—'}</strong>
+          </p>`}
+          <div id="pos-drawer-sel-wrap">
+            <div class="form-group"><label>Select Drawer *</label>
+              <select id="pos-drawer-sel" ${!hasAvailable ? 'disabled' : ''}>${selHTML}</select>
+            </div>
+            ${inUseHTML}
+          </div>
+          <div class="form-group" id="pos-float-group" ${!hasAvailable ? 'style="display:none"' : ''}>
+            <label>Opening Float ($)</label>
+            <input type="number" id="pos-drawer-float" min="0" step="0.01" value="0" placeholder="0.00">
+          </div>
+          <div id="pos-drawer-err" style="color:var(--danger);font-size:13px;min-height:16px"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="document.getElementById('pos-drawer-overlay').remove()">Skip</button>
+          <button class="btn btn-primary" onclick="App.openPOSDrawer()" ${!hasAvailable ? 'disabled' : ''}>Open Drawer</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    if (hasAvailable) setTimeout(() => document.getElementById('pos-drawer-float')?.focus(), 50);
+  },
+
+  onPOSDrawerBranchChange() {
+    const branchId = document.getElementById('pos-drawer-branch')?.value;
+    const wrap = document.getElementById('pos-drawer-sel-wrap');
+    const floatGroup = document.getElementById('pos-float-group');
+    const openBtn = document.querySelector('#pos-drawer-overlay .btn-primary');
+    if (!wrap || !branchId) return;
+    const drawers = (this._posAllDrawers || []).filter(d => d.branch_id == branchId);
+    const { selHTML, inUseHTML, hasAvailable } = this._buildDrawerSelHTML(drawers);
+    wrap.innerHTML = `
+      <div class="form-group"><label>Select Drawer *</label>
+        <select id="pos-drawer-sel" ${!hasAvailable ? 'disabled' : ''}>${selHTML}</select>
+      </div>${inUseHTML}`;
+    if (floatGroup) floatGroup.style.display = hasAvailable ? '' : 'none';
+    if (openBtn) openBtn.disabled = !hasAvailable;
+  },
+
+  async openPOSDrawer() {
+    const drawerId = document.getElementById('pos-drawer-sel')?.value;
+    const float = parseFloat(document.getElementById('pos-drawer-float')?.value) || 0;
+    const errEl = document.getElementById('pos-drawer-err');
+    const branchEl = document.getElementById('pos-drawer-branch');
+    const branches = this.currentUser.branches || [];
+    const branchId = branchEl
+      ? parseInt(branchEl.value)
+      : (this.posBranch || branches.find(b => b.is_default) || branches[0])?.id;
+
+    if (!drawerId) { if (errEl) errEl.textContent = 'Select a drawer.'; return; }
+    try {
+      const session = await this.api('POST', '/drawers/sessions', {
+        drawer_id: parseInt(drawerId),
+        branch_id: branchId || null,
+        employee_id: this.currentUser.id,
+        opening_float: float,
+      });
+      this.currentDrawerSession = session;
+      // Sync branch selection
+      const branch = branches.find(b => b.id === branchId);
+      if (branch) this.posBranch = branch;
+      document.getElementById('pos-drawer-overlay')?.remove();
+      this.updateDrawerBadge();
+      this.renderPOSBranchBar();
+      this.renderRentalDrawerBanner();
+      this.alert(`Drawer opened — float $${App._n2(float)}`);
+    } catch(e) { if (errEl) errEl.textContent = e.message; }
+  },
+
+  updateDrawerBadge() {
+    // Refresh the POS branch bar if it's currently visible
+    this.renderPOSBranchBar();
+  },
 });

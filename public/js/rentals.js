@@ -1,4 +1,4 @@
-// Rentals: agreements, dispatch, deposits, item picker, finalize, signature pad.
+// Rentals: agreements, dispatch, deposits, item picker, finalize.
 Object.assign(App, {
   // ─── Rentals ──────────────────────────────────────────────────────────────
 
@@ -3441,79 +3441,6 @@ Object.assign(App, {
     this._sigPadInit('ri-guard-sig');
     this._sigPadInit('ri-customer-sig');
   },
-
-  // ─── Signature pad (canvas-ID-parameterized) ───────────────────────────
-  // No canvas/signature infrastructure existed anywhere in this app before
-  // the rental checkpoint feature — a minimal pointer/touch-driven drawing
-  // surface, saved as a PNG data URL and decoded server-side
-  // (routes/rentals.js's uploadSignature helper). Parameterized by canvas
-  // ID (rather than one hardcoded canvas + one flat boolean) since a single
-  // modal can now hold two or three of these at once (customer + guard at
-  // Issue, guard at Return).
-  _sigPadHtml(canvasId, label, hint) {
-    return `<div class="form-group" style="margin-bottom:12px">
-      <label>${label} <span style="font-weight:400;color:var(--text-muted)">(${hint})</span></label>
-      <canvas id="${canvasId}" width="416" height="140" style="border:1px solid var(--border);border-radius:6px;width:100%;touch-action:none;cursor:crosshair;background:#fff"></canvas>
-      <div style="display:flex;justify-content:flex-end;margin-top:4px">
-        <button type="button" class="btn btn-secondary btn-sm" onclick="App._sigPadClear('${canvasId}')">Clear</button>
-      </div>
-    </div>`;
-  },
-  _sigPadPos(canvas, evt) {
-    const rect = canvas.getBoundingClientRect();
-    const point = evt.touches ? evt.touches[0] : evt;
-    return { x: (point.clientX - rect.left) * (canvas.width / rect.width), y: (point.clientY - rect.top) * (canvas.height / rect.height) };
-  },
-  _sigPadStart(canvasId, evt) {
-    evt.preventDefault();
-    const canvas = document.getElementById(canvasId);
-    if (!canvas) return;
-    this._sigPads[canvasId] = this._sigPads[canvasId] || {};
-    this._sigPads[canvasId].drawing = true;
-    const { x, y } = this._sigPadPos(canvas, evt);
-    const ctx = canvas.getContext('2d');
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-  },
-  _sigPadMove(canvasId, evt) {
-    const state = this._sigPads[canvasId];
-    if (!state?.drawing) return;
-    evt.preventDefault();
-    const canvas = document.getElementById(canvasId);
-    if (!canvas) return;
-    const { x, y } = this._sigPadPos(canvas, evt);
-    const ctx = canvas.getContext('2d');
-    ctx.lineTo(x, y);
-    ctx.strokeStyle = '#111';
-    ctx.lineWidth = 2;
-    ctx.lineCap = 'round';
-    ctx.stroke();
-    state.hasDrawn = true;
-  },
-  _sigPadEnd(canvasId) {
-    const state = this._sigPads[canvasId];
-    if (state) state.drawing = false;
-  },
-  _sigPadClear(canvasId) {
-    const canvas = document.getElementById(canvasId);
-    if (!canvas) return;
-    canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
-    if (this._sigPads[canvasId]) this._sigPads[canvasId].hasDrawn = false;
-  },
-  _sigPadInit(canvasId) {
-    this._sigPads = this._sigPads || {};
-    this._sigPads[canvasId] = { drawing: false, hasDrawn: false };
-    const canvas = document.getElementById(canvasId);
-    if (!canvas) return;
-    canvas.addEventListener('mousedown', e => this._sigPadStart(canvasId, e));
-    canvas.addEventListener('mousemove', e => this._sigPadMove(canvasId, e));
-    window.addEventListener('mouseup', () => this._sigPadEnd(canvasId));
-    canvas.addEventListener('touchstart', e => this._sigPadStart(canvasId, e));
-    canvas.addEventListener('touchmove', e => this._sigPadMove(canvasId, e));
-    canvas.addEventListener('touchend', () => this._sigPadEnd(canvasId));
-  },
-  _sigPadHasDrawn(canvasId) { return !!this._sigPads?.[canvasId]?.hasDrawn; },
-  _sigPadDataUrl(canvasId) { return document.getElementById(canvasId)?.toDataURL('image/png'); },
 
   async confirmIssueRental(id) {
     const deliveryDriverEl = document.getElementById('ri-delivery-driver');

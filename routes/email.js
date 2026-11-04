@@ -106,7 +106,7 @@ function receiptDocTitle(tx) {
 }
 
 // The invoice's "Bill To" lines after the (bold) customer name — account
-// code, then address. Mirrors App._billToLines() in public/js/pos.js.
+// code, then address. Mirrors App._billToLines() in public/js/documents.js.
 function billToLines(tx) {
   const cityLine = [tx.customer_city, [tx.customer_state, tx.customer_zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
   return [tx.customer_number ? `Account #: ${tx.customer_number}` : '', tx.customer_address, cityLine].filter(Boolean);

@@ -1,4 +1,4 @@
-// Branches, assessment badges, section-visit reporting.
+// Branches and assessment badges.
 Object.assign(App, {
   // ─── Branches ─────────────────────────────────────────────
   async renderBranches() {
@@ -165,7 +165,6 @@ Object.assign(App, {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
-  // ─── Security Groups ──────────────────────────────────────
   // ─── Admin > Assessment (training badges) ────────────────
   // Per-employee training progress: one badge per business process they've
   // taken all the way through at least once, gold trophy once every process
@@ -328,18 +327,6 @@ Object.assign(App, {
         </div>
         <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">Close</button></div>
       </div>`);
-  },
-
-  // ─── Admin > Active Sessions ─────────────────────────────
-  // Tells the server which screen this session is on, for the Active Sessions
-  // dashboard. Fire-and-forget: a failure here must never block navigation.
-  _reportSection(name) {
-    if (!this.currentUser) return;
-    const branchId = this.posBranch?.id || this.currentUser.default_branch_id || null;
-    fetch('/api/sessions/section', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ section: name, branch_id: Number.isInteger(branchId) ? branchId : null }),
-    }).catch(() => {});
   },
 
 });

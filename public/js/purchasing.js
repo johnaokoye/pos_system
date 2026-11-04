@@ -1423,20 +1423,6 @@ Object.assign(App, {
     this.calcPOTotal();
   },
 
-  showSecondaryModal(html) {
-    document.getElementById('secondary-modal-overlay')?.remove();
-    const overlay = document.createElement('div');
-    overlay.id = 'secondary-modal-overlay';
-    overlay.className = 'modal-overlay';
-    overlay.style.zIndex = '1100';
-    overlay.innerHTML = html;
-    document.body.appendChild(overlay);
-    overlay.querySelector('.modal-close')?.addEventListener('click', () => overlay.remove());
-    return overlay;
-  },
-
-  closeSecondaryModal() { document.getElementById('secondary-modal-overlay')?.remove(); },
-
   async showPONewProductForm() {
     const supplierId = document.getElementById('po-supplier').value;
     if (!supplierId) { this.alert('Please select a supplier first', 'error'); return; }
@@ -2126,64 +2112,6 @@ Object.assign(App, {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
-  // Shared Approve dialog (POs, purchase requests, Special Projects). The
-  // approver signs once: their signature is saved (employees.
-  // approval_signature) and every later approval shows it and applies it with
-  // one click; "Draw a new signature" replaces it. `approve(signature)` makes
-  // the approval call — `signature` is a newly drawn PNG data URL, or
-  // undefined to use the saved one (lib/signatures.js resolveApprovalSignature).
-  async _showApprovalDialog({ title, intro = '', context = '', approveLabel = 'Approve', approve }) {
-    let saved = null;
-    try { saved = (await this.api('GET', '/employees/me/signature')).approval_signature; } catch (e) {}
-    this._approval = { approve, drawing: !saved };
-    const me = this.currentUser ? `${this.currentUser.first_name} ${this.currentUser.last_name}` : '';
-    this.showModal(`
-      <div class="modal" style="max-width:480px">
-        <div class="modal-header"><span class="modal-title">${title}</span><button class="modal-close">✕</button></div>
-        <div class="modal-body">
-          ${intro ? `<p style="font-size:13px;color:var(--text-muted);margin-top:0">${intro}</p>` : ''}
-          ${context}
-          <div id="approval-saved" style="display:${saved ? '' : 'none'}">
-            <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">Your signature will be applied to the approved document${me ? ` as <strong>${this.escapeAttr(me)}</strong>` : ''}:</div>
-            ${saved ? `<div style="border:1px solid var(--border);border-radius:6px;background:#fff;padding:8px;text-align:center"><img src="${this.escapeAttr(saved)}" alt="Your signature" style="max-height:90px;max-width:100%"></div>` : ''}
-            <button type="button" class="btn btn-sm btn-outline" style="margin-top:8px" onclick="App._approvalDrawNew()">Draw a new signature</button>
-          </div>
-          <div id="approval-draw" style="display:${saved ? 'none' : ''}">
-            <p style="font-size:12px;color:var(--text-muted);margin-top:0">${saved ? 'Your new signature replaces the saved one for this and future approvals.' : "Draw your signature once — it's saved and applied automatically to your future approvals."}</p>
-            ${this._sigPadHtml('approval-sig', 'Your Signature', 'sign to approve')}
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-          <button class="btn btn-success" id="approval-btn" onclick="App._approvalConfirm()">${approveLabel}</button>
-        </div>
-      </div>`);
-    this._sigPadInit('approval-sig');
-  },
-  _approvalDrawNew() {
-    document.getElementById('approval-saved').style.display = 'none';
-    document.getElementById('approval-draw').style.display = '';
-    this._approval.drawing = true;
-  },
-  async _approvalConfirm() {
-    const a = this._approval;
-    if (!a) return;
-    if (a.drawing && !this._sigPadHasDrawn('approval-sig')) { this.alert('Draw your signature to approve', 'error'); return; }
-    const btn = document.getElementById('approval-btn');
-    if (btn) btn.disabled = true;
-    try {
-      await a.approve(a.drawing ? this._sigPadDataUrl('approval-sig') : undefined);
-    } catch (e) {
-      if (btn) btn.disabled = false;
-      this.alert(e.message, 'error');
-    }
-  },
-  // Approved-by signature shown on a document's in-app view.
-  _approvalSigImg(path, label = 'Approver signature') {
-    if (!path) return '';
-    return `<div style="margin-top:6px"><img src="${this.escapeAttr(path)}" alt="${label}" style="max-height:56px;max-width:220px;background:#fff;border:1px solid var(--border);border-radius:4px;padding:2px 6px"></div>`;
-  },
-
   async showApprovePOModal(id) {
     const po = await this.api('GET', `/purchase-orders/${id}`).catch(() => null);
     this._showApprovalDialog({
@@ -2273,24 +2201,6 @@ Object.assign(App, {
       this.alert(e.message, 'error');
       if (btn) { btn.disabled = false; btn.textContent = 'Send'; }
     }
-  },
-
-  // Letter-size print of the invoice (see _printServerDocument) — available
-  // from the WO detail view (viewWorkOrder) and the cashier's final-payment
-  // modal (showWOFinalPaymentModal), not gated on WO status since a partial
-  // invoice (assessment fee only, no estimate yet) is still valid to hand over.
-  printWorkOrderInvoice(id) {
-    return this._printServerDocument(`/api/email/work-order-preview/${id}`, 'work-order-invoice', 'invoice');
-  },
-
-  emailWorkOrderInvoice(id, customerEmail) {
-    this.showEmailModal('Email Service and Repair Tax Invoice', customerEmail, async (to, { as_pdf }) => {
-      this.closeModal();
-      try {
-        await this.api('POST', `/email/send-work-order-invoice/${id}`, { to, as_pdf });
-        this.alert(`Service and Repair Tax Invoice sent to ${to}`);
-      } catch(e) { this.alert(e.message, 'error'); }
-    }, { pdfOption: true });
   },
 
   async showReceivePO(id) {

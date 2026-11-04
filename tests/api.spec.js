@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-const BASE = 'http://localhost:3001';
+const BASE = process.env.POS_TEST_URL;
 
 async function post(url, body) {
   const r = await fetch(`${BASE}${url}`, {

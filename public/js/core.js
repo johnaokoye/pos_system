@@ -1,4 +1,4 @@
-// App state, init, auth, My Profile, notifications, hubs, api(), utilities.
+// App state, init, auth, My Profile, notifications, hubs, showSection, api(), utilities, modals.
 const App = {
   section: 'home',
   currentUser: null,
@@ -80,9 +80,9 @@ const App = {
       return;
     } catch (e) { /* no valid session — fall through to the login screen */ }
     // Show the login form (and bind its handlers) before the branding fetch,
-    // not after — otherwise showLoginScreen()'s field-clearing/focus setup
-    // races anyone who starts typing while that request is still in flight.
-    this.showLoginScreen();
+    // not after. The form was already on screen during the session check, so
+    // keep anything typed in it meanwhile.
+    this.showLoginScreen(true);
     // GET /settings is authenticated (tax rate, SMTP creds, etc. live there
     // too) so it 401s before login — /settings/public exposes just the
     // store name/logo so the login screen can show real branding.
@@ -170,14 +170,18 @@ const App = {
   },
 
   // ─── Auth ─────────────────────────────────────────────────
-  showLoginScreen() {
+  showLoginScreen(keepInput = false) {
     document.getElementById('login-screen').style.display = 'flex';
     document.getElementById('sidebar').style.display = 'none';
     document.getElementById('main').style.display = 'none';
-    document.getElementById('login-user').value = '';
-    document.getElementById('login-pass').value = '';
-    document.getElementById('login-error').textContent = '';
-    setTimeout(() => document.getElementById('login-user').focus(), 50);
+    if (!keepInput) {
+      document.getElementById('login-user').value = '';
+      document.getElementById('login-pass').value = '';
+      document.getElementById('login-error').textContent = '';
+    }
+    setTimeout(() => {
+      if (document.activeElement?.id !== 'login-pass') document.getElementById('login-user').focus();
+    }, 50);
     document.getElementById('login-user').onkeydown = e => { if (e.key === 'Enter') document.getElementById('login-pass').focus(); };
     document.getElementById('login-pass').onkeydown = e => { if (e.key === 'Enter') this.doLogin(); };
   },
@@ -244,165 +248,6 @@ const App = {
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
-  },
-
-  _signaturePreviewHtml(sig) {
-    return sig
-      ? `<div style="border:1px solid var(--border);border-radius:6px;background:#fff;padding:8px;text-align:center"><img src="${this.escapeAttr(sig)}" alt="Saved signature" style="max-height:90px;max-width:100%"></div>`
-      : `<div style="border:1px dashed var(--border);border-radius:6px;padding:14px;text-align:center;font-size:13px;color:var(--text-muted)">No signature saved yet — you'll be asked to draw one at your first approval, or add it now.</div>`;
-  },
-
-  _editMySignature() {
-    this._showSignatureEditor({
-      title: 'Your approval signature',
-      save: async dataUrl => { await this.api('PUT', '/employees/me/signature', { signature: dataUrl }); this.alert('Signature saved — it will be applied to your approvals'); this.showMyProfile(); },
-    });
-  },
-
-  async _removeMySignature() {
-    if (!confirm('Remove your saved signature? You\'ll be asked to draw one at your next approval. Documents already approved keep theirs.')) return;
-    try { await this.api('DELETE', '/employees/me/signature'); this.alert('Signature removed'); this.showMyProfile(); }
-    catch (e) { this.alert(e.message, 'error'); }
-  },
-
-  // Draw-or-upload editor (secondary modal). save(dataUrl) stores it.
-  _showSignatureEditor({ title, intro = '', save }) {
-    this._sigEditor = { save, mode: 'draw', upload: null };
-    this.showSecondaryModal(`
-      <div class="modal" style="max-width:500px">
-        <div class="modal-header"><span class="modal-title">${this.escapeAttr(title)}</span><button class="modal-close">✕</button></div>
-        <div class="modal-body">
-          ${intro ? `<p style="font-size:13px;color:var(--text-muted);margin-top:0">${intro}</p>` : ''}
-          <div style="display:flex;gap:6px;margin-bottom:12px">
-            <button type="button" class="btn btn-sm btn-primary" id="sig-mode-draw" onclick="App._sigEditorMode('draw')">Draw it</button>
-            <button type="button" class="btn btn-sm btn-outline" id="sig-mode-upload" onclick="App._sigEditorMode('upload')">Upload a picture</button>
-          </div>
-          <div id="sig-editor-draw">${this._sigPadHtml('sig-editor-pad', 'Signature', 'sign with the mouse, a stylus or your finger')}</div>
-          <div id="sig-editor-upload" style="display:none">
-            <p style="font-size:12px;color:var(--text-muted);margin-top:0">Sign in dark ink on plain white paper, take a photo or scan, and choose it here (PNG or JPEG). It's cropped to the signature automatically.</p>
-            <input type="file" id="sig-editor-file" accept="image/png,image/jpeg,image/webp" onchange="App._sigEditorLoadFile(this.files[0])">
-            <label style="display:flex;gap:8px;align-items:center;font-weight:400;text-transform:none;margin-top:10px">
-              <input type="checkbox" id="sig-editor-clean" checked style="width:auto" onchange="App._sigEditorProcess()"> Remove the paper background (keeps just the ink)
-            </label>
-            <div id="sig-editor-preview" style="margin-top:10px"></div>
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button class="btn btn-secondary" onclick="App.closeSecondaryModal()">Cancel</button>
-          <button class="btn btn-success" id="sig-editor-save" onclick="App._sigEditorSave()">Save Signature</button>
-        </div>
-      </div>`);
-    this._sigPadInit('sig-editor-pad');
-  },
-
-  _sigEditorMode(mode) {
-    this._sigEditor.mode = mode;
-    document.getElementById('sig-editor-draw').style.display = mode === 'draw' ? '' : 'none';
-    document.getElementById('sig-editor-upload').style.display = mode === 'upload' ? '' : 'none';
-    document.getElementById('sig-mode-draw').className = `btn btn-sm ${mode === 'draw' ? 'btn-primary' : 'btn-outline'}`;
-    document.getElementById('sig-mode-upload').className = `btn btn-sm ${mode === 'upload' ? 'btn-primary' : 'btn-outline'}`;
-  },
-
-  _sigEditorLoadFile(file) {
-    const ed = this._sigEditor;
-    ed.upload = null;
-    if (!file) return;
-    if (!/^image\/(png|jpeg|webp)$/.test(file.type)) { this.alert('Choose a PNG or JPEG picture', 'error'); return; }
-    if (file.size > 15 * 1024 * 1024) { this.alert('That picture is too large — use one under 15 MB', 'error'); return; }
-    const img = new Image();
-    img.onload = () => { ed.image = img; URL.revokeObjectURL(img.src); this._sigEditorProcess(); };
-    img.onerror = () => this.alert("That picture couldn't be opened", 'error');
-    img.src = URL.createObjectURL(file);
-  },
-
-  // Scales the picture down, optionally turns light (paper) pixels
-  // transparent, and crops to the ink, so it sits cleanly on documents.
-  _sigEditorProcess() {
-    const ed = this._sigEditor;
-    const img = ed?.image;
-    const box = document.getElementById('sig-editor-preview');
-    if (!img || !box) return;
-    const scale = Math.min(1, 1200 / img.naturalWidth, 600 / img.naturalHeight);
-    const w = Math.max(1, Math.round(img.naturalWidth * scale)), h = Math.max(1, Math.round(img.naturalHeight * scale));
-    const c = document.createElement('canvas');
-    c.width = w; c.height = h;
-    const ctx = c.getContext('2d');
-    ctx.drawImage(img, 0, 0, w, h);
-    const clean = document.getElementById('sig-editor-clean')?.checked;
-    const data = ctx.getImageData(0, 0, w, h);
-    const px = data.data;
-    let minX = w, minY = h, maxX = -1, maxY = -1;
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-      const i = (y * w + x) * 4;
-      const lum = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
-      if (clean) {
-        // Paper → transparent; ink → solid, with a soft edge so lines aren't jagged.
-        const a = lum >= 200 ? 0 : lum <= 120 ? 255 : Math.round(255 * (200 - lum) / 80);
-        px[i + 3] = Math.min(px[i + 3], a);
-      }
-      if (px[i + 3] > 40 && (!clean || lum < 200)) { if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; }
-    }
-    if (maxX < 0) { box.innerHTML = '<div style="color:var(--danger);font-size:13px">No signature found in that picture — use dark ink on white paper, or untick Remove the paper background.</div>'; ed.upload = null; return; }
-    ctx.putImageData(data, 0, 0);
-    const pad = 8;
-    minX = Math.max(0, minX - pad); minY = Math.max(0, minY - pad); maxX = Math.min(w - 1, maxX + pad); maxY = Math.min(h - 1, maxY + pad);
-    const out = document.createElement('canvas');
-    out.width = maxX - minX + 1; out.height = maxY - minY + 1;
-    out.getContext('2d').drawImage(c, minX, minY, out.width, out.height, 0, 0, out.width, out.height);
-    ed.upload = out.toDataURL('image/png');
-    box.innerHTML = `<div style="font-size:12px;color:var(--text-muted);margin-bottom:4px">How it will look on documents:</div>
-      <div style="border:1px solid var(--border);border-radius:6px;background:#fff;padding:8px;text-align:center"><img src="${ed.upload}" alt="Signature preview" style="max-height:90px;max-width:100%"></div>`;
-  },
-
-  async _sigEditorSave() {
-    const ed = this._sigEditor;
-    if (!ed) return;
-    let dataUrl;
-    if (ed.mode === 'draw') {
-      if (!this._sigPadHasDrawn('sig-editor-pad')) return this.alert('Draw the signature first', 'error');
-      dataUrl = this._sigPadDataUrl('sig-editor-pad');
-    } else {
-      if (!ed.upload) return this.alert('Choose a picture of the signature first', 'error');
-      dataUrl = ed.upload;
-    }
-    const btn = document.getElementById('sig-editor-save');
-    if (btn) btn.disabled = true;
-    try { await ed.save(dataUrl); this.closeSecondaryModal(); this._sigEditor = null; }
-    catch (e) { if (btn) btn.disabled = false; this.alert(e.message, 'error'); }
-  },
-
-  // Employees screen: an editor sets or removes a staff member's signature.
-  async _loadEmployeeSignature(empId) {
-    const box = document.getElementById('ef-sig-box');
-    if (!box) return;
-    let sig = null, canSign = false;
-    try { ({ approval_signature: sig, can_sign: canSign } = await this.api('GET', `/employees/${empId}/signature`)); } catch (e) { box.innerHTML = `<div style="font-size:12px;color:var(--text-muted)">${this.escapeAttr(e.message)}</div>`; return; }
-    if (!document.getElementById('ef-sig-box')) return;
-    if (!canSign) {
-      box.innerHTML = `<div style="font-size:12px;color:var(--text-muted)">Only employees with approval permissions (purchase orders, purchase requests, payment requests, Special Projects or commissions) keep a signature — this employee's security group has none.${sig ? ' A signature saved earlier is no longer used:' : ''}</div>
-        ${sig ? `<div style="border:1px solid var(--border);border-radius:6px;background:#fff;padding:6px;text-align:center;margin-top:6px"><img src="${this.escapeAttr(sig)}" alt="Saved signature" style="max-height:70px;max-width:100%"></div>
-        <div style="margin-top:6px"><button type="button" class="btn btn-sm btn-outline" onclick="App._removeEmployeeSignature(${empId})">Remove</button></div>` : ''}`;
-      return;
-    }
-    box.innerHTML = `${sig ? `<div style="border:1px solid var(--border);border-radius:6px;background:#fff;padding:6px;text-align:center"><img src="${this.escapeAttr(sig)}" alt="Saved signature" style="max-height:70px;max-width:100%"></div>` : '<div style="font-size:12px;color:var(--text-muted)">None saved — they\'ll be asked to draw one at their first approval.</div>'}
-      <div style="display:flex;gap:8px;margin-top:6px">
-        <button type="button" class="btn btn-sm btn-outline" onclick="App._editEmployeeSignature(${empId})">${sig ? 'Replace' : 'Add signature'}</button>
-        ${sig ? `<button type="button" class="btn btn-sm btn-outline" onclick="App._removeEmployeeSignature(${empId})">Remove</button>` : ''}
-      </div>`;
-  },
-
-  _editEmployeeSignature(empId) {
-    this._showSignatureEditor({
-      title: 'Employee approval signature',
-      intro: "This is applied whenever this employee approves something. Only add the employee's own signature, with their agreement.",
-      save: async dataUrl => { await this.api('PUT', `/employees/${empId}/signature`, { signature: dataUrl }); this.alert('Signature saved'); this._loadEmployeeSignature(empId); },
-    });
-  },
-
-  async _removeEmployeeSignature(empId) {
-    if (!confirm("Remove this employee's saved signature? Documents they've already approved keep theirs.")) return;
-    try { await this.api('DELETE', `/employees/${empId}/signature`); this._loadEmployeeSignature(empId); }
-    catch (e) { this.alert(e.message, 'error'); }
   },
 
   showChangePasswordModal(empId, required = false) {
@@ -699,161 +544,6 @@ const App = {
     if (!next) return;
     history.replaceState(null, '', window.location.pathname);
     if (/^\/api\/[\w\-\/]+\/download$/.test(next) || /^\/uploads\/[\w-]+\/[\w.-]+$/.test(next)) window.location.assign(next);
-  },
-
-  async checkPOSDrawer() {
-    if (this.currentDrawerSession) return;
-    if (!this.can('drawers')) { this._posHasDrawers = false; this.renderPOSBranchBar(); return; }
-
-    const branches = this.currentUser.branches || [];
-    const isMultiBranch = this.currentUser.permissions?.multi_branch_access && branches.length > 1;
-    const defaultBranch = branches.find(b => b.is_default) || branches[0];
-
-    // Check for an existing open session
-    try {
-      const sessions = await this.api('GET', `/drawers/sessions?employee_id=${this.currentUser.id}&status=open`);
-      if (sessions.length) {
-        const s = sessions[0];
-        const openedToday = this._storeDay(s.opened_at) === this._storeDay(new Date());
-        if (openedToday) {
-          // Same-day session — resume it silently
-          this.currentDrawerSession = s;
-          const sb = branches.find(b => b.id == s.branch_id);
-          if (sb) this.posBranch = sb;
-          this.updateDrawerBadge();
-          this.renderPOSBranchBar();
-          return;
-        }
-        // Stale session from a previous day — auto-close it so a new one can be opened
-        try { await this.api('PATCH', `/drawers/sessions/${s.id}/close`, {}); } catch(e) {}
-      }
-    } catch(e) {}
-
-    // Fetch all active drawers (includes active_session_id / active_employee_name for in-use detection)
-    let allDrawers;
-    try { allDrawers = await this.api('GET', '/drawers'); } catch(e) { return; }
-
-    const branchIds = branches.length ? branches.map(b => b.id) : null;
-    const branchDrawers = allDrawers.filter(d => !branchIds || branchIds.some(id => id == d.branch_id));
-    this._posHasDrawers = branchDrawers.length > 0;
-    this.renderPOSBranchBar();
-    if (!branchDrawers.length) return;
-
-    this.showPOSDrawerModal(branches, branchDrawers, isMultiBranch, defaultBranch);
-  },
-
-  _buildDrawerSelHTML(drawers) {
-    const available = drawers.filter(d => !d.active_session_id);
-    const inUse = drawers.filter(d => d.active_session_id);
-    const selHTML = available.length
-      ? available.map(d => `<option value="${d.id}">${d.name}</option>`).join('')
-      : '<option value="">— No drawers available —</option>';
-    const inUseHTML = inUse.length
-      ? `<div style="margin-top:10px;padding:8px 10px;background:#fef3cd;border:1px solid #ffc107;border-radius:4px;font-size:12px">
-           <strong style="color:#856404">Currently in use:</strong>
-           ${inUse.map(d => `<div style="margin-top:3px;color:#856404">${d.name} — ${d.active_employee_name || 'another user'}</div>`).join('')}
-         </div>`
-      : '';
-    return { selHTML, inUseHTML, hasAvailable: available.length > 0 };
-  },
-
-  showPOSDrawerModal(branches, allDrawers, isMultiBranch, defaultBranch) {
-    document.getElementById('pos-drawer-overlay')?.remove();
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    overlay.id = 'pos-drawer-overlay';
-    overlay.style.cssText = 'z-index:9400';
-
-    const branchId = (this.posBranch || defaultBranch)?.id || '';
-    const drawersForBranch = allDrawers.filter(d => d.branch_id == branchId);
-    this._posAllDrawers = allDrawers;
-    const { selHTML, inUseHTML, hasAvailable } = this._buildDrawerSelHTML(drawersForBranch);
-
-    overlay.innerHTML = `
-      <div class="modal" style="max-width:420px">
-        <div class="modal-header">
-          <span class="modal-title">Open Cash Drawer</span>
-        </div>
-        <div class="modal-body">
-          ${isMultiBranch ? `
-          <div class="form-group"><label>Branch *</label>
-            <select id="pos-drawer-branch" onchange="App.onPOSDrawerBranchChange()">
-              ${branches.map(b => `<option value="${b.id}" ${b.id==branchId?'selected':''}>${b.name}</option>`).join('')}
-            </select>
-          </div>` : `
-          <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px">
-            Branch: <strong>${defaultBranch?.name || '—'}</strong>
-          </p>`}
-          <div id="pos-drawer-sel-wrap">
-            <div class="form-group"><label>Select Drawer *</label>
-              <select id="pos-drawer-sel" ${!hasAvailable ? 'disabled' : ''}>${selHTML}</select>
-            </div>
-            ${inUseHTML}
-          </div>
-          <div class="form-group" id="pos-float-group" ${!hasAvailable ? 'style="display:none"' : ''}>
-            <label>Opening Float ($)</label>
-            <input type="number" id="pos-drawer-float" min="0" step="0.01" value="0" placeholder="0.00">
-          </div>
-          <div id="pos-drawer-err" style="color:var(--danger);font-size:13px;min-height:16px"></div>
-        </div>
-        <div class="modal-footer">
-          <button class="btn btn-secondary" onclick="document.getElementById('pos-drawer-overlay').remove()">Skip</button>
-          <button class="btn btn-primary" onclick="App.openPOSDrawer()" ${!hasAvailable ? 'disabled' : ''}>Open Drawer</button>
-        </div>
-      </div>`;
-    document.body.appendChild(overlay);
-    if (hasAvailable) setTimeout(() => document.getElementById('pos-drawer-float')?.focus(), 50);
-  },
-
-  onPOSDrawerBranchChange() {
-    const branchId = document.getElementById('pos-drawer-branch')?.value;
-    const wrap = document.getElementById('pos-drawer-sel-wrap');
-    const floatGroup = document.getElementById('pos-float-group');
-    const openBtn = document.querySelector('#pos-drawer-overlay .btn-primary');
-    if (!wrap || !branchId) return;
-    const drawers = (this._posAllDrawers || []).filter(d => d.branch_id == branchId);
-    const { selHTML, inUseHTML, hasAvailable } = this._buildDrawerSelHTML(drawers);
-    wrap.innerHTML = `
-      <div class="form-group"><label>Select Drawer *</label>
-        <select id="pos-drawer-sel" ${!hasAvailable ? 'disabled' : ''}>${selHTML}</select>
-      </div>${inUseHTML}`;
-    if (floatGroup) floatGroup.style.display = hasAvailable ? '' : 'none';
-    if (openBtn) openBtn.disabled = !hasAvailable;
-  },
-
-  async openPOSDrawer() {
-    const drawerId = document.getElementById('pos-drawer-sel')?.value;
-    const float = parseFloat(document.getElementById('pos-drawer-float')?.value) || 0;
-    const errEl = document.getElementById('pos-drawer-err');
-    const branchEl = document.getElementById('pos-drawer-branch');
-    const branches = this.currentUser.branches || [];
-    const branchId = branchEl
-      ? parseInt(branchEl.value)
-      : (this.posBranch || branches.find(b => b.is_default) || branches[0])?.id;
-
-    if (!drawerId) { if (errEl) errEl.textContent = 'Select a drawer.'; return; }
-    try {
-      const session = await this.api('POST', '/drawers/sessions', {
-        drawer_id: parseInt(drawerId),
-        branch_id: branchId || null,
-        employee_id: this.currentUser.id,
-        opening_float: float,
-      });
-      this.currentDrawerSession = session;
-      // Sync branch selection
-      const branch = branches.find(b => b.id === branchId);
-      if (branch) this.posBranch = branch;
-      document.getElementById('pos-drawer-overlay')?.remove();
-      this.updateDrawerBadge();
-      this.renderPOSBranchBar();
-      this.renderRentalDrawerBanner();
-      this.alert(`Drawer opened — float $${App._n2(float)}`);
-    } catch(e) { if (errEl) errEl.textContent = e.message; }
-  },
-
-  updateDrawerBadge() {
-    // Refresh the POS branch bar if it's currently visible
-    this.renderPOSBranchBar();
   },
 
   // Sidebar headers that expand into a grid of large touch tiles instead of
@@ -1459,4 +1149,18 @@ const App = {
     }
   },
 
+  // ─── Secondary modal (a dialog over a dialog) ────────────────────
+  showSecondaryModal(html) {
+    document.getElementById('secondary-modal-overlay')?.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'secondary-modal-overlay';
+    overlay.className = 'modal-overlay';
+    overlay.style.zIndex = '1100';
+    overlay.innerHTML = html;
+    document.body.appendChild(overlay);
+    overlay.querySelector('.modal-close')?.addEventListener('click', () => overlay.remove());
+    return overlay;
+  },
+
+  closeSecondaryModal() { document.getElementById('secondary-modal-overlay')?.remove(); },
 };

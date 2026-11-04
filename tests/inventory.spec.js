@@ -2,8 +2,9 @@ import { test, expect } from './fixtures.js';
 
 test.describe('Inventory', () => {
   test.beforeEach(async ({ page }) => {
-    await page.click('[data-section="inventory"]');
-    await expect(page.locator('text=Inventory').first()).toBeVisible({ timeout: 8_000 });
+    // Inventory sits under a hub, so go through the app's router as pos.spec.js does.
+    await page.evaluate(() => App.showSection('inventory'));
+    await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 8_000 });
   });
 
   test('product table has rows', async ({ page }) => {

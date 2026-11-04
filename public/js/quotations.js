@@ -1846,39 +1846,6 @@ Object.assign(App, {
     return this._printServerDocument(`/api/email/quote-preview/${id}`, 'quotation', 'quotation');
   },
 
-  // Opens a server-rendered printable document (tagged by the server with
-  // X-Pos-Document: <tag>) in a popup and prints it. Fetched first rather
-  // than opening the URL directly, so an error (no access, not printable
-  // yet, or a server running older code that returns the SPA shell for an
-  // unknown path) shows as a message instead of printing whatever page came
-  // back. The window is opened synchronously, before the fetch, so it stays
-  // inside the click's user gesture and isn't blocked as a popup.
-  async _printServerDocument(url, tag, label) {
-    const win = window.open('', '_blank', 'width=850,height=1000');
-    if (!win) { this.alert('Your browser blocked the print popup — allow popups for this site and try again', 'warning'); return; }
-    win.document.write(`<p style="font-family:Arial,sans-serif;padding:24px;color:#555">Preparing ${label}…</p>`);
-    let html;
-    try {
-      const res = await fetch(url, { credentials: 'same-origin' });
-      const type = res.headers.get('content-type') || '';
-      if (type.includes('application/json')) throw new Error((await res.json()).error || `Request failed (${res.status})`);
-      html = await res.text();
-      if (!res.ok) throw new Error(html.replace(/<[^>]+>/g, '').trim() || `Request failed (${res.status})`);
-      if (res.headers.get('x-pos-document') !== tag) throw new Error(`the server returned something other than the ${label} — it may be running an older version and need a restart`);
-    } catch(e) {
-      win.close();
-      this.alert(`Could not print ${label}: ${e.message}`, 'error');
-      return;
-    }
-    win.document.open();
-    win.document.write(html);
-    win.document.close();
-    win.focus();
-    // document.write() doesn't fire a fresh load event reliably across
-    // browsers — give layout a beat, then print.
-    setTimeout(() => win.print(), 300);
-  },
-
   async updateQuoteStatus(id, status) {
     try {
       await this.api('PATCH', `/quotations/${id}/status`, { status });

@@ -19,20 +19,36 @@ test.describe('Authentication', () => {
     await expect(page.locator('#login-error')).toContainText(/invalid|incorrect|wrong/i);
   });
 
-  test('admin login succeeds and shows dashboard', async ({ page }) => {
+  test('admin login succeeds and lands on Home', async ({ page }) => {
     await page.fill('#login-user', 'admin');
     await page.fill('#login-pass', '123456');
     await page.click('button.login-btn');
-    await expect(page.locator('.stat-card').first()).toBeVisible({ timeout: 8_000 });
-    await expect(page.locator('.nav-item.active')).toContainText('Dashboard');
+    await expect(page.locator('.nav-item.active')).toContainText('Home', { timeout: 8_000 });
     await expect(page.locator('#login-screen')).toBeHidden();
+  });
+
+  test('typing during the session check is kept', async ({ page }) => {
+    let release;
+    const held = new Promise(r => { release = r; });
+    await page.route('**/api/employees/me', async route => { await held; await route.continue(); });
+    await page.goto('/');
+    await page.fill('#login-user', 'admin');
+    await page.fill('#login-pass', '123456');
+    const checked = page.waitForResponse('**/api/employees/me');
+    release();
+    await checked;
+    await page.waitForTimeout(200);
+    await expect(page.locator('#login-user')).toHaveValue('admin');
+    await expect(page.locator('#login-pass')).toHaveValue('123456');
+    await page.click('button.login-btn');
+    await expect(page.locator('.nav-item.active')).toContainText('Home', { timeout: 8_000 });
   });
 
   test('sign out returns to login screen', async ({ page }) => {
     await page.fill('#login-user', 'admin');
     await page.fill('#login-pass', '123456');
     await page.click('button.login-btn');
-    await expect(page.locator('.stat-card').first()).toBeVisible({ timeout: 8_000 });
+    await expect(page.locator('.nav-item.active')).toContainText('Home', { timeout: 8_000 });
     await page.click('button:has-text("Sign Out")');
     await expect(page.locator('#login-screen')).toBeVisible();
   });

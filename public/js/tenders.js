@@ -475,14 +475,4 @@ Object.assign(App, {
     if (c) { c.base_per_unit = per; c.rate = 1 / per; }
   },
 
-  categoryEmoji(name = '') {
-    const map = { electronics: '🔌', clothing: '👕', 'food & beverage': '🍕', 'home & garden': '🏠', 'sports & outdoors': '⚽', 'toys & games': '🎮' };
-    return map[name.toLowerCase()] || '📦';
-  },
-
-  productEmoji(cat) {
-    const map = { electronics: '💻', clothing: '👗', 'food & beverage': '🍫', 'home & garden': '🌿', 'sports & outdoors': '🏃', 'toys & games': '🧸' };
-    return map[(cat || '').toLowerCase()] || '🛍️';
-  },
-
 });

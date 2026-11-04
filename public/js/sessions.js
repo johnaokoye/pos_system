@@ -1,4 +1,4 @@
-// Admin Active Sessions and the security groups list.
+// Admin Active Sessions and section-visit reporting.
 Object.assign(App, {
   // Rough browser/OS/device read from the User-Agent — enough for an admin
   // to tell "the front-counter Windows PC" from "someone's phone".
@@ -211,40 +211,15 @@ Object.assign(App, {
     } catch (e) { this.alert(e.message, 'error'); }
   },
 
-  async renderSecurity() {
-    const c = document.getElementById('content');
-    c.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
-    const groups = await this.api('GET', '/security-groups');
-    if (this.section !== 'security') return;
-    c.innerHTML = `
-      <div class="section-header">
-        <h2>Security Groups</h2>
-        <button class="btn btn-primary" onclick="App.showSecurityGroupForm()">+ New Group</button>
-      </div>
-      <div class="card">
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Group Name</th><th>Description</th><th>Members</th><th>Branch Access</th><th>Permissions</th><th>Actions</th></tr></thead>
-            <tbody>
-              ${groups.length ? groups.map(g => {
-                const moduleKeys = new Set(this._permissionTree.map(m => m.key));
-                const perms = Object.entries(g.permissions).filter(([k,v]) => v && moduleKeys.has(k)).map(([k]) => this._permissionTree.find(m=>m.key===k)?.label || k);
-                return `<tr>
-                  <td class="fw-600">${g.name}</td>
-                  <td>${g.description||'-'}</td>
-                  <td><span class="badge-pill badge-info">${g.member_count} members</span></td>
-                  <td>${g.permissions.multi_branch_access ? '<span class="badge-pill badge-success">Multi-Branch</span>' : '<span class="badge-pill" style="background:var(--bg-secondary);color:var(--text-muted)">Single Branch</span>'}</td>
-                  <td style="font-size:11px">${perms.slice(0,5).join(', ')}${perms.length > 5 ? ` +${perms.length-5} more` : ''}</td>
-                  <td>
-                    <button class="btn btn-sm btn-secondary" onclick="App.showSecurityGroupForm(${g.id})">Edit</button>
-                    <button class="btn btn-sm btn-outline" onclick="App.showAssignGroup(${g.id},'${g.name}')">Assign Users</button>
-                    ${g.member_count === 0 ? `<button class="btn btn-sm btn-danger" onclick="App.deleteSecurityGroup(${g.id})">Delete</button>` : ''}
-                  </td>
-                </tr>`;}).join('') : '<tr><td colspan="6" class="empty-state">No security groups</td></tr>'}
-            </tbody>
-          </table>
-        </div>
-      </div>`;
+  // ─── Admin > Active Sessions ─────────────────────────────
+  // Tells the server which screen this session is on, for the Active Sessions
+  // dashboard. Fire-and-forget: a failure here must never block navigation.
+  _reportSection(name) {
+    if (!this.currentUser) return;
+    const branchId = this.posBranch?.id || this.currentUser.default_branch_id || null;
+    fetch('/api/sessions/section', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ section: name, branch_id: Number.isInteger(branchId) ? branchId : null }),
+    }).catch(() => {});
   },
-
 });

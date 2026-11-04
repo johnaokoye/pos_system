@@ -1449,4 +1449,22 @@ Object.assign(App, {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
+  // ─── Work order invoice ──────────────────────────────────────────
+  // Letter-size print of the invoice (see _printServerDocument) — available
+  // from the WO detail view (viewWorkOrder) and the cashier's final-payment
+  // modal (showWOFinalPaymentModal), not gated on WO status since a partial
+  // invoice (assessment fee only, no estimate yet) is still valid to hand over.
+  printWorkOrderInvoice(id) {
+    return this._printServerDocument(`/api/email/work-order-preview/${id}`, 'work-order-invoice', 'invoice');
+  },
+
+  emailWorkOrderInvoice(id, customerEmail) {
+    this.showEmailModal('Email Service and Repair Tax Invoice', customerEmail, async (to, { as_pdf }) => {
+      this.closeModal();
+      try {
+        await this.api('POST', `/email/send-work-order-invoice/${id}`, { to, as_pdf });
+        this.alert(`Service and Repair Tax Invoice sent to ${to}`);
+      } catch(e) { this.alert(e.message, 'error'); }
+    }, { pdfOption: true });
+  },
 });

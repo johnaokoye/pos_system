@@ -1,6 +1,12 @@
 import { test, expect } from './fixtures.js';
 
 test.describe('Dashboard', () => {
+  // Home is the first screen after login; the dashboard is one click on.
+  test.beforeEach(async ({ page }) => {
+    await page.click('.nav-item[data-section="dashboard"]');
+    await page.locator('.stat-card').first().waitFor();
+  });
+
   test('shows four stat cards', async ({ page }) => {
     const cards = page.locator('.stat-card');
     await expect(cards).toHaveCount(4);

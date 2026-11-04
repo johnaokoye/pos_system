@@ -13,9 +13,8 @@ test.describe('Point of Sale', () => {
     await page.locator('#pos-drawer-overlay').waitFor({ state: 'detached', timeout: 3_000 }).catch(() => {});
   });
 
-  test('POS is a full-screen kiosk layout with the ticket table and action grid', async ({ page }) => {
-    await expect(page.locator('#sidebar')).toBeHidden();
-    await expect(page.locator('#topbar')).toBeHidden();
+  test('POS shows the ticket table and action grid beside the app menu', async ({ page }) => {
+    await expect(page.locator('#sidebar')).toBeVisible();
     await expect(page.locator('.pos-ticket-table')).toBeVisible();
     await expect(page.locator('.pos-action-grid')).toBeVisible();
     await expect(page.locator('#pos-item-input')).toBeVisible();
@@ -76,6 +75,18 @@ test.describe('Point of Sale', () => {
     await page.click('.modal-close');
     await page.click('button:has-text("Cancel Ticket")');
     await page.waitForTimeout(300);
+    await expect(page.locator('text=Cart is empty')).toBeVisible();
+  });
+
+  test('a cash sale completes and shows the receipt', async ({ page }) => {
+    const sku = await page.evaluate(() => App.allProducts.find(p => !p.is_service && p.stock_qty > 0 && !p.has_variations)?.sku);
+    await page.fill('#pos-item-input', sku);
+    await page.press('#pos-item-input', 'Enter');
+    await expect(page.locator('.pos-ticket-row').first()).toBeVisible();
+    await page.evaluate(() => { App.processPayment('cash'); });
+    await page.fill('#ctm-tendered', '100000');
+    await page.click('#ctm-confirm');
+    await expect(page.locator('.modal-title', { hasText: 'Receipt' })).toBeVisible();
     await expect(page.locator('text=Cart is empty')).toBeVisible();
   });
 
