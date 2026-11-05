@@ -1471,6 +1471,24 @@ async function _init() {
     // original_employee_id) — a target is about a salesperson's own
     // activity, a distinct question from who a sale's commission credits.
     // See routes/sales-targets.js.
+    // Customers' salesperson changes, by batch (lib/customerSalespeople.js).
+    { sql: `CREATE TABLE IF NOT EXISTS customer_salesperson_batches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source TEXT NOT NULL,
+      file_name TEXT,
+      employee_id INTEGER REFERENCES employees(id),
+      change_count INTEGER NOT NULL DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      undone_at DATETIME,
+      undone_by INTEGER REFERENCES employees(id)
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS customer_salesperson_changes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id INTEGER NOT NULL REFERENCES customer_salesperson_batches(id),
+      customer_id INTEGER NOT NULL REFERENCES customers(id),
+      old_salesperson_id INTEGER REFERENCES employees(id),
+      new_salesperson_id INTEGER REFERENCES employees(id)
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS sales_targets (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       employee_id INTEGER NOT NULL UNIQUE REFERENCES employees(id),

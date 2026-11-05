@@ -105,6 +105,7 @@ app.use('/api/brands',           require('./routes/brands'));
 app.use('/api/units',            require('./routes/units'));
 app.use('/api/catalogues',       require('./routes/catalogues'));
 app.use('/api/customers',        require('./routes/customers'));
+app.use('/api/customer-salespeople', require('./routes/customer-salespeople'));
 app.use('/api/customer-imports', require('./routes/customer-imports'));
 app.use('/api/supplier-imports', require('./routes/supplier-imports'));
 app.use('/api/payables/payment-requests', require('./routes/payment-requests'));

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { requireAuth, requirePermission, can } = require('../lib/permissions');
+const { setCustomerSalesperson } = require('../lib/customerSalespeople');
 const { nextNumber } = require('../lib/nextNumber');
 const { oldestOpenLegacySql, oldestUnpaidSaleSql, earliestDate, LEGACY_BALANCE_SQL } = require('../lib/legacyInvoices');
 const { resolveBlock } = require('../lib/creditBlock');
@@ -257,6 +258,11 @@ router.get('/', requireAuth, async (req, res) => {
       params.push(...ids);
     }
     if (req.query.rental === '1') sql += ' AND is_rental_customer = 1';
+    // Customers and Assign Salespeople filters. 'me' is the signed-in salesperson.
+    if (req.query.salesperson_id === 'none') sql += ' AND salesperson_id IS NULL';
+    else if (req.query.salesperson_id === 'me') { sql += ' AND salesperson_id = ?'; params.push(req.employee?.id ?? 0); }
+    else if (req.query.salesperson_id) { sql += ' AND salesperson_id = ?'; params.push(Number(req.query.salesperson_id)); }
+    if (req.query.category_id) { sql += ' AND customer_category_id = ?'; params.push(Number(req.query.category_id)); }
     if (req.query.credit_enabled === '0' || req.query.credit_enabled === '1') { sql += ' AND COALESCE(credit_enabled, 0) = ?'; params.push(Number(req.query.credit_enabled)); }
     // Customers list filter: credit / cash, or rental approved (can rent
     // today — a rental customer who's preapproved or has every required
@@ -448,7 +454,7 @@ async function resolveCustomerSalesperson(req, customerId) {
     const { rows: [sp] } = await db.execute({ sql: 'SELECT id FROM employees WHERE id = ? AND active = 1 AND is_salesperson = 1', args: [id] });
     if (!sp) return { error: 'The selected salesperson is not an active Salesperson', status: 400 };
   }
-  return { id };
+  return { id, from: current };
 }
 
 function resolveCreditFields(req, body, existing) {
@@ -1021,7 +1027,7 @@ router.post('/', requirePermission('customers_add'), async (req, res) => {
     await syncPhoneKeys(db, newId, phone);
     if (names) await db.execute({ sql: 'UPDATE customers SET customer_kind = ?, business_name = ? WHERE id = ?', args: [names.kind, names.business_name, newId] });
     if (contactSet) await saveContacts(newId, contactSet.rows);
-    if (!assignedSalesperson.unchanged) await db.execute({ sql: 'UPDATE customers SET salesperson_id = ? WHERE id = ?', args: [assignedSalesperson.id, newId] });
+    if (!assignedSalesperson.unchanged) await setCustomerSalesperson(newId, null, assignedSalesperson.id, req.employee?.id);
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [newId] });
     res.status(201).json(row);
   } catch (e) {
@@ -1101,7 +1107,7 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
     } else {
       await runCreditCheck(req.params.id);
     }
-    if (!assignedSalesperson.unchanged) await db.execute({ sql: 'UPDATE customers SET salesperson_id = ? WHERE id = ?', args: [assignedSalesperson.id, req.params.id] });
+    if (!assignedSalesperson.unchanged) await setCustomerSalesperson(req.params.id, assignedSalesperson.from, assignedSalesperson.id, req.employee?.id);
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.id] });
     res.json(row);
   } catch(e) { res.status(500).json({ error: e.message }); }

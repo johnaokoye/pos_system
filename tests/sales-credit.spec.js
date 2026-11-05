@@ -4,12 +4,8 @@ import salesCredit from '../lib/salesCredit.js';
 const { sumSalesByPeriod } = salesCredit;
 const api = (page, method, url, data) => page.evaluate(([m, u, d]) => App.api(m, u, d), [method, url, data]);
 
-// Two salespeople, and sales_manager for the admin (a new database's seed leaves it off).
+// Two salespeople.
 async function setup(page) {
-  const groups = await api(page, 'GET', '/security-groups');
-  const admin = groups.find(g => g.name === 'Administrator');
-  const perms = typeof admin.permissions === 'string' ? JSON.parse(admin.permissions) : admin.permissions;
-  await api(page, 'PUT', `/security-groups/${admin.id}`, { ...admin, permissions: { ...perms, sales_manager: true } });
   const people = (await api(page, 'GET', '/employees')).filter(e => e.username !== 'admin').slice(0, 2);
   for (const e of people) await api(page, 'PUT', `/employees/${e.id}`, { ...e, is_salesperson: 1, active: 1 });
   await page.reload();
@@ -49,6 +45,16 @@ async function ringUp(page, product, customerId) {
   await page.fill('#pos-item-input', product.sku);
   await page.press('#pos-item-input', 'Enter');
   await expect(page.locator('.pos-ticket-row').first()).toBeVisible();
+}
+
+// A signed-in Cashier: can edit customers, has no sales_manager.
+async function loginWithoutSalesManager(page) {
+  const groups = await api(page, 'GET', '/security-groups');
+  const group = groups.find(g => g.name === 'Cashier');
+  const username = `cashier${Date.now()}`;
+  await api(page, 'POST', '/employees', { first_name: 'Test', last_name: 'Cashier', username, pin: username.slice(-6), password: 'pw-123456', must_change_password: 0, security_group_id: group.id, active: 1 });
+  const r = await fetch(`${process.env.POS_TEST_URL}/api/employees/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password: 'pw-123456' }) });
+  return (r.headers.get('set-cookie') || '').split(';')[0];
 }
 
 const creditedTo = async (page, id) => { const t = await api(page, 'GET', `/transactions/${id}`); return t.salesperson_id ?? t.created_by ?? t.employee_id; };
@@ -246,18 +252,12 @@ test.describe('Sales credit', () => {
     expect(await page.evaluate(([id, body]) => App.api('PUT', `/customers/${id}`, body).then(() => 'saved', e => e.message), [c.id, { ...saved, salesperson_id: 999999 }])).toContain('not an active Salesperson');
 
     // Without sales_manager: refused if it changes, and other edits still save.
-    const groups = await api(page, 'GET', '/security-groups');
-    const admin = groups.find(g => g.name === 'Administrator');
-    const perms = typeof admin.permissions === 'string' ? JSON.parse(admin.permissions) : admin.permissions;
-    await api(page, 'PUT', `/security-groups/${admin.id}`, { ...admin, permissions: { ...perms, sales_manager: false } });
-    try {
-      expect(await page.evaluate(([id, body]) => App.api('PUT', `/customers/${id}`, body).then(() => 'saved', e => e.message), [c.id, { ...saved, salesperson_id: b }])).toContain('sales_manager');
-      const { salesperson_id, ...withoutIt } = saved;
-      await api(page, 'PUT', `/customers/${c.id}`, { ...withoutIt, notes: 'edited' });
-      const after = await api(page, 'GET', `/customers/${c.id}`);
-      expect(after).toMatchObject({ notes: 'edited', salesperson_id: a });
-    } finally {
-      await api(page, 'PUT', `/security-groups/${admin.id}`, { ...admin, permissions: { ...perms, sales_manager: true } });
-    }
+    const cookie = await loginWithoutSalesManager(page);
+    const put = body => fetch(`${process.env.POS_TEST_URL}/api/customers/${c.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', cookie }, body: JSON.stringify(body) });
+    const refused = await put({ ...saved, salesperson_id: b });
+    expect(refused.status).toBe(403);
+    const { salesperson_id, ...withoutIt } = saved;
+    expect((await put({ ...withoutIt, notes: 'edited' })).status).toBe(200);
+    expect(await api(page, 'GET', `/customers/${c.id}`)).toMatchObject({ notes: 'edited', salesperson_id: a });
   });
 });

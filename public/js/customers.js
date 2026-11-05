@@ -105,7 +105,8 @@ Object.assign(App, {
   _customerListQuery(offset = 0) {
     const q = (document.getElementById('cust-search')?.value || '').trim();
     const type = document.getElementById('cust-type-filter')?.value || '';
-    return `/customers?active=1&paged=1&offset=${offset}${q ? `&search=${encodeURIComponent(q)}` : ''}${type ? `&type=${type}` : ''}`;
+    const salesperson = document.getElementById('cust-salesperson-filter')?.value || '';
+    return `/customers?active=1&paged=1&offset=${offset}${q ? `&search=${encodeURIComponent(q)}` : ''}${type ? `&type=${type}` : ''}${salesperson ? `&salesperson_id=${salesperson}` : ''}`;
   },
 
   // Customers filter bar as it stands, so a save / deactivate re-renders on
@@ -113,10 +114,11 @@ Object.assign(App, {
   _custFilterState(fallback = {}) {
     if (this.section !== 'customers') return null;
     const val = id => (document.getElementById(id) || {}).value || '';
-    return { search: val('cust-search') || fallback.search || '', type: val('cust-type-filter') };
+    return { search: val('cust-search') || fallback.search || '', type: val('cust-type-filter'), salesperson: val('cust-salesperson-filter') };
   },
 
   async renderCustomers(filters = null) {
+    this._custSalespeople = await this.api('GET', '/sales-targets/salespeople').catch(() => []);
     if (this.section !== 'customers') return;
 
     document.getElementById('content').innerHTML = `
@@ -129,6 +131,7 @@ Object.assign(App, {
           ${this.can('customers_export_balances') ? `<button class="btn btn-secondary btn-sm" style="white-space:nowrap" onclick="App.showCustomerBalancesExport()" title="Export AR balance, credit note total, and status by customer type">Export Balances</button>` : ''}
           ${this.can('customers_missing_rental_info') ? `<button class="btn btn-secondary btn-sm" style="white-space:nowrap" onclick="App.showRentalIncompleteReport()" title="Rental customers missing the ID/reference/document info required to create a rental">🔑 Missing Rental Info</button>` : ''}
           ${this.can('customers_merge') ? `<button class="btn btn-secondary btn-sm" style="white-space:nowrap" onclick="App.renderCustomerDuplicates()" title="Customers sharing a phone number or email — review and merge">Find Duplicates</button>` : ''}
+          ${this.can('sales_manager') ? `<button class="btn btn-secondary btn-sm" style="white-space:nowrap" onclick="App.renderCustomerAssign()" title="Assign many customers to salespeople at once">Assign Salespeople</button>` : ''}
           ${this.can('customers_add') ? `<button class="btn btn-primary" style="white-space:nowrap" onclick="App.showCustomerForm()">+ Add Customer</button>` : ''}
         </div>
       </div>
@@ -144,6 +147,12 @@ Object.assign(App, {
           <option value="rental_approved">Rental Approved</option>
           <option value="other">Other (not rental approved)</option>
         </select>
+        <select id="cust-salesperson-filter" title="Show one salesperson's customers" style="width:auto;flex:0 0 auto">
+          <option value="">Any Salesperson</option>
+          ${this.currentUser?.is_salesperson ? '<option value="me">My Customers</option>' : ''}
+          <option value="none">No Salesperson</option>
+          ${this._custSalespeople.map(p => `<option value="${p.id}">${this.escapeAttr(`${p.first_name} ${p.last_name}`.trim())}</option>`).join('')}
+        </select>
         <span id="cust-count" style="font-size:13px;color:var(--text-muted);margin-left:auto"></span>
       </div>
       <div class="card">
@@ -154,6 +163,7 @@ Object.assign(App, {
     if (filters) {
       document.getElementById('cust-search').value = filters.search || '';
       document.getElementById('cust-type-filter').value = filters.type || '';
+      document.getElementById('cust-salesperson-filter').value = filters.salesperson || '';
     }
 
     // Search once typing pauses (Enter at once); _custLoad ignores replies
@@ -163,6 +173,7 @@ Object.assign(App, {
     searchEl.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => this._custLoad(), 250); });
     searchEl.addEventListener('keydown', e => { if (e.key === 'Enter') { clearTimeout(searchTimer); this._custLoad(); } });
     document.getElementById('cust-type-filter').addEventListener('change', () => this._custLoad());
+    document.getElementById('cust-salesperson-filter').addEventListener('change', () => this._custLoad());
     await this._custLoad();
   },
 
@@ -207,6 +218,14 @@ Object.assign(App, {
     </div>` : ''}`;
   },
 
+  // Under the customer's name in the list; nothing when they have no salesperson.
+  _custSalespersonLine(id) {
+    if (!id) return '';
+    const p = (this._custSalespeople || []).find(x => x.id === id);
+    const name = p ? this.escapeAttr(`${p.first_name} ${p.last_name}`.trim()) : `Employee #${id}`;
+    return `<div style="font-size:11px;font-weight:400;color:var(--text-muted)">Salesperson: ${name}</div>`;
+  },
+
   _custRowsHtml(customers) {
     return customers.map(c => {
         const isCredit = c.customer_type === 'credit';
@@ -218,7 +237,7 @@ Object.assign(App, {
         const preapprovedBadge = c.is_rental_customer && c.rental_preapproved ? ' <span class="badge-pill badge-success" title="Can be rented to despite incomplete compliance info">Preapproved</span>' : '';
         return `<tr>
         <td style="font-family:monospace;font-size:12px">${c.customer_number}</td>
-        <td class="fw-600">${c.first_name} ${c.last_name}${c.customer_kind === 'business' ? ' <span class="badge-pill badge-secondary" style="font-size:10px">Business</span>' : ''}</td>
+        <td class="fw-600">${c.first_name} ${c.last_name}${c.customer_kind === 'business' ? ' <span class="badge-pill badge-secondary" style="font-size:10px">Business</span>' : ''}${this._custSalespersonLine(c.salesperson_id)}</td>
         <td style="white-space:nowrap">${typeBadge}${taxExemptBadge}${rentalBadge}${preapprovedBadge}</td>
         <td style="color:var(--text-muted)">${c.email||'—'}</td>
         <td>${c.phone||'—'}</td>
