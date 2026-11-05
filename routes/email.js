@@ -10,7 +10,7 @@ const { customerArDetail, customerStatement } = require('../lib/arDetail');
 const { inlineProtectedImages } = require('../lib/protectedUploads');
 const { orderLineUnit } = require('../lib/units');
 const { rentalQuoteSummary, attachRentalRates, attachRateBasis, rentalWindow, rateBasisLabel } = require('../lib/rentals');
-const { lineExtended, rentPeriodLabel, lineDiscountLabel, quoteDocTotals } = require('../lib/quoteLines');
+const { lineExtended, rentPeriodLabel, lineDiscountLabel, quoteDocTotals, quoteDraftLabel } = require('../lib/quoteLines');
 const { renderDocumentPdf } = require('../lib/documentPdf');
 const { loadDrawerSession } = require('../lib/drawerReport');
 const { paymentReceipt } = require('../lib/customerPayments');
@@ -764,6 +764,7 @@ function buildQuoteHtml(q, s, { print = false } = {}) {
   const footer = footerHtml(s);
   const isSP = q.quote_type === 'special_project';
   const totals = quoteDocTotals(q);
+  const draftLabel = quoteDraftLabel(q);
   const th = (label, align) => `<th style="padding:8px;text-align:${align};font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">${label}</th>`;
   const head = isSP
     ? th('Item No.', 'left') + th('Item Description', 'left') + th('Quantity', 'right') + th('U.O.M', 'left') + th('Rent Period', 'left') + th('Unit Price', 'right') + th('Extended Price', 'right')
@@ -781,7 +782,7 @@ function buildQuoteHtml(q, s, { print = false } = {}) {
 
   return `<!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"><title>Quotation ${q.quote_number}</title>
+<head><meta charset="utf-8"><title>Quotation ${q.quote_number}${draftLabel ? ` - ${draftLabel}` : ''}</title>
 ${print ? PRINT_PAGE_STYLE : ''}
 </head>
 <body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
@@ -798,6 +799,7 @@ ${print ? PRINT_PAGE_STYLE : ''}
         <div>
           <div style="font-size:20px;font-weight:700;color:${BRAND.black}">QUOTATION</div>
           <div style="font-size:13px;color:#888;margin-top:2px">${q.quote_number}</div>
+          ${draftLabel ? `<div style="display:inline-block;margin-top:6px;padding:3px 8px;border:2px solid #dc2626;color:#dc2626;font-size:12px;font-weight:700;letter-spacing:.5px">${draftLabel}</div>` : ''}
         </div>
         <div style="text-align:right;font-size:13px;color:#444">
           <div><strong>Date:</strong> ${fmtDate(q.created_at)}</div>
@@ -1327,7 +1329,7 @@ router.post('/send-quote/:id', requireAuth, async (req, res) => {
       await transporter.sendMail({
         from: `"${fromName}" <${fromAddr}>`,
         to,
-        subject: `${isRental ? 'Rental Quotation' : 'Quotation'} ${q.quote_number} from ${s.store_name || 'Our Store'}`,
+        subject: `${isRental ? 'Rental Quotation' : 'Quotation'} ${q.quote_number}${quoteDraftLabel(q) ? ` (${quoteDraftLabel(q)})` : ''} from ${s.store_name || 'Our Store'}`,
         // An approved Special Project's signature is a login-only image — embed it.
         ...(await documentEmailContent(req.body.as_pdf, s, isRental ? rentalQuotePdfModel(q, s) : quotePdfModel(q, s), isRental ? buildRentalQuoteHtml(q, s) : inlineProtectedImages(buildQuoteHtml(q, s)))),
       });
@@ -2532,7 +2534,7 @@ function quotePdfModel(q, s) {
     : [i.sku || '', i.product_name, i.quantity, fmt(i.unit_price), fmt(i.total)];
   return {
     store: pdfStore(s),
-    title: 'QUOTATION', number: q.quote_number,
+    title: quoteDraftLabel(q) ? `QUOTATION - ${quoteDraftLabel(q)}` : 'QUOTATION', number: q.quote_number,
     meta: [['Date', pdfDate(q.created_at)], ['Valid Until', q.valid_until ? pdfDate(String(q.valid_until).slice(0, 10)) : ''], ['Branch', q.branch_name]],
     party: { label: 'Bill To', lines: [q.customer_name, q.customer_phone, q.customer_email] },
     tables: [{ mainCol: 1, columns, rows: (q.items || []).map(i => i.is_comment ? commentRowPdf(i.product_name, cols, 1) : i.serial_number ? commentRowPdf(`Serial: ${i.serial_number}`, cols, 1) : ({

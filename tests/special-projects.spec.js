@@ -35,6 +35,30 @@ test.describe('Special Project custom items', () => {
     expect(html).not.toContain('SPECIAL PROJECT');
   });
 
+  test('the quotation says Draft until the project is approved', async ({ page }) => {
+    const q = await createProject(page, [line]);
+    expect(await preview(page, q.id)).toContain('>DRAFT<');
+    await api(page, 'PATCH', `/quotations/${q.id}/submit-for-approval`, {});
+    expect(await preview(page, q.id)).toContain('>DRAFT - PENDING APPROVAL<');
+    await api(page, 'PATCH', `/quotations/${q.id}/approve`, {});
+    const approved = await preview(page, q.id);
+    expect(approved).toContain('QUOTATION');
+    expect(approved).not.toContain('DRAFT');
+
+    const retail = await api(page, 'POST', '/quotations', { employee_id: 1, branch_id: 1, items: [{ description: 'Thing to order', quantity: 1, unit_price: 100 }] });
+    expect(await preview(page, retail.id)).not.toContain('DRAFT');
+  });
+
+  test('the screens call it a Quotation', async ({ page }) => {
+    const q = await createProject(page, [line]);
+    await page.evaluate(() => App.showSection('special-projects'));
+    await expect(page.locator('button', { hasText: '+ New Quotation' })).toBeVisible();
+    await expect(page.locator('th', { hasText: 'Quotation #' })).toBeVisible();
+    await page.evaluate(id => App.viewQuote(id), q.id);
+    await expect(page.locator('.modal-title').last()).toHaveText(`Quotation: ${q.quote_number}`);
+    await expect(page.locator('.modal').last().locator('.badge-pill', { hasText: 'Draft' })).toBeVisible();
+  });
+
   test('a dollar discount, part quantities and a line with no rent period', async ({ page }) => {
     const q = await createProject(page, [{ description: 'Labour', quantity: 2.5, unit_price: 100, discount: 50, discount_type: 'amount' }]);
     expect(q.subtotal).toBe(200);

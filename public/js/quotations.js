@@ -158,7 +158,7 @@ Object.assign(App, {
         <h2>Special Projects</h2>
         <div style="display:flex;gap:8px">
           <button class="btn btn-secondary" onclick="App.showSpecialProjectsMarginReport()">📊 Margin Report</button>
-          ${this.can('special_projects') ? `<button class="btn btn-primary" onclick="App.showQuoteForm(null,'special_project')">+ New Special Project</button>` : ''}
+          ${this.can('special_projects') ? `<button class="btn btn-primary" onclick="App.showQuoteForm(null,'special_project')">+ New Quotation</button>` : ''}
         </div>
       </div>
       <p style="font-size:12px;color:var(--text-muted);margin:-8px 0 14px">Custom quotes/invoices for one-off jobs — free-form pricing, needs a supervisor's approval before it can go to the customer.</p>
@@ -175,7 +175,7 @@ Object.assign(App, {
       <div class="card">
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Project #</th><th>Customer</th><th>Employee</th><th>Total</th><th>Status</th><th>Invoice #</th><th>Date</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Quotation #</th><th>Customer</th><th>Employee</th><th>Total</th><th>Status</th><th>Invoice #</th><th>Date</th><th>Actions</th></tr></thead>
             <tbody id="sp-tbody">${this.buildSpecialProjectRows(projects)}</tbody>
           </table>
         </div>
@@ -439,7 +439,7 @@ Object.assign(App, {
     const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0,10);
     this.showModal(`
       <div class="modal" style="max-width:720px">
-        <div class="modal-header"><span class="modal-title">${editId ? `Edit ${(q&&q.quote_type==='special_project')?'Special Project':'Quotation'}: ${q.quote_number}` : (initialType==='special_project' ? 'New Special Project' : 'New Quotation')}</span><button class="modal-close">✕</button></div>
+        <div class="modal-header"><span class="modal-title">${editId ? `Edit ${(q&&q.quote_type==='special_project')?'Special Project Quotation':'Quotation'}: ${q.quote_number}` : (initialType==='special_project' ? 'New Special Project Quotation' : 'New Quotation')}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           ${!editId && initialType !== 'special_project' ? `<div class="form-group"><label>Quote Type</label>
             <div style="display:flex;gap:8px">
@@ -1593,10 +1593,10 @@ Object.assign(App, {
       if (isSpecialProject && !this._editingQuoteId) payload.quote_type = 'special_project';
       if (this._editingQuoteId) {
         await this.api('PUT', `/quotations/${this._editingQuoteId}`, payload);
-        this.alert(isSpecialProject ? 'Special project updated' : 'Quotation updated');
+        this.alert('Quotation updated');
       } else {
         await this.api('POST', '/quotations', payload);
-        this.alert(isSpecialProject ? 'Special project saved as draft' : 'Quotation created');
+        this.alert(isSpecialProject ? 'Quotation saved as draft' : 'Quotation created');
       }
       this.closeModal();
       if (isSpecialProject) this.renderSpecialProjects(); else this.renderQuotations();
@@ -1725,7 +1725,7 @@ Object.assign(App, {
     this.showModal(`
       <div class="modal" style="max-width:960px">
         <div class="modal-header">
-          <span class="modal-title">${isSpecialProject ? 'Special Project' : 'Quotation'}: ${q.quote_number}</span>
+          <span class="modal-title">Quotation: ${q.quote_number}</span>
           <div style="display:flex;gap:8px;align-items:center">
             <span class="badge-pill ${isRental?'badge-warning':isSpecialProject?'badge-danger':'badge-info'}" style="font-size:10px">${isRental?'RENTAL':isSpecialProject?'SPECIAL PROJECT':'RETAIL'}</span>
             ${q.is_special_order ? `<span class="badge-pill badge-purple" style="font-size:10px" title="Includes Q items — things Purchasing has to order">SPECIAL ORDER</span>` : ''}
@@ -1948,12 +1948,12 @@ Object.assign(App, {
 
   showApproveSpecialProjectModal(id) {
     this._showApprovalDialog({
-      title: 'Approve Special Project',
+      title: 'Approve Quotation',
       intro: 'This signs off on the pricing as entered — the project can then be sent to the customer and converted to an invoice. Your signature appears on the quotation\'s printed, emailed and PDF copies.',
       approve: async (signature) => {
         await this.api('PATCH', `/quotations/${id}/approve`, { signature });
         this.closeModal();
-        this.alert('Special project approved');
+        this.alert('Quotation approved');
         this.viewQuote(id);
       },
     });
@@ -1962,7 +1962,7 @@ Object.assign(App, {
   showRejectSpecialProjectModal(id) {
     this.showModal(`
       <div class="modal" style="max-width:460px">
-        <div class="modal-header"><span class="modal-title">Reject Special Project</span><button class="modal-close">✕</button></div>
+        <div class="modal-header"><span class="modal-title">Reject Quotation</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <p style="font-size:13px;color:var(--text-muted)">This sends it back to Draft so the pricing can be adjusted and resubmitted.</p>
           <div class="form-group"><label>Reason *</label><textarea id="sp-reject-reason" rows="3" placeholder="What needs to change"></textarea></div>
@@ -1980,7 +1980,7 @@ Object.assign(App, {
     try {
       await this.api('PATCH', `/quotations/${id}/reject`, { reason, employee_id: this.currentUser.id });
       this.closeModal();
-      this.alert('Special project rejected — back in Draft');
+      this.alert('Quotation rejected — back in Draft');
       this.viewQuote(id);
     } catch(e) { this.alert(e.message, 'error'); }
   },
