@@ -441,8 +441,9 @@ Object.assign(App, {
       return;
     }
     const methods = [['cash', 'Cash'], ['credit_card', 'Credit Card'], ['debit_card', 'Debit Card'], ['check', 'Cheque'], ['direct_deposit', 'Direct Deposit']];
-    // TAX-EXEMPT clears the GCT on chosen invoices for a Tax Exempt customer — no money, no drawer.
-    if (c.tax_exempt) methods.push(['tax_exempt', 'Tax Exempt (clear GCT)']);
+    // TAX-EXEMPT clears the GCT on chosen invoices for a Tax Exempt customer — no
+    // money, no drawer. Always listed, so its absence doesn't look like a fault.
+    methods.push(['tax_exempt', c.tax_exempt ? 'Tax Exempt (clear GCT)' : 'Tax Exempt (customer not marked)', !c.tax_exempt]);
     const taxExempt = this._rp.method === 'tax_exempt';
     document.getElementById('rp-body').innerHTML = `
       <div style="display:flex;gap:20px;flex-wrap:wrap;font-size:13px;padding:10px 12px;border:1px solid var(--border);border-radius:6px;margin-bottom:12px">
@@ -464,7 +465,8 @@ Object.assign(App, {
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:12px">
         <div class="form-group" style="margin:0"><label>${taxExempt ? 'GCT Cleared' : 'Amount Received *'}</label><input type="number" id="rp-amount" step="0.01" min="0" ${taxExempt ? 'readonly' : ''} oninput="App._rp.amountEdited = true; App._rpExtraNote()" placeholder="0.00">
           <div id="rp-extra-note" style="font-size:11px;margin-top:3px"></div></div>
-        <div class="form-group" style="margin:0"><label>Paid By *</label><select id="rp-method" onchange="App._rpMethodChanged(true)">${methods.map(([v, l]) => `<option value="${v}" ${this._rp.method === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+        <div class="form-group" style="margin:0"><label>Paid By *</label><select id="rp-method" onchange="App._rpMethodChanged(true)">${methods.map(([v, l, off]) => `<option value="${v}" ${this._rp.method === v ? 'selected' : ''} ${off ? 'disabled' : ''}>${l}</option>`).join('')}</select>
+          ${c.tax_exempt ? '' : '<div id="rp-exempt-note" style="font-size:11px;color:var(--text-muted);margin-top:3px">For Tax Exempt, tick Tax Exempt on this customer\'s form first.</div>'}</div>
         <div class="form-group" style="margin:0" id="rp-ref-wrap"><label id="rp-ref-label">Reference</label><input id="rp-ref" placeholder="Optional for cash"></div>
       </div>
       <div class="form-group" style="margin:10px 0 0"><label>Notes</label><input id="rp-notes" placeholder="Optional"></div>
