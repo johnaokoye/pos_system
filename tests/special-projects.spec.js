@@ -116,7 +116,8 @@ test.describe('Special Project custom items', () => {
     await page.evaluate(() => App.saveQuote());
     await expect(page.locator('.modal')).toHaveCount(0);
 
-    const list = await api(page, 'GET', '/quotations?quote_type=special_project&limit=1');
+    // Newest by id: created_at ties when two are made in the same second.
+    const list = (await api(page, 'GET', '/quotations?quote_type=special_project&limit=100')).sort((x, y) => y.id - x.id);
     expect(list[0].status).toBe('draft');
     expect(list[0].subtotal).toBe(92431.12);
 
@@ -163,7 +164,7 @@ test.describe('Special Project custom items', () => {
     await page.evaluate(id => App.loadHeldOrder(id), held.id);
     await expect(page.locator('.pos-ticket-row').first()).toBeVisible();
     expect(await page.evaluate(() => App.getCartTotals().total)).toBe(q.total);
-    await page.evaluate(() => { App.processPayment('cash'); });
+    await page.evaluate(() => { App._salespersonReminderDone = true; App.processPayment('cash'); });
     await page.fill('#ctm-tendered', '200000');
     await page.click('#ctm-confirm');
     const invoice = page.locator('.modal').last();

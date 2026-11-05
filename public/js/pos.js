@@ -1567,6 +1567,7 @@ Object.assign(App, {
   },
 
   clearCart() {
+    this._salespersonReminderDone = false;
     this._bundleSeen = new Set(); this._closeBundleUpsell();
     this._ticketPoNumber = null;
     this.cart = []; this.cartCustomer = null; this.cartDiscount = 0; this._storeCreditApplied = 0; this._cashBackApplied = 0; this.appliedPromoCode = null; this.autoAppliedPromo = null; this._availablePromos = []; this._returnCredit = null; this._activeQuoteId = null; this._ticketCreatedBy = null; this._ticketSalesperson = null; this.appliedDiscountCard = null; this._manualTaxExempt = null; this._manualTicketDiscount = false; this._manualTicketDiscountPct = null;
@@ -1917,9 +1918,58 @@ Object.assign(App, {
     this._checkAutoPromos();
   },
 
+  // True when nobody would get target credit for this ticket: no customer's
+  // salesperson, Salesperson who started it, or pick (ticketSalesperson in
+  // routes/transactions.js). Refund tickets aren't asked about.
+  _ticketNeedsSalesperson() {
+    const people = this._posSalespeople || [];
+    if (!people.length || this._salespersonReminderDone || this._ticketSalesperson) return false;
+    const initiatorId = this._ticketCreatedBy || this.currentUser?.id;
+    if (people.some(sp => sp.id === this.cartCustomer?.salesperson_id || sp.id === initiatorId)) return false;
+    return this.getCartTotals().total > 0;
+  },
+
+  // Asked once a ticket at payment; picking stays optional. Resolves false if
+  // the cashier goes back to the ticket instead.
+  _salespersonReminder() {
+    if (!this._ticketNeedsSalesperson()) return Promise.resolve(true);
+    return new Promise(resolve => {
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.innerHTML = `
+        <div class="modal" style="max-width:400px">
+          <div class="modal-header"><span class="modal-title">Who made this sale?</span><button class="modal-close" id="spr-back">✕</button></div>
+          <div class="modal-body">
+            <p style="margin:0 0 12px;font-size:13px;color:var(--text-muted)">No salesperson is set, so this sale won't count toward anyone's sales target.</p>
+            <div class="form-group" style="margin-bottom:0"><label>Salesperson</label>
+              <select id="spr-pick"><option value="">Choose…</option>${this._posSalespeople.map(s => `<option value="${s.id}">${this.escapeAttr(`${s.first_name} ${s.last_name}`.trim())}</option>`).join('')}</select>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-secondary" id="spr-skip">Continue Without</button>
+            <button class="btn btn-primary" id="spr-use" disabled>Use Salesperson</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      const pick = overlay.querySelector('#spr-pick');
+      const use = overlay.querySelector('#spr-use');
+      const finish = result => { overlay.remove(); resolve(result); };
+      pick.addEventListener('change', () => { use.disabled = !pick.value; });
+      overlay.querySelector('#spr-back').addEventListener('click', () => finish(false));
+      overlay.querySelector('#spr-skip').addEventListener('click', () => { this._salespersonReminderDone = true; finish(true); });
+      use.addEventListener('click', () => {
+        this._ticketSalesperson = Number(pick.value);
+        this._renderTicketSalesperson();
+        finish(true);
+      });
+      setTimeout(() => pick.focus(), 50);
+    });
+  },
+
   async processPayment(method) {
     if (!this.cart.length) { this.alert('Cart is empty', 'warning'); return; }
     if (this._posQItemBlocksSale()) return;
+    if (!await this._salespersonReminder()) return;
 
     if (method === 'credit') {
       if (!this.cartCustomer) { this.alert('Please select a customer to use charge account', 'error'); return; }

@@ -83,7 +83,7 @@ test.describe('Point of Sale', () => {
     await page.fill('#pos-item-input', sku);
     await page.press('#pos-item-input', 'Enter');
     await expect(page.locator('.pos-ticket-row').first()).toBeVisible();
-    await page.evaluate(() => { App.processPayment('cash'); });
+    await page.evaluate(() => { App._salespersonReminderDone = true; App.processPayment('cash'); });
     await page.fill('#ctm-tendered', '100000');
     await page.click('#ctm-confirm');
     await expect(page.locator('.modal-title', { hasText: 'Receipt' })).toBeVisible();

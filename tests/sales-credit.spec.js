@@ -32,7 +32,7 @@ async function openPos(page) {
 }
 
 async function pay(page) {
-  await page.evaluate(() => { window.__sale = null; App.processPayment('cash'); });
+  await page.evaluate(() => { window.__sale = null; App._salespersonReminderDone = true; App.processPayment('cash'); });
   await page.fill('#ctm-tendered', '1000000');
   await page.click('#ctm-confirm');
   await page.waitForFunction(() => window.__sale);
@@ -131,6 +131,79 @@ test.describe('Sales credit', () => {
     await ringUp(page, product, c.id);
     await page.selectOption('#pos-salesperson', String(b));
     expect(await creditedTo(page, await pay(page))).toBe(b);
+  });
+
+  test('the payment reminder: pick, continue without, or go back', async ({ page }) => {
+    const { b, product } = await setup(page);
+    const me = await page.evaluate(() => App.currentUser.id);
+    const reminder = page.locator('.modal-title', { hasText: 'Who made this sale?' });
+    const start = () => page.evaluate(() => { window.__sale = null; App.processPayment('cash'); });
+    const finish = async () => {
+      await page.fill('#ctm-tendered', '1000000');
+      await page.click('#ctm-confirm');
+      await page.waitForFunction(() => window.__sale);
+      return page.evaluate(() => window.__sale.id);
+    };
+
+    // Going back keeps the ticket and takes no payment; it asks again next time.
+    await ringUp(page, product);
+    await start();
+    await expect(reminder).toBeVisible();
+    await page.click('#spr-back');
+    await expect(reminder).toHaveCount(0);
+    await expect(page.locator('#ctm-tendered')).toHaveCount(0);
+    expect(await page.evaluate(() => App.cart.length)).toBe(1);
+
+    // Picking credits that person. Use stays off until someone is chosen.
+    await start();
+    await expect(page.locator('#spr-use')).toBeDisabled();
+    await page.selectOption('#spr-pick', String(b));
+    await page.click('#spr-use');
+    expect(await creditedTo(page, await finish())).toBe(b);
+
+    // Continuing without stays with the cashier, and only asks once a ticket.
+    await ringUp(page, product);
+    await start();
+    await page.click('#spr-skip');
+    await page.click('#ctm-x');
+    await start();
+    await expect(page.locator('#ctm-tendered')).toBeVisible();
+    await expect(reminder).toHaveCount(0);
+    expect(await creditedTo(page, await finish())).toBe(me);
+
+    // The next ticket asks again.
+    await ringUp(page, product);
+    await start();
+    await expect(reminder).toBeVisible();
+    await page.click('#spr-back');
+  });
+
+  test('no payment reminder when someone already gets the credit', async ({ page }) => {
+    const { a, b, product } = await setup(page);
+    const noReminder = async () => {
+      await page.evaluate(() => { App.processPayment('cash'); });
+      await expect(page.locator('#ctm-tendered')).toBeVisible();
+      await expect(page.locator('.modal-title', { hasText: 'Who made this sale?' })).toHaveCount(0);
+      await page.click('#ctm-x');
+    };
+    // The customer has a salesperson.
+    const owned = await createCustomer(page, a);
+    await ringUp(page, product, owned.id);
+    await noReminder();
+    // A salesperson was picked on the ticket.
+    await ringUp(page, product);
+    await page.selectOption('#pos-salesperson', String(b));
+    await noReminder();
+    // A salesperson started it (their quote, put through by the cashier).
+    const q = await api(page, 'POST', '/quotations', { employee_id: a, branch_id: 1, items: [{ product_id: product.id, quantity: 1 }] });
+    await openPos(page);
+    await page.evaluate(id => App.loadQuoteToCart(id), q.id);
+    await expect(page.locator('.pos-ticket-row').first()).toBeVisible();
+    await noReminder();
+    // A salesperson is ringing up.
+    await ringUp(page, product);
+    await page.evaluate(id => { App.currentUser.id = id; }, a);
+    expect(await page.evaluate(() => App._ticketNeedsSalesperson())).toBe(false);
   });
 
   test('a layaway belongs to the customer\'s salesperson', async ({ page }) => {
