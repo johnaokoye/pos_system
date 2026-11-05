@@ -58,6 +58,43 @@ Check:
 
 To look at one item: `… | grep SKU123`. To see only the top: `… | head -20`.
 
+### If the last file of a multi-file count zeroed items
+
+`--only-previously-counted` only looks at **earlier sessions**. An item counted in
+an earlier file of the *same* session, then zeroed by the last file, is left out and
+stays at 0. So when one session had several uploads, run the dry run without it:
+
+```sh
+su-exec app node scripts/reverse-zero-uncounted.js CC-000004 --include-imported-zeros
+```
+
+Check that the last file's line under **Uploads in …** shows most of its lines as 0,
+and that the summary line shows the right branch. If more than one committed session
+zeroed items, run this for each of them. Then read each row:
+
+| Earlier count | From upload | What it means | What to do |
+|---|---|---|---|
+| A number | `#3` | Counted in an earlier session, then zeroed | Restore |
+| `—` | `#2,#3` | In an earlier file of this session, then zeroed; the earlier file may have had a real count | Restore, then check the quantity |
+| `—` | `#3` | Only in the last file, as 0, with no earlier count | Restore only if it wasn't really counted as 0 |
+| `—` | `checkbox` | Zeroed by the box; nobody counted it | Restore if it should have stock |
+
+This list can include items that really were counted as 0, so leave those out when
+you apply, using `--exclude=SKU1,SKU2`, or list only the items to restore with
+`--skus=SKU1,SKU2`:
+
+```sh
+su-exec app node scripts/reverse-zero-uncounted.js CC-000004 --include-imported-zeros --exclude=SKU1,SKU2 --apply
+```
+
+A restore puts back the stock figure from before that session's count, **not** the
+quantity in the earlier file. For example, an item with 10 on hand and a count of 5
+in the first file goes back to 10. Where a file had a real count, adjust that item
+by hand afterwards.
+
+If items were adjusted by hand since the commit, leave `--only-previously-counted`
+out of the step 6 commands too.
+
 ## 5. Apply, normal mode
 
 Run the same command as step 4 with `--apply` on the end:
@@ -99,7 +136,7 @@ reference `CC-000004-REV` putting the stock back. No restart needed.
 |---|---|
 | `--apply` | Make the changes. Without it the run is a dry run and nothing changes. |
 | `--include-imported-zeros` | Also restore zeros that came from an imported file |
-| `--only-previously-counted` | Only items counted in an earlier committed session (use with `--include-imported-zeros`) |
+| `--only-previously-counted` | Only items counted in an earlier committed session (use with `--include-imported-zeros`). Leaves out items counted only in an earlier file of the same session; see step 4 |
 | `--adjusted` | Handle the items fixed by hand since (undoes those fixes too) |
 | `--skus=SKU1,SKU2` | Only these items |
 | `--exclude=SKU1,SKU2` | Leave these items out |
