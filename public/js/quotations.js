@@ -201,6 +201,7 @@ Object.assign(App, {
             <button class="btn btn-sm btn-primary" onclick="App.submitSpecialProjectForApproval(${p.id})">Submit</button>` : ''}
           ${p.status==='pending_approval' && canApprove ? `<button class="btn btn-sm btn-success" onclick="App.showApproveSpecialProjectModal(${p.id})">Approve</button>
             <button class="btn btn-sm btn-danger" onclick="App.showRejectSpecialProjectModal(${p.id})">Reject</button>` : ''}
+          ${['pending_approval','approved','sent','accepted','declined'].includes(p.status) && canManage ? `<button class="btn btn-sm btn-outline" onclick="App.reopenSpecialProject(${p.id},'${p.status}')">Edit</button>` : ''}
           ${['approved','sent','accepted'].includes(p.status) && canManage ? `<button class="btn btn-sm btn-primary" onclick="App.showConvertQuote(${p.id})">Convert</button>` : ''}
         </td>
       </tr>`).join('');
@@ -1781,6 +1782,9 @@ Object.assign(App, {
             <button class="btn btn-secondary" onclick="App.closeModal();App.showQuoteForm(${q.id})">Edit</button>
             ${this.can('special_projects') ? `<button class="btn btn-primary" onclick="App.submitSpecialProjectForApproval(${q.id})">Submit for Approval</button>` : ''}
           ` : ''}
+          ${isSpecialProject && ['pending_approval','approved','sent','accepted','declined'].includes(q.status) && this.can('special_projects') ? `
+            <button class="btn btn-secondary" onclick="App.reopenSpecialProject(${q.id},'${q.status}')">Edit</button>
+          ` : ''}
           ${isSpecialProject && q.status==='pending_approval' && this.can('special_projects_approve') ? `
             <button class="btn btn-success" onclick="App.showApproveSpecialProjectModal(${q.id})">Approve</button>
             <button class="btn btn-danger" onclick="App.showRejectSpecialProjectModal(${q.id})">Reject</button>
@@ -1937,6 +1941,24 @@ Object.assign(App, {
   },
 
   // ─── Special Projects: internal pricing approval ───────────────────────
+
+  // Changing a quote after it was submitted or approved: back to Draft, approval
+  // and any rental holds removed, so the new numbers get approved again.
+  async reopenSpecialProject(id, status) {
+    const warning = status === 'pending_approval'
+      ? 'This takes the quotation back from approval and returns it to Draft so you can change it. It will need submitting again.'
+      : status === 'declined'
+      ? 'This reopens the declined quotation as a Draft so you can change it. It will need approving again.'
+      : 'This returns the quotation to Draft so you can change it. Its approval and signature are removed, any rental holds are released, and it will need approving again.';
+    const extra = status === 'accepted' ? '\n\nAny Purchase Request or transfer already raised for it stays as it is, so check those if the items change.' : '';
+    if (!confirm(`${warning}${extra}\n\nContinue?`)) return;
+    try {
+      await this.api('PATCH', `/quotations/${id}/status`, { status: 'draft' });
+      this.closeModal();
+      this.renderSpecialProjects();
+      this.showQuoteForm(id);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
 
   async submitSpecialProjectForApproval(id) {
     try {

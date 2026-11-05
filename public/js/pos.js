@@ -2317,7 +2317,7 @@ Object.assign(App, {
         : await this.api('GET', '/quotations?limit=50');
       // Rental quotes become rental agreements (Convert on the quote), never
       // a POS sale, so they aren't offered here.
-      quotes = qs.filter(q => !['converted','declined','cancelled'].includes(q.status) && q.quote_type !== 'rental');
+      quotes = qs.filter(q => this._quoteRecallable(q));
     } catch(e) {}
 
     const renderList = (list) => list.length
@@ -2361,18 +2361,24 @@ Object.assign(App, {
     if (!input) return;
     const q = input.value.trim().toLowerCase();
     if (!q) {
-      const filtered = (this._quoteSearchData || []).filter(x => !['converted','declined','cancelled'].includes(x.status) && x.quote_type !== 'rental');
+      const filtered = (this._quoteSearchData || []).filter(x => this._quoteRecallable(x));
       document.getElementById('qt-list').innerHTML = filtered.length
         ? filtered.map(x => this._quoteRow(x)).join('') : '<p style="color:var(--text-muted);text-align:center;padding:20px 0">No open quotes found</p>';
       return;
     }
     try {
       const results = await this.api('GET', `/quotations?quote_number=${encodeURIComponent(q)}&limit=30`);
-      const filtered = results.filter(x => !['converted','declined','cancelled'].includes(x.status) && x.quote_type !== 'rental')
+      const filtered = results.filter(x => this._quoteRecallable(x))
         .filter(x => x.quote_number.toLowerCase().includes(q) || (x.customer_name||'').toLowerCase().includes(q));
       document.getElementById('qt-list').innerHTML = filtered.length
         ? filtered.map(x => this._quoteRow(x)).join('') : '<p style="color:var(--text-muted);text-align:center;padding:20px 0">No matching quotes</p>';
     } catch(e) {}
+  },
+
+  // Quote Recall: open quotes only, not rentals, and a Special Project only once approved.
+  _quoteRecallable(q) {
+    if (['converted','declined','cancelled'].includes(q.status) || q.quote_type === 'rental') return false;
+    return !(q.quote_type === 'special_project' && ['draft','pending_approval'].includes(q.status));
   },
 
   _quoteRow(q) {
@@ -2395,6 +2401,7 @@ Object.assign(App, {
       if (['declined','cancelled'].includes(quote.status)) { this.alert(`Cannot load a ${quote.status} quote`, 'error'); return; }
       if (!quote.items || !quote.items.length) { this.alert('Quote has no items', 'error'); return; }
       if (quote.quote_type === 'rental') { this.alert(`${quote.quote_number} is a rental quote — convert it to a rental agreement from Quotations, not at the POS`, 'error'); return; }
+      if (quote.quote_type === 'special_project' && ['draft','pending_approval'].includes(quote.status)) { this.alert(`${quote.quote_number} hasn't been approved yet, so it can't be sold`, 'error'); return; }
       const quoteValid = this._quoteStillValid(quote.valid_until);
 
       if (this.cart.length && !confirm(`Loading ${quote.quote_number} will replace your current cart. Continue?`)) return;

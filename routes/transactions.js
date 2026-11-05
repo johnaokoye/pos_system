@@ -498,6 +498,9 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       if (srcQuote?.quote_type === 'rental') {
         return res.status(400).json({ error: `${srcQuote.quote_number} is a rental quote — convert it to a rental agreement from Quotations (Convert), not at the POS` });
       }
+      if (srcQuote?.quote_type === 'special_project' && ['draft', 'pending_approval'].includes(srcQuote.status)) {
+        return res.status(400).json({ error: `${srcQuote.quote_number} hasn't been approved yet, so it can't be sold` });
+      }
       await refreshStoreTz();
       const usable = srcQuote && !['declined', 'cancelled'].includes(srcQuote.status)
         && !(srcQuote.status === 'converted' && srcQuote.converted_tx_status && srcQuote.converted_tx_status !== 'hold');

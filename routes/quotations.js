@@ -938,7 +938,10 @@ router.patch('/:id/status', async (req, res) => {
     if (q.quote_type === 'special_project' && ['draft', 'declined'].includes(status)) {
       await releaseSpecialProjectRentals(db, q.id, `Special Project ${q.quote_number} ${status === 'draft' ? 'sent back to draft' : 'declined'}`, req.employee && req.employee.id);
     }
-    await db.execute({ sql: `UPDATE quotations SET status = ?${stampSent}${stampAccepted} WHERE id = ?`, args: [status, req.params.id] });
+    // Back to Draft to be edited: the approval was for the old numbers, so it
+    // and its signature come off and the quote has to be approved again.
+    const clearApproval = q.quote_type === 'special_project' && status === 'draft' ? ', approved_by = NULL, approved_at = NULL, approval_signature = NULL' : '';
+    await db.execute({ sql: `UPDATE quotations SET status = ?${stampSent}${stampAccepted}${clearApproval} WHERE id = ?`, args: [status, req.params.id] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM quotations WHERE id = ?', args: [req.params.id] });
     // Customer has accepted the quote (their PO is in hand) — this is the
     // point custom "Q" items actually get submitted to Purchasing, grouped

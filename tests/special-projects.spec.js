@@ -200,6 +200,101 @@ test.describe('Special Project custom items', () => {
     expect(cart[0].name).toContain('PROPS713');
   });
 
+  test('an unapproved quotation can\'t be sold from POS Quote Recall', async ({ page }) => {
+    const q = await createProject(page, [{ description: 'Labour', quantity: 1, unit_price: 100 }]);
+    await page.evaluate(() => App.showSection('pos'));
+    await page.waitForFunction(() => App.allProducts);
+    const check = async expectedShown => {
+      const shown = await page.evaluate(async id => App._quoteRecallable(await App.api('GET', `/quotations/${id}`)), q.id);
+      expect(shown).toBe(expectedShown);
+      await page.evaluate(() => { App.cart = []; });
+      await page.evaluate(id => App.loadQuoteToCart(id), q.id);
+      expect(await page.evaluate(() => App.cart.length)).toBe(expectedShown ? 1 : 0);
+    };
+    const sell = () => page.evaluate(id => App.api('POST', '/transactions', { items: [{ product_name: 'Labour', quantity: 1, unit_price: 100, tax_rate: 0 }], quote_id: id, branch_id: 1, employee_id: 1, payment_method: 'cash', amount_tendered: 1000 }).then(() => 'sold', e => e.message), q.id);
+
+    await check(false);
+    expect(await sell()).toContain("hasn't been approved");
+    await api(page, 'PATCH', `/quotations/${q.id}/submit-for-approval`, {});
+    await check(false);
+    expect(await sell()).toContain("hasn't been approved");
+    await api(page, 'PATCH', `/quotations/${q.id}/reject`, { reason: 'Too low' });
+    await check(false);
+    expect(await sell()).toContain("hasn't been approved");
+    await api(page, 'PATCH', `/quotations/${q.id}/submit-for-approval`, {});
+    await api(page, 'PATCH', `/quotations/${q.id}/approve`, {});
+    await check(true);
+    expect((await api(page, 'GET', `/quotations/${q.id}`)).status).toBe('approved');
+  });
+
+  test('a rejected quotation can be edited and resubmitted', async ({ page }) => {
+    const q = await createProject(page, [{ description: 'Labour', quantity: 1, unit_price: 100 }]);
+    await api(page, 'PATCH', `/quotations/${q.id}/submit-for-approval`, {});
+    await api(page, 'PATCH', `/quotations/${q.id}/reject`, { reason: 'Too low' });
+    const saved = await api(page, 'PUT', `/quotations/${q.id}`, { branch_id: 1, items: [{ description: 'Labour', quantity: 1, unit_price: 150 }] });
+    expect(saved.subtotal).toBe(150);
+    await api(page, 'PATCH', `/quotations/${q.id}/submit-for-approval`, {});
+    expect((await api(page, 'PATCH', `/quotations/${q.id}/approve`, {})).status).toBe('approved');
+  });
+
+  for (const stage of ['pending_approval', 'approved', 'sent', 'accepted']) {
+    test(`Edit on a ${stage} quotation returns it to Draft and it must be approved again`, async ({ page }) => {
+      const q = await createProject(page, [{ description: 'Labour', quantity: 1, unit_price: 100 }]);
+      await api(page, 'PATCH', `/quotations/${q.id}/submit-for-approval`, {});
+      if (stage !== 'pending_approval') await api(page, 'PATCH', `/quotations/${q.id}/approve`, {});
+      if (stage === 'sent' || stage === 'accepted') await api(page, 'PATCH', `/quotations/${q.id}/status`, { status: stage });
+      expect((await api(page, 'PUT', `/quotations/${q.id}`, { branch_id: 1, items: [{ description: 'Labour', quantity: 1, unit_price: 1 }] }).catch(e => e.message))).toContain('can only be edited while in Draft');
+
+      await page.evaluate(() => App.showSection('special-projects'));
+      await page.evaluate(id => App.viewQuote(id), q.id);
+      let message = '';
+      page.once('dialog', d => { message = d.message(); d.accept(); });
+      await page.locator('.modal-footer button', { hasText: /^Edit$/ }).click();
+      await expect(page.locator('.modal-title').last()).toHaveText(`Edit Special Project Quotation: ${q.quote_number}`);
+      expect(message).toContain('Continue?');
+
+      const idx = (await page.locator('[id^="qt-item-"]').last().getAttribute('id')).replace('qt-item-', '');
+      await page.fill(`#qti-price-${idx}`, '250');
+      await page.evaluate(() => App.saveQuote());
+      await expect(page.locator('.modal')).toHaveCount(0);
+
+      const after = await api(page, 'GET', `/quotations/${q.id}`);
+      expect(after).toMatchObject({ status: 'draft', subtotal: 250, approved_at: null, approved_by: null, approval_signature: null });
+      const html = await preview(page, q.id);
+      expect(html).toContain('>DRAFT<');
+      expect(html).not.toContain('Approved By');
+      expect(await page.evaluate(id => App.api('POST', `/quotations/${id}/convert`, {}).then(() => 'converted', e => e.message), q.id)).toContain('must be approved');
+
+      await api(page, 'PATCH', `/quotations/${q.id}/submit-for-approval`, {});
+      expect((await api(page, 'PATCH', `/quotations/${q.id}/approve`, {})).status).toBe('approved');
+      expect(await preview(page, q.id)).toContain('Approved By');
+    });
+  }
+
+  test('editing an accepted quotation with a Q item doesn\'t order it twice', async ({ page }) => {
+    const q = await createProject(page, [{ description: 'Order this', quantity: 2, unit_price: 100, is_q_item: true }]);
+    await api(page, 'PATCH', `/quotations/${q.id}/submit-for-approval`, {});
+    await api(page, 'PATCH', `/quotations/${q.id}/approve`, {});
+    await api(page, 'PATCH', `/quotations/${q.id}/status`, { status: 'accepted' });
+    const pr = (await api(page, 'GET', `/quotations/${q.id}`)).items[0].purchase_request_id;
+    expect(pr).toBeTruthy();
+
+    await api(page, 'PATCH', `/quotations/${q.id}/status`, { status: 'draft' });
+    await page.evaluate(id => App.showQuoteForm(id), q.id);
+    const idx = (await page.locator('[id^="qt-item-"]').last().getAttribute('id')).replace('qt-item-', '');
+    await page.fill(`#qti-price-${idx}`, '120');
+    await page.evaluate(() => App.saveQuote());
+    await expect(page.locator('.modal')).toHaveCount(0);
+    await api(page, 'PATCH', `/quotations/${q.id}/submit-for-approval`, {});
+    await api(page, 'PATCH', `/quotations/${q.id}/approve`, {});
+    await api(page, 'PATCH', `/quotations/${q.id}/status`, { status: 'accepted' });
+
+    const again = await api(page, 'GET', `/quotations/${q.id}`);
+    expect(again.items[0].purchase_request_id).toBe(pr);
+    const request = await api(page, 'GET', `/purchase-requests/${pr}`);
+    expect(request.items.length).toBe(1);
+  });
+
   test('the margin report counts the rent period in the cost', async ({ page }) => {
     const q = await createProject(page, [line]);
     const today = new Date().toISOString().slice(0, 10);
