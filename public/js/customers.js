@@ -1177,7 +1177,7 @@ Object.assign(App, {
         <td class="fw-600">${tx.transaction_number}</td>
         <td>${this.fmtDateTime(tx.created_at)}</td>
         <td>${this.fmt(tx.total)}</td>
-        <td>${(tx.payment_method||'').replace('_',' ')}</td>
+        <td>${(tx.payment_method||'').replace(/_/g, ' ')}</td>
         <td><span class="badge-pill ${tx.status==='completed'?'badge-success':'badge-danger'}">${tx.status}</span></td>
       </tr>`).join('')}</tbody>
     </table>`;
@@ -1192,7 +1192,7 @@ Object.assign(App, {
         <td class="fw-600">${p.payment_number}</td>
         <td>${this.fmtDateTime(p.created_at)}</td>
         <td style="color:#2e7d32;font-weight:600">${this.fmt(p.amount)}</td>
-        <td>${(p.payment_method||'').replace('_',' ')}</td>
+        <td>${(p.payment_method||'').replace(/_/g, ' ')}</td>
         <td style="font-size:12px;color:var(--text-muted)">${p.notes||'—'}</td>
       </tr>`).join('')}</tbody>
     </table>`;
@@ -1221,14 +1221,14 @@ Object.assign(App, {
       <td>${tx.transaction_number}</td>
       <td>${this.fmtDateTime(tx.created_at)}</td>
       <td>${this.fmt(tx.total)}</td>
-      <td>${(tx.payment_method||'').replace('_',' ')}</td>
+      <td>${(tx.payment_method||'').replace(/_/g, ' ')}</td>
       <td>${tx.status}</td>
     </tr>`).join('');
     const pmtRows = pmts.map(p => `<tr>
       <td>${p.payment_number}</td>
       <td>${this.fmtDateTime(p.created_at)}</td>
       <td>${this.fmt(p.amount)}</td>
-      <td>${(p.payment_method||'').replace('_',' ')}</td>
+      <td>${(p.payment_method||'').replace(/_/g, ' ')}</td>
       <td>${p.notes||'—'}</td>
     </tr>`).join('');
     const win = window.open('', '_blank', 'width=750,height=800');

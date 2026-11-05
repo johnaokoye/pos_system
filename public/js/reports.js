@@ -1741,7 +1741,7 @@ Object.assign(App, {
           <div class="card-header"><span class="card-title">Payment Methods</span></div>
           <table>
             <thead><tr><th>Method</th><th>Transactions</th><th>Total</th></tr></thead>
-            <tbody>${sales.byMethod.map(m => `<tr><td><span class="badge-pill badge-info">${m.payment_method.replace('_',' ')}</span></td><td style="text-align:center">${m.count}</td><td class="fw-600">${this.fmt(m.total)}</td></tr>`).join('')}</tbody>
+            <tbody>${sales.byMethod.map(m => `<tr><td><span class="badge-pill badge-info">${m.payment_method.replace(/_/g, ' ')}</span></td><td style="text-align:center">${m.count}</td><td class="fw-600">${this.fmt(m.total)}</td></tr>`).join('')}</tbody>
           </table>
         </div>
       </div>
@@ -1823,7 +1823,7 @@ Object.assign(App, {
             <table>
               <thead><tr><th>Method</th><th style="text-align:center">Payments</th><th>Amount</th></tr></thead>
               <tbody>${arRpt.byMethod.map(m => `<tr>
-                <td><span class="badge-pill badge-info">${m.payment_method.replace('_',' ')}</span></td>
+                <td><span class="badge-pill badge-info">${m.payment_method.replace(/_/g, ' ')}</span></td>
                 <td style="text-align:center">${m.count}</td>
                 <td class="fw-600 color-success">${this.fmt(m.total)}</td>
               </tr>`).join('')}</tbody>

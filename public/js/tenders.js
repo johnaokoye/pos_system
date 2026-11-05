@@ -254,6 +254,48 @@ Object.assign(App, {
     });
   },
 
+  // ─── Tax Exempt Tender Modal ─────────────────────────────
+  // The customer pays the full total, GCT included, and reclaims the GCT
+  // themselves. Any customer, or none; the exemption reference is optional, so
+  // this resolves '' with no reference and null only on cancel.
+  showExemptTenderModal(total, tax) {
+    return new Promise(resolve => {
+      document.querySelectorAll('.modal-overlay').forEach(el => el.remove());
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.innerHTML = `
+        <div class="modal" style="max-width:380px">
+          <div class="modal-header"><span class="modal-title">Tax Exempt Payment</span><button id="etm-x" class="modal-close">✕</button></div>
+          <div class="modal-body">
+            <div style="text-align:center;background:var(--bg);border-radius:8px;padding:12px;margin-bottom:14px">
+              <div style="font-size:12px;color:var(--text-muted);margin-bottom:2px;text-transform:uppercase;letter-spacing:.5px">Total Due</div>
+              <div style="font-size:30px;font-weight:700">${this.fmt(total)}</div>
+              <div id="etm-gct" style="font-size:13px;color:var(--text-muted)">Includes GCT of ${this.fmt(tax)}</div>
+            </div>
+            ${tax > 0 ? '' : '<p id="etm-no-gct" class="color-danger" style="font-size:12px;margin:0 0 10px">This ticket has no GCT on it, so the customer will have none to reclaim.</p>'}
+            <div class="form-group">
+              <label>Exemption Ref # (optional)</label>
+              <input id="etm-ref" value="${this.escapeAttr(this.cartCustomer?.tax_exemption_number || '')}" placeholder="Exemption or reference number">
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-secondary" id="etm-cancel">Cancel</button>
+            <button class="btn btn-primary" id="etm-confirm">Confirm Payment</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      const cancel = () => { overlay.remove(); resolve(null); };
+      overlay.querySelector('#etm-x').addEventListener('click', cancel);
+      overlay.querySelector('#etm-cancel').addEventListener('click', cancel);
+      overlay.querySelector('#etm-confirm').addEventListener('click', () => {
+        const ref = overlay.querySelector('#etm-ref').value.trim();
+        overlay.remove();
+        resolve(ref);
+      });
+      setTimeout(() => overlay.querySelector('#etm-ref')?.focus(), 50);
+    });
+  },
+
   // ─── Split Tender Modal ───────────────────────────────────
   // Collects 2+ tender rows (method + amount, plus a ref/approval code for
   // methods that need one) that together must add up to the total. Charge
@@ -314,8 +356,13 @@ Object.assign(App, {
     return ['credit_card', 'debit_card', 'direct_deposit', 'gift_card'].includes(method);
   },
 
+  // Tax Exempt's reference box is shown but optional.
+  _stmRefShown(method) {
+    return method === 'tax_exempt_tender' || this._stmRefRequired(method);
+  },
+
   _stmMethodOptionsHtml(selected) {
-    const methods = [['cash', 'Cash'], ['credit_card', 'Credit Card'], ['debit_card', 'Debit Card'], ['check', 'Check'], ['gift_card', 'Gift Card'], ['direct_deposit', 'Direct Deposit']]
+    const methods = [['cash', 'Cash'], ['credit_card', 'Credit Card'], ['debit_card', 'Debit Card'], ['check', 'Check'], ['gift_card', 'Gift Card'], ['direct_deposit', 'Direct Deposit'], ['tax_exempt_tender', 'Tax Exempt']]
       .filter(([v]) => !(this._stmExclude || []).includes(v));
     return `<option value="">Method…</option>` + methods.map(([v, l]) => `<option value="${v}" ${v === selected ? 'selected' : ''}>${l}</option>`).join('');
   },
@@ -349,14 +396,14 @@ Object.assign(App, {
         <select class="stm-currency" style="width:100%" onchange="App._updateStmSummary()">${this._stmCurrencyOptionsHtml()}</select>
         <div class="stm-currency-hint" style="font-size:11px;color:var(--text-muted);margin-top:2px"></div>
       </div>` : ''}
-      <input type="text" class="stm-ref" placeholder="Ref / Approval #" style="width:100%;margin-top:6px;box-sizing:border-box;${this._stmRefRequired(method) ? '' : 'display:none'}">
+      <input type="text" class="stm-ref" placeholder="Ref / Approval #" style="width:100%;margin-top:6px;box-sizing:border-box;${this._stmRefShown(method) ? '' : 'display:none'}">
     </div>`;
   },
 
   _stmRowMethodChanged(selectEl) {
     const row = selectEl.closest('.stm-row');
     const refInput = row.querySelector('.stm-ref');
-    refInput.style.display = this._stmRefRequired(selectEl.value) ? '' : 'none';
+    refInput.style.display = this._stmRefShown(selectEl.value) ? '' : 'none';
     const curWrap = row.querySelector('.stm-currency-wrap');
     if (curWrap) curWrap.style.display = (selectEl.value === 'cash' && this._stmHasAltCurrencies()) ? '' : 'none';
     this._updateStmSummary();

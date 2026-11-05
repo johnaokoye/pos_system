@@ -304,7 +304,7 @@ router.post('/sessions/:id/reconcile', requireAuth, async (req, res) => {
     if (!scope) return res.status(403).json({ error: 'Missing permission: Close & Reconcile Own Drawer' });
     if (!canActOnSession(req, session)) return res.status(403).json({ error: 'You can only reconcile your own drawer — reconciling other drawers needs Reconcile All Drawers' });
     if (session.status === 'reconciled') return res.status(400).json({ error: 'This drawer session is already reconciled' });
-    const { cash_counted, card_counted, check_counted, gift_card_counted, credit_counted, direct_deposit_counted, notes, reconciled_by, note_counts } = req.body;
+    const { cash_counted, card_counted, check_counted, gift_card_counted, credit_counted, direct_deposit_counted, tax_exempt_tender_counted, notes, reconciled_by, note_counts } = req.body;
     // The float is handed back before the cash count (lib/drawerReport.js);
     // the rates valuing any foreign notes are kept with the count.
     const floatReturned = req.body.float_returned == null || req.body.float_returned === '' ? null : round2(req.body.float_returned);
@@ -312,7 +312,7 @@ router.post('/sessions/:id/reconcile', requireAuth, async (req, res) => {
     const { rates } = await currencySettings(db);
     const tx = await db.transaction('write');
     try {
-      await tx.execute({ sql: 'INSERT OR REPLACE INTO drawer_reconciliations (session_id, cash_counted, card_counted, check_counted, gift_card_counted, credit_counted, direct_deposit_counted, notes, reconciled_by, float_returned, fx_rates) VALUES (?,?,?,?,?,?,?,?,?,?,?)', args: [req.params.id, cash_counted || 0, card_counted || 0, check_counted || 0, gift_card_counted || 0, credit_counted || 0, direct_deposit_counted || 0, notes || null, reconciled_by || null, floatReturned, JSON.stringify(rates)] });
+      await tx.execute({ sql: 'INSERT OR REPLACE INTO drawer_reconciliations (session_id, cash_counted, card_counted, check_counted, gift_card_counted, credit_counted, direct_deposit_counted, tax_exempt_tender_counted, notes, reconciled_by, float_returned, fx_rates) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', args: [req.params.id, cash_counted || 0, card_counted || 0, check_counted || 0, gift_card_counted || 0, credit_counted || 0, direct_deposit_counted || 0, tax_exempt_tender_counted || 0, notes || null, reconciled_by || null, floatReturned, JSON.stringify(rates)] });
       const { rows: [rec] } = await tx.execute({ sql: 'SELECT id FROM drawer_reconciliations WHERE session_id = ?', args: [req.params.id] });
       if (rec && Array.isArray(note_counts) && note_counts.length > 0) {
         for (const { denomination_id, quantity } of note_counts) {

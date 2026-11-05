@@ -217,7 +217,7 @@ function buildReceiptHtml(tx, s) {
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-bottom:16px">
         ${tx.created_by_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Created By:</strong> ${tx.created_by_name}</td></tr>` : ''}
         ${tx.employee_name ? `<tr><td colspan="2" style="padding:2px 0"><strong>Cashier:</strong> ${tx.employee_name}</td></tr>` : ''}
-        <tr><td colspan="2" style="padding:2px 0"><strong>Payment:</strong> ${(tx.payment_method || '').replace('_',' ').toUpperCase()}</td></tr>
+        <tr><td colspan="2" style="padding:2px 0"><strong>Payment:</strong> ${(tx.payment_method || '').replace(/_/g, ' ').toUpperCase()}</td></tr>
       </table>
       <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px">
         <thead><tr style="background:#f9fafb"><th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Item</th><th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Amount</th></tr></thead>
@@ -286,7 +286,7 @@ function buildVoidReceiptHtml(tx, s) {
     <tr><td style="padding:0 24px 20px">
       ${docRow('Voided', fmtDateTime(tx.voided_at))}
       ${tx.customer_name ? docRow('Customer', tx.customer_name) : ''}
-      ${docRow('Original Payment Method', (tx.payment_method || '').replace('_',' ').toUpperCase())}
+      ${docRow('Original Payment Method', (tx.payment_method || '').replace(/_/g, ' ').toUpperCase())}
       ${tx.voided_by_name ? docRow('Authorized By', tx.voided_by_name) : ''}
       ${tx.void_reason ? docRow('Reason', tx.void_reason) : ''}
       <div style="height:12px"></div>
@@ -435,7 +435,7 @@ function buildCancellationReceiptHtml(agreement, s) {
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-top:12px">
         <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
         ${wasBilled ? `
-        <tr><td style="padding:3px 0">Original Charge (${(agreement.checkout_payment_method||'').replace('_',' ').toUpperCase()})</td><td style="text-align:right">${fmt(agreement.checkout_total)}</td></tr>
+        <tr><td style="padding:3px 0">Original Charge (${(agreement.checkout_payment_method||'').replace(/_/g, ' ').toUpperCase()})</td><td style="text-align:right">${fmt(agreement.checkout_total)}</td></tr>
         <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">AMOUNT VOIDED</td><td style="font-size:16px;font-weight:700;color:#dc2626;text-align:right">${fmt(agreement.checkout_total)}</td></tr>
         ` : `<tr><td style="font-size:13px;color:#666" colspan="2">This rental was on hold — no payment had been collected, so nothing was charged or refunded.</td></tr>`}
       </table>
@@ -567,7 +567,7 @@ function buildRentalInvoiceHtml(agreement, tx, s, origin) {
         <tr><td style="padding:3px 0">Tax</td><td style="text-align:right">${fmt(tx.tax_amount)}</td></tr>`}
         <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
         <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">${rentalBreakdown ? 'GRAND TOTAL' : 'TOTAL'}</td><td style="font-size:16px;font-weight:700;color:${BRAND.black};text-align:right">${fmt(tx.total)}</td></tr>
-        <tr><td style="padding:3px 0;color:#666">Payment</td><td style="text-align:right;color:#666">${(tx.payment_method || '').replace('_',' ').toUpperCase()}</td></tr>
+        <tr><td style="padding:3px 0;color:#666">Payment</td><td style="text-align:right;color:#666">${(tx.payment_method || '').replace(/_/g, ' ').toUpperCase()}</td></tr>
       </table>
       ${sigBlock(issueSignatures, returnSignatures)}
       ${signatureLinesHtml(blankSignatureLabels(!!agreement.issue_customer_signature))}
@@ -618,7 +618,7 @@ function rentalSummaryFigures(agreement) {
     ['Deposit Collected', fmt(agreement.deposit_total)],
     agreement.checkout_discount_amount > 0 ? ['Discount', `-${fmt(agreement.checkout_discount_amount)}`] : null,
     ['Total Charged at Checkout', fmt(agreement.checkout_total)],
-    ['Payment Method', (agreement.checkout_payment_method||'').replace('_',' ').toUpperCase()],
+    ['Payment Method', (agreement.checkout_payment_method||'').replace(/_/g, ' ').toUpperCase()],
   ].filter(Boolean) : [];
 
   const durationAdjLabel = agreement.duration_adjustment_total > 0 ? 'Additional Rental Time' : agreement.duration_adjustment_total < 0 ? 'Rental Fee Credit (returned early)' : 'Duration Adjustment';
@@ -635,7 +635,7 @@ function rentalSummaryFigures(agreement) {
   let dispositionLine = null;
   if (isReturned && agreement.balance_due > 0.004) {
     dispositionLine = agreement.settlement_transaction_id
-      ? `Collected ${fmt(agreement.balance_due)} via ${(agreement.settlement_payment_method||'').replace('_',' ').toUpperCase()} on ${fmtDateTime(agreement.settlement_created_at)}${agreement.settlement_amount_tendered > agreement.balance_due ? ` — Tendered ${fmt(agreement.settlement_amount_tendered)}, Change ${fmt(agreement.settlement_change_amount)}` : ''}.`
+      ? `Collected ${fmt(agreement.balance_due)} via ${(agreement.settlement_payment_method||'').replace(/_/g, ' ').toUpperCase()} on ${fmtDateTime(agreement.settlement_created_at)}${agreement.settlement_amount_tendered > agreement.balance_due ? ` — Tendered ${fmt(agreement.settlement_amount_tendered)}, Change ${fmt(agreement.settlement_change_amount)}` : ''}.`
       : 'Balance due has not yet been collected — see POS Hold Recall.';
   } else if (isReturned && agreement.balance_due < -0.004) {
     if (agreement.credit_note_amount > 0) {
@@ -2647,7 +2647,7 @@ function receiptPdfModel(tx, s) {
     title: receiptDocTitle(tx).toUpperCase(), number: tx.transaction_number,
     meta: [['Date', pdfDateTime(tx.created_at)], ['P.O. #', txPoNumber(tx) || '________________'], ['Quotation', tx.source_quote_number]],
     party: { label: 'Bill To', boldFirst: true, lines: [tx.customer_name || 'Cash Customer', ...billToLines(tx)] },
-    info: [['Created By', tx.created_by_name], ['Cashier', tx.employee_name], ['Payment', (tx.payment_method || '').replace('_', ' ').toUpperCase()]],
+    info: [['Created By', tx.created_by_name], ['Cashier', tx.employee_name], ['Payment', (tx.payment_method || '').replace(/_/g, ' ').toUpperCase()]],
     tables: [{ columns: ITEM_COLUMNS, rows: (tx.items || []).map(i => {
       if (i.is_comment) return commentRowPdf(i.product_name, ITEM_COLUMNS.length);
       if (i.serial_number) return commentRowPdf(`Serial: ${i.serial_number}`, ITEM_COLUMNS.length);
@@ -2699,12 +2699,12 @@ function rentalInvoicePdfModel(agreement, tx, s) {
       { label: 'Rental Deposit', value: fmt(breakdown.depositAmt) },
       parseFloat(tx.discount_amount) > 0 ? { label: 'Discount', value: `-${fmt(tx.discount_amount)}`, style: 'green' } : null,
       { label: 'GRAND TOTAL', value: fmt(tx.total), style: 'grand' },
-      { label: 'Payment', value: (tx.payment_method || '').replace('_', ' ').toUpperCase(), style: 'muted' },
+      { label: 'Payment', value: (tx.payment_method || '').replace(/_/g, ' ').toUpperCase(), style: 'muted' },
     ] : [
       { label: 'Subtotal', value: fmt(tx.subtotal) },
       { label: 'Tax', value: fmt(tx.tax_amount) },
       { label: 'TOTAL', value: fmt(tx.total), style: 'grand' },
-      { label: 'Payment', value: (tx.payment_method || '').replace('_', ' ').toUpperCase(), style: 'muted' },
+      { label: 'Payment', value: (tx.payment_method || '').replace(/_/g, ' ').toUpperCase(), style: 'muted' },
     ],
     signatures: [
       sig('Issued - Customer', agreement.customer_name, agreement.issue_customer_signature, agreement.issued_at),

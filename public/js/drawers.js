@@ -690,6 +690,7 @@ Object.assign(App, {
       gift_card_counted:      parseFloat(document.getElementById('rc-gift_card')?.value)      || 0,
       credit_counted:         parseFloat(document.getElementById('rc-credit')?.value)         || 0,
       direct_deposit_counted: parseFloat(document.getElementById('rc-direct_deposit')?.value) || 0,
+      tax_exempt_tender_counted: parseFloat(document.getElementById('rc-tax_exempt_tender')?.value) || 0,
       notes:             document.getElementById('rc-notes')?.value.trim() || null,
       reconciled_by:     this.currentUser?.id,
       note_counts,

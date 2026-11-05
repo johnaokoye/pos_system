@@ -591,7 +591,7 @@ Object.assign(App, {
         <div class="modal-body">
           <p style="font-size:13px;color:var(--text-muted)">This fee is non-refundable and covers the initial assessment of the item.</p>
           <div class="form-group"><label>Payment Method</label>
-            <select id="wo-fee-paymethod"><option value="cash">Cash</option><option value="credit_card">Card</option><option value="check">Check</option></select>
+            <select id="wo-fee-paymethod"><option value="cash">Cash</option><option value="credit_card">Card</option><option value="check">Check</option><option value="tax_exempt_tender">Tax Exempt</option></select>
           </div>
         </div>
         <div class="modal-footer">
@@ -674,7 +674,7 @@ Object.assign(App, {
         <div class="modal-header"><span class="modal-title">Process Deposit</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <div class="form-group"><label>Payment Method</label>
-            <select id="wo-dep-paymethod"><option value="cash">Cash</option><option value="credit_card">Card</option><option value="check">Check</option></select>
+            <select id="wo-dep-paymethod"><option value="cash">Cash</option><option value="credit_card">Card</option><option value="check">Check</option><option value="tax_exempt_tender">Tax Exempt</option></select>
           </div>
         </div>
         <div class="modal-footer">
@@ -1353,7 +1353,7 @@ Object.assign(App, {
             </div>
             ${this._woAccChecklistHtml(wo)}
             ${balance > 0 ? `<div class="form-group"><label>Payment Method</label>
-              <select id="wo-final-paymethod"><option value="cash">Cash</option><option value="credit_card">Card</option><option value="check">Check</option></select>
+              <select id="wo-final-paymethod"><option value="cash">Cash</option><option value="credit_card">Card</option><option value="check">Check</option><option value="tax_exempt_tender">Tax Exempt</option></select>
             </div>` : `<p style="font-size:13px;color:var(--text-muted)">No balance due — the deposit already covers the final cost.</p>`}
           </div>
           <div class="modal-footer">

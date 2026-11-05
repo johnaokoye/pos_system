@@ -21,7 +21,7 @@ const { ensureReady, db } = require('../../database');
   // A saved signature lets tests approve without writing a file into uploads/.
   await db.execute("UPDATE employees SET must_change_password = 0, approval_signature = '/uploads/approval-signatures/test.png' WHERE username = 'admin'");
   // A new database's seed leaves these keys off the Administrator group.
-  await db.execute("UPDATE security_groups SET permissions = json_set(permissions, '$.sales_manager', json('true'), '$.pos_receive_payment', json('true')) WHERE name = 'Administrator'");
+  await db.execute("UPDATE security_groups SET permissions = json_set(permissions, '$.sales_manager', json('true'), '$.pos_receive_payment', json('true'), '$.drawers_close', json('true')) WHERE name = 'Administrator'");
   // The seed fills branch_inventory before it adds the demo products, so a new
   // database has none at any branch, and POS shows everything out of stock.
   await db.execute(`INSERT OR IGNORE INTO branch_inventory (product_id, branch_id, stock_qty, min_stock)

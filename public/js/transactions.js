@@ -134,7 +134,7 @@ Object.assign(App, {
           <td>${tx.customer_name||'<em style="color:#999">Walk-in</em>'}</td>
           <td style="font-size:12px;color:var(--text-muted)">${tx.branch_name||'—'}</td>
           <td class="fw-600">${this.fmt(tx.total)}</td>
-          <td><span class="badge-pill badge-info">${tx.payment_method.replace('_',' ')}</span></td>
+          <td><span class="badge-pill badge-info">${tx.payment_method.replace(/_/g, ' ')}</span></td>
           <td><span style="display:inline-block;background:${c}22;color:${c};border:1px solid ${c}55;border-radius:12px;padding:2px 10px;font-size:11px;font-weight:600;text-transform:capitalize">${st}</span></td>
           <td style="white-space:nowrap">
             <button class="btn btn-secondary btn-sm" onclick="App.viewOnlineOrder(${tx.id})">View</button>
@@ -197,7 +197,7 @@ Object.assign(App, {
             ${tx.customer_phone?`<div><span style="color:var(--text-muted)">Phone:</span> ${tx.customer_phone}</div>`:''}
             ${tx.customer_address?`<div style="grid-column:1/-1"><span style="color:var(--text-muted)">Ship to:</span> ${tx.customer_address}${tx.customer_city?', '+tx.customer_city:''}${tx.customer_state?' '+tx.customer_state:''}${tx.customer_zip?' '+tx.customer_zip:''}</div>`:''}
             <div><span style="color:var(--text-muted)">Branch:</span> ${tx.branch_name||'—'}</div>
-            <div><span style="color:var(--text-muted)">Payment:</span> ${tx.payment_method.replace('_',' ')}</div>
+            <div><span style="color:var(--text-muted)">Payment:</span> ${tx.payment_method.replace(/_/g, ' ')}</div>
           </div>
           <table style="margin-bottom:12px">
             <thead><tr><th>Item</th><th>SKU</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
@@ -421,7 +421,7 @@ Object.assign(App, {
         <td>${this.fmt(tx.subtotal)}</td>
         <td style="color:var(--text-muted)">${this.fmt(tx.tax_amount)}</td>
         <td class="fw-600">${this.fmt(tx.total)}</td>
-        <td><span class="badge-pill badge-info">${tx.payment_method.replace('_',' ')}</span></td>
+        <td><span class="badge-pill badge-info">${tx.payment_method.replace(/_/g, ' ')}</span></td>
         <td style="font-size:12px">${this.escapeAttr(tx.credited_name || '—')}</td>
         <td><span class="badge-pill ${tx.status==='completed'?'badge-success':'badge-danger'}">${tx.status}</span>${tx.return_count > 0 ? ` <span class="badge-pill badge-warning" title="Has ${tx.return_count} return${tx.return_count > 1 ? 's' : ''} — open the sale to see ${tx.return_count > 1 ? 'them' : 'it'}">↩ Returned</span>` : ''}</td>
         <td style="white-space:nowrap">
@@ -567,11 +567,11 @@ Object.assign(App, {
             <div><span style="color:var(--text-muted)">Employee:</span> ${tx.employee_name || '—'}</div>
             <div><span style="color:var(--text-muted)">Salesperson:</span> ${this.escapeAttr(tx.credited_name || '—')}</div>
             <div><span style="color:var(--text-muted)">Branch:</span> ${tx.branch_name || '—'}</div>
-            <div><span style="color:var(--text-muted)">Payment:</span> ${tx.payment_method === 'split' ? 'SPLIT' : tx.payment_method.replace('_',' ')}</div>
+            <div><span style="color:var(--text-muted)">Payment:</span> ${tx.payment_method === 'split' ? 'SPLIT' : tx.payment_method.replace(/_/g, ' ')}</div>
             <div><span style="color:var(--text-muted)">Tendered:</span> ${this.fmt(tx.amount_tendered)}</div>
           </div>
           ${tx.payment_method === 'split' ? `<div style="margin-bottom:14px;font-size:13px;border:1px solid var(--border);border-radius:6px;padding:8px 12px">
-            ${(tx.payments||[]).map(p => `<div style="display:flex;justify-content:space-between;padding:2px 0"><span>${p.payment_method.replace('_',' ')}${p.approval_code ? ` <span style="color:var(--text-muted);font-size:11px">(${p.approval_code})</span>` : ''}</span><span>${this.fmt(p.amount)}</span></div>`).join('')}
+            ${(tx.payments||[]).map(p => `<div style="display:flex;justify-content:space-between;padding:2px 0"><span>${p.payment_method.replace(/_/g, ' ')}${p.approval_code ? ` <span style="color:var(--text-muted);font-size:11px">(${p.approval_code})</span>` : ''}</span><span>${this.fmt(p.amount)}</span></div>`).join('')}
           </div>` : ''}
           ${(tx.salesperson_changes || []).length ? `<div style="margin-bottom:14px;font-size:12px;border:1px solid var(--border);border-radius:6px;padding:8px 12px">
             <div style="font-weight:600;margin-bottom:4px">Salesperson changes</div>

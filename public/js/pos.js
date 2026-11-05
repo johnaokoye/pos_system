@@ -361,23 +361,18 @@ Object.assign(App, {
     if (f) f.innerHTML = `<button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>${html}`;
   },
 
-  // The most an invoice can take: its balance, or under Tax Exempt (main form only) the GCT still to clear.
-  _rpCap(inv, prefix) { return prefix === 'rp' && this._rp.method === 'tax_exempt' ? Number(inv.gct_room) || 0 : Number(inv.balance_due) || 0; },
-
   _rpInvoiceRows(prefix) {
     const { invoices } = this._rp.summary;
     if (!invoices.length) return '<p style="font-size:12px;color:var(--text-muted);margin:6px 0">No open invoices on this account.</p>';
-    const gctCol = prefix === 'rp' && this._rp.method === 'tax_exempt';
     return `<div class="table-wrap" style="max-height:240px;overflow-y:auto"><table>
-      <thead><tr><th style="width:32px"></th><th>Invoice</th><th>Date</th><th>Total</th><th>Balance Due</th>${gctCol ? '<th title="GCT on the invoice not yet cleared">GCT to Clear</th>' : ''}<th style="width:120px">Apply</th></tr></thead>
-      <tbody>${invoices.map((inv, i) => `<tr${gctCol && !(this._rpCap(inv, prefix) > 0.005) ? ' style="opacity:.5"' : ''}>
-        <td><input type="checkbox" class="${prefix}-pick" data-i="${i}" onchange="App._rpPick(this,'${prefix}')" style="width:auto;margin:0" ${gctCol && !(this._rpCap(inv, prefix) > 0.005) ? 'disabled title="No GCT left to clear on this invoice"' : ''}></td>
+      <thead><tr><th style="width:32px"></th><th>Invoice</th><th>Date</th><th>Total</th><th>Balance Due</th><th style="width:120px">Apply</th></tr></thead>
+      <tbody>${invoices.map((inv, i) => `<tr>
+        <td><input type="checkbox" class="${prefix}-pick" data-i="${i}" onchange="App._rpPick(this,'${prefix}')" style="width:auto;margin:0"></td>
         <td class="fw-600" style="font-size:12px">${this.escapeAttr(inv.transaction_number)}${inv.kind === 'legacy' ? ' <span class="badge-pill badge-secondary" style="font-size:10px">Legacy</span>' : ''}</td>
         <td style="font-size:12px;color:var(--text-muted)">${inv.kind === 'legacy' ? this._apDate(inv.created_at) : this.fmtDate(inv.created_at)}</td>
         <td style="font-size:12px">${this.fmt(inv.total)}</td>
         <td style="font-size:12px" class="color-danger fw-600">${this.fmt(inv.balance_due)}</td>
-        ${gctCol ? `<td style="font-size:12px" title="GCT on the invoice: ${this.fmt(inv.gct)}">${this.fmt(inv.gct_room)}</td>` : ''}
-        <td><input type="number" class="${prefix}-amt" data-i="${i}" step="0.01" min="0" max="${this._rpCap(inv, prefix).toFixed(2)}" disabled placeholder="0.00" oninput="App._rpRecalc('${prefix}')" style="width:110px;padding:4px 6px;font-size:12px"></td>
+        <td><input type="number" class="${prefix}-amt" data-i="${i}" step="0.01" min="0" max="${(Number(inv.balance_due) || 0).toFixed(2)}" disabled placeholder="0.00" oninput="App._rpRecalc('${prefix}')" style="width:110px;padding:4px 6px;font-size:12px"></td>
       </tr>`).join('')}</tbody>
     </table></div>`;
   },
@@ -386,7 +381,7 @@ Object.assign(App, {
     const inv = this._rp.summary.invoices[cb.dataset.i];
     const amt = document.querySelector(`.${prefix}-amt[data-i="${cb.dataset.i}"]`);
     amt.disabled = !cb.checked;
-    amt.value = cb.checked ? this._rpCap(inv, prefix).toFixed(2) : '';
+    amt.value = cb.checked ? (Number(inv.balance_due) || 0).toFixed(2) : '';
     this._rpRecalc(prefix);
   },
 
@@ -400,15 +395,11 @@ Object.assign(App, {
 
   // Invoice mode: the amount received follows the invoices ticked, but can be
   // raised above them — the rest is left on account as unapplied credit.
-  // (Tax Exempt always equals the GCT cleared.)
   _rpRecalc(prefix) {
     const total = Math.round(this._rpAllocations(prefix).reduce((t, a) => t + a.amount, 0) * 100) / 100;
     if (prefix === 'rp' && this._rp.mode === 'invoices') {
       const amt = document.getElementById('rp-amount');
-      if (amt) {
-        const exempt = this._rp.method === 'tax_exempt';
-        if (exempt || !this._rp.amountEdited || (parseFloat(amt.value) || 0) < total) { amt.value = total ? total.toFixed(2) : ''; if (!exempt) this._rp.amountEdited = false; }
-      }
+      if (amt && (!this._rp.amountEdited || (parseFloat(amt.value) || 0) < total)) { amt.value = total ? total.toFixed(2) : ''; this._rp.amountEdited = false; }
     }
     const el = document.getElementById(`${prefix}-applied-total`);
     if (el) el.textContent = this.fmt(total);
@@ -422,7 +413,7 @@ Object.assign(App, {
     const amount = Math.round((parseFloat(document.getElementById('rp-amount')?.value) || 0) * 100) / 100;
     if (applied == null) applied = Math.round(this._rpAllocations('rp').reduce((t, a) => t + a.amount, 0) * 100) / 100;
     const extra = Math.round((amount - applied) * 100) / 100;
-    note.innerHTML = this._rp.mode === 'invoices' && this._rp.method !== 'tax_exempt' && extra > 0.005
+    note.innerHTML = this._rp.mode === 'invoices' && extra > 0.005
       ? `<span class="color-success">${this.fmt(applied)} applied to invoices · <strong>${this.fmt(extra)} left on account</strong> as unapplied credit</span>`
       : this._rp.mode === 'invoices' && extra < -0.005 ? `<span class="color-danger">Less than the ${this.fmt(applied)} applied to the invoices ticked</span>` : '';
   },
@@ -440,10 +431,7 @@ Object.assign(App, {
       this._rpFooter('');
       return;
     }
-    const methods = [['cash', 'Cash'], ['credit_card', 'Credit Card'], ['debit_card', 'Debit Card'], ['check', 'Cheque'], ['direct_deposit', 'Direct Deposit']];
-    // TAX-EXEMPT clears the GCT on chosen invoices, for any customer — no money, no drawer.
-    methods.push(['tax_exempt', 'Tax Exempt (clear GCT)']);
-    const taxExempt = this._rp.method === 'tax_exempt';
+    const methods = [['cash', 'Cash'], ['credit_card', 'Credit Card'], ['debit_card', 'Debit Card'], ['check', 'Cheque'], ['direct_deposit', 'Direct Deposit'], ['tax_exempt_tender', 'Tax Exempt']];
     document.getElementById('rp-body').innerHTML = `
       <div style="display:flex;gap:20px;flex-wrap:wrap;font-size:13px;padding:10px 12px;border:1px solid var(--border);border-radius:6px;margin-bottom:12px">
         <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Open Invoices (${summary.invoices.length})</div><div class="fw-600 color-danger" style="font-size:18px">${this.fmt(summary.invoices.reduce((t, i) => t + Number(i.balance_due || 0), 0))}</div></div>
@@ -455,16 +443,14 @@ Object.assign(App, {
         <label style="display:flex;gap:6px;align-items:center;margin:0;cursor:pointer;font-weight:${mode === 'open' ? 600 : 400}"><input type="radio" name="rp-mode" value="open" ${mode === 'open' ? 'checked' : ''} onchange="App._rpSetMode('open')" style="width:auto;margin:0"> Open payment (on account)</label>
         <label style="display:flex;gap:6px;align-items:center;margin:0;cursor:pointer;font-weight:${mode === 'invoices' ? 600 : 400}"><input type="radio" name="rp-mode" value="invoices" ${mode === 'invoices' ? 'checked' : ''} onchange="App._rpSetMode('invoices')" style="width:auto;margin:0" ${summary.invoices.length ? '' : 'disabled'}> Pay specific invoices</label>
       </div>
-      <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px">${taxExempt
-        ? '<strong>Tax Exempt:</strong> clears the GCT on the invoices you tick — no money is taken and nothing goes in the drawer. Each invoice defaults to the GCT still on it.'
-        : mode === 'open'
+      <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px">${mode === 'open'
         ? 'The payment comes off the balance now without being applied to any invoice. It can be applied to invoices later from this screen.'
         : 'Tick the invoices being paid. Each one defaults to its full balance due — change the amount for a part payment. The amount received is their sum; raise it if the customer paid more, and the rest stays on account as unapplied credit. Existing credit on the account is not used.'}</p>
       ${mode === 'invoices' ? `${this._rpInvoiceRows('rp')}<div style="text-align:right;font-size:12px;margin-top:6px">Applied: <strong id="rp-applied-total">${this.fmt(0)}</strong></div>` : ''}
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:12px">
-        <div class="form-group" style="margin:0"><label>${taxExempt ? 'GCT Cleared' : 'Amount Received *'}</label><input type="number" id="rp-amount" step="0.01" min="0" ${taxExempt ? 'readonly' : ''} oninput="App._rp.amountEdited = true; App._rpExtraNote()" placeholder="0.00">
+        <div class="form-group" style="margin:0"><label>Amount Received *</label><input type="number" id="rp-amount" step="0.01" min="0" oninput="App._rp.amountEdited = true; App._rpExtraNote()" placeholder="0.00">
           <div id="rp-extra-note" style="font-size:11px;margin-top:3px"></div></div>
-        <div class="form-group" style="margin:0"><label>Paid By *</label><select id="rp-method" onchange="App._rpMethodChanged(true)">${methods.map(([v, l]) => `<option value="${v}" ${this._rp.method === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+        <div class="form-group" style="margin:0"><label>Paid By *</label><select id="rp-method" onchange="App._rpMethodChanged()">${methods.map(([v, l]) => `<option value="${v}" ${this._rp.method === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
         <div class="form-group" style="margin:0" id="rp-ref-wrap"><label id="rp-ref-label">Reference</label><input id="rp-ref" placeholder="Optional for cash"></div>
       </div>
       <div class="form-group" style="margin:10px 0 0"><label>Notes</label><input id="rp-notes" placeholder="Optional"></div>
@@ -482,23 +468,16 @@ Object.assign(App, {
   },
 
   _rpSetMode(mode) {
-    if (mode === 'open' && this._rp.method === 'tax_exempt') { this.alert('Tax Exempt clears the GCT on particular invoices — pick the invoices', 'warning'); return this._rpRender(); }
     this._rp.mode = mode; this._rpRender();
   },
 
   // Card, cheque and deposit payments need their approval / cheque / deposit number.
-  _rpMethodChanged(fromSelect) {
+  _rpMethodChanged() {
     const m = document.getElementById('rp-method')?.value;
-    // Switching to or from Tax Exempt redraws the form (invoice mode, GCT column).
-    if (fromSelect && this._rp && (m === 'tax_exempt') !== (this._rp.method === 'tax_exempt')) {
-      this._rp.method = m;
-      if (m === 'tax_exempt') this._rp.mode = 'invoices';
-      return this._rpRender();
-    }
     if (this._rp && m) this._rp.method = m;
     const label = document.getElementById('rp-ref-label'), ref = document.getElementById('rp-ref');
     if (!label || !ref) return;
-    const labels = { tax_exempt: ['Exemption Ref #', this._rp?.summary?.customer?.tax_exemption_number || 'Optional'], cash: ['Reference', 'Optional for cash'], credit_card: ['Approval Code *', 'Card approval code'], debit_card: ['Approval Code *', 'Card approval code'], check: ['Cheque # *', 'Cheque number'], direct_deposit: ['Deposit Ref # *', 'Bank deposit reference'] };
+    const labels = { tax_exempt_tender: ['Exemption Ref #', this._rp?.summary?.customer?.tax_exemption_number || 'Optional'], cash: ['Reference', 'Optional for cash'], credit_card: ['Approval Code *', 'Card approval code'], debit_card: ['Approval Code *', 'Card approval code'], check: ['Cheque # *', 'Cheque number'], direct_deposit: ['Deposit Ref # *', 'Bank deposit reference'] };
     [label.textContent, ref.placeholder] = labels[m] || labels.cash;
   },
 
@@ -513,9 +492,9 @@ Object.assign(App, {
       if (!(applied > 0)) { this.alert('Tick at least one invoice to pay', 'error'); return; }
       if (applied - amount > 0.005) { this.alert(`The amount received is less than the ${this.fmt(applied)} applied to the invoices`, 'error'); return; }
       const extra = Math.round((amount - applied) * 100) / 100;
-      if (extra > 0.005 && payment_method !== 'tax_exempt' && !confirm(`${this.fmt(applied)} goes to the invoices ticked and ${this.fmt(extra)} stays on the account as unapplied credit. Continue?`)) return;
+      if (extra > 0.005 && !confirm(`${this.fmt(applied)} goes to the invoices ticked and ${this.fmt(extra)} stays on the account as unapplied credit. Continue?`)) return;
     }
-    if (payment_method !== 'cash' && payment_method !== 'tax_exempt' && !reference) { this.alert('Enter the approval code, cheque number or deposit reference', 'error'); return; }
+    if (payment_method !== 'cash' && payment_method !== 'tax_exempt_tender' && !reference) { this.alert('Enter the approval code, cheque number or deposit reference', 'error'); return; }
     const btn = document.getElementById('rp-submit');
     if (btn) btn.disabled = true;
     try {
@@ -527,10 +506,6 @@ Object.assign(App, {
       });
       this.closeModal();
       if (this.cartCustomer?.id === p.customer_id) this.setCartCustomer(p.customer_id);
-      if (payment_method === 'tax_exempt') {
-        this.alert(`${p.payment_number}: GCT of ${this.fmt(p.amount)} cleared (tax exempt) for ${p.customer_name}. Balance now ${this.fmt(p.balance_after)}.`);
-        return;
-      }
       this.alert(`Payment ${p.payment_number} received: ${this.fmt(p.amount)} from ${p.customer_name}${p.unapplied > 0.005 ? ' (on account)' : ''}. Balance now ${this.fmt(p.balance_after)}.`);
       this.showPaymentReceipt(p.id);
     } catch (e) { if (btn) btn.disabled = false; this.alert(e.message, 'error'); }
@@ -638,6 +613,7 @@ Object.assign(App, {
             <button class="pay-btn" style="background:#9C27B0;color:#fff;" onclick="App.closeModal();App.processPayment('credit')"><span>🧾</span> Credit<span>Charge Account</span></button>
             <button class="pay-btn" style="background:#EC407A;color:#fff;" onclick="App.closeModal();App.processPayment('gift_card')"><span>🎁</span> Gift Card<span>Stored Value</span></button>
             <button class="pay-btn" style="background:#0277BD;color:#fff;" onclick="App.closeModal();App.processPayment('direct_deposit')"><span>🏛️</span> Direct Deposit<span>Bank Transfer</span></button>
+            <button class="pay-btn" id="pay-tax-exempt" style="background:#00796B;color:#fff;" onclick="App.closeModal();App.processPayment('tax_exempt_tender')"><span>🧾</span> Tax Exempt<span>Pays Total With GCT</span></button>
             <button class="pay-btn pay-split" onclick="App.closeModal();App.processPayment('split')"><span>➗</span> Split Tender<span>Multiple Methods</span></button>
           </div>
         </div>
@@ -2015,6 +1991,9 @@ Object.assign(App, {
     } else if (method === 'gift_card') {
       approvalCode = await this.showGiftCardModal();
       if (approvalCode === null) return;
+    } else if (method === 'tax_exempt_tender') {
+      approvalCode = await this.showExemptTenderModal(total, tax);
+      if (approvalCode === null) return;
     } else if (method === 'split') {
       const splitResult = await this.showSplitTenderModal(total);
       if (!splitResult) return;
@@ -2547,10 +2526,10 @@ Object.assign(App, {
   _splitPaymentReceiptRows(tx, foreignCash) {
     const payments = tx.payments || [];
     return payments.map((p, i) => {
-      const refLabel = p.payment_method === 'direct_deposit' ? 'Ref #' : p.payment_method === 'gift_card' ? 'Gift Card #' : (p.payment_method === 'credit_card' || p.payment_method === 'debit_card') ? 'Approval' : null;
+      const refLabel = p.payment_method === 'direct_deposit' ? 'Ref #' : p.payment_method === 'tax_exempt_tender' ? 'Exemption Ref #' : p.payment_method === 'gift_card' ? 'Gift Card #' : (p.payment_method === 'credit_card' || p.payment_method === 'debit_card') ? 'Approval' : null;
       const foreign = foreignCash && foreignCash[i];
       const foreignLine = foreign ? `<div class="receipt-row" style="font-size:10px;color:#666"><span>Tendered (${foreign.currency})</span><span>${foreign.currency} ${this._n2(foreign.tenderedAlt)}</span></div>` : '';
-      return `<div class="receipt-row"><span>${p.payment_method.replace('_',' ').toUpperCase()}</span><span>${this.fmt(p.amount)}</span></div>${foreignLine}${p.approval_code && refLabel ? `<div class="receipt-row" style="font-size:10px;color:#666"><span>${refLabel}</span><span>${p.approval_code}</span></div>` : ''}`;
+      return `<div class="receipt-row"><span>${p.payment_method.replace(/_/g, ' ').toUpperCase()}</span><span>${this.fmt(p.amount)}</span></div>${foreignLine}${p.approval_code && refLabel ? `<div class="receipt-row" style="font-size:10px;color:#666"><span>${refLabel}</span><span>${p.approval_code}</span></div>` : ''}`;
     }).join('');
   },
 
@@ -2651,9 +2630,9 @@ Object.assign(App, {
             ${tx.discount_amount > 0 && !tx.discount_pre_tax ? `<div class="receipt-row"><span>Discount${tx.promotion_code ? ` (${tx.promotion_code})` : ''}</span><span>-${this.fmt(tx.discount_amount)}</span></div>${tx.promotion_name ? `<div style="color:#666;font-size:11px;padding-left:4px">${tx.promotion_name}</div>` : ''}` : ''}
             <hr>
             <div class="receipt-row receipt-total"><span>TOTAL</span><span>${this.fmt(tx.total)}</span></div>
-            ${tx.payment_method === 'split' ? this._splitPaymentReceiptRows(tx, splitForeignCash) : `<div class="receipt-row"><span>Payment</span><span>${tx.payment_method.replace('_',' ').toUpperCase()}</span></div>
+            ${tx.payment_method === 'split' ? this._splitPaymentReceiptRows(tx, splitForeignCash) : `<div class="receipt-row"><span>Payment</span><span>${tx.payment_method.replace(/_/g, ' ').toUpperCase()}</span></div>
             ${tx.amount_tendered > tx.total ? (cashResult?.rate && cashResult.rate !== 1 ? `<div class="receipt-row"><span>Tendered (${cashResult.currency})</span><span>${cashResult.currency} ${this._n2(cashResult.tenderedAlt)}</span></div><div class="receipt-row" style="font-size:10px;color:#666"><span>Equivalent</span><span>${this.fmt(tx.amount_tendered)}</span></div><div class="receipt-row"><span>Change</span><span>${this._changeDisplay(cashResult, change)}</span></div>` : `<div class="receipt-row"><span>Tendered</span><span>${this.fmt(tx.amount_tendered)}</span></div><div class="receipt-row"><span>Change</span><span>${this._changeDisplay(cashResult, change)}</span></div>`) : ''}
-            ${tx.approval_code ? `<div class="receipt-row"><span>${tx.payment_method === 'direct_deposit' ? 'Deposit Ref #' : tx.payment_method === 'gift_card' ? 'Gift Card #' : 'Approval Code'}</span><span style="font-family:monospace;font-weight:600">${tx.approval_code}</span></div>` : ''}`}
+            ${tx.approval_code ? `<div class="receipt-row"><span>${tx.payment_method === 'direct_deposit' ? 'Deposit Ref #' : tx.payment_method === 'tax_exempt_tender' ? 'Exemption Ref #' : tx.payment_method === 'gift_card' ? 'Gift Card #' : 'Approval Code'}</span><span style="font-family:monospace;font-weight:600">${tx.approval_code}</span></div>` : ''}`}
             <hr>
             <div style="text-align:center;margin-top:4px">${footer}</div>
           </div>
@@ -2798,8 +2777,8 @@ Object.assign(App, {
     const tenderRows = [];
     if (tx.payment_method === 'split') {
       (tx.payments || []).forEach((p, i) => {
-        const refLabel = p.payment_method === 'direct_deposit' ? 'Ref #' : p.payment_method === 'gift_card' ? 'Gift Card #' : (p.payment_method === 'credit_card' || p.payment_method === 'debit_card') ? 'Approval' : null;
-        tenderRows.push([p.payment_method.replace('_',' ').toUpperCase(), this.fmt(p.amount)]);
+        const refLabel = p.payment_method === 'direct_deposit' ? 'Ref #' : p.payment_method === 'tax_exempt_tender' ? 'Exemption Ref #' : p.payment_method === 'gift_card' ? 'Gift Card #' : (p.payment_method === 'credit_card' || p.payment_method === 'debit_card') ? 'Approval' : null;
+        tenderRows.push([p.payment_method.replace(/_/g, ' ').toUpperCase(), this.fmt(p.amount)]);
         const foreign = splitForeignCash && splitForeignCash[i];
         if (foreign) tenderRows.push([`Tendered (${foreign.currency})`, `${foreign.currency} ${this._n2(foreign.tenderedAlt)}`]);
         if (p.approval_code && refLabel) tenderRows.push([refLabel, p.approval_code]);
@@ -2813,7 +2792,7 @@ Object.assign(App, {
         }
       }
       if (tx.approval_code) {
-        const label = tx.payment_method === 'direct_deposit' ? 'Deposit Ref #' : tx.payment_method === 'gift_card' ? 'Gift Card #' : 'Approval Code';
+        const label = tx.payment_method === 'direct_deposit' ? 'Deposit Ref #' : tx.payment_method === 'tax_exempt_tender' ? 'Exemption Ref #' : tx.payment_method === 'gift_card' ? 'Gift Card #' : 'Approval Code';
         tenderRows.push([label, tx.approval_code]);
       }
     }
@@ -2864,7 +2843,7 @@ Object.assign(App, {
     <table class="totals">
       ${summaryRows.map(([l,v]) => `<tr><td>${l}</td><td style="text-align:right">${v}</td></tr>`).join('')}
       <tr class="total-row"><td>${rentalBreakdown ? 'Grand Total' : 'TOTAL'}</td><td style="text-align:right">${this.fmt(tx.total)}</td></tr>
-      <tr><td>Payment</td><td style="text-align:right">${tx.payment_method.replace('_',' ').toUpperCase()}</td></tr>
+      <tr><td>Payment</td><td style="text-align:right">${tx.payment_method.replace(/_/g, ' ').toUpperCase()}</td></tr>
       ${tenderRows.map(([l,v]) => `<tr><td>${l}</td><td style="text-align:right">${v}</td></tr>`).join('')}
     </table>
     ${tx.rental_pauses?.length ? `

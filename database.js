@@ -2073,6 +2073,7 @@ async function _init() {
     // Exchange rates ({"USD":0.0064} — units per 1 base) used to value the
     // foreign notes counted, so the report keeps the rate of that day.
     'ALTER TABLE drawer_reconciliations ADD COLUMN fx_rates TEXT',
+    'ALTER TABLE drawer_reconciliations ADD COLUMN tax_exempt_tender_counted REAL DEFAULT 0',
     'ALTER TABLE products ADD COLUMN online_available INTEGER DEFAULT 0',
     'ALTER TABLE products ADD COLUMN web_allotment INTEGER',
     "ALTER TABLE transactions ADD COLUMN source TEXT DEFAULT 'pos'",

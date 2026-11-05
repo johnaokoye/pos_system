@@ -1453,7 +1453,7 @@ Object.assign(App, {
       ['Deposit Collected', this.fmt(a.deposit_total)],
       a.checkout_discount_amount > 0 ? ['Discount', `-${this.fmt(a.checkout_discount_amount)}`] : null,
       ['Total Charged at Checkout', this.fmt(a.checkout_total)],
-      ['Payment Method', (a.checkout_payment_method||'').replace('_',' ').toUpperCase()],
+      ['Payment Method', (a.checkout_payment_method||'').replace(/_/g, ' ').toUpperCase()],
     ].filter(Boolean) : [];
 
     const durationAdjLabel = a.duration_adjustment_total > 0 ? 'Additional Rental Time' : a.duration_adjustment_total < 0 ? 'Rental Fee Credit (returned early)' : 'Duration Adjustment';
@@ -1470,7 +1470,7 @@ Object.assign(App, {
     let dispositionLine = null;
     if (isReturned && a.balance_due > 0.004) {
       if (a.settlement_transaction_id) {
-        dispositionLine = `Collected ${this.fmt(a.balance_due)} via ${(a.settlement_payment_method||'').replace('_',' ').toUpperCase()} on ${this.fmtDateTime(a.settlement_created_at)}${a.settlement_amount_tendered > a.balance_due ? ` — Tendered ${this.fmt(a.settlement_amount_tendered)}, Change ${this.fmt(a.settlement_change_amount)}` : ''}.`;
+        dispositionLine = `Collected ${this.fmt(a.balance_due)} via ${(a.settlement_payment_method||'').replace(/_/g, ' ').toUpperCase()} on ${this.fmtDateTime(a.settlement_created_at)}${a.settlement_amount_tendered > a.balance_due ? ` — Tendered ${this.fmt(a.settlement_amount_tendered)}, Change ${this.fmt(a.settlement_change_amount)}` : ''}.`;
       } else {
         dispositionLine = 'Balance due has not yet been collected — see POS Hold Recall.';
       }
@@ -2343,7 +2343,7 @@ Object.assign(App, {
             ${items.map(i => `<div class="receipt-row"><span>${i.sku ? `<span style="font-size:11px;color:#555">${i.sku}</span> ` : ''}${i.product_name}</span><span>x${i.quantity}</span></div>`).join('')}
             <hr>
             ${wasBilled ? `
-            <div class="receipt-row"><span>Original Payment</span><span>${(agreement.checkout_payment_method||'').replace('_',' ').toUpperCase()}</span></div>
+            <div class="receipt-row"><span>Original Payment</span><span>${(agreement.checkout_payment_method||'').replace(/_/g, ' ').toUpperCase()}</span></div>
             <div class="receipt-row receipt-total" style="color:var(--danger)"><span>AMOUNT VOIDED</span><span>${this.fmt(agreement.checkout_total)}</span></div>
             ` : `<div style="text-align:center;font-size:11px;color:#666;margin:6px 0">This rental was on hold — no payment had been collected, so nothing was charged or refunded.</div>`}
             <hr>
@@ -3202,6 +3202,7 @@ Object.assign(App, {
               <option value="credit_card">Credit Card</option>
               <option value="debit_card">Debit Card</option>
               <option value="check">Check</option>
+              <option value="tax_exempt_tender">Tax Exempt</option>
               <option value="direct_deposit">Direct Deposit</option>
               <option value="credit">Charge Account (Credit)</option>
               <option value="split">Split Tender (Multiple Methods)</option>
@@ -3650,6 +3651,7 @@ Object.assign(App, {
                 <option value="credit_card">Credit Card</option>
                 <option value="debit_card">Debit Card</option>
                 <option value="check">Check</option>
+                <option value="tax_exempt_tender">Tax Exempt</option>
                 <option value="gift_card">Gift Card</option>
                 <option value="direct_deposit">Direct Deposit</option>
                 <option value="split">Split Tender (Multiple Methods)</option>

@@ -119,6 +119,7 @@ Object.assign(App, {
                 <option value="cash">Cash</option>
                 <option value="credit_card">Card</option>
                 <option value="check">Check</option>
+                <option value="tax_exempt_tender">Tax Exempt</option>
               </select>
             </div>
             <div class="form-group"><label>Deposit Collected (min ${depositPct}%)</label><input type="number" id="lc-tendered" step="0.01" min="0" oninput="this.dataset.touched='1'"></div>
@@ -378,7 +379,7 @@ Object.assign(App, {
           <strong>Payment History</strong>
           <table class="table">
             <thead><tr><th>Payment #</th><th>Date</th><th>Amount</th><th>Method</th><th>Type</th></tr></thead>
-            <tbody>${p.payments.map(pay => `<tr><td>${pay.payment_number}</td><td>${this.fmtDateTime(pay.created_at)}</td><td>${this.fmt(pay.amount)}</td><td>${(pay.payment_method||'').replace('_',' ')}</td><td>${pay.is_deposit ? 'Deposit' : 'Installment'}</td></tr>`).join('')}</tbody>
+            <tbody>${p.payments.map(pay => `<tr><td>${pay.payment_number}</td><td>${this.fmtDateTime(pay.created_at)}</td><td>${this.fmt(pay.amount)}</td><td>${(pay.payment_method||'').replace(/_/g, ' ')}</td><td>${pay.is_deposit ? 'Deposit' : 'Installment'}</td></tr>`).join('')}</tbody>
           </table>
         </div>
         <div class="modal-footer">
@@ -407,6 +408,7 @@ Object.assign(App, {
               <option value="cash">Cash</option>
               <option value="credit_card">Card</option>
               <option value="check">Check</option>
+              <option value="tax_exempt_tender">Tax Exempt</option>
             </select>
           </div>
           <div class="form-group"><label>Notes</label><input id="lp-notes" placeholder="Optional"></div>
