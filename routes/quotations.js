@@ -10,6 +10,7 @@ const { resolveUnit, lineName, parseQty } = require('../lib/units');
 const { feeFor, getBranchStock, buildRentalLines, revalidateQuoteLines, insertPendingAgreement, assertRentalCustomerEligible, assertNoUnpaidRentalReturns, rentalQuoteSummary, attachRentalRates, attachRateBasis, rentalWindow, rateLineOf } = require('../lib/rentals');
 const { ratePlanError } = require('../lib/rentalPricing');
 const { allocateTicketDiscount } = require('../lib/ticketDiscount');
+const { RENT_PERIOD_UNITS, quoteLineForSale } = require('../lib/quoteLines');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -77,7 +78,7 @@ router.get('/', async (req, res) => {
 async function insertQuoteLines(tx, quoteId, processedItems) {
   for (const item of processedItems) {
     const { product_id, product_name, sku, is_temp_item, is_q_item, purchase_request_id, sources, qty, unit_price, unit_cost, lineTotal, lineTax, lineDisc, serial_number } = item;
-    const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,unit_cost,discount_amount,tax_amount,total,is_temp_item,is_q_item,purchase_request_id,serial_number,is_rental_line,rental_start,rental_end,is_mandatory,rate_plan,sell_unit,units_per,uom_id,is_comment,is_delivery) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [quoteId, product_id, product_name, sku, qty, unit_price, unit_cost, lineDisc, lineTax, lineTotal, is_temp_item, is_q_item, purchase_request_id, serial_number || null, item.is_rental_line ? 1 : 0, item.rental_start || null, item.rental_end || null, item.is_mandatory ? 1 : 0, item.rate_plan || null, item.sell_unit || null, item.units_per || 1, item.uom_id ?? null, item.is_comment ? 1 : 0, item.is_delivery ? 1 : 0] });
+    const itemResult = await tx.execute({ sql: 'INSERT INTO quotation_items (quote_id,product_id,product_name,sku,quantity,unit_price,unit_cost,discount_amount,tax_amount,total,is_temp_item,is_q_item,purchase_request_id,serial_number,is_rental_line,rental_start,rental_end,is_mandatory,rate_plan,sell_unit,units_per,uom_id,is_comment,is_delivery,rent_period,rent_period_unit,discount_percent,discount_applied) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [quoteId, product_id, product_name, sku, qty, unit_price, unit_cost, lineDisc, lineTax, lineTotal, is_temp_item, is_q_item, purchase_request_id, serial_number || null, item.is_rental_line ? 1 : 0, item.rental_start || null, item.rental_end || null, item.is_mandatory ? 1 : 0, item.rate_plan || null, item.sell_unit || null, item.units_per || 1, item.uom_id ?? null, item.is_comment ? 1 : 0, item.is_delivery ? 1 : 0, item.rent_period ?? null, item.rent_period_unit || null, item.discount_percent ?? null, item.discount_applied ? 1 : 0] });
     item.id = Number(itemResult.lastInsertRowid);
     if (sources) {
       for (const src of sources) {
@@ -150,6 +151,7 @@ router.get('/:id', async (req, res) => {
     if (quote.quote_type === 'special_project' && !canSeeSpecialProjects(req)) return res.status(403).json({ error: 'Missing permission: special_projects' });
     const { rows: items } = await db.execute({ sql: QUOTE_ITEMS_SELECT, args: [req.params.id] });
     quote.items = await attachQuoteItemSources(items);
+    for (const i of quote.items) i.sale_line = quoteLineForSale(i);
     await attachSpecialProjectRentals(quote.items);
     if (quote.quote_type === 'rental') {
       await attachRentalRates(db, quote.items);
@@ -327,10 +329,11 @@ async function processQuoteItems(items, { allowRental = false } = {}) {
     const qty = serial_number ? 1 : product ? parseQty(item.quantity || 1, unit.allow_decimal) : (parseInt(item.quantity) || 1);
     if (Number.isNaN(qty)) throw new Error(`${product.name} is quoted in whole ${unit.sell_unit || 'unit'}s — the quantity can't be ${item.quantity}`);
     const unit_price = parseFloat(item.unit_price ?? (product ? unit.price : 0));
-    const lineTotal = parseFloat((unit_price * qty).toFixed(2));
+    const spCustom = allowRental && !product && !item.is_q_item ? specialProjectCustomFields(item, unit_price) : null;
+    const lineTotal = spCustom ? spCustom.lineTotal : parseFloat((unit_price * qty).toFixed(2));
     const taxRate = product ? product.tax_rate : defaultTaxRate;
     const lineTax = parseFloat((lineTotal * taxRate / 100).toFixed(2));
-    const lineDisc = parseFloat(item.discount || 0);
+    const lineDisc = spCustom ? spCustom.lineDisc : parseFloat(item.discount || 0);
     subtotal += lineTotal;
     tax_amount += lineTax;
     // Informational cost snapshot (margin/markup visibility on Special
@@ -356,6 +359,7 @@ async function processQuoteItems(items, { allowRental = false } = {}) {
       purchase_request_id: product ? null : (item.purchase_request_id || null),
       sources,
       qty, unit_price, unit_cost, lineTotal, lineTax, taxRate, lineDisc,
+      ...(spCustom || {}),
     });
   }
   if (!processedItems.some(l => !l.is_comment)) throw new Error('No items in quotation');
@@ -363,6 +367,40 @@ async function processQuoteItems(items, { allowRental = false } = {}) {
     subtotal: parseFloat(subtotal.toFixed(2)),
     tax_amount: parseFloat(tax_amount.toFixed(2)),
     processedItems,
+  };
+}
+
+// A Special Project custom line's own fields (see lib/quoteLines.js). The
+// discount is taken off the line, unlike the reference-only discount on other
+// lines. Throws a user-facing error.
+function specialProjectCustomFields(item, unit_price) {
+  const name = String(item.description).trim();
+  const positive = (v, label) => {
+    const n = Number(v);
+    if (!(n > 0)) throw new Error(`Enter a ${label} above 0 for "${name}"`);
+    return Math.round(n * 1000) / 1000;
+  };
+  const qty = positive(item.quantity ?? 1, 'quantity');
+  const blankPeriod = item.rent_period == null || String(item.rent_period).trim() === '';
+  const rent_period = blankPeriod ? null : positive(item.rent_period, 'rent period');
+  const rent_period_unit = rent_period == null ? null : (RENT_PERIOD_UNITS.includes(item.rent_period_unit) ? item.rent_period_unit : 'Day(s)');
+  const extended = parseFloat((unit_price * qty * (rent_period ?? 1)).toFixed(2));
+
+  const entered = Number(item.discount || 0);
+  if (!(entered >= 0)) throw new Error(`The discount on "${name}" can't be negative`);
+  const isPercent = item.discount_type === 'percent' && entered > 0;
+  if (isPercent && entered > 100) throw new Error(`The discount on "${name}" can't be more than 100%`);
+  const discount = parseFloat((isPercent ? extended * entered / 100 : entered).toFixed(2));
+  if (discount > extended) throw new Error(`The discount on "${name}" is more than its extended price`);
+
+  return {
+    qty, rent_period, rent_period_unit,
+    sku: String(item.item_no ?? '').trim().slice(0, 60) || null,
+    sell_unit: String(item.uom ?? '').trim().slice(0, 30) || null,
+    lineDisc: discount,
+    lineTotal: parseFloat((extended - discount).toFixed(2)),
+    discount_percent: isPercent ? entered : null,
+    discount_applied: discount > 0 ? 1 : 0,
   };
 }
 
@@ -1019,8 +1057,9 @@ router.post('/:id/convert', async (req, res) => {
         // the sale doesn't touch the rental fleet's stock — the item itself
         // goes out through its rental agreement.
         const isRental = !!item.is_rental_line;
-        const name = isRental && !item.is_mandatory ? `${item.product_name} — ${holdNumbers[item.id]}` : item.product_name;
-        await convTx.execute({ sql: 'INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,serial_number,sell_unit,units_per,uom_id,is_comment,is_delivery) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [txId, isRental ? null : item.product_id, name, isRental ? 'RENTAL' : (item.sku || ''), item.quantity, item.unit_price, item.discount_amount, item.tax_amount, item.total, item.serial_number || null, isRental ? null : (item.sell_unit || null), isRental ? 1 : (item.units_per || 1), isRental ? null : (item.uom_id ?? null), item.is_comment ? 1 : 0, item.is_delivery ? 1 : 0] });
+        const sale = quoteLineForSale(item);
+        const name = isRental && !item.is_mandatory ? `${item.product_name} — ${holdNumbers[item.id]}` : sale.name;
+        await convTx.execute({ sql: 'INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,serial_number,sell_unit,units_per,uom_id,is_comment,is_delivery) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', args: [txId, isRental ? null : item.product_id, name, isRental ? 'RENTAL' : (item.sku || ''), sale.quantity, sale.unit_price, sale.packed ? 0 : item.discount_amount, item.tax_amount, item.total, item.serial_number || null, isRental || sale.packed ? null : (item.sell_unit || null), isRental ? 1 : (item.units_per || 1), isRental ? null : (item.uom_id ?? null), item.is_comment ? 1 : 0, item.is_delivery ? 1 : 0] });
       }
 
       await convTx.execute({ sql: 'UPDATE quotations SET status = ?, converted_to_tx = ? WHERE id = ?', args: ['converted', txId, quote.id] });

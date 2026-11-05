@@ -928,6 +928,14 @@ Object.assign(App, {
     const div = document.createElement('div');
     div.className = 'po-receive-row';
     div.id = `qt-item-${idx}`;
+    if (isSP && !isQ) {
+      div.style.cssText = 'flex-wrap:wrap;align-items:flex-end';
+      div.innerHTML = this._spCustomItemHtml(idx, prefill);
+      container.appendChild(div);
+      this.calcQuoteTotal();
+      this._updateQuoteItemMargin(idx);
+      return;
+    }
     div.innerHTML = `
       <input id="qti-desc-${idx}" style="flex:2" placeholder="${isSP && !isQ ? 'e.g. Labour, Chainsaw rental, Equipment operator' : 'Item to order — description'}" value="${prefill?this.escapeAttr(prefill.product_name):''}" data-pr-id="${prefill&&prefill.purchase_request_id||''}" data-q-item="${isSP && isQ ? '1' : ''}">
       <input id="qti-qty-${idx}" type="number" min="1" value="${prefill?prefill.quantity:1}" style="width:70px" placeholder="Qty" oninput="App.calcQuoteTotal()">
@@ -939,6 +947,31 @@ Object.assign(App, {
     container.appendChild(div);
     this.calcQuoteTotal();
     if (isSP) this._updateQuoteItemMargin(idx);
+  },
+
+  // A Special Project custom line's fields, in the order the quotation prints
+  // them, plus Cost. Extended = quantity × rent period × unit price; the
+  // discount (% or $) comes off it. Server: specialProjectCustomFields.
+  _spCustomItemHtml(idx, p) {
+    const field = (label, html, style = '') => `<label style="display:flex;flex-direction:column;gap:2px;font-size:11px;color:var(--text-muted);margin:0;${style}">${label}${html}</label>`;
+    const val = v => v == null ? '' : this.escapeAttr(String(v));
+    const isPct = p?.discount_percent != null;
+    const discVal = isPct ? p.discount_percent : (p?.discount_amount || '');
+    const units = ['Hour(s)', 'Day(s)', 'Week(s)', 'Month(s)'];
+    const unit = p?.rent_period_unit || 'Day(s)';
+    return `
+      ${field('Item No.', `<input id="qti-itemno-${idx}" value="${val(p?.sku)}" maxlength="60" style="width:110px">`)}
+      ${field('Item Description', `<input id="qti-desc-${idx}" placeholder="e.g. Labour, Chainsaw rental, Equipment operator" value="${val(p?.product_name)}" data-pr-id="${p?.purchase_request_id || ''}" data-q-item="">`, 'flex:1 1 260px')}
+      <button class="btn btn-sm btn-danger" onclick="document.getElementById('qt-item-${idx}').remove();App.calcQuoteTotal()">✕</button>
+      <div style="flex-basis:100%;height:0"></div>
+      ${field('Quantity', `<input id="qti-qty-${idx}" type="number" min="0" step="any" value="${p ? p.quantity : 1}" style="width:80px" oninput="App.calcQuoteTotal()">`)}
+      ${field('U.O.M', `<input id="qti-uom-${idx}" value="${val(p?.sell_unit)}" maxlength="30" style="width:60px">`)}
+      ${field('Rent Period', `<span style="display:flex;gap:4px"><input id="qti-period-${idx}" type="number" min="0" step="any" value="${val(p?.rent_period)}" style="width:70px" title="Leave blank for a line that isn't charged by time" oninput="App.calcQuoteTotal()"><select id="qti-period-unit-${idx}" style="width:auto">${units.map(u => `<option${u === unit ? ' selected' : ''}>${u}</option>`).join('')}</select></span>`)}
+      ${field('Cost', `<input id="qti-cost-${idx}" type="number" step="0.01" value="${val(p?.unit_cost)}" style="width:85px" title="Informational only, per unit and period — doesn't affect the total" oninput="App._updateQuoteItemMargin(${idx})">`)}
+      ${field('Unit Price', `<input id="qti-price-${idx}" type="number" step="0.01" value="${p ? p.unit_price : ''}" style="width:90px" oninput="App.calcQuoteTotal();App._updateQuoteItemMargin(${idx})">`)}
+      ${field('Discount', `<span style="display:flex;gap:4px"><input id="qti-disc-${idx}" type="number" min="0" step="0.01" value="${discVal}" style="width:80px" title="Taken off this line's extended price" oninput="App.calcQuoteTotal()"><select id="qti-disc-type-${idx}" style="width:auto" onchange="App.calcQuoteTotal()"><option value="amount"${isPct ? '' : ' selected'}>$</option><option value="percent"${isPct ? ' selected' : ''}>%</option></select></span>`)}
+      ${field('Extended Price', `<strong id="qti-ext-${idx}" style="font-size:13px;color:var(--text);white-space:nowrap;padding:6px 0"></strong>`)}
+      <span id="qti-margin-${idx}" style="font-size:11px;color:var(--text-muted);white-space:nowrap;padding-bottom:8px"></span>`;
   },
 
   // Delivery line: description + price before tax (taxed at the store rate,
@@ -1367,7 +1400,14 @@ Object.assign(App, {
       const idx = qEl.id.split('-').pop();
       const qty = parseFloat(qEl.value) || 0;
       const price = parseFloat(document.getElementById(`qti-price-${idx}`)?.value) || 0;
-      subtotal += qty * price;
+      const extEl = document.getElementById(`qti-ext-${idx}`);
+      if (!extEl) { subtotal += qty * price; return; }
+      // Special Project custom line: rent period and an applied discount.
+      const extended = qty * price * (parseFloat(document.getElementById(`qti-period-${idx}`)?.value) || 1);
+      const discEntered = parseFloat(document.getElementById(`qti-disc-${idx}`)?.value) || 0;
+      const lineDisc = parseFloat((document.getElementById(`qti-disc-type-${idx}`)?.value === 'percent' ? parseFloat(extended.toFixed(2)) * discEntered / 100 : discEntered).toFixed(2));
+      subtotal += extended - lineDisc;
+      extEl.innerHTML = `${this.fmt(extended)}${lineDisc > 0 ? ` <span style="font-weight:400;color:var(--text-muted)">net ${this.fmt(extended - lineDisc)}</span>` : ''}`;
     });
     const disc = parseFloat(document.getElementById('qt-disc')?.value) || 0;
     if (el) el.textContent = this.fmt(Math.max(0, subtotal - disc));
@@ -1533,7 +1573,14 @@ Object.assign(App, {
       if (!description) return;
       const purchase_request_id = descInp.dataset.prId || null;
       const is_q_item = descInp.dataset.qItem === '1';
-      items.push({ description, quantity, unit_price, unit_cost, discount, purchase_request_id, is_q_item });
+      const spFields = document.getElementById(`qti-ext-${idx}`) ? {
+        item_no: document.getElementById(`qti-itemno-${idx}`).value,
+        uom: document.getElementById(`qti-uom-${idx}`).value,
+        rent_period: document.getElementById(`qti-period-${idx}`).value,
+        rent_period_unit: document.getElementById(`qti-period-unit-${idx}`).value,
+        discount_type: document.getElementById(`qti-disc-type-${idx}`).value,
+      } : {};
+      items.push({ description, quantity, unit_price, unit_cost, discount, purchase_request_id, is_q_item, ...spFields });
     });
     if (snClash) { this.alert(snClash, 'error'); return; }
     if (deliveryErr) { this.alert(deliveryErr, 'error'); return; }
@@ -1563,7 +1610,7 @@ Object.assign(App, {
   _spRentalDetailsHtml(i, q) {
     if (!i.is_rental_line || i.parent_item_id) return '';
     const d = v => v ? new Date(`${String(v).slice(0, 10)}T00:00:00Z`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }) : '—';
-    const cell = html => `<tr><td colspan="6" style="padding-top:0;border-top:none"><div style="font-size:12px;background:var(--bg-secondary);border-radius:6px;padding:8px 10px;line-height:1.6">${html}</div></td></tr>`;
+    const cell = html => `<tr><td colspan="8" style="padding-top:0;border-top:none"><div style="font-size:12px;background:var(--bg-secondary);border-radius:6px;padding:8px 10px;line-height:1.6">${html}</div></td></tr>`;
     const r = i.rental;
     if (!r) {
       const note = ['draft', 'pending_approval'].includes(q.status) ? 'The item is held for this project when it\'s approved.' : 'Not held — send the project back to Draft and approve it again to hold the item.';
@@ -1619,6 +1666,7 @@ Object.assign(App, {
     ]);
     const isRental = q.quote_type === 'rental';
     const isSpecialProject = q.quote_type === 'special_project';
+    const lineDiscounts = q.items.reduce((sum, i) => sum + (i.discount_applied ? parseFloat(i.discount_amount) || 0 : 0), 0);
     const canEditAttachments = !isSpecialProject || this.can('special_projects');
     const statusColor = { draft:'badge-warning', sent:'badge-info', accepted:'badge-success', declined:'badge-danger', converted:'badge-teal', pending_approval:'badge-warning', approved:'badge-success' };
     const statusLabel = { pending_approval: 'Pending Approval' };
@@ -1660,9 +1708,9 @@ Object.assign(App, {
       <p style="font-size:11px;color:var(--text-muted);margin-top:6px">Rental fees are estimated for the period shown — the real charge is computed when the rental is finalized at the register.</p>` : isSpecialProject ? `
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Item</th><th>Qty</th><th>Cost</th><th>Price</th><th>Margin</th><th>Total</th></tr></thead>
+          <thead><tr><th>Item</th><th>Qty</th><th>U.O.M</th><th>Rent Period</th><th>Cost</th><th>Price</th><th>Margin</th><th>Total</th></tr></thead>
           <tbody>
-            ${q.items.map(i => { if (i.is_comment) return `<tr><td colspan="6" style="font-style:italic;white-space:pre-wrap;color:var(--text-muted)"><span class="badge-pill badge-info" style="font-size:10px;font-style:normal">C</span> ${this.escapeAttr(i.product_name)}</td></tr>`; const margin = (i.unit_cost != null && i.unit_price > 0) ? ((i.unit_price - i.unit_cost) / i.unit_price * 100) : null; return `<tr><td>${i.parent_item_id ? '↳ ' : ''}${i.is_rental_line && !i.parent_item_id ? '<span class="badge-pill badge-warning" style="font-size:10px">RENTAL</span> ' : ''}${i.product_name}${i.is_temp_item && i.is_q_item ? ` <span class="badge-pill badge-warning" style="font-size:10px" title="Flagged for Purchasing to order">Q</span>${i.purchase_request_number ? ` <a href="#" style="font-size:11px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${i.purchase_request_id})">${i.purchase_request_number}</a>` : ''}` : ''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on this line">-${this.fmt(i.discount_amount)}</span>` : ''}</td><td>${i.quantity}</td><td>${i.unit_cost != null ? this.fmt(i.unit_cost) : '<span style="color:var(--text-muted)">—</span>'}</td><td>${this.fmt(i.unit_price)}</td><td>${margin != null ? `<span style="color:${margin<0?'var(--danger)':'var(--text-muted)'}">${margin>=0?'+':''}${margin.toFixed(0)}%</span>` : '—'}</td><td class="fw-600">${i.is_mandatory ? 'Included' : this.fmt(i.total)}</td></tr>${this._spRentalDetailsHtml(i, q)}`; }).join('')}
+            ${q.items.map(i => { if (i.is_comment) return `<tr><td colspan="8" style="font-style:italic;white-space:pre-wrap;color:var(--text-muted)"><span class="badge-pill badge-info" style="font-size:10px;font-style:normal">C</span> ${this.escapeAttr(i.product_name)}</td></tr>`; const margin = (i.unit_cost != null && i.unit_price > 0) ? ((i.unit_price - i.unit_cost) / i.unit_price * 100) : null; return `<tr><td>${i.parent_item_id ? '↳ ' : ''}${i.is_rental_line && !i.parent_item_id ? '<span class="badge-pill badge-warning" style="font-size:10px">RENTAL</span> ' : ''}${i.is_temp_item && i.sku ? `<span style="color:var(--text-muted)">${this.escapeAttr(i.sku)}</span> ` : ''}${i.is_temp_item ? this.escapeAttr(i.product_name) : i.product_name}${i.is_temp_item && i.is_q_item ? ` <span class="badge-pill badge-warning" style="font-size:10px" title="Flagged for Purchasing to order">Q</span>${i.purchase_request_number ? ` <a href="#" style="font-size:11px;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewPR(${i.purchase_request_id})">${i.purchase_request_number}</a>` : ''}` : ''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="${i.discount_applied ? 'Discount taken off this line' : 'Discount given on this line'}">-${this.fmt(i.discount_amount)}${i.discount_percent != null ? ` (${parseFloat(i.discount_percent)}%)` : ''}</span>` : ''}</td><td>${i.quantity}</td><td>${i.is_temp_item ? this.escapeAttr(i.sell_unit || '') : (i.sell_unit || '')}</td><td style="white-space:nowrap">${i.rent_period != null ? `${i.rent_period} ${this.escapeAttr(i.rent_period_unit || 'Day(s)')}` : ''}</td><td>${i.unit_cost != null ? this.fmt(i.unit_cost) : '<span style="color:var(--text-muted)">—</span>'}</td><td>${this.fmt(i.unit_price)}</td><td>${margin != null ? `<span style="color:${margin<0?'var(--danger)':'var(--text-muted)'}">${margin>=0?'+':''}${margin.toFixed(0)}%</span>` : '—'}</td><td class="fw-600">${i.is_mandatory ? 'Included' : this.fmt(i.total)}</td></tr>${this._spRentalDetailsHtml(i, q)}`; }).join('')}
           </tbody>
         </table>
       </div>` : `
@@ -1713,8 +1761,8 @@ Object.assign(App, {
               <div style="display:flex;justify-content:space-between;border-top:2px solid var(--text);margin-top:4px;font-size:16px;font-weight:700"><span>Total Due at Checkout</span><span>${this.fmt(sm.total)}</span></div>
             </div>`;
           })() : `<div style="text-align:right;margin-top:10px;font-size:13px;line-height:2">
-            <div>Subtotal: ${this.fmt(q.subtotal)}</div>
-            ${q.discount_amount > 0 ? `<div>Discount: -${this.fmt(q.discount_amount)}</div>` : ''}
+            <div>Subtotal: ${this.fmt(q.subtotal + lineDiscounts)}</div>
+            ${q.discount_amount + lineDiscounts > 0 ? `<div>Discount: -${this.fmt(q.discount_amount + lineDiscounts)}</div>` : ''}
             <div>Tax: ${this.fmt(q.tax_amount)}</div>
             <div style="font-size:16px;font-weight:700">Total: ${this.fmt(q.total)}</div>
           </div>`}

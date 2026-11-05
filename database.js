@@ -2947,6 +2947,13 @@ async function _init() {
     // so sales/receipts after the count stay in the stock.
     'ALTER TABLE cycle_count_upload_lines ADD COLUMN stock_snapshot REAL',
     'ALTER TABLE cycle_count_items ADD COLUMN expected_at_count REAL',
+    // Special Project custom lines (lib/quoteLines.js): extended = quantity ×
+    // rent_period × unit_price. discount_applied = 1 means discount_amount was
+    // taken off total; on other lines it's only recorded for reference.
+    'ALTER TABLE quotation_items ADD COLUMN rent_period REAL',
+    'ALTER TABLE quotation_items ADD COLUMN rent_period_unit TEXT',
+    'ALTER TABLE quotation_items ADD COLUMN discount_percent REAL',
+    'ALTER TABLE quotation_items ADD COLUMN discount_applied INTEGER NOT NULL DEFAULT 0',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

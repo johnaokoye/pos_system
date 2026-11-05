@@ -254,7 +254,7 @@ router.get('/special-projects-margin', requireAnyPermission('special_projects', 
               oe.first_name || ' ' || oe.last_name as original_employee_name,
               COUNT(qi.id) as item_count,
               COALESCE(SUM(qi.total), 0) as revenue,
-              COALESCE(SUM(COALESCE(qi.unit_cost, 0) * qi.quantity), 0) as cost,
+              COALESCE(SUM(COALESCE(qi.unit_cost, 0) * qi.quantity * COALESCE(qi.rent_period, 1)), 0) as cost,
               SUM(CASE WHEN qi.unit_cost IS NULL THEN 1 ELSE 0 END) as missing_cost_count
             FROM quotations q
             JOIN quotation_items qi ON qi.quote_id = q.id
@@ -298,7 +298,7 @@ router.get('/special-projects-margin', requireAnyPermission('special_projects', 
       sql: `SELECT COALESCE(oe.id, e.id) as employee_id, COALESCE(oe.first_name || ' ' || oe.last_name, e.first_name || ' ' || e.last_name, 'Unassigned') as employee_name,
               COUNT(DISTINCT q.id) as project_count,
               COALESCE(SUM(qi.total), 0) as revenue,
-              COALESCE(SUM(COALESCE(qi.unit_cost, 0) * qi.quantity), 0) as cost
+              COALESCE(SUM(COALESCE(qi.unit_cost, 0) * qi.quantity * COALESCE(qi.rent_period, 1)), 0) as cost
             FROM quotations q
             JOIN quotation_items qi ON qi.quote_id = q.id
             LEFT JOIN employees e ON q.employee_id = e.id

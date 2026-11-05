@@ -10,6 +10,7 @@ const { customerArDetail, customerStatement } = require('../lib/arDetail');
 const { inlineProtectedImages } = require('../lib/protectedUploads');
 const { orderLineUnit } = require('../lib/units');
 const { rentalQuoteSummary, attachRentalRates, attachRateBasis, rentalWindow, rateBasisLabel } = require('../lib/rentals');
+const { lineExtended, rentPeriodLabel, lineDiscountLabel, quoteDocTotals } = require('../lib/quoteLines');
 const { renderDocumentPdf } = require('../lib/documentPdf');
 const { loadDrawerSession } = require('../lib/drawerReport');
 const { paymentReceipt } = require('../lib/customerPayments');
@@ -736,6 +737,24 @@ const PRINT_PAGE_STYLE = `<style>
   tr { page-break-inside: avoid; }
 </style>`;
 
+// A line on a Special Project's quotation: Extended Price is before the line's
+// discount, which shows under the description.
+function spQuoteRowHtml(i) {
+  const td = (content, style = '') => `<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;${style}">${content}</td>`;
+  const discount = lineDiscountLabel(i);
+  const note = discount || (parseFloat(i.discount_amount) > 0 ? `Price includes ${fmt(i.discount_amount)} discount` : '');
+  return `
+    <tr>
+      ${td(esc(i.sku || ''), 'color:#555')}
+      ${td(`${esc(i.product_name)}${note ? `<br><span style="color:${BRAND.green};font-size:11px">${note}</span>` : ''}`)}
+      ${td(num2(i.quantity), 'text-align:right;white-space:nowrap')}
+      ${td(esc(i.sell_unit || ''))}
+      ${td(esc(rentPeriodLabel(i)), 'white-space:nowrap')}
+      ${td(fmt(i.unit_price), 'text-align:right')}
+      ${td(fmt(i.is_temp_item ? lineExtended(i) : i.total), 'text-align:right;font-weight:600;white-space:nowrap')}
+    </tr>`;
+}
+
 // `print` lays the same document out for a US Letter page — used by GET
 // /quote-preview/:id (Print Quotation on retail and Special Project quotes).
 function buildQuoteHtml(q, s, { print = false } = {}) {
@@ -743,8 +762,15 @@ function buildQuoteHtml(q, s, { print = false } = {}) {
   const storeAddr = s.store_address || '';
   const storePhone = s.store_phone || '';
   const footer = footerHtml(s);
+  const isSP = q.quote_type === 'special_project';
+  const totals = quoteDocTotals(q);
+  const th = (label, align) => `<th style="padding:8px;text-align:${align};font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">${label}</th>`;
+  const head = isSP
+    ? th('Item No.', 'left') + th('Item Description', 'left') + th('Quantity', 'right') + th('U.O.M', 'left') + th('Rent Period', 'left') + th('Unit Price', 'right') + th('Extended Price', 'right')
+    : th('SKU', 'left') + th('Item', 'left') + th('Qty', 'center') + th('Unit Price', 'right') + th('Total', 'right');
+  const cols = isSP ? 7 : 5;
 
-  const rows = (q.items || []).map(i => i.is_comment ? commentRowHtml(i.product_name, 5) : i.serial_number ? serialRowHtml(i.serial_number, 5) : `
+  const rows = (q.items || []).map(i => i.is_comment ? commentRowHtml(i.product_name, cols) : i.serial_number ? serialRowHtml(i.serial_number, cols) : isSP ? spQuoteRowHtml(i) : `
     <tr>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;white-space:nowrap;color:#555">${i.sku || ''}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}${parseFloat(i.discount_amount) > 0 ? `<br><span style="color:${BRAND.green};font-size:11px">Price includes ${fmt(i.discount_amount)} discount</span>` : ''}</td>
@@ -761,7 +787,7 @@ ${print ? PRINT_PAGE_STYLE : ''}
 <body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
 <table class="page-wrap" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
 <tr><td align="center">
-  <table class="page" width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+  <table class="page" width="${isSP ? 700 : 560}" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
     <tr><td style="${BRAND_HEADER_STYLE}">
       <div style="color:#fff;font-size:22px;font-weight:700">${storeName}</div>
       ${storeAddr ? `<div style="color:#ffffff;font-size:12px;margin-top:4px">${storeAddr}</div>` : ''}
@@ -783,18 +809,12 @@ ${print ? PRINT_PAGE_STYLE : ''}
         <strong>Bill To:</strong><br>${q.customer_name}${q.customer_phone ? `<br>${q.customer_phone}` : ''}${q.customer_email ? `<br>${q.customer_email}` : ''}
       </div>` : ''}
       <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px">
-        <thead><tr style="background:#f9fafb">
-          <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">SKU</th>
-          <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Item</th>
-          <th style="padding:8px;text-align:center;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Qty</th>
-          <th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Unit Price</th>
-          <th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Total</th>
-        </tr></thead>
+        <thead><tr style="background:#f9fafb">${head}</tr></thead>
         <tbody>${rows}</tbody>
       </table>
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-top:12px">
-        <tr><td style="padding:3px 0">Subtotal</td><td style="text-align:right">${fmt(q.subtotal)}</td></tr>
-        ${parseFloat(q.discount_amount) > 0 ? `<tr><td style="padding:3px 0;color:${BRAND.green}">Discount</td><td style="text-align:right;color:${BRAND.green}">-${fmt(q.discount_amount)}</td></tr>` : ''}
+        <tr><td style="padding:3px 0">Subtotal</td><td style="text-align:right">${fmt(totals.subtotal)}</td></tr>
+        ${totals.discount > 0 ? `<tr><td style="padding:3px 0;color:${BRAND.green}">Discount</td><td style="text-align:right;color:${BRAND.green}">-${fmt(totals.discount)}</td></tr>` : ''}
         <tr><td style="padding:3px 0">Tax</td><td style="text-align:right">${fmt(q.tax_amount)}</td></tr>
         <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
         <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">TOTAL</td><td style="font-size:16px;font-weight:700;color:${BRAND.black};text-align:right">${fmt(q.total)}</td></tr>
@@ -1312,8 +1332,9 @@ router.post('/send-quote/:id', requireAuth, async (req, res) => {
         ...(await documentEmailContent(req.body.as_pdf, s, isRental ? rentalQuotePdfModel(q, s) : quotePdfModel(q, s), isRental ? buildRentalQuoteHtml(q, s) : inlineProtectedImages(buildQuoteHtml(q, s)))),
       });
 
-      // Auto-mark as sent if still in draft
-      if (q.status === 'draft') {
+      // Auto-mark as sent if still in draft. A Special Project draft stays a
+      // draft: it still needs approving before it can be sent or converted.
+      if (q.status === 'draft' && q.quote_type !== 'special_project') {
         await db.execute({ sql: "UPDATE quotations SET status = 'sent' WHERE id = ?", args: [q.id] });
       }
 
@@ -2500,18 +2521,27 @@ function pdfStore(s, src = {}) {
 const ITEM_COLUMNS = [{ label: 'Item', width: 4 }, { label: 'Qty', width: 0.8, align: 'center' }, { label: 'Unit Price', width: 1.4, align: 'right' }, { label: 'Total', width: 1.4, align: 'right' }];
 
 function quotePdfModel(q, s) {
+  const isSP = q.quote_type === 'special_project';
+  const totals = quoteDocTotals(q);
+  const cols = isSP ? 7 : 5;
+  const columns = isSP
+    ? [{ label: 'Item No.', width: 1.2 }, { label: 'Item Description', width: 2.7 }, { label: 'Quantity', width: 1.3, align: 'right' }, { label: 'U.O.M', width: 0.8 }, { label: 'Rent Period', width: 1.3 }, { label: 'Unit Price', width: 1.2, align: 'right' }, { label: 'Extended Price', width: 1.5, align: 'right' }]
+    : [{ label: 'SKU', width: 1.4 }, { label: 'Item', width: 3.4 }, ...ITEM_COLUMNS.slice(1)];
+  const cells = i => isSP
+    ? [i.sku || '', i.product_name, num2(i.quantity), i.sell_unit || '', rentPeriodLabel(i), fmt(i.unit_price), fmt(i.is_temp_item ? lineExtended(i) : i.total)]
+    : [i.sku || '', i.product_name, i.quantity, fmt(i.unit_price), fmt(i.total)];
   return {
     store: pdfStore(s),
     title: 'QUOTATION', number: q.quote_number,
     meta: [['Date', pdfDate(q.created_at)], ['Valid Until', q.valid_until ? pdfDate(String(q.valid_until).slice(0, 10)) : ''], ['Branch', q.branch_name]],
     party: { label: 'Bill To', lines: [q.customer_name, q.customer_phone, q.customer_email] },
-    tables: [{ mainCol: 1, columns: [{ label: 'SKU', width: 1.4 }, { label: 'Item', width: 3.4 }, ...ITEM_COLUMNS.slice(1)], rows: (q.items || []).map(i => i.is_comment ? commentRowPdf(i.product_name, 5, 1) : i.serial_number ? commentRowPdf(`Serial: ${i.serial_number}`, 5, 1) : ({
-      cells: [i.sku || '', i.product_name, i.quantity, fmt(i.unit_price), fmt(i.total)],
-      sub: parseFloat(i.discount_amount) > 0 ? `Price includes ${fmt(i.discount_amount)} discount` : '',
+    tables: [{ mainCol: 1, columns, rows: (q.items || []).map(i => i.is_comment ? commentRowPdf(i.product_name, cols, 1) : i.serial_number ? commentRowPdf(`Serial: ${i.serial_number}`, cols, 1) : ({
+      cells: cells(i),
+      sub: lineDiscountLabel(i) || (parseFloat(i.discount_amount) > 0 ? `Price includes ${fmt(i.discount_amount)} discount` : ''),
     })) }],
     totals: [
-      { label: 'Subtotal', value: fmt(q.subtotal) },
-      parseFloat(q.discount_amount) > 0 ? { label: 'Discount', value: `-${fmt(q.discount_amount)}`, style: 'green' } : null,
+      { label: 'Subtotal', value: fmt(totals.subtotal) },
+      totals.discount > 0 ? { label: 'Discount', value: `-${fmt(totals.discount)}`, style: 'green' } : null,
       { label: 'Tax', value: fmt(q.tax_amount) },
       { label: 'TOTAL', value: fmt(q.total), style: 'grand' },
     ],
