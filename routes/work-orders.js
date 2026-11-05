@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { CUSTOMER_SALESPERSON_SQL } = require('../lib/salesCredit');
 const { requirePermission, requireAnyPermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { processWorkOrderItems, processWorkOrderPartSourcing } = require('../lib/workOrders');
@@ -632,7 +633,7 @@ router.patch('/:id/assessment-paid', requireAnyPermission('wo_assess', 'pos'), a
     const tx = await db.transaction('write');
     let committed = false;
     try {
-      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, wo.customer_id, employee_id || null, branch_id || wo.branch_id || null, drawer_session_id || null, subtotal, taxAmt, total, method, tendered, changeAmt, `Work order assessment fee ${wo.wo_number}`, 'pos'] });
+      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,salesperson_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,${CUSTOMER_SALESPERSON_SQL},?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, wo.customer_id, employee_id || null, wo.customer_id, branch_id || wo.branch_id || null, drawer_session_id || null, subtotal, taxAmt, total, method, tendered, changeAmt, `Work order assessment fee ${wo.wo_number}`, 'pos'] });
       const txId = Number(txResult.lastInsertRowid);
       await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?)`, args: [txId, wo.assessment_fee_name || 'Assessment Fee', 'WO-ASSESS', 1, subtotal, taxAmt, subtotal] });
       await tx.execute({ sql: `UPDATE work_orders SET assessment_transaction_id = ?, status = 'assessed' WHERE id = ?`, args: [txId, req.params.id] });
@@ -713,7 +714,7 @@ router.patch('/:id/deposit-paid', requireAnyPermission('wo_assess', 'pos'), asyn
     const tx = await db.transaction('write');
     let committed = false;
     try {
-      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, wo.customer_id, employee_id || null, branch_id || wo.branch_id || null, drawer_session_id || null, total, 0, total, method, tendered, changeAmt, `Work order deposit ${wo.wo_number}`, 'pos'] });
+      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,salesperson_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,${CUSTOMER_SALESPERSON_SQL},?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, wo.customer_id, employee_id || null, wo.customer_id, branch_id || wo.branch_id || null, drawer_session_id || null, total, 0, total, method, tendered, changeAmt, `Work order deposit ${wo.wo_number}`, 'pos'] });
       const txId = Number(txResult.lastInsertRowid);
       await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?)`, args: [txId, 'Deposit', 'WO-DEPOSIT', 1, total, 0, total] });
       await tx.execute({ sql: `UPDATE work_orders SET deposit_transaction_id = ?, status = 'in_progress' WHERE id = ?`, args: [txId, req.params.id] });
@@ -929,7 +930,7 @@ router.patch('/:id/final-payment', requireAnyPermission('wo_assess', 'pos'), asy
         const tendered = parseFloat(amount_tendered || balance);
         const changeAmt = Math.max(0, parseFloat((tendered - balance).toFixed(2)));
         const transaction_number = await nextNumber(db, 'transactions', 'transaction_number', 'TXN-', 6);
-        const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, wo.customer_id, employee_id || null, branch_id || wo.branch_id || null, drawer_session_id || null, subtotal, taxTotal, balance, method, tendered, changeAmt, `Work order final payment ${wo.wo_number}`, 'pos'] });
+        const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,salesperson_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,${CUSTOMER_SALESPERSON_SQL},?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, wo.customer_id, employee_id || null, wo.customer_id, branch_id || wo.branch_id || null, drawer_session_id || null, subtotal, taxTotal, balance, method, tendered, changeAmt, `Work order final payment ${wo.wo_number}`, 'pos'] });
         txId = Number(txResult.lastInsertRowid);
         await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?)`, args: [txId, 'Work Order Balance', 'WO-FINAL', 1, subtotal, taxTotal, subtotal] });
       }

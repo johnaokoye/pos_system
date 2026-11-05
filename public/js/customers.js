@@ -288,6 +288,9 @@ Object.assign(App, {
             <div id="cf-contacts">${contactRows.map(ct => this._customerContactRowHtml(ct)).join('')}</div>
             <button type="button" class="btn btn-secondary btn-sm" onclick="App._addCustomerContactRow()">+ Add Contact</button>
           </div>
+          <div class="form-group"><label>Salesperson</label>
+            <select id="cf-salesperson" data-current="${c.salesperson_id||''}" ${this.can('sales_manager') ? '' : 'disabled'} title="Owns this customer's transactions: they count toward this person's sales targets and commission"><option value="">None</option></select>
+          </div>
           <div class="form-group"><label>Notes</label><textarea id="cf-notes" rows="2">${c.notes||''}</textarea></div>
           <div class="form-group">
             <label>Customer Type</label>
@@ -448,6 +451,7 @@ Object.assign(App, {
           <button class="btn btn-primary" onclick="App.saveCustomer(${id||'null'})">Save</button>
         </div>
       </div>`);
+    this._loadCustomerSalespeople();
   },
 
   toggleCreditFields() {
@@ -610,6 +614,19 @@ Object.assign(App, {
     document.getElementById('cf-addr-label').textContent = isBusiness ? 'Business Address' : 'Address';
   },
 
+  // Fills the customer form's Salesperson box; a current owner who's no longer
+  // an active Salesperson stays listed, since they're still what's saved.
+  async _loadCustomerSalespeople() {
+    const sel = document.getElementById('cf-salesperson');
+    if (!sel) return;
+    const people = await this.api('GET', '/sales-targets/salespeople').catch(() => []);
+    const current = sel.dataset.current;
+    const options = people.map(p => `<option value="${p.id}">${this.escapeAttr(`${p.first_name} ${p.last_name}`.trim())}</option>`);
+    if (current && !people.some(p => String(p.id) === current)) options.push(`<option value="${current}">Employee #${current} (not an active Salesperson)</option>`);
+    sel.insertAdjacentHTML('beforeend', options.join(''));
+    sel.value = current;
+  },
+
   async saveCustomer(id, opts = {}) {
     const customerType = document.getElementById('cf-type')?.value || 'cash';
     const taxExempt = document.getElementById('cf-tax-exempt')?.checked ? 1 : 0;
@@ -658,6 +675,7 @@ Object.assign(App, {
       cash_back_card_type_id: document.getElementById('cf-cash-back-card-type')?.value || null,
       cash_back_card_number: document.getElementById('cf-cash-back-card-number')?.value.trim() || null,
       customer_category_id: document.getElementById('cf-category')?.value || null,
+      ...(this.can('sales_manager') ? { salesperson_id: document.getElementById('cf-salesperson')?.value || null } : {}),
     };
     if (customerKind === 'business' && !data.business_name) { this.alert('Business name is required', 'error'); return; }
     if (customerKind === 'individual' && (!data.first_name || !data.last_name)) { this.alert('First and last name required', 'error'); return; }

@@ -3,6 +3,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { requireAuth, requirePermission, requireAnyPermission } = require('../lib/permissions');
 const { SERIAL_NUMBER_SKU } = require('../lib/serialNumber');
+const { refreshStoreTz, storeToday, storeOffsetModifier } = require('../lib/storeTime');
 const { oldestOpenLegacySql, oldestUnpaidSaleSql, earliestDate } = require('../lib/legacyInvoices');
 
 // Sales summary for a date range
@@ -163,8 +164,13 @@ router.get('/dashboard', requireAuth, async (req, res) => {
     const ef = mine ? ' AND COALESCE(t.salesperson_id, t.created_by, t.employee_id) = ?' : '';
     const ep = mine ? [req.employee.id] : [];
 
-    const { rows: [todayStats] } = await db.execute({ sql: `SELECT COUNT(*) as transactions, COALESCE(SUM(total),0) as sales FROM transactions t WHERE t.status='completed' AND date(t.created_at) = date(?) ${warehouseExclude}${bf}${ef}`, args: [today, ...bp, ...ep] });
-    const { rows: [monthStats] } = await db.execute({ sql: `SELECT COUNT(*) as transactions, COALESCE(SUM(total),0) as sales FROM transactions t WHERE t.status='completed' AND date(t.created_at) >= date(?) ${warehouseExclude}${bf}${ef}`, args: [monthStart, ...bp, ...ep] });
+    // Today, this month and the 7-day chart are on the store clock, so they
+    // agree with the salesperson target meters.
+    await refreshStoreTz();
+    const storeOffset = storeOffsetModifier();
+    const storeDayToday = storeToday();
+    const { rows: [todayStats] } = await db.execute({ sql: `SELECT COUNT(*) as transactions, COALESCE(SUM(total),0) as sales FROM transactions t WHERE t.status='completed' AND date(t.created_at, ?) = date(?) ${warehouseExclude}${bf}${ef}`, args: [storeOffset, storeDayToday, ...bp, ...ep] });
+    const { rows: [monthStats] } = await db.execute({ sql: `SELECT COUNT(*) as transactions, COALESCE(SUM(total),0) as sales FROM transactions t WHERE t.status='completed' AND date(t.created_at, ?) >= date(?) ${warehouseExclude}${bf}${ef}`, args: [storeOffset, `${storeDayToday.slice(0, 7)}-01`, ...bp, ...ep] });
     const { rows: [totalCustomers] } = await db.execute({ sql: 'SELECT COUNT(*) as count FROM customers WHERE active=1', args: [] });
     // Mirrors the /inventory report's low-stock logic (branch_inventory rows,
     // falling back to products.stock_qty only for products with no branch
@@ -179,7 +185,7 @@ router.get('/dashboard', requireAuth, async (req, res) => {
           AND NOT EXISTS (SELECT 1 FROM branch_inventory bi2 JOIN branches b2 ON bi2.branch_id = b2.id WHERE bi2.product_id = p.id AND b2.active = 1)
       )`, args: [] });
     const { rows: recentTx } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id WHERE 1=1 ${warehouseExclude}${bf}${ef} ORDER BY t.created_at DESC LIMIT 5`, args: [...bp, ...ep] });
-    const { rows: last7Days } = await db.execute({ sql: `SELECT date(t.created_at) as date, COALESCE(SUM(t.total),0) as sales, COUNT(*) as transactions FROM transactions t WHERE t.status='completed' AND date(t.created_at) >= date('now', '-6 days') ${warehouseExclude}${bf}${ef} GROUP BY date(t.created_at) ORDER BY date`, args: [...bp, ...ep] });
+    const { rows: last7Days } = await db.execute({ sql: `SELECT date(t.created_at, ?) as date, COALESCE(SUM(t.total),0) as sales, COUNT(*) as transactions FROM transactions t WHERE t.status='completed' AND date(t.created_at, ?) >= date(?, '-6 days') ${warehouseExclude}${bf}${ef} GROUP BY date(t.created_at, ?) ORDER BY date`, args: [storeOffset, storeOffset, storeDayToday, ...bp, ...ep, storeOffset] });
 
     // Cross-branch/company performance has no place on a salesperson's
     // personal view — only computed for everyone else.

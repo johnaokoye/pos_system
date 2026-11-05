@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { calcCommission } = require('./commissions');
+const { customerSalesperson } = require('../lib/salesCredit');
 const { getWcSettings, wcRequest } = require('./woocommerce');
 const { syncBinQty } = require('../lib/binSync');
 const { requireAuth, requirePermission, requireAnyPermission, can } = require('../lib/permissions');
@@ -40,14 +41,17 @@ async function resolveSalesperson(salespersonId) {
   return sp.id;
 }
 
-// Who a sale is credited to for sales targets: the person who started the
+// Who a sale is credited to for sales targets: the customer's assigned
+// salesperson (lib/salesCredit.js) above all; then the person who started the
 // ticket when they're a Salesperson (a hold they put up, their quote, a sale
 // they rang up themselves) — not the cashier who finishes it or whoever the
 // cashier picks; otherwise the Salesperson picked on the ticket. Stored in
 // salesperson_id; reads use CREDITED_SQL so a sale with none falls back to
 // whoever started it, then the cashier. A sales manager can change it after
 // the sale (PATCH /salesperson).
-async function ticketSalesperson(initiatorId, pickedId) {
+async function ticketSalesperson(initiatorId, pickedId, customerId) {
+  const owner = await customerSalesperson(db, customerId);
+  if (owner) return owner;
   if (initiatorId) {
     const { rows: [sp] } = await db.execute({ sql: 'SELECT id FROM employees WHERE id = ? AND is_salesperson = 1 AND active = 1', args: [initiatorId] });
     if (sp) return sp.id;
@@ -98,7 +102,7 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
     const discountSource = ['manual', 'promo_code', 'auto_promo', 'card'].includes(req.body.discount_source) ? req.body.discount_source : null;
     const ticketPct = discountSource === 'manual' ? Math.min(100, Math.max(0, parseFloat(req.body.ticket_discount_percent) || 0)) || null : null;
     let salespersonId;
-    try { salespersonId = await ticketSalesperson(created_by || employee_id, req.body.salesperson_id); } catch (e) { return res.status(400).json({ error: e.message }); }
+    try { salespersonId = await ticketSalesperson(created_by || employee_id, req.body.salesperson_id, customer_id); } catch (e) { return res.status(400).json({ error: e.message }); }
 
     const hold_number = 'HOLD-' + Date.now();
     // A line's manual % discount (and who overrode the store limit) is kept
@@ -464,7 +468,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       if (!poNumber) poNumber = q?.po_number || null;
     }
     createdBy = createdBy || employee_id || 1;
-    try { salespersonId = await ticketSalesperson(createdBy, req.body.salesperson_id); } catch (e) { return res.status(400).json({ error: e.message }); }
+    try { salespersonId = await ticketSalesperson(createdBy, req.body.salesperson_id, customer_id); } catch (e) { return res.status(400).json({ error: e.message }); }
 
     // Store-wide cap for a manual per-line discount (see the POS "Discount"
     // action on a cart line) — the same Maximum Discount (max_discount_pct)

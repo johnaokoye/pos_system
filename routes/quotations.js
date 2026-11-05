@@ -1052,7 +1052,7 @@ router.post('/:id/convert', async (req, res) => {
     const convTx = await db.transaction('write');
     let committed = false;
     try {
-      const result = await convTx.execute({ sql: 'INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,subtotal,tax_amount,discount_amount,total,payment_method,status,amount_tendered,change_amount,notes,po_number) VALUES (?,?,?,?,?,?,?,?,?,?,0,0,?,?)', args: [hold_number, quote.customer_id, employee_id||quote.employee_id||1, branch_id||quote.branch_id||null, quote.subtotal, quote.tax_amount, quote.discount_amount, quote.total, 'hold', 'hold', `Converted from quotation ${quote.quote_number}`, quote.po_number || null] });
+      const result = await convTx.execute({ sql: 'INSERT INTO transactions (transaction_number,customer_id,employee_id,created_by,branch_id,subtotal,tax_amount,discount_amount,total,payment_method,status,amount_tendered,change_amount,notes,po_number) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,0,?,?)', args: [hold_number, quote.customer_id, employee_id||quote.employee_id||1, quote.original_employee_id||quote.employee_id||null, branch_id||quote.branch_id||null, quote.subtotal, quote.tax_amount, quote.discount_amount, quote.total, 'hold', 'hold', `Converted from quotation ${quote.quote_number}`, quote.po_number || null] });
       const txId = Number(result.lastInsertRowid);
 
       for (const item of items) {

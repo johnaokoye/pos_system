@@ -2,25 +2,22 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { requireAuth, requirePermission, can } = require('../lib/permissions');
+const { sumSalesByPeriod } = require('../lib/salesCredit');
+const { refreshStoreTz, toDate } = require('../lib/storeTime');
 
 // "Current sales" per period go to whoever the sale is credited to:
 // transactions.salesperson_id (the Salesperson who started the ticket, or the
 // one picked on it, or set afterwards by a sales manager — see
 // ticketSalesperson in routes/transactions.js), else whoever started the
 // ticket (created_by), else whoever rang it up (employee_id) — the same
-// person the sale's commission goes to. Bounded to the last 31 days so the query never has to scan a
-// store's full transaction history just to answer "what happened this
-// hour/day/week/month" — 31 days safely covers the current month from
-// any day within it.
+// person the sale's commission goes to. Periods are on the store clock
+// (lib/salesCredit.js). Bounded to the last 32 days so the query never has to
+// scan a store's full transaction history; that covers the current month from
+// any day within it, on the store clock too.
 const CURRENT_SALES_SELECT = `
-  SELECT COALESCE(salesperson_id, created_by, employee_id) as employee_id,
-    COALESCE(SUM(CASE WHEN strftime('%Y-%m-%d %H', created_at) = strftime('%Y-%m-%d %H', 'now') THEN total ELSE 0 END), 0) as hourly_sales,
-    COALESCE(SUM(CASE WHEN date(created_at) = date('now') THEN total ELSE 0 END), 0) as daily_sales,
-    COALESCE(SUM(CASE WHEN strftime('%Y-%W', created_at) = strftime('%Y-%W', 'now') THEN total ELSE 0 END), 0) as weekly_sales,
-    COALESCE(SUM(CASE WHEN strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now') THEN total ELSE 0 END), 0) as monthly_sales
+  SELECT COALESCE(salesperson_id, created_by, employee_id) as employee_id, total, created_at
   FROM transactions
-  WHERE status = 'completed' AND COALESCE(salesperson_id, created_by, employee_id) IS NOT NULL AND date(created_at) >= date('now', '-31 days')
-  GROUP BY COALESCE(salesperson_id, created_by, employee_id)`;
+  WHERE status = 'completed' AND COALESCE(salesperson_id, created_by, employee_id) IS NOT NULL AND date(created_at) >= date('now', '-32 days')`;
 
 // A plain salesperson (no sales_manager/reports) only ever sees their own
 // numbers, regardless of what they ask for — same "mine" scoping pattern
@@ -56,8 +53,7 @@ router.get('/', requireAuth, async (req, res) => {
       args: ep,
     });
     const { rows: salesRows } = await db.execute({ sql: CURRENT_SALES_SELECT, args: [] });
-    const salesMap = {};
-    for (const row of salesRows) salesMap[row.employee_id] = row;
+    const salesMap = sumSalesByPeriod(salesRows.map(r => ({ ...r, created_at: toDate(r.created_at) })), new Date(), await refreshStoreTz());
 
     for (const emp of employees) {
       const sales = salesMap[emp.id] || { hourly_sales: 0, daily_sales: 0, weekly_sales: 0, monthly_sales: 0 };

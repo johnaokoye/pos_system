@@ -431,6 +431,26 @@ function normalizeCustomerType(t) {
 // unchanged; a cash customer's hidden limit/terms are ignored). Returns
 // { type, terms, limit } to save, or { error }.
 const CREDIT_PERMISSION_ERROR = 'Changing a customer between Cash and Credit, or a credit limit or terms, needs the Manage Credit Limits permission';
+// customers.salesperson_id on create/edit: only sales_manager can change it,
+// because it moves targets and commission. Returns { unchanged: true } when the
+// request doesn't change it, { id } to set it, or { error, status }.
+async function resolveCustomerSalesperson(req, customerId) {
+  if (!('salesperson_id' in req.body)) return { unchanged: true };
+  const id = req.body.salesperson_id ? Number(req.body.salesperson_id) : null;
+  let current = null;
+  if (customerId) {
+    const { rows: [row] } = await db.execute({ sql: 'SELECT salesperson_id FROM customers WHERE id = ?', args: [customerId] });
+    current = row?.salesperson_id ?? null;
+  }
+  if (id === current) return { unchanged: true };
+  if (!req.apiKey && !can(req.employee?.permissions, 'sales_manager')) return { error: 'Missing permission: sales_manager (assign a salesperson)', status: 403 };
+  if (id) {
+    const { rows: [sp] } = await db.execute({ sql: 'SELECT id FROM employees WHERE id = ? AND active = 1 AND is_salesperson = 1', args: [id] });
+    if (!sp) return { error: 'The selected salesperson is not an active Salesperson', status: 400 };
+  }
+  return { id };
+}
+
 function resolveCreditFields(req, body, existing) {
   const wanted = {
     type: normalizeCustomerType(body.customer_type),
@@ -968,6 +988,8 @@ router.post('/', requirePermission('customers_add'), async (req, res) => {
     if (cardError) return res.status(400).json({ error: cardError });
     const cashBackCardError = await validateCashBackCard(cash_back_card_type_id, cash_back_card_number, null);
     if (cashBackCardError) return res.status(400).json({ error: cashBackCardError });
+    const assignedSalesperson = await resolveCustomerSalesperson(req, null);
+    if (assignedSalesperson.error) return res.status(assignedSalesperson.status).json({ error: assignedSalesperson.error });
     const credit = resolveCreditFields(req, req.body, null);
     if (credit.error) return res.status(403).json({ error: credit.error });
     const customer_number = await nextNumber(db, 'customers', 'customer_number', 'CUST-', 4);
@@ -999,6 +1021,7 @@ router.post('/', requirePermission('customers_add'), async (req, res) => {
     await syncPhoneKeys(db, newId, phone);
     if (names) await db.execute({ sql: 'UPDATE customers SET customer_kind = ?, business_name = ? WHERE id = ?', args: [names.kind, names.business_name, newId] });
     if (contactSet) await saveContacts(newId, contactSet.rows);
+    if (!assignedSalesperson.unchanged) await db.execute({ sql: 'UPDATE customers SET salesperson_id = ? WHERE id = ?', args: [assignedSalesperson.id, newId] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [newId] });
     res.status(201).json(row);
   } catch (e) {
@@ -1033,6 +1056,8 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
     if (cashBackCardError) return res.status(400).json({ error: cashBackCardError });
     const { rows: [existing] } = await db.execute({ sql: 'SELECT phone, email, rental_preapproved, rental_preapproved_by, rental_preapproved_at, customer_type, credit_terms_days, credit_limit FROM customers WHERE id = ?', args: [req.params.id] });
     if (!existing) return res.status(404).json({ error: 'Customer not found' });
+    const assignedSalesperson = await resolveCustomerSalesperson(req, req.params.id);
+    if (assignedSalesperson.error) return res.status(assignedSalesperson.status).json({ error: assignedSalesperson.error });
     const credit = resolveCreditFields(req, req.body, existing);
     if (credit.error) return res.status(403).json({ error: credit.error });
     // Changing a customer's phone/email to one another active customer
@@ -1076,6 +1101,7 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
     } else {
       await runCreditCheck(req.params.id);
     }
+    if (!assignedSalesperson.unchanged) await db.execute({ sql: 'UPDATE customers SET salesperson_id = ? WHERE id = ?', args: [assignedSalesperson.id, req.params.id] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.id] });
     res.json(row);
   } catch(e) { res.status(500).json({ error: e.message }); }

@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { CUSTOMER_SALESPERSON_SQL } = require('../lib/salesCredit');
 const { getOutstandingQty, getOutOfServiceQty } = require('../lib/rentalAvailability');
 const { blockedMessage, creditLimitError } = require('../lib/creditBlock');
 const { depositWaiver, isCreditCustomerType, getBranchStock, feeFor, blendedFeePerUnit, checkAvailability, parseDbTime, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, assertNoUnpaidRentalReturns, dueDateTime, requiredDepositReturnMethod, rentalDiscount, rentalTaxAfterDiscount, attachRateBasis, rentalWindow, rateLineOf } = require('../lib/rentals');
@@ -594,14 +595,14 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
     const tx = await db.transaction('write');
     let committed = false;
     try {
-      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,total,payment_method,amount_tendered,change_amount,notes,source,approval_code,discount_pre_tax) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)`, args: [transaction_number, agreement.customer_id, finalizeEmployeeId || null, agreement.branch_id, drawer_session_id || null, rentalSubtotal + depositTotal + serviceFeesTotal, taxAmount, discountAmount, total, method, tendered, changeAmt, `Rental checkout ${agreement.agreement_number}`, 'pos', approvalCode] });
+      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,salesperson_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,total,payment_method,amount_tendered,change_amount,notes,source,approval_code,discount_pre_tax) VALUES (?,?,?,${CUSTOMER_SALESPERSON_SQL},?,?,?,?,?,?,?,?,?,?,?,?,1)`, args: [transaction_number, agreement.customer_id, finalizeEmployeeId || null, agreement.customer_id, agreement.branch_id, drawer_session_id || null, rentalSubtotal + depositTotal + serviceFeesTotal, taxAmount, discountAmount, total, method, tendered, changeAmt, `Rental checkout ${agreement.agreement_number}`, 'pos', approvalCode] });
       const checkoutTxId = Number(txResult.lastInsertRowid);
       // Per-leg rows are what drawer reconciliation and the tender reports
       // sum for a split sale (single-method checkouts fall back to
       // transactions.payment_method there, as before).
       if (tenderLegs) {
         for (const leg of tenderLegs) {
-          await tx.execute({ sql: 'INSERT INTO transaction_payments (transaction_id, payment_method, amount, approval_code) VALUES (?,?,?,?)', args: [checkoutTxId, leg.payment_method, leg.amount, leg.approval_code] });
+          await tx.execute({ sql: 'INSERT INTO transaction_payments (transaction_id, payment_method, amount, approval_code) VALUES (?,?,?,${CUSTOMER_SALESPERSON_SQL},?)', args: [checkoutTxId, leg.payment_method, leg.amount, leg.approval_code] });
         }
       }
 
@@ -2103,7 +2104,7 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
       if (!needsCashierHold) {
         const transaction_number = await nextNumber(tx, 'transactions', 'transaction_number', 'TXN-', 6);
         const method = checkoutIsCredit ? 'credit' : (settlementAmount >= 0 ? (payment_method || 'cash') : 'refund');
-        const settleResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, agreement.customer_id, agreement.employee_id, agreement.branch_id, drawer_session_id || null, settlementSubtotal, taxAdjustmentTotal, settlementAmount, method, 0, 0, `Rental settlement ${agreement.agreement_number}`, 'pos'] });
+        const settleResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,salesperson_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,${CUSTOMER_SALESPERSON_SQL},?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, agreement.customer_id, agreement.employee_id, agreement.customer_id, agreement.branch_id, drawer_session_id || null, settlementSubtotal, taxAdjustmentTotal, settlementAmount, method, 0, 0, `Rental settlement ${agreement.agreement_number}`, 'pos'] });
         settlementTxId = Number(settleResult.lastInsertRowid);
 
         if (durationAdjustmentTotal !== 0) {
@@ -2209,11 +2210,11 @@ router.patch('/agreements/:id/collect-balance', (req, res, next) => {
       const changeAmt = tenderLegs ? 0 : Math.max(0, parseFloat((tendered - balance).toFixed(2)));
       const approvalCode = tenderLegs && tenderLegs.length === 1 ? tenderLegs[0].approval_code : null;
       const transaction_number = await nextNumber(tx, 'transactions', 'transaction_number', 'TXN-', 6);
-      const settleResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source,approval_code) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, agreement.customer_id, employee_id || agreement.employee_id, branch_id || agreement.branch_id, drawer_session_id || null, parseFloat((balance - agreement.tax_adjustment_total).toFixed(2)), agreement.tax_adjustment_total, balance, method, tendered, changeAmt, `Rental settlement ${agreement.agreement_number}`, 'pos', approvalCode] });
+      const settleResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,salesperson_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source,approval_code) VALUES (?,?,?,${CUSTOMER_SALESPERSON_SQL},?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, agreement.customer_id, employee_id || agreement.employee_id, agreement.customer_id, branch_id || agreement.branch_id, drawer_session_id || null, parseFloat((balance - agreement.tax_adjustment_total).toFixed(2)), agreement.tax_adjustment_total, balance, method, tendered, changeAmt, `Rental settlement ${agreement.agreement_number}`, 'pos', approvalCode] });
       settlementTxId = Number(settleResult.lastInsertRowid);
       if (tenderLegs) {
         for (const leg of tenderLegs) {
-          await tx.execute({ sql: 'INSERT INTO transaction_payments (transaction_id, payment_method, amount, approval_code) VALUES (?,?,?,?)', args: [settlementTxId, leg.payment_method, leg.amount, leg.approval_code] });
+          await tx.execute({ sql: 'INSERT INTO transaction_payments (transaction_id, payment_method, amount, approval_code) VALUES (?,?,?,${CUSTOMER_SALESPERSON_SQL},?)', args: [settlementTxId, leg.payment_method, leg.amount, leg.approval_code] });
         }
       }
 

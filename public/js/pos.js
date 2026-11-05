@@ -1539,14 +1539,16 @@ Object.assign(App, {
   _renderTicketSalesperson() {
     const sel = document.getElementById('pos-salesperson');
     if (!sel) return;
-    // A ticket started by a Salesperson — a hold they put up, their quote,
-    // or one they're ringing up themselves — is theirs; the cashier can't
+    // The customer's assigned salesperson owns the sale. Otherwise a ticket
+    // started by a Salesperson — a hold they put up, their quote, or one
+    // they're ringing up themselves — is theirs. Either way the cashier can't
     // hand it to someone else (the server applies the same rule, see
     // ticketSalesperson in routes/transactions.js).
     const initiatorId = this._ticketCreatedBy || this.currentUser?.id;
-    const initiator = (this._posSalespeople || []).find(sp => sp.id === initiatorId);
+    const owner = (this._posSalespeople || []).find(sp => sp.id === this.cartCustomer?.salesperson_id);
+    const initiator = owner || (this._posSalespeople || []).find(sp => sp.id === initiatorId);
     sel.disabled = !!initiator;
-    sel.title = initiator ? `Started by ${`${initiator.first_name} ${initiator.last_name}`.trim()} — the sale is credited to them` : '';
+    sel.title = owner ? `This customer's salesperson — the sale is credited to them` : initiator ? `Started by ${`${initiator.first_name} ${initiator.last_name}`.trim()} — the sale is credited to them` : '';
     if (initiator) {
       sel.innerHTML = `<option value="${initiator.id}">${this.escapeAttr(`${initiator.first_name} ${initiator.last_name}`.trim())}</option>`;
       sel.value = String(initiator.id);
@@ -1609,6 +1611,7 @@ Object.assign(App, {
   },
 
   renderCart() {
+    this._renderTicketSalesperson();
     const list = document.getElementById('cart-items-list');
     const totals = document.getElementById('cart-totals');
     if (!list || !totals) return;
@@ -3040,6 +3043,7 @@ Object.assign(App, {
       this._storeCreditApplied = 0;
       this._cashBackApplied = 0;
       this._renderCartCustomer();
+      this._renderTicketSalesperson();
       const bar = document.getElementById('store-credit-bar');
       const bal = parseFloat(c.account_balance || 0);
       // account_balance is a receivable (positive = customer owes the

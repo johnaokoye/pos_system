@@ -2954,6 +2954,8 @@ async function _init() {
     'ALTER TABLE quotation_items ADD COLUMN rent_period_unit TEXT',
     'ALTER TABLE quotation_items ADD COLUMN discount_percent REAL',
     'ALTER TABLE quotation_items ADD COLUMN discount_applied INTEGER NOT NULL DEFAULT 0',
+    // The salesperson who owns this customer's transactions (lib/salesCredit.js).
+    'ALTER TABLE customers ADD COLUMN salesperson_id INTEGER REFERENCES employees(id)',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

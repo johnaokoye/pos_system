@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { CUSTOMER_SALESPERSON_SQL } = require('../lib/salesCredit');
 const { resolveUnit, lineName, parseQty, stockUnits } = require('../lib/units');
 const { syncBinQty } = require('../lib/binSync');
 const { requirePermission } = require('../lib/permissions');
@@ -119,7 +120,7 @@ router.post('/plans', requirePermission('layaway_create'), async (req, res) => {
     const tx = await db.transaction('write');
     let committed = false;
     try {
-      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id, employee_id || null, branch_id, drawer_session_id || null, tendered, 0, tendered, payment_method || 'cash', tendered, 0, `Layaway deposit ${plan_number}`, 'pos'] });
+      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,salesperson_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,${CUSTOMER_SALESPERSON_SQL},?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id, employee_id || null, customer_id, branch_id, drawer_session_id || null, tendered, 0, tendered, payment_method || 'cash', tendered, 0, `Layaway deposit ${plan_number}`, 'pos'] });
       const depositTxId = Number(txResult.lastInsertRowid);
       await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?,?)`, args: [depositTxId, null, `Layaway Deposit — ${lines.length} item(s)`, 'LAYAWAY-DEPOSIT', 1, tendered, 0, tendered] });
 
@@ -176,7 +177,7 @@ router.patch('/plans/:id/payments', requirePermission('layaway_payments'), async
     const tx = await db.transaction('write');
     let committed = false;
     try {
-      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, plan.customer_id, employee_id || null, plan.branch_id, drawer_session_id || null, amt, 0, amt, payment_method || 'cash', amt, 0, `Layaway payment ${plan.plan_number}`, 'pos'] });
+      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,salesperson_id,branch_id,drawer_session_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,${CUSTOMER_SALESPERSON_SQL},?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, plan.customer_id, employee_id || null, plan.customer_id, plan.branch_id, drawer_session_id || null, amt, 0, amt, payment_method || 'cash', amt, 0, `Layaway payment ${plan.plan_number}`, 'pos'] });
       const payTxId = Number(txResult.lastInsertRowid);
       await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?,?)`, args: [payTxId, null, `Layaway Payment — ${plan.plan_number}`, 'LAYAWAY-PAYMENT', 1, amt, 0, amt] });
 
@@ -238,7 +239,7 @@ router.patch('/plans/:id/cancel', requirePermission('layaway_cancel'), async (re
       }
 
       if (refunded > 0) {
-        const refundResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,branch_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, args: [refundTxNumber, plan.customer_id, employee_id || null, plan.branch_id, -refunded, 0, -refunded, 'refund', 0, 0, `Layaway cancellation refund ${plan.plan_number}`, 'pos'] });
+        const refundResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,salesperson_id,branch_id,subtotal,tax_amount,total,payment_method,amount_tendered,change_amount,notes,source) VALUES (?,?,?,${CUSTOMER_SALESPERSON_SQL},?,?,?,?,?,?,?,?,?)`, args: [refundTxNumber, plan.customer_id, employee_id || null, plan.customer_id, plan.branch_id, -refunded, 0, -refunded, 'refund', 0, 0, `Layaway cancellation refund ${plan.plan_number}`, 'pos'] });
         const refundTxId = Number(refundResult.lastInsertRowid);
         await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?,?)`, args: [refundTxId, null, `Layaway Refund — ${plan.plan_number}`, 'LAYAWAY-REFUND', 1, -refunded, 0, -refunded] });
       }
