@@ -1,17 +1,15 @@
 # ---- Stage 1: resolve the build's git commit ----
-# Only this stage ever sees .git (needed to read the current commit) — the
-# runtime stage below copies its filesystem from here *after* .git is
-# deleted, so .git itself never lands in any layer that actually ships.
-# Works automatically for both a local `docker compose build` and
-# Portainer's Git-repository stacks (which clone the real repo, .git
-# included) — no env var or command-line flag to remember either way.
-# Building from a source with no .git (e.g. GitHub's "Download ZIP") just
-# yields "unknown" here, same as any other build-info-unavailable case.
+# Only this stage ever sees .git — the runtime stage below copies its
+# filesystem from here *after* .git is deleted, so .git itself never lands in
+# any layer that actually ships. A local `docker compose build` reads .git;
+# a Portainer Git stack has none (Portainer deletes it after cloning), so
+# scripts/build-commit.sh compares the source with GitHub's master instead.
+# No env var or command-line flag to remember either way.
 FROM node:20-alpine AS build
 WORKDIR /app
 COPY . .
 RUN apk add --no-cache git \
-    && (git rev-parse --short HEAD > .build-commit 2>/dev/null || echo unknown > .build-commit) \
+    && sh scripts/build-commit.sh > .build-commit \
     && rm -rf .git
 
 FROM node:20-alpine

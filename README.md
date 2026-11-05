@@ -10,14 +10,14 @@ docker compose up -d --build
 
 **Always update the checkout before rebuilding** — `--build` only rebuilds from whatever source is already on disk in this directory; it does not pull anything. Run `git pull` (or `git fetch && git reset --hard origin/master`) first, every time.
 
-The running app shows exactly which commit it was built from — in Settings and on the login screen (`Build: <short sha>`) — so a stale deploy is obvious instead of silently running old code. This is detected automatically at build time from `.git` (see the Dockerfile's `build` stage), no env var or extra flag needed; it only shows "unknown" if the image was built from a source with no `.git` at all (e.g. GitHub's "Download ZIP" instead of a clone).
+The running app shows exactly which commit it was built from — in Settings and on the login screen (`Build: <short sha>`) — so a stale deploy is obvious instead of silently running old code. This is detected automatically at build time (`scripts/build-commit.sh`), no env var or extra flag needed. It reads `.git` when there is one. Portainer deletes `.git` after cloning, so otherwise the build compares its source with the latest `master` on GitHub and uses that commit if they match. It shows "unknown" if they don't match (the source is older or newer than `master`, or was changed) or GitHub can't be reached during the build.
 
 ### Deploying via Portainer
 
 This repo is deployed as a Portainer **Git repository** stack (Repository URL + branch, not a pasted/uploaded `docker-compose.yml`) — that's what makes "redeploy" actually fetch new code instead of reusing whatever Portainer cloned last time:
 
 1. When updating the stack, make sure whatever action you take actually re-pulls and rebuilds — Portainer's wording varies by version, but look for something like "Pull latest image"/"Re-clone repository" combined with a rebuild, not just "restart"/"redeploy existing containers". Enabling GitOps auto-updates (webhook, or polling on an interval) on the stack removes the manual step entirely — every push to `master` redeploys on its own.
-2. After it comes up, open the app and check `Build: <sha>` (Settings, or the login screen before signing in) against the latest commit on GitHub's `master` branch. If it doesn't match, the stack didn't actually pick up the new code — re-check step 1.
+2. After it comes up, open the app and check `Build: <sha>` (Settings, or the login screen before signing in) against the latest commit on GitHub's `master` branch. If it doesn't match or shows "unknown", the stack may not have picked up the new code — re-check step 1. Without `.git`, the number can't tell you which older version is running, and "unknown" can also mean `master` moved on during the build.
 
 ### Resetting the database
 
