@@ -373,8 +373,12 @@ router.post('/legacy-invoices', requirePermission('accounts_create'), async (req
       if (already) return res.json({ ...(await legacyInvoiceRow(already.id)), already_recorded: true });
     }
 
-    const { rows: [customer] } = await db.execute({ sql: 'SELECT id, first_name, last_name, credit_enabled, active FROM customers WHERE id = ?', args: [customer_id] });
+    const { rows: [customer] } = await db.execute({ sql: `SELECT c.id, c.first_name, c.last_name, c.credit_enabled, c.active, kept.customer_number AS merged_into_number
+      FROM customers c LEFT JOIN customers kept ON kept.id = c.merged_into_customer_id WHERE c.id = ?`, args: [customer_id] });
     if (!customer) return res.status(404).json({ error: `No POS customer with id ${customer_id}` });
+    // Inactive customers are left out of every search, so nobody could find them to collect it.
+    if (customer.merged_into_number) return res.status(400).json({ error: `${customer.first_name} ${customer.last_name} was merged into ${customer.merged_into_number} in the POS — enter the invoice on that customer` });
+    if (!customer.active) return res.status(400).json({ error: `${customer.first_name} ${customer.last_name} is inactive in the POS — reactivate them, and this invoice will go through on the next sync` });
     if (!customer.credit_enabled) return res.status(400).json({ error: `${customer.first_name} ${customer.last_name} isn't set up for credit in the POS — enable credit on their account (Accounts) first` });
     const number = String(invoice_number).trim();
     const { rows: [dup] } = await db.execute({ sql: "SELECT id FROM ar_legacy_invoices WHERE customer_id = ? AND invoice_number = ? AND status = 'open'", args: [customer_id, number] });

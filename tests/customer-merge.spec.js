@@ -68,12 +68,13 @@ test.describe('Merge Customer In', () => {
     const s = stamp();
     const keep = await customer(page, `Hidden ${s}`, { credit_limit: 300000 });
     const dup = await customer(page, `Hiddne ${s}`, { phone: s.slice(-10) });
-    // Deactivated with nothing owing, then an invoice arrives from Books: inactive and owing.
+    // Hidden with a balance, as existing records can be: deactivated with nothing owing, then a credit sale.
     await api(page, 'DELETE', `/customers/${keep.id}`);
-    await legacyInvoice(page, keep.id, 500);
+    const product = await page.evaluate(() => App.api('GET', '/products').then(ps => ps.find(p => !p.is_rental && !p.has_variations && p.stock_qty > 5 && p.price > 0)));
+    const sale = await api(page, 'POST', '/transactions', { customer_id: keep.id, items: [{ product_id: product.id, quantity: 1 }], branch_id: 1, employee_id: 1, payment_method: 'credit', amount_tendered: 0 });
 
     // Hidden from search, but what Books reads still answers.
-    expect((await api(page, 'GET', `/accounts/customer/${keep.id}/receivables`)).customer.account_balance).toBeCloseTo(500, 2);
+    expect((await api(page, 'GET', `/accounts/customer/${keep.id}/receivables`)).customer.account_balance).toBeCloseTo(sale.total, 2);
     await page.evaluate(() => App.showSection('customers'));
     await page.fill('#cust-search', keep.customer_number);
     await expect(page.locator('#cust-table')).not.toContainText(keep.customer_number);
@@ -90,7 +91,7 @@ test.describe('Merge Customer In', () => {
     await expect(row).toBeVisible();
     const back = await api(page, 'GET', `/customers/${keep.id}`);
     expect(back.active).toBeTruthy();
-    expect(back.account_balance).toBeCloseTo(500, 2);
+    expect(back.account_balance).toBeCloseTo(sale.total, 2);
     expect(back.customer_number).toBe(keep.customer_number);
     expect(await api(page, 'POST', '/customers/merge', { keep_id: keep.id, merge_ids: [dup.id] })).toMatchObject({ merged: 1 });
   });
@@ -129,6 +130,24 @@ test.describe('Merge Customer In', () => {
     // Saving them normally still works.
     await api(page, 'PUT', `/customers/${c.id}`, { ...full, city: 'Ocho Rios' });
     expect((await api(page, 'GET', `/customers/${c.id}`)).city).toBe('Ocho Rios');
+  });
+
+  test('a legacy invoice from Books is refused for an inactive or merged customer, then goes through once reactivated', async ({ page }) => {
+    const refused = id => page.evaluate(i => App.api('POST', '/accounts/legacy-invoices', { customer_id: i, invoice_number: `OLD-${Date.now()}`, invoice_date: '2026-10-21', amount: 100, external_id: 'books-invoice-retry' }).then(() => 'accepted', e => e.message), id);
+    const s = stamp();
+    const gone = await customer(page, `Inactive ${s}`);
+    await api(page, 'DELETE', `/customers/${gone.id}`);
+    expect(await refused(gone.id)).toContain('inactive');
+    expect((await api(page, 'GET', `/customers/${gone.id}`)).account_balance).toBe(0);
+
+    await api(page, 'POST', `/customers/${gone.id}/reactivate`);
+    expect(await refused(gone.id)).toBe('accepted');
+    expect((await api(page, 'GET', `/customers/${gone.id}`)).account_balance).toBeCloseTo(100, 2);
+
+    const keep = await customer(page, `MergeKeep ${s}`);
+    const merged = await customer(page, `MergeGone ${s}`);
+    await api(page, 'POST', '/customers/merge', { keep_id: keep.id, merge_ids: [merged.id] });
+    expect(await page.evaluate(i => App.api('POST', '/accounts/legacy-invoices', { customer_id: i, invoice_number: 'OLD-MERGED', invoice_date: '2026-10-21', amount: 100 }).then(() => 'accepted', e => e.message), merged.id)).toContain(keep.customer_number);
   });
 
   test('a customer with no balance can still be deactivated', async ({ page }) => {
