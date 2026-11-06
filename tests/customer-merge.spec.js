@@ -68,8 +68,9 @@ test.describe('Merge Customer In', () => {
     const s = stamp();
     const keep = await customer(page, `Hidden ${s}`, { credit_limit: 300000 });
     const dup = await customer(page, `Hiddne ${s}`, { phone: s.slice(-10) });
-    await legacyInvoice(page, keep.id, 500);
+    // Deactivated with nothing owing, then an invoice arrives from Books: inactive and owing.
     await api(page, 'DELETE', `/customers/${keep.id}`);
+    await legacyInvoice(page, keep.id, 500);
 
     // Hidden from search, but what Books reads still answers.
     expect((await api(page, 'GET', `/accounts/customer/${keep.id}/receivables`)).customer.account_balance).toBeCloseTo(500, 2);
@@ -108,5 +109,52 @@ test.describe('Merge Customer In', () => {
     const taker = await customer(page, `Taker ${s}`, { phone });
     expect(await refused(gone.id)).toContain(taker.customer_number);
     expect((await api(page, 'GET', `/customers/${gone.id}`)).active).toBeFalsy();
+  });
+
+  test('a customer who owes money can\'t be deactivated, from the form or the API', async ({ page }) => {
+    page.on('dialog', d => d.accept());
+    const c = await customer(page, `Owing ${stamp()}`);
+    await legacyInvoice(page, c.id, 1234.5);
+    const refused = (method, url, data) => page.evaluate(([m, u, d]) => App.api(m, u, d).then(() => 'accepted', e => e.message), [method, url, data]);
+
+    await page.evaluate(id => App.showCustomerForm(id), c.id);
+    await page.click('.modal-footer button:has-text("Delete")');
+    await expect(page.locator('body')).toContainText('owes $1,234.50');
+    expect((await api(page, 'GET', `/customers/${c.id}`)).active).toBeTruthy();
+
+    expect(await refused('DELETE', `/customers/${c.id}`)).toContain('owes $1,234.50');
+    const full = await api(page, 'GET', `/customers/${c.id}`);
+    expect(await refused('PUT', `/customers/${c.id}`, { ...full, active: 0 })).toContain('owes $1,234.50');
+    expect((await api(page, 'GET', `/customers/${c.id}`)).active).toBeTruthy();
+    // Saving them normally still works.
+    await api(page, 'PUT', `/customers/${c.id}`, { ...full, city: 'Ocho Rios' });
+    expect((await api(page, 'GET', `/customers/${c.id}`)).city).toBe('Ocho Rios');
+  });
+
+  test('a customer with no balance can still be deactivated', async ({ page }) => {
+    const c = await customer(page, `Clear ${stamp()}`);
+    await api(page, 'DELETE', `/customers/${c.id}`);
+    expect((await api(page, 'GET', `/customers/${c.id}`)).active).toBeFalsy();
+  });
+
+  test('reversing an import keeps customers who owe money and lists them', async ({ page }) => {
+    page.on('dialog', d => d.accept());
+    const s = stamp();
+    const { id: batchId } = await api(page, 'POST', '/customer-imports', {});
+    const row = (last, phone) => ({ first_name: 'Import', last_name: last, phone, customer_type: 'credit', credit_terms_days: 30, credit_limit: 1000 });
+    await api(page, 'POST', '/customers/import', { batch_id: batchId, duplicate_mode: 'force', rows: [row(`Owes ${s}`, s.slice(-10)), row(`Clear ${s}`, stamp().slice(-10))] });
+    const [owing] = await api(page, 'GET', `/customers?search=${encodeURIComponent(`Owes ${s}`)}&limit=5`);
+    const [clear] = await api(page, 'GET', `/customers?search=${encodeURIComponent(`Clear ${s}`)}&limit=5`);
+    await legacyInvoice(page, owing.id, 300);
+
+    await page.evaluate(id => App.showCustomerImportBatchDetail(id), batchId);
+    await page.click('button:has-text("Reverse This Import")');
+    await expect(page.locator('#cib-kept-owing')).toContainText(owing.customer_number);
+    await expect(page.locator('#cib-kept-owing')).toContainText('owes');
+
+    expect((await api(page, 'GET', `/customers/${owing.id}`)).active).toBeTruthy();
+    expect((await api(page, 'GET', `/customers/${clear.id}`)).active).toBeFalsy();
+    const { kept_owing } = await api(page, 'GET', `/customer-imports/${batchId}`);
+    expect(kept_owing.map(k => k.id)).toEqual([owing.id]);
   });
 });

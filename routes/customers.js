@@ -80,6 +80,15 @@ async function findDuplicateCustomers({ email, phone, first_name, last_name }, e
   });
 }
 
+// A customer who owes money can't be deactivated: every search leaves inactive
+// customers out, so cashiers couldn't find them to take a payment.
+function owesBlockError(c) {
+  const owed = Number(c.account_balance) || 0;
+  if (owed <= 0.005) return null;
+  const amount = owed.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return `This customer owes $${amount}, so they can't be deactivated. Collect or write off the balance first.`;
+}
+
 const isHardDuplicate = m => m.match_on.includes('phone') || m.match_on.includes('email');
 
 // 409 body for a phone/email clash — `blocking: true` tells the frontend not
@@ -1060,8 +1069,12 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
     if (cardError) return res.status(400).json({ error: cardError });
     const cashBackCardError = await validateCashBackCard(cash_back_card_type_id, cash_back_card_number, req.params.id);
     if (cashBackCardError) return res.status(400).json({ error: cashBackCardError });
-    const { rows: [existing] } = await db.execute({ sql: 'SELECT phone, email, rental_preapproved, rental_preapproved_by, rental_preapproved_at, customer_type, credit_terms_days, credit_limit FROM customers WHERE id = ?', args: [req.params.id] });
+    const { rows: [existing] } = await db.execute({ sql: 'SELECT phone, email, rental_preapproved, rental_preapproved_by, rental_preapproved_at, customer_type, credit_terms_days, credit_limit, active, account_balance FROM customers WHERE id = ?', args: [req.params.id] });
     if (!existing) return res.status(404).json({ error: 'Customer not found' });
+    if (active != null && !Number(active) && existing.active) {
+      const owes = owesBlockError(existing);
+      if (owes) return res.status(409).json({ error: owes });
+    }
     const assignedSalesperson = await resolveCustomerSalesperson(req, req.params.id);
     if (assignedSalesperson.error) return res.status(assignedSalesperson.status).json({ error: assignedSalesperson.error });
     const credit = resolveCreditFields(req, req.body, existing);
@@ -1115,7 +1128,10 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
 
 router.delete('/:id', requirePermission('customers_delete'), async (req, res) => {
   try {
-    await db.execute({ sql: 'UPDATE customers SET active = 0 WHERE id = ?', args: [req.params.id] });
+    const { rows: [c] } = await db.execute({ sql: 'SELECT account_balance FROM customers WHERE id = ?', args: [req.params.id] });
+    const owes = c && owesBlockError(c);
+    if (owes) return res.status(409).json({ error: owes });
+    await db.execute({ sql: 'UPDATE customers SET active = 0 WHERE id = ? AND COALESCE(account_balance, 0) <= 0.005', args: [req.params.id] });
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

@@ -50,6 +50,17 @@ router.get('/', requirePermission('customers_import_history'), async (req, res) 
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Customers a reversal left active because they owe money.
+async function keptOwing(batchId) {
+  const { rows } = await db.execute({
+    sql: `SELECT c.id, c.customer_number, c.first_name, c.last_name, c.account_balance
+      FROM customer_import_batch_items i JOIN customers c ON c.id = i.customer_id
+      WHERE i.batch_id = ? AND i.reverse_outcome = 'kept_owes' ORDER BY i.id`,
+    args: [batchId],
+  });
+  return rows;
+}
+
 // GET one batch's detail: metadata, per-action counts, and the list of rows
 // skipped as likely duplicates (with which existing customer they matched)
 // so the import can be reviewed before deciding whether to reverse it.
@@ -80,7 +91,7 @@ router.get('/:id', requirePermission('customers_import_history'), async (req, re
       args: [req.params.id],
     });
 
-    res.json({ batch, counts: actionCounts, duplicates, errors: errorRows });
+    res.json({ batch, counts: actionCounts, duplicates, errors: errorRows, kept_owing: await keptOwing(req.params.id) });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -88,7 +99,8 @@ router.get('/:id', requirePermission('customers_import_history'), async (req, re
 // batch created — the same soft-delete DELETE /customers/:id already uses,
 // so a reversed row behaves exactly like any other deactivated customer
 // (no hard delete, no dependency bookkeeping needed). Skipped/error rows
-// have nothing to undo.
+// have nothing to undo. A customer who owes money stays active (reverse_outcome
+// 'kept_owes') and is listed: inactive customers can't be found to take a payment.
 router.post('/:id/reverse', requirePermission('customers_import_history'), async (req, res) => {
   try {
     const { rows: [batch] } = await db.execute({ sql: 'SELECT * FROM customer_import_batches WHERE id = ?', args: [req.params.id] });
@@ -100,11 +112,14 @@ router.post('/:id/reverse', requirePermission('customers_import_history'), async
       args: [req.params.id],
     });
 
+    let deactivated = 0;
     const tx = await db.transaction('write');
     try {
       for (const item of createdItems) {
-        await tx.execute({ sql: 'UPDATE customers SET active = 0 WHERE id = ?', args: [item.customer_id] });
-        await tx.execute({ sql: "UPDATE customer_import_batch_items SET reverse_outcome = 'deactivated' WHERE id = ?", args: [item.id] });
+        const updated = await tx.execute({ sql: 'UPDATE customers SET active = 0 WHERE id = ? AND COALESCE(account_balance, 0) <= 0.005', args: [item.customer_id] });
+        const outcome = updated.rowsAffected ? 'deactivated' : 'kept_owes';
+        if (outcome === 'deactivated') deactivated += 1;
+        await tx.execute({ sql: 'UPDATE customer_import_batch_items SET reverse_outcome = ? WHERE id = ?', args: [outcome, item.id] });
       }
       await tx.execute({
         sql: "UPDATE customer_import_batches SET status = 'reversed', reversed_at = CURRENT_TIMESTAMP, reversed_by = ? WHERE id = ?",
@@ -116,7 +131,7 @@ router.post('/:id/reverse', requirePermission('customers_import_history'), async
       throw e;
     }
 
-    res.json({ deactivated: createdItems.length });
+    res.json({ deactivated, kept_owing: await keptOwing(req.params.id) });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

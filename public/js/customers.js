@@ -1025,7 +1025,7 @@ Object.assign(App, {
   },
 
   async showCustomerImportBatchDetail(batchId) {
-    const { batch, counts, duplicates, errors } = await this.api('GET', `/customer-imports/${batchId}`);
+    const { batch, counts, duplicates, errors, kept_owing } = await this.api('GET', `/customer-imports/${batchId}`);
     const fmtDate = d => d ? this._toDate(d).toLocaleString('en-US', { month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit', timeZone: this._storeTz() }) : '—';
     const c = counts || {};
     const canReverse = batch.status !== 'reversed';
@@ -1037,6 +1037,12 @@ Object.assign(App, {
             Started ${fmtDate(batch.started_at)} by ${batch.employee_name || 'unknown'}
             ${batch.status === 'reversed' ? ` · reversed ${fmtDate(batch.reversed_at)}` : ''}
           </p>
+          ${kept_owing?.length ? `<div id="cib-kept-owing" style="padding:10px 12px;background:#fff8e1;border:1px solid #ffb300;border-radius:6px;font-size:13px;margin-bottom:16px">
+            <strong>Kept active because they owe money (${kept_owing.length})</strong>
+            <div style="max-height:160px;overflow-y:auto;margin-top:6px">
+              ${kept_owing.map(k => `<div>${this.escapeAttr(k.customer_number)} · ${this.escapeAttr(`${k.first_name} ${k.last_name}`)}${Number(k.account_balance) > 0.005 ? ` · owes ${this.fmt(k.account_balance)}` : ' · balance now cleared'}</div>`).join('')}
+            </div>
+          </div>` : ''}
           <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px">
             <div class="card" style="padding:10px;text-align:center"><div style="font-size:20px;font-weight:700">${c.created||0}</div><div style="font-size:11px;color:var(--text-muted)">Created</div></div>
             <div class="card" style="padding:10px;text-align:center"><div style="font-size:20px;font-weight:700">${c.skipped_duplicate||0}</div><div style="font-size:11px;color:var(--text-muted)">Skipped (Duplicate)</div></div>
@@ -1063,10 +1069,11 @@ Object.assign(App, {
   },
 
   async reverseCustomerImportBatch(batchId) {
-    if (!confirm('Reverse this import? Every customer this batch created will be deactivated (same as deleting a customer). This cannot be undone.')) return;
+    if (!confirm('Reverse this import? Every customer this batch created will be deactivated (same as deleting a customer), except anyone who owes money. This cannot be undone.')) return;
     try {
       const result = await this.api('POST', `/customer-imports/${batchId}/reverse`);
-      this.alert(`Reversed: ${result.deactivated} customer(s) deactivated.`, 'success');
+      const kept = result.kept_owing?.length;
+      this.alert(`Reversed: ${result.deactivated} customer(s) deactivated.${kept ? ` ${kept} kept active because they owe money.` : ''}`, 'success');
       this.renderCustomers();
       this.showCustomerImportBatchDetail(batchId);
     } catch(e) { this.alert(e.message, 'error'); }
@@ -1083,7 +1090,8 @@ Object.assign(App, {
 
   async deleteCustomer(id) {
     if (!confirm('Deactivate this customer?')) return;
-    await this.api('DELETE', `/customers/${id}`);
+    try { await this.api('DELETE', `/customers/${id}`); }
+    catch (e) { this.alert(e.message, 'error'); return; }
     const filters = this._custFilterState();
     this.closeModal();
     this.alert('Customer deactivated');
