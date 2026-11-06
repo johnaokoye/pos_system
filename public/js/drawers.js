@@ -513,6 +513,7 @@ Object.assign(App, {
       </details>` : `<p style="font-size:11px;color:var(--text-muted);margin:4px 0 8px">No denominations configured for ${this.escapeAttr(base)}. Set them up in Settings.</p>`;
 
     const nonCash = r.tenders.filter(t => t.key !== 'cash' && !t.uncounted);
+    const exemptTaken = r.tenders.find(t => t.key === 'tax_exempt_tender')?.sales || 0;
     // What section 4 totals as the counts are typed.
     this._reconcileSummary = { opening: r.float.opening, tenders: [{ key: 'cash', expected: expectedCash }, ...nonCash.map(t => ({ key: t.key, expected: t.expected }))] };
     this.showModal(`
@@ -535,6 +536,7 @@ Object.assign(App, {
           </table>
           <h3 style="font-size:13px;margin:0 0 6px">2. Count the cash takings</h3>
           <p style="font-size:12px;color:var(--text-muted);margin:0 0 6px">Cash sales &amp; account payments ${m(r.cash_sales)}${r.payouts_total ? ` − petty cash paid out ${m(r.payouts_total)} (${r.payouts_count})` : ''} = expected <strong>${m(expectedCash)}</strong></p>
+          ${exemptTaken ? `<p id="rc-exempt-note" style="font-size:12px;margin:0 0 6px"><strong>Tax Exempt ${m(exemptTaken)} isn't part of this cash.</strong> Keep that money out of this count, including any paid in cash, and enter it on the Tax Exempt line in section 3.</p>` : ''}
           <table class="table" style="margin-bottom:4px">
             <thead><tr><th>Tender</th><th>Expected</th><th>Amount Counted</th><th>Variance</th></tr></thead>
             <tbody><tr>

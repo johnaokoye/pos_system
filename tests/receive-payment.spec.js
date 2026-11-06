@@ -125,10 +125,27 @@ test.describe('Tax Exempt tender', () => {
     await page.evaluate(([s, pid]) => App.api('POST', '/transactions', { items: [{ product_id: pid, quantity: 1 }], branch_id: 1, employee_id: App.currentUser.id, drawer_session_id: s, payment_method: 'tax_exempt_tender' }), [session.id, product.id]);
     const { expected } = await drawerLine(page, session.id);
     expect(expected).toBeGreaterThan(0);
-    await api(page, 'POST', `/drawers/sessions/${session.id}/reconcile`, { float_returned: 0, tax_exempt_tender_counted: expected });
+    await api(page, 'PATCH', `/drawers/sessions/${session.id}/close`, {});
+
+    // The screen tells them to keep it out of the cash count, and takes it on its own line.
+    await page.evaluate(id => App.showReconcileModal(id), session.id);
+    await expect(page.locator('#rc-exempt-note')).toContainText("isn't part of this cash");
+    await page.fill('#rc-cash', '0');
+    await page.fill('#rc-float', '0');
+    await page.fill('#rc-tax_exempt_tender', (expected - 1).toFixed(2));
+    await expect(page.locator('#rcv-tax_exempt_tender')).toContainText('-1.00');
+    await page.fill('#rc-tax_exempt_tender', expected.toFixed(2));
+    await expect(page.locator('#rcs-var')).toContainText('0.00');
+    await page.uncheck('#rc-email-on');
+    await page.click('button:has-text("Save Reconciliation")');
+    await expect(page.locator('#rc-tax_exempt_tender')).toHaveCount(0);
+
     const line = await drawerLine(page, session.id);
     expect(line.counted).toBeCloseTo(expected, 2);
     expect(line.variance).toBe(0);
+    const { report } = await api(page, 'GET', `/drawers/sessions/${session.id}`);
+    expect(report.tenders.find(t => t.key === 'cash').variance).toBe(0);
+    expect(report.summary.overall_variance).toBe(0);
   });
 
   test('a layaway takes it, and it counts on the drawer', async ({ page }) => {
