@@ -46,7 +46,7 @@ Object.assign(App, {
     document.getElementById('content').innerHTML = `
       <div class="section-header">
         <h2>Retail Inventory Management</h2>
-        <button class="btn btn-primary" onclick="App.showProductForm()">+ Add Product</button>
+        ${this.can('inventory_add') ? `<button class="btn btn-primary" onclick="App.showProductForm()">+ Add Product</button>` : ''}
       </div>
       ${tabsHtml}
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
@@ -61,7 +61,7 @@ Object.assign(App, {
           ${branches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
         </select>
         <div style="flex:1"></div>
-        <button class="btn btn-secondary btn-sm" onclick="App.showSection('reports-inventory')" title="Inventory reports — items sold over a period">📊 Reports</button>
+        ${this.can('reports') || this._canSeeInventoryCost() ? `<button class="btn btn-secondary btn-sm" onclick="App.showSection('reports-inventory')" title="Inventory reports — items sold over a period">📊 Reports</button>` : ''}
         ${this.can('inventory_export') ? `<button class="btn btn-secondary btn-sm" onclick="App.exportInventoryCsv()" title="Export filtered products to CSV">&#8659; Export CSV</button>` : ''}
         ${this.can('inventory_export') ? `<button class="btn btn-secondary btn-sm" onclick="App.showCatalogues()" title="Build and download PDF product catalogues by category or brand">📘 Catalogues</button>` : ''}
         ${this.can('inventory_missing_data') ? `<a class="btn btn-secondary btn-sm" href="/api/products/export/issues" download title="Export active products with $0 price, negative stock, or missing category/supplier/barcode">&#8659; Missing Data</a>` : ''}
@@ -69,9 +69,9 @@ Object.assign(App, {
         ${this.can('inventory_import') ? `<label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0" title="Import products from CSV or Excel">&#8657; Import<input type="file" accept=".csv,.tsv,.txt,.xls,.xlsx" style="display:none" onchange="App.importProductsCsv(this)"></label>` : ''}
         ${this.can('inventory_import_history') ? `<button class="btn btn-secondary btn-sm" onclick="App.showImportHistory()" title="Review or reverse past CSV imports">Import History</button>` : ''}
         ${this.can('inventory_scan_images') ? `<button class="btn btn-secondary btn-sm" onclick="App.scanProductImages()" title="Assign images already placed in uploads/products/ (named by SKU) to their matching products">Scan Images</button>` : ''}
-        <a class="btn btn-secondary btn-sm" href="/api/products/export/stock-mismatches" download title="Items whose overall stock figure doesn't match the total of their branch counts — review before bringing them into line">&#8659; Stock Mismatches</a>
-        <button class="btn btn-secondary btn-sm" onclick="App.showBulkAssignBranchModal()" title="Assign every product with no branch stock yet (e.g. after a CSV import) to one branch">Bulk Assign to Branch</button>
-        <button class="btn btn-secondary btn-sm" onclick="App.showBulkTaxRateModal()" title="Set the tax rate on every product stocked at one branch">Bulk Tax Rate Change</button>
+        ${this.can('inventory_edit') ? `<a class="btn btn-secondary btn-sm" href="/api/products/export/stock-mismatches" download title="Items whose overall stock figure doesn't match the total of their branch counts — review before bringing them into line">&#8659; Stock Mismatches</a>` : ''}
+        ${this.can('inventory_edit') ? `<button class="btn btn-secondary btn-sm" onclick="App.showBulkAssignBranchModal()" title="Assign every product with no branch stock yet (e.g. after a CSV import) to one branch">Bulk Assign to Branch</button>` : ''}
+        ${this.can('inventory_edit') ? `<button class="btn btn-secondary btn-sm" onclick="App.showBulkTaxRateModal()" title="Set the tax rate on every product stocked at one branch">Bulk Tax Rate Change</button>` : ''}
         ${this.can('inventory_categories') ? `<button class="btn btn-secondary btn-sm" onclick="App.showCategoriesManager()">Categories</button>` : ''}
         ${this.can('inventory_units') ? `<button class="btn btn-secondary btn-sm" onclick="App.showUnitsManager()">Units</button>` : ''}
         ${this.can('inventory_brands') ? `<button class="btn btn-secondary btn-sm" onclick="App.showBrandsManager()">Brands</button>` : ''}
@@ -183,20 +183,21 @@ Object.assign(App, {
 
   buildNonInventoryTable(products) {
     if (!products.length) return '<div class="empty-state"><p>No non-inventory items found</p></div>';
+    const showCost = this._canSeeInventoryCost();
     return `<table class="sticky-table">
-      <thead><tr><th>SKU</th><th>Name</th><th>Category</th><th>Price</th><th>Cost</th><th>Stock</th><th>Actions</th></tr></thead>
+      <thead><tr><th>SKU</th><th>Name</th><th>Category</th><th>Price</th>${showCost ? '<th>Cost</th>' : ''}<th>Stock</th><th>Actions</th></tr></thead>
       <tbody>
         ${products.map(p => `<tr id="noninv-row-${p.id}">
           <td style="font-family:monospace;font-size:12px">${p.sku}</td>
           <td class="fw-600">${p.name}</td>
           <td style="color:var(--text-muted)">${p.category_name || '—'}</td>
           <td>${this.fmt(p.price)}</td>
-          <td style="color:var(--text-muted)">${this.fmt(p.cost)}</td>
+          ${showCost ? `<td style="color:var(--text-muted)">${this.fmt(p.cost)}</td>` : ''}
           <td>${p.stock_qty}</td>
           <td style="white-space:nowrap">
             <button class="btn btn-outline btn-sm" onclick="App.showProductCard(${p.id})">View</button>
-            <button class="btn btn-secondary btn-sm" onclick="App.showProductForm(${p.id})">Edit</button>
-            <button class="btn btn-primary btn-sm" onclick="App.promoteToInventory(${p.id})">Add to Warehouse Inventory</button>
+            ${this.can('inventory_edit') ? `<button class="btn btn-secondary btn-sm" onclick="App.showProductForm(${p.id})">Edit</button>
+            <button class="btn btn-primary btn-sm" onclick="App.promoteToInventory(${p.id})">Add to Warehouse Inventory</button>` : ''}
           </td>
         </tr>`).join('')}
       </tbody>
@@ -464,7 +465,7 @@ Object.assign(App, {
     const stockHeader = branchName ? `Stock (${branchName})` : 'Stock';
     const first = this._invTakeRows();
     return `<table class="sticky-table">
-      <thead><tr><th></th><th>SKU</th><th>Name</th><th>Category</th><th>Price</th><th>Cost</th><th>${stockHeader}</th><th>Status</th><th>Actions</th></tr></thead>
+      <thead><tr><th></th><th>SKU</th><th>Name</th><th>Category</th><th>Price</th>${this._canSeeInventoryCost() ? '<th>Cost</th>' : ''}<th>${stockHeader}</th><th>Status</th><th>Actions</th></tr></thead>
       <tbody id="inv-tbody">${first}</tbody>
     </table>
     <div id="inv-more" style="padding:10px;text-align:center;color:var(--text-muted);font-size:12px;${this._invTable.shown < products.length ? '' : 'display:none'}">
@@ -495,15 +496,22 @@ Object.assign(App, {
     if (t.shown >= t.products.length) document.getElementById('inv-more').style.display = 'none';
   },
 
+  // Only people who can change products see cost on this screen.
+  // Mirrors canSeeInventoryCost() in lib/permissions.js.
+  _canSeeInventoryCost() {
+    return ['inventory_add', 'inventory_edit', 'inventory_import'].some(key => this.can(key));
+  },
+
   _invRowsHtml(products, branchName, branchId) {
+    const showCost = this._canSeeInventoryCost(), canEdit = this.can('inventory_edit');
     return `
         ${products.map(p => `<tr id="inv-row-${p.id}">
-          <td style="width:52px">${p.image_path ? `<img src="${p.image_path}" class="prod-img-thumb" alt="" loading="lazy" decoding="async">` : `<div class="prod-img-placeholder" onclick="App.showProductForm(${p.id})">📷</div>`}</td>
+          <td style="width:52px">${p.image_path ? `<img src="${p.image_path}" class="prod-img-thumb" alt="" loading="lazy" decoding="async">` : `<div class="prod-img-placeholder"${canEdit ? ` onclick="App.showProductForm(${p.id})"` : ''}>📷</div>`}</td>
           <td style="font-family:monospace;font-size:12px">${p.sku}</td>
           <td class="fw-600">${p.name}${p.has_variations > 0 ? `<span class="has-vars-badge">${p.has_variations} var</span>` : ''}${p.used_of_product_id ? `<span class="badge-pill badge-purple" style="font-size:10px;margin-left:6px">Used</span>` : ''}${p.merged_into_product_id ? `<span class="badge-pill badge-secondary" style="font-size:10px;margin-left:6px" title="Merged into ${p.merged_into_sku||''}">Merged → ${p.merged_into_sku||'?'}</span>` : ''}</td>
           <td style="color:var(--text-muted)">${p.category_name || '—'}</td>
           <td>${this.fmt(p.price)}</td>
-          <td style="color:var(--text-muted)">${this.fmt(p.cost)}</td>
+          ${showCost ? `<td style="color:var(--text-muted)">${this.fmt(p.cost)}</td>` : ''}
           <td>
             <span class="${p.stock_qty <= p.min_stock ? 'color-danger fw-600' : ''}">${p.stock_qty}</span>
             <span style="color:var(--text-muted);font-size:11px"> / min ${p.min_stock}</span>
@@ -511,7 +519,7 @@ Object.assign(App, {
           <td><span class="badge-pill ${p.active ? 'badge-success' : 'badge-danger'}">${p.active ? 'Active' : 'Inactive'}</span></td>
           <td style="white-space:nowrap">
             <button class="btn btn-outline btn-sm" onclick="App.showProductCard(${p.id})">View</button>
-            <button class="btn btn-secondary btn-sm" onclick="App.showProductForm(${p.id}${branchId ? `,${branchId}` : ''})">Edit</button>
+            ${canEdit ? `<button class="btn btn-secondary btn-sm" onclick="App.showProductForm(${p.id}${branchId ? `,${branchId}` : ''})">Edit</button>` : ''}
             ${this.can('inventory_adjust') ? `<button class="btn btn-outline btn-sm" onclick="App.showStockAdjust(${p.id},${this.escapeAttr(JSON.stringify(p.name))},${Number(p.stock_qty) || 0}${branchId ? `,${branchId},${this.escapeAttr(JSON.stringify(branchName))}` : ''})">Stock</button>` : ''}
             <button class="btn btn-secondary btn-sm" id="inv-hist-btn-${p.id}" onclick="App.toggleProductHistory(${p.id})" title="Stock history" style="padding:4px 7px">
               <svg viewBox="0 0 24 24" fill="currentColor" width="13" height="13"><path d="M13 3a9 9 0 1 0 9 9h-2a7 7 0 1 1-7-7v2l4-4-4-4v2zm-1 5v5l4.25 2.52.77-1.28-3.52-2.09V8z"/></svg>
@@ -523,7 +531,7 @@ Object.assign(App, {
           </td>
         </tr>
         <tr id="inv-hist-${p.id}" style="display:none">
-          <td colspan="9" style="padding:0;background:var(--bg-secondary)"></td>
+          <td colspan="${showCost ? 9 : 8}" style="padding:0;background:var(--bg-secondary)"></td>
         </tr>`).join('')}`;
   },
 
@@ -901,7 +909,7 @@ Object.assign(App, {
         ${id ? `<div id="ppanel-variations" style="display:none;overflow-y:auto;max-height:520px"><div id="var-panel"><div style="text-align:center;padding:30px;color:var(--text-muted)">Click the Variations tab to manage variants</div></div></div>
         <div id="ppanel-bins" style="display:none;overflow-y:auto;max-height:520px"><div id="bin-panel"><div style="text-align:center;padding:30px;color:var(--text-muted)">Click the Bin Locations tab to manage bin assignments</div></div></div>` : ''}
         <div class="modal-footer">
-          ${id ? `<button class="btn btn-danger" onclick="App.deleteProduct(${id})">Delete</button>` : ''}
+          ${id && this.can('inventory_delete') ? `<button class="btn btn-danger" onclick="App.deleteProduct(${id})">Delete</button>` : ''}
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
           <button class="btn btn-primary" id="pf-save-btn" onclick="App.saveProduct(${id||'null'})">Save</button>
         </div>

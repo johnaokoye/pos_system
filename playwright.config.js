@@ -18,7 +18,9 @@ process.env.POS_TEST_URL = BASE_URL;
 module.exports = defineConfig({
   testDir: './tests',
   timeout: 30_000,
-  workers: 2,
+  // One at a time: every test shares one database, and two creating employees
+  // at once can collide on employee_number.
+  workers: 1,
   expect: { timeout: 5_000 },
   reporter: 'list',
   use: {

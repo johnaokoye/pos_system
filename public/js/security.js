@@ -25,6 +25,7 @@ Object.assign(App, {
       { key: 'void_transactions', label: 'Void Transactions' },
     ]},
     { key: 'inventory', label: 'Inventory', subs: [
+      { key: 'inventory_view', label: 'View Retail Inventory (read only, no cost)' },
       { key: 'inventory_add', label: 'Add Products' },
       { key: 'inventory_edit', label: 'Edit Products' },
       { key: 'inventory_delete', label: 'Delete Products' },

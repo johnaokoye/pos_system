@@ -6,7 +6,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
-const { requireAuth, requirePermission, requireAnyPermission, can } = require('../lib/permissions');
+const { requireAuth, requirePermission, requireAnyPermission, can, canSeeInventoryCost, hidesProductCost } = require('../lib/permissions');
 const { getOutstandingQty, getOutOfServiceQty } = require('../lib/rentalAvailability');
 const { mergeProducts } = require('../lib/productMerge');
 const { HAS_ISSUE_SQL, ISSUE_LABEL_SQL, csvEscape, rowsToCsv } = require('../lib/productIssues');
@@ -87,17 +87,25 @@ const sanitizeSkuForFilename = sku => String(sku).trim().replace(/[^A-Za-z0-9_.-
 // reflect the row as it will exist after the write (existing DB state OR'd
 // with the incoming payload, so toggling a plain item into a rental item is
 // still gated by rentals_manage_items).
-function requiredProductPermission(isRental, isService) {
+function requiredProductPermission(isRental, isService, action) {
   if (isRental) return 'rentals_manage_items';
   if (isService) return 'services';
-  return 'inventory';
+  return `inventory_${action}`;
 }
 
-function requireProductPermission(isRental, isService) {
+// Takes cost off what the product routes return (see hidesProductCost).
+function withoutCost(req, rows) {
+  if (hidesProductCost(req)) for (const r of rows) delete r.cost;
+}
+
+// CSV exports are on the Retail Inventory screen, so its own rule applies.
+const exportHidesCost = req => !req.apiKey && !canSeeInventoryCost(req.employee?.permissions);
+
+function requireProductPermission(isRental, isService, action) {
   return (req, res, next) => {
     if (req.apiKey) return next();
     if (!req.employee) return res.status(401).json({ error: 'Authentication required' });
-    const key = requiredProductPermission(isRental, isService);
+    const key = requiredProductPermission(isRental, isService, action);
     if (!can(req.employee.permissions, key)) {
       return res.status(403).json({ error: `Missing permission: ${key}` });
     }
@@ -116,9 +124,12 @@ async function requireImagePermission(req, res, next) {
   try {
     const { rows: [product] } = await db.execute({ sql: 'SELECT is_rental, is_service FROM products WHERE id = ?', args: [req.params.id] });
     if (!product) return res.status(404).json({ error: 'Product not found' });
-    const key = requiredProductPermission(!!product.is_rental, !!product.is_service);
-    if (!can(req.employee.permissions, key)) {
-      return res.status(403).json({ error: `Missing permission: ${key}` });
+    // Saving a new product uploads its photo straight after, so Add counts too.
+    const keys = product.is_rental || product.is_service
+      ? [requiredProductPermission(!!product.is_rental, !!product.is_service)]
+      : ['inventory_add', 'inventory_edit'];
+    if (!keys.some(key => can(req.employee.permissions, key))) {
+      return res.status(403).json({ error: `Missing permission: ${keys.join(' or ')}` });
     }
     next();
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -169,6 +180,7 @@ router.get('/', requireAuth, async (req, res) => {
       if (is_rental !== undefined) { onlineSql += ` AND p.is_rental = ?`; onlineParams.push(is_rental === '1' || is_rental === 'true' ? 1 : 0); }
       onlineSql += ` ORDER BY p.name`;
       const { rows: onlineRows } = await db.execute({ sql: onlineSql, args: onlineParams });
+      withoutCost(req, onlineRows);
       return res.json(onlineRows);
     }
 
@@ -263,6 +275,7 @@ router.get('/', requireAuth, async (req, res) => {
     if (!branch_id) rows.forEach(applyBranchTotal);
     for (const r of rows) if (typeof r.branch_stock === 'string') r.branch_stock = JSON.parse(r.branch_stock).sort((a, b) => a.branch_name.localeCompare(b.branch_name));
     await attachUnits(rows);
+    withoutCost(req, rows);
     res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -357,7 +370,7 @@ router.get('/export', requirePermission('inventory_export'), async (req, res) =>
       return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
     };
 
-    const headers = ['sku','barcode','name','description','long_description','category_name','price','cost','tax_rate','stock_qty','min_stock','active','supplier_name'];
+    const headers = ['sku','barcode','name','description','long_description','category_name','price','cost','tax_rate','stock_qty','min_stock','active','supplier_name'].filter(h => h !== 'cost' || !exportHidesCost(req));
     const csvRows = [headers.join(',')];
     for (const p of products) {
       csvRows.push(headers.map(h => escape(p[h])).join(','));
@@ -388,7 +401,7 @@ router.get('/export/issues', requirePermission('inventory_missing_data'), async 
         ORDER BY p.sku`,
       args: [],
     });
-    const csv = rowsToCsv(rows, ['id','sku','name','price','cost','stock_qty','category_name','supplier_name','barcode','issue']);
+    const csv = rowsToCsv(rows, ['id','sku','name','price','cost','stock_qty','category_name','supplier_name','barcode','issue'].filter(h => h !== 'cost' || !exportHidesCost(req)));
     const timestamp = new Date().toISOString().slice(0, 10);
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="products_missing_data_${timestamp}.csv"`);
@@ -401,7 +414,7 @@ router.get('/export/issues', requirePermission('inventory_missing_data'), async 
 // column into line. Biggest gaps first; one column per branch. A positive
 // difference (global above the branches) may be real stock that was never
 // put at a branch, rather than drift.
-router.get('/export/stock-mismatches', requirePermission('inventory'), async (req, res) => {
+router.get('/export/stock-mismatches', requirePermission('inventory_edit'), async (req, res) => {
   try {
     const [{ rows }, { rows: branchRows }, { rows: branches }] = await Promise.all([
       db.execute({
@@ -589,7 +602,7 @@ router.get('/unbranched-count', requirePermission('inventory'), async (req, res)
 // same WHERE clause regardless, so a batch is a no-op for anything another
 // batch (or something else entirely) already handled since the id list was
 // fetched.
-router.post('/bulk-assign-branch', requirePermission('inventory'), async (req, res) => {
+router.post('/bulk-assign-branch', requirePermission('inventory_edit'), async (req, res) => {
   try {
     const { branch_id, rows: productIds } = req.body;
     if (!branch_id) return res.status(400).json({ error: 'branch_id is required' });
@@ -638,7 +651,7 @@ router.get('/branch-count/:branchId', requirePermission('inventory'), async (req
 // all three record a branch assignment. tax_rate lives on `products`, not
 // per-branch, so a product stocked at more than one branch gets its single
 // rate overwritten regardless of which of those branches this was run for.
-router.post('/bulk-tax-rate', requirePermission('inventory'), async (req, res) => {
+router.post('/bulk-tax-rate', requirePermission('inventory_edit'), async (req, res) => {
   try {
     const { branch_id, tax_rate } = req.body;
     if (!branch_id) return res.status(400).json({ error: 'branch_id is required' });
@@ -1089,6 +1102,7 @@ router.get('/:id', requireAuth, async (req, res) => {
         args: onlineParams
       });
       if (!product) return res.status(404).json({ error: 'Product not found' });
+      withoutCost(req, [product]);
       return res.json(product);
     }
     const { rows: [product] } = await db.execute({ sql: `SELECT p.*, c.name as category_name,
@@ -1108,6 +1122,7 @@ router.get('/:id', requireAuth, async (req, res) => {
     // the edit form's read-only All Branches stock.
     if ((product.is_rental && product.is_accessory) || (!product.is_rental && !product.is_service)) product.branch_stock = await accessoryBranchStock(db, product.id);
     await attachUnits([product]);
+    withoutCost(req, [product]);
     res.json(product);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -1244,7 +1259,7 @@ router.post('/:id/units', requireAnyPermission('inventory_edit', 'inventory_unit
 // Services, and Rentals items all go through this same endpoint — so the
 // permission required is chosen per-request based on the product's own type
 // (see requireProductPermission above), not any-of-the-three statically.
-router.post('/', (req, res, next) => requireProductPermission(!!req.body.is_rental, !!req.body.is_service)(req, res, next), async (req, res) => {
+router.post('/', (req, res, next) => requireProductPermission(!!req.body.is_rental, !!req.body.is_service, 'add')(req, res, next), async (req, res) => {
   const { sku, barcode, name, description, category_id, price, cost, tax_rate, stock_qty, min_stock, active, branch_id, supplier_id, is_service, unit, online_available, web_allotment, is_rental, rental_rate_type, rental_rate, rental_deposit, rental_late_fee_rate, replacement_value, rental_classification, rental_weekly_rate, rental_monthly_rate, rental_hourly_rate, rental_allow_sale, is_accessory, is_layaway_eligible, model_number, size, brand, taxable } = req.body;
   if (!String(sku || '').trim() || !name) return res.status(400).json({ error: 'SKU and name are required' });
   try {
@@ -1290,7 +1305,7 @@ router.put('/:id', async (req, res, next) => {
   if (!req.employee) return res.status(401).json({ error: 'Authentication required' });
   const { rows: [existing] } = await db.execute({ sql: 'SELECT is_rental, is_service FROM products WHERE id = ?', args: [req.params.id] });
   if (!existing) return res.status(404).json({ error: 'Product not found' });
-  const key = requiredProductPermission(!!existing.is_rental || !!req.body.is_rental, !!existing.is_service || !!req.body.is_service);
+  const key = requiredProductPermission(!!existing.is_rental || !!req.body.is_rental, !!existing.is_service || !!req.body.is_service, 'edit');
   if (!can(req.employee.permissions, key)) return res.status(403).json({ error: `Missing permission: ${key}` });
   next();
 }, async (req, res) => {
@@ -1493,7 +1508,7 @@ router.patch('/:id/stock', requirePermission('inventory_adjust'), async (req, re
 });
 
 // PATCH promote a non-inventory (quote-sourced) product into normal inventory
-router.patch('/:id/promote-to-inventory', requirePermission('inventory'), async (req, res) => {
+router.patch('/:id/promote-to-inventory', requirePermission('inventory_edit'), async (req, res) => {
   try {
     const { rows: [product] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [req.params.id] });
     if (!product) return res.status(404).json({ error: 'Product not found' });
@@ -1509,7 +1524,7 @@ router.delete('/:id', async (req, res, next) => {
   if (!req.employee) return res.status(401).json({ error: 'Authentication required' });
   const { rows: [existing] } = await db.execute({ sql: 'SELECT is_rental, is_service FROM products WHERE id = ?', args: [req.params.id] });
   if (!existing) return res.status(404).json({ error: 'Product not found' });
-  const key = requiredProductPermission(!!existing.is_rental, !!existing.is_service);
+  const key = requiredProductPermission(!!existing.is_rental, !!existing.is_service, 'delete');
   if (!can(req.employee.permissions, key)) return res.status(403).json({ error: `Missing permission: ${key}` });
   next();
 }, async (req, res) => {
@@ -1647,7 +1662,7 @@ router.get('/:id/variation-types', requireAuth, async (req, res) => {
 });
 
 // PUT save variation types (replaces all)
-router.put('/:id/variation-types', requirePermission('inventory'), async (req, res) => {
+router.put('/:id/variation-types', requireAnyPermission('inventory_add', 'inventory_edit'), async (req, res) => {
   const { types } = req.body;
   if (!Array.isArray(types)) return res.status(400).json({ error: 'types must be an array' });
   try {
@@ -1667,12 +1682,13 @@ router.put('/:id/variation-types', requirePermission('inventory'), async (req, r
 router.get('/:id/variations', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.execute({ sql: 'SELECT * FROM product_variations WHERE product_id = ? ORDER BY name', args: [req.params.id] });
+    withoutCost(req, rows);
     res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // POST create a variation
-router.post('/:id/variations', requirePermission('inventory'), async (req, res) => {
+router.post('/:id/variations', requireAnyPermission('inventory_add', 'inventory_edit'), async (req, res) => {
   const { name, sku, barcode, attributes, price, price_modifier, cost, stock_qty, min_stock, active } = req.body;
   if (!name || !sku) return res.status(400).json({ error: 'Name and SKU are required' });
   try {
@@ -1683,7 +1699,7 @@ router.post('/:id/variations', requirePermission('inventory'), async (req, res) 
 });
 
 // PUT update a variation
-router.put('/:id/variations/:vid', requirePermission('inventory'), async (req, res) => {
+router.put('/:id/variations/:vid', requireAnyPermission('inventory_add', 'inventory_edit'), async (req, res) => {
   const { name, sku, barcode, attributes, price, price_modifier, cost, stock_qty, min_stock, active } = req.body;
   try {
     await db.execute({ sql: 'UPDATE product_variations SET name=?,sku=?,barcode=?,attributes=?,price=?,price_modifier=?,cost=?,stock_qty=?,min_stock=?,active=? WHERE id=? AND product_id=?', args: [name, sku, barcode||null, JSON.stringify(attributes||{}), price!=null?price:null, price_modifier||0, cost!=null?cost:null, stock_qty||0, min_stock||5, active??1, req.params.vid, req.params.id] });
@@ -1693,7 +1709,7 @@ router.put('/:id/variations/:vid', requirePermission('inventory'), async (req, r
 });
 
 // DELETE a variation
-router.delete('/:id/variations/:vid', requirePermission('inventory'), async (req, res) => {
+router.delete('/:id/variations/:vid', requireAnyPermission('inventory_add', 'inventory_edit'), async (req, res) => {
   try {
     await db.execute({ sql: 'DELETE FROM product_variations WHERE id = ? AND product_id = ?', args: [req.params.vid, req.params.id] });
     res.json({ success: true });
