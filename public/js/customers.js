@@ -173,7 +173,8 @@ Object.assign(App, {
     const q = (document.getElementById('cust-search')?.value || '').trim();
     const type = document.getElementById('cust-type-filter')?.value || '';
     const salesperson = document.getElementById('cust-salesperson-filter')?.value || '';
-    return `/customers?active=1&paged=1&offset=${offset}${q ? `&search=${encodeURIComponent(q)}` : ''}${type ? `&type=${type}` : ''}${salesperson ? `&salesperson_id=${salesperson}` : ''}`;
+    const active = document.getElementById('cust-status-filter')?.value === 'inactive' ? 0 : 1;
+    return `/customers?active=${active}&paged=1&offset=${offset}${q ? `&search=${encodeURIComponent(q)}` : ''}${type ? `&type=${type}` : ''}${salesperson ? `&salesperson_id=${salesperson}` : ''}`;
   },
 
   // Customers filter bar as it stands, so a save / deactivate re-renders on
@@ -181,7 +182,7 @@ Object.assign(App, {
   _custFilterState(fallback = {}) {
     if (this.section !== 'customers') return null;
     const val = id => (document.getElementById(id) || {}).value || '';
-    return { search: val('cust-search') || fallback.search || '', type: val('cust-type-filter'), salesperson: val('cust-salesperson-filter') };
+    return { search: val('cust-search') || fallback.search || '', type: val('cust-type-filter'), salesperson: val('cust-salesperson-filter'), status: val('cust-status-filter') };
   },
 
   async renderCustomers(filters = null) {
@@ -220,6 +221,10 @@ Object.assign(App, {
           <option value="none">No Salesperson</option>
           ${this._custSalespeople.map(p => `<option value="${p.id}">${this.escapeAttr(`${p.first_name} ${p.last_name}`.trim())}</option>`).join('')}
         </select>
+        <select id="cust-status-filter" title="Inactive customers: deactivated, from a reversed import, or merged" style="width:auto;flex:0 0 auto">
+          <option value="">Active</option>
+          <option value="inactive">Inactive</option>
+        </select>
         <span id="cust-count" style="font-size:13px;color:var(--text-muted);margin-left:auto"></span>
       </div>
       <div class="card">
@@ -231,6 +236,7 @@ Object.assign(App, {
       document.getElementById('cust-search').value = filters.search || '';
       document.getElementById('cust-type-filter').value = filters.type || '';
       document.getElementById('cust-salesperson-filter').value = filters.salesperson || '';
+      document.getElementById('cust-status-filter').value = filters.status || '';
     }
 
     // Search once typing pauses (Enter at once); _custLoad ignores replies
@@ -241,6 +247,7 @@ Object.assign(App, {
     searchEl.addEventListener('keydown', e => { if (e.key === 'Enter') { clearTimeout(searchTimer); this._custLoad(); } });
     document.getElementById('cust-type-filter').addEventListener('change', () => this._custLoad());
     document.getElementById('cust-salesperson-filter').addEventListener('change', () => this._custLoad());
+    document.getElementById('cust-status-filter').addEventListener('change', () => this._custLoad());
     await this._custLoad();
   },
 
@@ -305,15 +312,16 @@ Object.assign(App, {
         return `<tr>
         <td style="font-family:monospace;font-size:12px">${c.customer_number}</td>
         <td class="fw-600">${c.first_name} ${c.last_name}${c.customer_kind === 'business' ? ' <span class="badge-pill badge-secondary" style="font-size:10px">Business</span>' : ''}${this._custSalespersonLine(c.salesperson_id)}</td>
-        <td style="white-space:nowrap">${typeBadge}${taxExemptBadge}${rentalBadge}${preapprovedBadge}</td>
+        <td style="white-space:nowrap">${typeBadge}${taxExemptBadge}${rentalBadge}${preapprovedBadge}${c.active ? '' : ` <span class="badge-pill badge-secondary">${c.merged_into_customer_id ? 'Merged' : 'Inactive'}</span>${Number(c.account_balance) > 0.005 ? ` <span class="badge-pill badge-danger">Owes ${this.fmt(c.account_balance)}</span>` : ''}`}</td>
         <td style="color:var(--text-muted)">${c.email||'—'}</td>
         <td>${c.phone||'—'}</td>
         <td style="color:var(--text-muted)">${c.city||'—'}</td>
         <td><span class="badge-pill badge-info">🏆 ${c.loyalty_points}</span></td>
         <td class="fw-600">${this.fmt(c.total_spent)}</td>
         <td>
-          ${this.can('customers_edit') ? `<button class="btn btn-secondary btn-sm" onclick="App.showCustomerForm(${c.id})">Edit</button>` : ''}
+          ${this.can('customers_edit') && c.active ? `<button class="btn btn-secondary btn-sm" onclick="App.showCustomerForm(${c.id})">Edit</button>` : ''}
           <button class="btn btn-outline btn-sm" onclick="App.viewCustomer(${c.id})">History</button>
+          ${this.can('customers_edit') && !c.active && !c.merged_into_customer_id ? `<button class="btn btn-primary btn-sm" onclick="App.reactivateCustomer(${c.id})">Reactivate</button>` : ''}
         </td>
       </tr>`;}).join('');
   },
@@ -1062,6 +1070,15 @@ Object.assign(App, {
       this.renderCustomers();
       this.showCustomerImportBatchDetail(batchId);
     } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async reactivateCustomer(id) {
+    if (!confirm('Reactivate this customer? They come back in searches, with their balance and history.')) return;
+    try {
+      const c = await this.api('POST', `/customers/${id}/reactivate`);
+      this.alert(`${c.customer_number} is active again`, 'success');
+      this._custLoad();
+    } catch (e) { this.alert(e.message, 'error'); }
   },
 
   async deleteCustomer(id) {

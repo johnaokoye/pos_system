@@ -1120,6 +1120,27 @@ router.delete('/:id', requirePermission('customers_delete'), async (req, res) =>
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Brings back a deactivated customer (Deactivate or a reversed import), with
+// their balance and history untouched. A merged record stays retired: its
+// history moved to the customer it was merged into. Refused if another active
+// customer has since taken their phone or email, as on any customer save.
+router.post('/:id/reactivate', requirePermission('customers_edit'), async (req, res) => {
+  try {
+    const { rows: [c] } = await db.execute({ sql: 'SELECT id, phone, email, active, merged_into_customer_id FROM customers WHERE id = ?', args: [req.params.id] });
+    if (!c) return res.status(404).json({ error: 'Customer not found' });
+    if (c.merged_into_customer_id) return res.status(400).json({ error: 'This customer was merged into another one, so it can\'t be reactivated' });
+    if (!c.active) {
+      const clashes = (await findDuplicateCustomers({ phone: c.phone, email: c.email }, c.id)).filter(isHardDuplicate);
+      if (clashes.length) return res.status(409).json(hardDuplicateError(clashes));
+      await db.execute({ sql: 'UPDATE customers SET active = 1 WHERE id = ?', args: [c.id] });
+      await syncPhoneKeys(db, c.id, c.phone);
+      await runCreditCheck(c.id);
+    }
+    const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [c.id] });
+    res.json(row);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // POST import customers from CSV rows.
 // `batch_id` (from POST /customer-imports) is optional — when present, every
 // row's outcome is logged to customer_import_batch_items so the batch can

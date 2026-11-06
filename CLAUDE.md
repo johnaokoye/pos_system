@@ -68,6 +68,8 @@ Retail products need `inventory_add` / `inventory_edit` / `inventory_delete` to 
 ### Customer merge
 `lib/customerMerge.js` via `POST /customers/merge` (`customers_merge`), from Find Duplicates (shared phone/email only) or `App.showMergeCustomerIn` (Merge Customer In on the customer's History, any two active customers). Books has no merge handling: its customer page reads the POS by the id it's linked to, so keep the number Books uses; a retired credit customer stays listed there, empty, and invoices Books already synced stay under it.
 
+Inactive customers (`active = 0`: Deactivate, a reversed import, or merged) are left out of every search, but Books' `GET /accounts/customer/:id/receivables` still reads them. The Customers screen's status box lists them; `POST /customers/:id/reactivate` (`customers_edit`) brings back any but a merged one, refused on a phone/email clash.
+
 ### Product variations
 `product_variation_types` defines attribute axes per product (e.g. Size, Color); `product_variations` holds individual SKU-level variants with their own price/cost/stock. `transaction_items.variation_id` links a sold item to its specific variant.
 

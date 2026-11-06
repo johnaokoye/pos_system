@@ -62,4 +62,51 @@ test.describe('Merge Customer In', () => {
     await expect(page.locator('button:has-text("Merge Customer In")')).toHaveCount(0);
     await page.evaluate(() => { App.can = App._realCan; delete App._realCan; });
   });
+
+  test('a deactivated customer with a balance can be found, reactivated and then merged into', async ({ page }) => {
+    page.on('dialog', d => d.accept());
+    const s = stamp();
+    const keep = await customer(page, `Hidden ${s}`, { credit_limit: 300000 });
+    const dup = await customer(page, `Hiddne ${s}`, { phone: s.slice(-10) });
+    await legacyInvoice(page, keep.id, 500);
+    await api(page, 'DELETE', `/customers/${keep.id}`);
+
+    // Hidden from search, but what Books reads still answers.
+    expect((await api(page, 'GET', `/accounts/customer/${keep.id}/receivables`)).customer.account_balance).toBeCloseTo(500, 2);
+    await page.evaluate(() => App.showSection('customers'));
+    await page.fill('#cust-search', keep.customer_number);
+    await expect(page.locator('#cust-table')).not.toContainText(keep.customer_number);
+
+    await page.selectOption('#cust-status-filter', 'inactive');
+    const row = page.locator('#cust-table tr', { hasText: keep.customer_number });
+    await expect(row).toContainText('Inactive');
+    await expect(row).toContainText('Owes');
+    await expect(row.locator('button:has-text("Edit")')).toHaveCount(0);
+    await row.locator('button:has-text("Reactivate")').click();
+    await expect(page.locator('#cust-table')).not.toContainText(keep.customer_number);
+
+    await page.selectOption('#cust-status-filter', '');
+    await expect(row).toBeVisible();
+    const back = await api(page, 'GET', `/customers/${keep.id}`);
+    expect(back.active).toBeTruthy();
+    expect(back.account_balance).toBeCloseTo(500, 2);
+    expect(back.customer_number).toBe(keep.customer_number);
+    expect(await api(page, 'POST', '/customers/merge', { keep_id: keep.id, merge_ids: [dup.id] })).toMatchObject({ merged: 1 });
+  });
+
+  test('reactivating is refused for a merged customer and on a phone clash', async ({ page }) => {
+    const refused = (id) => page.evaluate(i => App.api('POST', `/customers/${i}/reactivate`).then(() => 'accepted', e => e.message), id);
+    const s = stamp();
+    const keep = await customer(page, `Survivor ${s}`);
+    const merged = await customer(page, `Retired ${s}`);
+    await api(page, 'POST', '/customers/merge', { keep_id: keep.id, merge_ids: [merged.id] });
+    expect(await refused(merged.id)).toContain('merged');
+
+    const phone = stamp().slice(-10);
+    const gone = await customer(page, `Gone ${s}`, { phone });
+    await api(page, 'DELETE', `/customers/${gone.id}`);
+    const taker = await customer(page, `Taker ${s}`, { phone });
+    expect(await refused(gone.id)).toContain(taker.customer_number);
+    expect((await api(page, 'GET', `/customers/${gone.id}`)).active).toBeFalsy();
+  });
 });
