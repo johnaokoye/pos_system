@@ -66,6 +66,74 @@ Object.assign(App, {
     } catch (e) { this.alert(e.message, 'error'); }
   },
 
+  // What a merge would move (one customer's GET /customers/merge-preview counts).
+  _mergeMovingText(counts) {
+    const labels = { transactions: 'sales', returns: 'returns', account_payments: 'payments', ar_legacy_invoices: 'legacy invoices', quotations: 'quotes', rental_agreements: 'rentals', layaway_plans: 'layaways', work_orders: 'work orders', shipments: 'shipments', crm_leads: 'CRM leads', crm_opportunities: 'CRM opportunities', crm_activities: 'CRM activities', customer_contacts: 'contacts' };
+    const one = word => word.replace(/ies$/, 'y').replace(/s$/, '');
+    const parts = Object.entries(counts || {}).map(([t, n]) => `${n} ${n === 1 ? one(labels[t] || t) : labels[t] || t}`);
+    return parts.length ? parts.join(', ') : 'no history';
+  },
+
+  // Merge from a customer's record, for duplicates Find Duplicates can't group
+  // because they share no phone or email. The open customer is the one kept.
+  showMergeCustomerIn(keepId) {
+    this.showModal(`
+      <div class="modal" style="max-width:560px">
+        <div class="modal-header"><span class="modal-title">Merge Customer In</span><button class="modal-close">✕</button></div>
+        <div class="modal-body" style="font-size:13px">
+          <p id="mci-keep" style="margin-top:0">Loading…</p>
+          <label>Customer to merge in and retire</label>
+          ${this._customerPickerHtml('mci-source', [], null, { placeholder: 'Search name or customer #…', remote: '', allowAdd: false, showBalance: true })}
+          <div id="mci-details" style="margin-top:12px"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-danger" id="mci-confirm" disabled>Merge</button>
+        </div>
+      </div>`);
+    const esc = v => this.escapeAttr(v ?? '');
+    const label = c => `${esc(c.first_name)} ${esc(c.last_name)} (${esc(c.customer_number)})`;
+    let keep = null;
+    let source = null;
+    const confirm = document.getElementById('mci-confirm');
+    this._customerById(keepId).then(c => {
+      keep = c;
+      const keepEl = document.getElementById('mci-keep');
+      if (keepEl && c) keepEl.innerHTML = `Keeping <strong>${label(c)}</strong>. Everything on the customer you choose moves here.`;
+    }, e => this.alert(e.message, 'error'));
+    this._custPickerOnSelect = { ...(this._custPickerOnSelect || {}), 'mci-source': async c => {
+      source = null;
+      confirm.disabled = true;
+      const details = document.getElementById('mci-details');
+      if (!c) { details.innerHTML = ''; return; }
+      if (Number(c.id) === Number(keepId)) { details.innerHTML = '<p style="color:var(--danger)">That\'s the customer you\'re keeping. Choose the other record.</p>'; return; }
+      details.innerHTML = '<p style="color:var(--text-muted)">Checking…</p>';
+      let counts;
+      try { counts = (await this.api('GET', `/customers/merge-preview?ids=${c.id}`))[c.id]; }
+      catch (e) { details.innerHTML = `<p style="color:var(--danger)">${esc(e.message)}</p>`; return; }
+      source = c;
+      confirm.disabled = false;
+      const onCredit = c.customer_type === 'credit' || c.credit_enabled;
+      details.innerHTML = `
+        <p style="margin:0 0 8px"><strong>${label(c)}</strong>${[c.phone, c.email].filter(Boolean).length ? ` · ${esc([c.phone, c.email].filter(Boolean).join(' · '))}` : ''}<br>
+          Moves: ${this._mergeMovingText(counts)}${Number(c.account_balance) ? `, balance ${this.fmt(c.account_balance)}` : ''}</p>
+        ${onCredit ? `<div id="mci-books-warning" style="padding:8px 10px;background:#fff8e1;border:1px solid #ffb300;border-radius:6px;color:#6d4c00;margin-bottom:8px">
+          <strong>RetailPOS Books:</strong> keep the customer # Books shows this account under. Books will still list ${esc(c.customer_number)} with an empty account, and any invoices it has already synced for that number stay there in Books.</div>` : ''}
+        <p style="margin:0;color:var(--text-muted)">Balances and loyalty points are added together, missing details are filled in, and ${esc(c.customer_number)} is deactivated. This can't be undone.</p>`;
+    } };
+    confirm.addEventListener('click', async () => {
+      if (!source || !keep) return;
+      confirm.disabled = true;
+      try {
+        await this.api('POST', '/customers/merge', { keep_id: keepId, merge_ids: [source.id] });
+        this.closeModal();
+        this.alert(`Merged ${source.customer_number} into ${keep.customer_number}`);
+        if (this.section === 'customers') this.renderCustomers();
+        this.viewCustomer(keepId);
+      } catch (err) { confirm.disabled = false; this.alert(err.message, 'error'); }
+    });
+  },
+
   async _mergeDuplicateGroup(key) {
     const g = this._dupGroups?.[key];
     const keepId = Number(document.querySelector(`input[name="dup-keep-${key}"]:checked`)?.value);
@@ -74,8 +142,7 @@ Object.assign(App, {
     const others = g.customers.filter(cu => cu.id !== keepId);
     let preview = {};
     try { preview = await this.api('GET', `/customers/merge-preview?ids=${others.map(o => o.id).join(',')}`); } catch (e) {}
-    const labels = { transactions: 'sales', returns: 'returns', account_payments: 'payments', ar_legacy_invoices: 'legacy invoices', quotations: 'quotes', rental_agreements: 'rentals', layaway_plans: 'layaways', work_orders: 'work orders', shipments: 'shipments', crm_leads: 'CRM leads', crm_opportunities: 'CRM opportunities', crm_activities: 'CRM activities', customer_contacts: 'contacts' };
-    const moving = o => { const p = preview[o.id] || {}; const parts = Object.entries(p).map(([t, n]) => `${n} ${labels[t] || t}`); return parts.length ? parts.join(', ') : 'no history'; };
+    const moving = o => this._mergeMovingText(preview[o.id]);
     this.showModal(`
       <div class="modal" style="max-width:560px">
         <div class="modal-header"><span class="modal-title">Merge Duplicate Customers</span><button class="modal-close">✕</button></div>
@@ -1046,6 +1113,7 @@ Object.assign(App, {
             <input type="date" id="ch-end" value="" title="Leave blank for all dates" style="width:140px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;font-size:13px">
             <button class="btn btn-primary btn-sm" onclick="App.filterCustomerHistory(${c.id})">Filter</button>
             ${this.can('customers_print_history') ? `<button class="btn btn-secondary btn-sm" onclick="App.printCustomerHistory(${c.id},'${c.first_name} ${c.last_name}')">Print</button>` : ''}
+            ${this.can('customers_merge') && c.active ? `<button class="btn btn-secondary btn-sm" onclick="App.showMergeCustomerIn(${c.id})" title="Merge a duplicate record into this customer">Merge Customer In</button>` : ''}
           </div>
           <div id="ch-table">${this._buildCustomerTxHTML(txs)}</div>
           <div id="ch-payments" style="margin-top:16px">${this._buildCustomerPmtHTML(pmts)}</div>
