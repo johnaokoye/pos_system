@@ -1373,6 +1373,20 @@ async function _init() {
       status TEXT NOT NULL DEFAULT 'processed',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // An exchange return turned into a refund or credit note before any
+    // replacement was sold (returns.resolution is changed to match). Books
+    // reads this to clear its Exchange Credits Outstanding.
+    { sql: `CREATE TABLE IF NOT EXISTS exchange_conversions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      return_id INTEGER NOT NULL UNIQUE REFERENCES returns(id),
+      to_resolution TEXT NOT NULL,
+      amount REAL NOT NULL,
+      credit_note_payment_id INTEGER REFERENCES account_payments(id),
+      reason TEXT NOT NULL,
+      employee_id INTEGER REFERENCES employees(id),
+      override_by INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS return_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       return_id INTEGER NOT NULL REFERENCES returns(id),

@@ -237,7 +237,7 @@ router.get('/pending-exchanges', requirePermission('pos'), async (req, res) => {
   try {
     const { customer_id } = req.query;
     let sql = `SELECT r.id, r.return_number, r.created_at, r.total, r.customer_id, r.branch_id, r.notes,
-      t.transaction_number as original_transaction_number,
+      t.transaction_number as original_transaction_number, (COALESCE(t.is_credit, 0) = 1 OR t.payment_method = 'credit') as charged_to_account,
       c.first_name || ' ' || c.last_name as customer_name, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name,
       (SELECT GROUP_CONCAT(ri.product_name, ', ') FROM return_items ri WHERE ri.return_id = r.id) as item_names
       FROM returns r
@@ -250,6 +250,17 @@ router.get('/pending-exchanges', requirePermission('pos'), async (req, res) => {
     if (customer_id) { sql += ' AND r.customer_id = ?'; args.push(customer_id); }
     sql += ' ORDER BY r.created_at DESC LIMIT 100';
     const { rows } = await db.execute({ sql, args });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Converted exchanges for RetailPOS Books (orders:read), which clears its
+// Exchange Credits Outstanding for a refund from this. A credit note comes
+// through /accounts/payments-feed, marked converted_exchange.
+router.get('/exchange-conversions', requirePermission('transactions'), async (req, res) => {
+  try {
+    const { rows } = await db.execute({ sql: `SELECT ec.id, ec.return_id, r.return_number, ec.to_resolution, ec.amount, ec.created_at, t.transaction_number as original_transaction_number
+      FROM exchange_conversions ec JOIN returns r ON r.id = ec.return_id LEFT JOIN transactions t ON t.id = r.original_transaction_id ORDER BY ec.id`, args: [] });
     res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -853,13 +864,16 @@ router.get('/returns/:id', requireAuth, async (req, res) => {
       c.first_name || ' ' || c.last_name as customer_name, c.email as customer_email,
       e.first_name || ' ' || e.last_name as employee_name,
       oe.first_name || ' ' || oe.last_name as override_by_name,
-      b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone
+      b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone,
+      ec.created_at as converted_at, ec.reason as converted_reason, ca.first_name || ' ' || ca.last_name as converted_authorized_by
       FROM returns r
       LEFT JOIN transactions t ON r.original_transaction_id = t.id
       LEFT JOIN customers c ON r.customer_id = c.id
       LEFT JOIN employees e ON r.employee_id = e.id
       LEFT JOIN employees oe ON r.override_by = oe.id
       LEFT JOIN branches b ON r.branch_id = b.id
+      LEFT JOIN exchange_conversions ec ON ec.return_id = r.id
+      LEFT JOIN employees ca ON ca.id = ec.override_by
       WHERE r.id = ?`, args: [req.params.id] });
     if (!ret) return res.status(404).json({ error: 'Return not found' });
     const { rows: items } = await db.execute({ sql: 'SELECT * FROM return_items WHERE return_id = ?', args: [req.params.id] });
@@ -936,6 +950,80 @@ async function paidByCreditCard(tx) {
 }
 
 // Process a return
+// The manager whose PIN authorizes a return or its conversion: an active
+// employee whose group has returns_override (standalone key). Checked here,
+// not trusted from the till. Returns { id }, or { error, code } for a 403.
+async function returnAuthorizer(pinValue) {
+  const pin = String(pinValue || '').trim();
+  if (!pin) return { error: 'A manager must enter their PIN to authorize this return', code: 'override_required' };
+  const { rows: candidates } = await db.execute({ sql: 'SELECT e.id, e.pin, sg.permissions FROM employees e LEFT JOIN security_groups sg ON e.security_group_id = sg.id WHERE e.active = 1 AND e.pin = ?', args: [pin] });
+  const authorizer = candidates.find(c => { try { return JSON.parse(c.permissions || '{}').returns_override === true; } catch { return false; } });
+  return authorizer ? { id: authorizer.id } : { error: "That PIN isn't a manager who can authorize returns", code: 'override_invalid' };
+}
+
+// Why this sale can't be refunded, or null. A charge-account sale was never
+// paid — refunding it would hand over money while the customer still owes
+// the full amount. Its return goes back on the account as a credit note instead.
+async function refundRefusal(tx) {
+  if (tx.is_credit || tx.payment_method === 'credit') return "This sale was charged to the customer's account, so it can't be refunded. Issue a credit note to take the return off their balance.";
+  if (daysSinceSale(tx.created_at) > CARD_REFUND_WINDOW_DAYS && await paidByCreditCard(tx)) return `This sale was paid by credit card more than ${CARD_REFUND_WINDOW_DAYS} days ago, so it can't be refunded. Issue a credit note or an exchange instead.`;
+  return null;
+}
+
+// Turns a waiting exchange into a refund or credit note, when the customer
+// isn't taking a replacement. The goods are already back and the sale's figures
+// already adjusted, so this only settles the credit. Same manager PIN and
+// permissions as a return settled that way in the first place.
+router.post('/returns/:id/convert', requirePermission('transactions_returns'), async (req, res) => {
+  try {
+    const { to } = req.body;
+    if (!['refund', 'credit_note'].includes(to)) return res.status(400).json({ error: 'Choose a refund or a credit note' });
+    if (to === 'refund' && !can(req.employee?.permissions, 'transactions_refund')) return res.status(403).json({ error: 'Missing permission: transactions_refund' });
+    if (to === 'credit_note' && !can(req.employee?.permissions, 'transactions_credit_note')) return res.status(403).json({ error: 'Missing permission: transactions_credit_note' });
+    const reason = String(req.body.reason || '').trim();
+    if (!reason) return res.status(400).json({ error: 'Enter the reason for converting this exchange', code: 'reason_required' });
+    const authorizer = await returnAuthorizer(req.body.override_pin);
+    if (authorizer.error) return res.status(403).json({ error: authorizer.error, code: authorizer.code });
+
+    const { rows: [current] } = await db.execute({ sql: 'SELECT customer_id, original_transaction_id FROM returns WHERE id = ?', args: [req.params.id] });
+    if (!current) return res.status(404).json({ error: 'Return not found' });
+    const { error, ret } = await exchangeCreditError(db, req.params.id, current.customer_id);
+    if (error) return res.status(400).json({ error });
+    const { rows: [sale] } = await db.execute({ sql: 'SELECT * FROM transactions WHERE id = ?', args: [current.original_transaction_id] });
+    if (!sale || sale.status !== 'completed') return res.status(400).json({ error: "The original sale isn't a completed sale any more, so this exchange can't be converted" });
+    if (to === 'credit_note' && !current.customer_id) return res.status(400).json({ error: 'Credit note requires a customer on the original transaction' });
+    if (to === 'refund') {
+      const refused = await refundRefusal(sale);
+      if (refused) return res.status(400).json({ error: refused });
+    }
+    const amount = parseFloat(ret.total);
+    const creditNoteNumber = to === 'credit_note' ? await nextNumber(db, 'account_payments', 'payment_number', 'CN-', 6) : null;
+
+    const conv = await db.transaction('write');
+    let committed = false;
+    try {
+      // Again inside the write transaction: a till may be selling on this credit.
+      const again = await exchangeCreditError(conv, req.params.id, current.customer_id);
+      if (again.error) { await conv.rollback(); committed = true; return res.status(400).json({ error: again.error }); }
+      let creditNoteId = null;
+      if (to === 'credit_note') {
+        await conv.execute({ sql: 'UPDATE customers SET account_balance = account_balance - ? WHERE id = ?', args: [amount, current.customer_id] });
+        creditNoteId = await recordReturnCreditNote(conv, { returnId: ret.id, returnNumber: ret.return_number, transaction: sale, customerId: current.customer_id,
+          employeeId: req.employee?.id, branchId: sale.branch_id, amount, number: creditNoteNumber });
+      }
+      await conv.execute({ sql: 'UPDATE returns SET resolution = ? WHERE id = ?', args: [to, ret.id] });
+      await conv.execute({ sql: 'INSERT INTO exchange_conversions (return_id, to_resolution, amount, credit_note_payment_id, reason, employee_id, override_by) VALUES (?,?,?,?,?,?,?)',
+        args: [ret.id, to, amount, creditNoteId, reason, req.employee?.id || null, authorizer.id] });
+      await conv.commit();
+      committed = true;
+    } catch (e) {
+      if (!committed) await conv.rollback();
+      throw e;
+    }
+    res.json({ id: ret.id, return_number: ret.return_number, resolution: to, total: amount });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.post('/:id/return', requirePermission('transactions_returns'), async (req, res) => {
   try {
     const { items, resolution, notes, employee_id } = req.body;
@@ -949,11 +1037,8 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
       // The reason goes with the manager's authorization (returns.notes —
       // printed as Reason on the return receipt).
       if (!String(notes || '').trim()) return res.status(400).json({ error: 'Enter the reason for the return', code: 'reason_required' });
-      const pin = String(req.body.override_pin || '').trim();
-      if (!pin) return res.status(403).json({ error: 'A manager must enter their PIN to authorize this return', code: 'override_required' });
-      const { rows: candidates } = await db.execute({ sql: 'SELECT e.id, e.pin, sg.permissions FROM employees e LEFT JOIN security_groups sg ON e.security_group_id = sg.id WHERE e.active = 1 AND e.pin = ?', args: [pin] });
-      const authorizer = candidates.find(c => { try { return JSON.parse(c.permissions || '{}').returns_override === true; } catch { return false; } });
-      if (!authorizer) return res.status(403).json({ error: "That PIN isn't a manager who can authorize returns", code: 'override_invalid' });
+      const authorizer = await returnAuthorizer(req.body.override_pin);
+      if (authorizer.error) return res.status(403).json({ error: authorizer.error, code: authorizer.code });
       overrideBy = authorizer.id;
     }
     if (!req.apiKey) {
@@ -965,14 +1050,9 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
     if (!tx) return res.status(404).json({ error: 'Transaction not found' });
     if (tx.status !== 'completed') return res.status(400).json({ error: 'Only completed transactions can be returned' });
     if (resolution === 'credit_note' && !tx.customer_id) return res.status(400).json({ error: 'Credit note requires a customer on the original transaction' });
-    // A charge-account sale was never paid — refunding it would hand over
-    // money while the customer still owes the full amount. Its return goes
-    // back on the account as a credit note instead.
-    if (resolution === 'refund' && (tx.is_credit || tx.payment_method === 'credit')) {
-      return res.status(400).json({ error: "This sale was charged to the customer's account, so it can't be refunded. Issue a credit note to take the return off their balance." });
-    }
-    if (resolution === 'refund' && daysSinceSale(tx.created_at) > CARD_REFUND_WINDOW_DAYS && await paidByCreditCard(tx)) {
-      return res.status(400).json({ error: `This sale was paid by credit card more than ${CARD_REFUND_WINDOW_DAYS} days ago, so it can't be refunded. Issue a credit note or an exchange instead.` });
+    if (resolution === 'refund') {
+      const refused = await refundRefusal(tx);
+      if (refused) return res.status(400).json({ error: refused });
     }
 
     // Same reasoning as the void guard below: a rental's checkout/settlement

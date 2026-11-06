@@ -827,6 +827,70 @@ Object.assign(App, {
     this.renderCart();
   },
 
+  // Hold Recall → Convert: the customer isn't taking a replacement, so the
+  // waiting credit is settled as a refund or credit note instead.
+  async showConvertExchange(returnId) {
+    let ret;
+    try { ret = (await this.api('GET', '/transactions/pending-exchanges')).find(r => r.id === returnId); }
+    catch (e) { this.alert(e.message, 'error'); return; }
+    if (!ret) { this.alert('That exchange credit has already been used or converted', 'warning'); this.updateHoldBadge(); return; }
+    const esc = v => this.escapeAttr(v ?? '');
+    const canRefund = this.can('transactions_refund') && !ret.charged_to_account;
+    const canCredit = this.can('transactions_credit_note') && !!ret.customer_id;
+    const option = (value, label, detail, enabled, why) => `
+      <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px;margin-bottom:6px${enabled ? '' : ';opacity:0.45'}">
+        <input type="radio" name="cx-to" value="${value}" ${enabled ? '' : 'disabled'} style="margin-top:2px">
+        <span><strong>${label}</strong> — ${detail}${why ? ` <em style="color:var(--text-muted)">(${why})</em>` : ''}</span>
+      </label>`;
+    this.showModal(`
+      <div class="modal" style="max-width:500px">
+        <div class="modal-header"><span class="modal-title">Convert Exchange ${esc(ret.return_number)}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body" style="font-size:13px">
+          <p style="margin-top:0"><strong>${esc(ret.customer_name || 'Walk-in Customer')}</strong> · credit <strong>${this.fmt(ret.total)}</strong><br>
+            <span style="color:var(--text-muted)">Returned ${esc(ret.item_names)} from ${esc(ret.original_transaction_number)}. The goods are already back in stock.</span></p>
+          <div class="form-group">
+            <label>Settle as *</label>
+            ${this.can('transactions_refund') ? option('refund', 'Refund', 'pay the customer back', canRefund, ret.charged_to_account ? "this sale was charged to their account" : '') : ''}
+            ${this.can('transactions_credit_note') ? option('credit_note', 'Credit Note', "put it on the customer's account", canCredit, ret.customer_id ? '' : 'requires a customer') : ''}
+          </div>
+          <div class="form-group">
+            <label>Reason *</label>
+            <textarea id="cx-reason" rows="2" placeholder="Why isn't the customer taking a replacement?" style="width:100%;resize:vertical"></textarea>
+          </div>
+          <div class="form-group" style="margin-bottom:0">
+            <label>Manager Override PIN *</label>
+            <input type="password" id="cx-pin" inputmode="numeric" autocomplete="off" placeholder="Manager enters their PIN" style="width:220px">
+          </div>
+          <p style="margin:12px 0 0;color:var(--text-muted)">This can't be undone. The card leaves Hold Recall and the credit can no longer be used on a sale.</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-danger" id="cx-confirm">Convert</button>
+        </div>
+      </div>`);
+    const confirmBtn = document.getElementById('cx-confirm');
+    confirmBtn.addEventListener('click', async () => {
+      const to = document.querySelector('input[name="cx-to"]:checked')?.value;
+      const reason = document.getElementById('cx-reason').value.trim();
+      const pinInput = document.getElementById('cx-pin');
+      if (!to) { this.alert('Choose a refund or a credit note', 'warning'); return; }
+      if (!reason) { this.alert('Enter the reason for converting this exchange', 'warning'); document.getElementById('cx-reason').focus(); return; }
+      if (!pinInput.value.trim()) { this.alert('A manager must enter their PIN to authorize this', 'warning'); pinInput.focus(); return; }
+      confirmBtn.disabled = true;
+      try {
+        const done = await this.api('POST', `/transactions/returns/${returnId}/convert`, { to, reason, override_pin: pinInput.value.trim() });
+        this.closeModal();
+        this.alert(`${done.return_number} converted to a ${to === 'refund' ? 'refund' : 'credit note'} of ${this.fmt(done.total)}`, 'success');
+        this.updateHoldBadge();
+        this.showReturnReceipt(await this.api('GET', `/transactions/returns/${returnId}`));
+      } catch (e) {
+        confirmBtn.disabled = false;
+        if (/PIN/.test(e.message)) { pinInput.value = ''; pinInput.focus(); }
+        this.alert(e.message, 'error');
+      }
+    });
+  },
+
   // Hold Recall → a pending exchange: start a fresh ticket on its credit.
   async recallExchange(returnId) {
     try {
@@ -867,6 +931,9 @@ Object.assign(App, {
             <div class="receipt-row"><span>Resolution:</span><span>${resolutionLabel}</span></div>
             ${ret.employee_name ? `<div class="receipt-row"><span>Processed By:</span><span>${ret.employee_name}</span></div>` : ''}
             ${ret.override_by_name ? `<div class="receipt-row"><span>Authorized By:</span><span>${ret.override_by_name}</span></div>` : ''}
+            ${ret.converted_at ? `<div class="receipt-row"><span>Converted from exchange:</span><span>${this.fmtDateTime(ret.converted_at)}</span></div>
+            <div class="receipt-row"><span style="flex-shrink:0">Conversion reason:</span><span style="text-align:right;white-space:pre-wrap;overflow-wrap:anywhere">${this.escapeAttr(ret.converted_reason)}</span></div>
+            ${ret.converted_authorized_by ? `<div class="receipt-row"><span>Conversion authorized by:</span><span>${this.escapeAttr(ret.converted_authorized_by)}</span></div>` : ''}` : ''}
             ${ret.notes ? `<div class="receipt-row"><span style="flex-shrink:0">Reason:</span><span style="text-align:right;white-space:pre-wrap;overflow-wrap:anywhere">${ret.notes}</span></div>` : ''}
             <hr>
             ${items.map(i => `<div class="receipt-row"><span>${i.sku ? `<span style="font-size:11px;color:#555">${i.sku}</span> ` : ''}${i.product_name}</span><span>${this.fmt(i.total)}</span></div>${i.quantity > 1 ? `<div style="color:#666;font-size:11px;padding-left:4px">${i.quantity} x ${this.fmt(i.unit_price)}</div>` : ''}`).join('')}

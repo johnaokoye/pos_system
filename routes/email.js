@@ -334,6 +334,9 @@ function buildReturnReceiptHtml(ret, s) {
       ${docRow('Resolution', resolutionLabel)}
       ${ret.employee_name ? docRow('Processed By', ret.employee_name) : ''}
       ${ret.override_by_name ? docRow('Authorized By', ret.override_by_name) : ''}
+      ${ret.converted_at ? docRow('Converted From Exchange', fmtDateTime(ret.converted_at)) : ''}
+      ${ret.converted_at ? docRow('Conversion Reason', esc(ret.converted_reason)) : ''}
+      ${ret.converted_authorized_by ? docRow('Conversion Authorized By', esc(ret.converted_authorized_by)) : ''}
       ${ret.notes ? docRow('Reason', ret.notes) : ''}
       <div style="height:12px"></div>
       <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px">
@@ -1066,6 +1069,9 @@ router.post('/send-return-receipt/:id', requireAuth, async (req, res) => {
   if (!to) return res.status(400).json({ error: 'Recipient email is required' });
   try {
     const { rows: [ret] } = await db.execute({ sql: `SELECT r.*, t.transaction_number as original_transaction_number,
+      (SELECT created_at FROM exchange_conversions ec WHERE ec.return_id = r.id) as converted_at,
+      (SELECT reason FROM exchange_conversions ec WHERE ec.return_id = r.id) as converted_reason,
+      (SELECT e2.first_name || ' ' || e2.last_name FROM exchange_conversions ec JOIN employees e2 ON e2.id = ec.override_by WHERE ec.return_id = r.id) as converted_authorized_by,
       c.first_name || ' ' || c.last_name as customer_name,
       e.first_name || ' ' || e.last_name as employee_name,
       oe.first_name || ' ' || oe.last_name as override_by_name,

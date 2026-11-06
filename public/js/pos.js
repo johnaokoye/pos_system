@@ -2189,7 +2189,10 @@ Object.assign(App, {
                   <div style="font-size:13px;color:var(--text-muted);margin-top:3px">
                     Credit: <strong>${this.fmt(r.total)}</strong> &bull; returned ${this.escapeAttr(r.item_names || '')} from ${r.original_transaction_number || '—'} &bull; ${this._storeDateTime(r.created_at)}
                   </div>
-                  ${this._recallMetaLine(r.employee_name, r.branch_name).replace('Held by', 'Returned by')}
+                  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+                    ${this._recallMetaLine(r.employee_name, r.branch_name).replace('Held by', 'Returned by')}
+                    ${this.can('transactions_returns') && (this.can('transactions_refund') || this.can('transactions_credit_note')) ? `<button class="btn btn-secondary btn-sm" style="flex-shrink:0" onclick="event.stopPropagation();App.showConvertExchange(${r.id})" title="The customer isn't taking a replacement: settle this credit as a refund or credit note">Convert</button>` : ''}
+                  </div>
                 </div>`)(entry.data) : (w => `
                 <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px;cursor:pointer;transition:background 0.15s" onmouseover="this.style.background='#f0f4ff'" onmouseout="this.style.background=''" onclick="App.closeModal();${w.status==='intake' ? `App.showWOAssessmentFeeModal(${w.id})` : w.status==='pending_deposit' ? `App.showWODepositModal(${w.id})` : `App.showWOFinalPaymentModal(${w.id})`}">
                   <div style="display:flex;justify-content:space-between;align-items:center">

@@ -187,7 +187,8 @@ router.get('/payments-feed', async (req, res) => {
     // entered_in_pos marks an old-system credit note entered in the POS on a
     // cash customer (routes/customers.js) — Books posts those too.
     const { rows } = await db.execute({ sql: `SELECT ap.id, ap.payment_number, ap.customer_id, ap.amount, ap.payment_method, ap.payment_mode, ap.reference, ap.notes, ap.created_at,
-        ap.return_id, r.return_number, r.tax_amount AS return_tax, COALESCE(ap.entered_in_pos, 0) AS entered_in_pos, ap.legacy_credit_date
+        ap.return_id, r.return_number, r.tax_amount AS return_tax, COALESCE(ap.entered_in_pos, 0) AS entered_in_pos, ap.legacy_credit_date,
+        EXISTS (SELECT 1 FROM exchange_conversions ec WHERE ec.return_id = ap.return_id) AS converted_exchange
       FROM account_payments ap LEFT JOIN returns r ON r.id = ap.return_id WHERE ap.id > ? ORDER BY ap.id LIMIT ?`, args: [sinceId, limit] });
     res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
