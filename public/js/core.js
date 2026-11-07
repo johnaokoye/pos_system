@@ -894,7 +894,8 @@ const App = {
     const opts = { method, headers: { 'Content-Type': 'application/json' } };
     if (data) opts.body = JSON.stringify(data);
     const res = await fetch('/api' + url, opts);
-    const json = await res.json();
+    // An error page that isn't JSON (e.g. a proxy's 502) reads as its status.
+    const json = res.ok ? await res.json() : await res.json().catch(() => ({ error: `The server didn't respond properly (HTTP ${res.status})` }));
     if (!res.ok) {
       // Session expired/invalid server-side — force a clean re-login instead
       // of leaving the UI in a confusing half-authenticated state. Skip this

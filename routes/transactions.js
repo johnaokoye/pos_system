@@ -161,17 +161,37 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Cancel / delete a held order
+// Removes a held ticket; false when it's no longer on hold. A hold created by
+// converting a quotation points quotations.converted_to_tx back at it, so the
+// quote is reverted rather than left pointing at a deleted transaction (a
+// sale from the quote then converts it again).
+async function deleteHold(executor, id) {
+  const { rows: [held] } = await executor.execute({ sql: `SELECT id FROM transactions WHERE id = ? AND status = 'hold'`, args: [id] });
+  if (!held) return false;
+  await executor.execute({ sql: `UPDATE quotations SET status = 'accepted', converted_to_tx = NULL WHERE converted_to_tx = ?`, args: [id] });
+  await executor.execute({ sql: 'DELETE FROM transaction_items WHERE transaction_id = ?', args: [id] });
+  await executor.execute({ sql: 'DELETE FROM transactions WHERE id = ?', args: [id] });
+  return true;
+}
+
+// Cancel / delete a held order (Cancel Ticket or re-holding a recalled one)
 router.delete('/:id/hold', requirePermission('pos_hold'), async (req, res) => {
   try {
-    const { rows: [held] } = await db.execute({ sql: `SELECT id FROM transactions WHERE id = ? AND status = 'hold'`, args: [req.params.id] });
-    if (!held) return res.status(404).json({ error: 'Held order not found' });
-    // A hold created by converting a quotation points quotations.converted_to_tx
-    // back at it — if the hold is cancelled instead of recalled and finalized,
-    // revert the quote so it isn't left stranded pointing at a deleted transaction.
-    await db.execute({ sql: `UPDATE quotations SET status = 'accepted', converted_to_tx = NULL WHERE converted_to_tx = ?`, args: [req.params.id] });
-    await db.execute({ sql: 'DELETE FROM transaction_items WHERE transaction_id = ?', args: [req.params.id] });
-    await db.execute({ sql: 'DELETE FROM transactions WHERE id = ?', args: [req.params.id] });
+    const tx = await db.transaction('write');
+    let found;
+    try { found = await deleteHold(tx, req.params.id); await tx.commit(); } catch (e) { await tx.rollback(); throw e; }
+    if (!found) return res.status(404).json({ error: 'Held order not found' });
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Hold Recall opened this ticket at a till. It stays on hold until it's sold
+// (POST / with hold_id), so a failed sale or a frozen screen can't lose it;
+// this only records who has it open, for the Recall list.
+router.patch('/:id/hold/recall', requirePermission('pos_hold'), async (req, res) => {
+  try {
+    const result = await db.execute({ sql: `UPDATE transactions SET recalled_by = ?, recalled_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'hold'`, args: [req.employee?.id || null, req.params.id] });
+    if (!result.rowsAffected) return res.status(404).json({ error: 'That held order is no longer on hold — it may have been completed at another till' });
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -192,9 +212,11 @@ router.get('/', requireTransactionsList, async (req, res) => {
       CASE WHEN ra.checkout_transaction_id = t.id THEN 'checkout' WHEN ra.settlement_transaction_id = t.id THEN 'settlement' END as rental_role,
       wo.wo_number as work_order_number,
       CASE WHEN wo.assessment_transaction_id = t.id THEN 'assessment' WHEN wo.deposit_transaction_id = t.id THEN 'deposit' WHEN wo.final_transaction_id = t.id THEN 'final' END as wo_role,
-      (SELECT COUNT(*) FROM returns rt WHERE rt.original_transaction_id = t.id) as return_count
+      (SELECT COUNT(*) FROM returns rt WHERE rt.original_transaction_id = t.id) as return_count,
+      rce.first_name || ' ' || rce.last_name as recalled_by_name
       FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN branches b ON t.branch_id = b.id
       LEFT JOIN employees ce ON ce.id = ${CREDITED_SQL}
+      LEFT JOIN employees rce ON rce.id = t.recalled_by
       LEFT JOIN rental_agreements ra ON ra.checkout_transaction_id = t.id OR ra.settlement_transaction_id = t.id
       LEFT JOIN quotations q ON q.converted_to_tx = t.id
       LEFT JOIN work_orders wo ON wo.assessment_transaction_id = t.id OR wo.deposit_transaction_id = t.id OR wo.final_transaction_id = t.id
@@ -449,7 +471,7 @@ router.patch('/salesperson', requirePermission('sales_manager'), async (req, res
 
 router.post('/', requirePermission('pos'), async (req, res) => {
   try {
-    const { customer_id, employee_id, created_by, drawer_session_id, items, discount_amount, promotion_code, promotion_name, payment_method, amount_tendered, notes, source_return_id, store_credit_applied, cash_back_applied, quote_id, tax_exempt, tax_exemption_number, approval_code, tenders } = req.body;
+    const { customer_id, employee_id, created_by, drawer_session_id, items, discount_amount, promotion_code, promotion_name, payment_method, amount_tendered, notes, source_return_id, store_credit_applied, cash_back_applied, quote_id, tax_exempt, tax_exemption_number, approval_code, tenders, hold_id } = req.body;
     let { branch_id } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in transaction' });
     // A POS Q item (not in inventory) can't be sold at the till — it has to
@@ -738,6 +760,12 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         const { error } = await exchangeCreditError(tx, source_return_id, customer_id);
         if (error) throw new Error(error);
       }
+      // A recalled held ticket is removed with the sale, in the same
+      // transaction — kept until now so a failed sale doesn't lose it. Gone
+      // already means it was sold (or cancelled) at another till.
+      if (hold_id && !(await deleteHold(tx, hold_id))) {
+        throw Object.assign(new Error('This held ticket is no longer on hold — it may already have been completed at another till. Check Transactions before taking payment again.'), { status: 409, holdGone: true });
+      }
       const txSource = req.apiKey ? 'online' : 'pos';
       const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,created_by,salesperson_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,promotion_code,promotion_name,total,payment_method,amount_tendered,change_amount,is_credit,notes,source_return_id,store_credit_applied,cash_back_applied,tax_exempt,tax_exemption_number,approval_code,source,discount_pre_tax,po_number) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id || null, employee_id || 1, createdBy, salespersonId, branch_id || null, drawer_session_id || null, subtotal, tax_amount, disc, promotion_code || null, promotion_name || null, total, method, tendered, change > 0 ? change : 0, isCredit ? 1 : 0, notes || null, source_return_id || null, storeCredit > 0 ? storeCredit : 0, cashBack > 0 ? cashBack : 0, isTaxExempt, tax_exemption_number || null, finalApprovalCode, txSource, discountPreTax, poNumber] });
       const txId = Number(txResult.lastInsertRowid);
@@ -839,7 +867,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       // throws and would crash the process (unhandled rejection), so only
       // roll back if the commit itself never happened.
       if (!committed) await tx.rollback();
-      res.status(committed ? 500 : 400).json({ error: e.message });
+      res.status(committed ? 500 : (e.status || 400)).json({ error: e.message, ...(e.holdGone ? { code: 'hold_gone' } : {}) });
     }
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

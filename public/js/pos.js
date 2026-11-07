@@ -807,7 +807,20 @@ Object.assign(App, {
   posCancelTicket() {
     if (!this.cart.length) return;
     if (!confirm('Cancel this ticket? All items will be removed.')) return;
+    this._dropRecalledHold();
     this.clearCart();
+  },
+
+  // A recalled hold stays on hold until the ticket is finished (Hold Recall →
+  // loadHeldOrder), so a failed sale or a frozen screen can't lose it. A sale
+  // removes it server-side (hold_id); cancelling the ticket, re-holding it or
+  // turning it into a layaway removes it here.
+  async _dropRecalledHold() {
+    const id = this._recalledHoldId;
+    if (!id) return;
+    this._recalledHoldId = null;
+    try { await this.api('DELETE', `/transactions/${id}/hold`); } catch (e) { /* already gone */ }
+    this.updateHoldBadge();
   },
 
   // "Create Quote" grid button — opens the normal (unchanged) quote form,
@@ -1543,6 +1556,7 @@ Object.assign(App, {
   },
 
   clearCart() {
+    this._recalledHoldId = null;
     this._salespersonReminderDone = false;
     this._bundleSeen = new Set(); this._closeBundleUpsell();
     this._ticketPoNumber = null;
@@ -1943,6 +1957,9 @@ Object.assign(App, {
   },
 
   async processPayment(method) {
+    // One sale at a time — a second click while the first is still saving
+    // would charge the ticket twice.
+    if (this._paymentInFlight) return;
     if (!this.cart.length) { this.alert('Cart is empty', 'warning'); return; }
     if (this._posQItemBlocksSale()) return;
     if (!await this._salespersonReminder()) return;
@@ -2003,6 +2020,8 @@ Object.assign(App, {
 
     const isTaxExempt = this.isCartTaxExempt();
 
+    this._paymentInFlight = true;
+    const busy = this._showPaymentBusy();
     try {
       const tx = await this.api('POST', '/transactions', {
         customer_id: this.cartCustomer?.id || null,
@@ -2032,7 +2051,10 @@ Object.assign(App, {
         tax_exemption_number: isTaxExempt ? this.cartTaxExemptionNumber() : null,
         approval_code: approvalCode || null,
         tenders: splitTenders,
+        hold_id: this._recalledHoldId || null,
       });
+      this._recalledHoldId = null;
+      busy.remove();
 
       // Record promo code usage
       if (this.appliedPromoCode?.code_id) {
@@ -2056,9 +2078,39 @@ Object.assign(App, {
       this.showReceipt(tx, changeAmount, cashResult, splitForeignCash);
       this.clearCart();
       this.renderProductGrid();
+      this.updateHoldBadge();
     } catch (e) {
-      this.alert(e.message, 'error');
+      busy.remove();
+      if (e.data?.code === 'hold_gone') {
+        // The held ticket was finished elsewhere — the ticket is still on
+        // screen; selling it anyway is the cashier's call.
+        this._paymentInFlight = false;
+        if (confirm(`${e.message}\n\nSell this ticket anyway as a new sale?`)) {
+          this._recalledHoldId = null;
+          await this.processPayment(method);
+        }
+        return;
+      }
+      // The ticket stays on screen (and, if it was recalled, still on hold).
+      // A refusal (4xx) means nothing was saved; no reply or a server error
+      // can come after the sale was saved, so check before charging again.
+      if (e.status >= 400 && e.status < 500) this.alert(`${e.message} — the sale was not completed; the ticket is still here`, 'error');
+      // Stays up until dismissed — this one mustn't be missed.
+      else window.alert(`${e.message}\n\nThe sale may or may not have gone through. Check Transactions for it before taking payment again.`);
+    } finally {
+      this._paymentInFlight = false;
+      busy.remove();
     }
+  },
+
+  // Full-screen "Completing sale…" notice while the sale saves, so a slow
+  // server doesn't look like a frozen till (and nothing can be clicked twice).
+  _showPaymentBusy() {
+    const el = document.createElement('div');
+    el.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center';
+    el.innerHTML = '<div style="background:var(--card-bg,#fff);color:var(--text,#111);padding:18px 26px;border-radius:10px;font-size:16px;font-weight:600;box-shadow:0 6px 24px rgba(0,0,0,0.25)">Completing sale…</div>';
+    document.body.appendChild(el);
+    return el;
   },
 
   async holdOrder() {
@@ -2098,6 +2150,8 @@ Object.assign(App, {
         ...this._ticketDiscountSource(),
       });
       const customerName = this.cartCustomer ? `${this.cartCustomer.first_name} ${this.cartCustomer.last_name}` : 'Walk-in Customer';
+      // Re-holding a recalled ticket: the new hold replaces the old one.
+      await this._dropRecalledHold();
       this.clearCart();
       this.alert(`Order held for ${customerName}`, 'success');
       this.updateHoldBadge();
@@ -2141,6 +2195,7 @@ Object.assign(App, {
         ...pendingWOs.map(w => ({ type: 'work_order', created_at: w.created_at, data: w })),
         ...pendingExchanges.map(r => ({ type: 'exchange', created_at: r.created_at, data: r })),
       ].sort((a, b) => this._utcDate(b.created_at) - this._utcDate(a.created_at));
+      this._holdRecallList = held;
       this.showModal(`
         <div class="modal">
           <div class="modal-header">
@@ -2160,6 +2215,7 @@ Object.assign(App, {
                     ${h.notes ? `&bull; ${h.notes}` : ''}
                   </div>
                   ${this._recallMetaLine(h.employee_name, h.branch_name)}
+                  ${h.recalled_at ? `<div style="font-size:12px;color:#b45309;margin-top:2px">Opened by ${this.escapeAttr(h.recalled_by_name || 'someone')} at ${this._storeDateTime(h.recalled_at)} — not finished yet</div>` : ''}
                 </div>`)(entry.data) : entry.type === 'rental' ? (r => `
                 <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px;cursor:pointer;transition:background 0.15s" onmouseover="this.style.background='#f0f4ff'" onmouseout="this.style.background=''" onclick="App.closeModal();App.showFinalizeRentalModal(${r.id})">
                   <div style="display:flex;justify-content:space-between;align-items:center">
@@ -2228,9 +2284,16 @@ Object.assign(App, {
   async loadHeldOrder(id) {
     try {
       const held = await this.api('GET', `/transactions/${id}`);
+      if (held.status !== 'hold') { this.alert('That held order is no longer on hold — it may have been completed at another till', 'warning'); this.updateHoldBadge(); return; }
+      const listed = (this._holdRecallList || []).find(h => h.id === id);
+      if (listed?.recalled_at && listed.recalled_by !== this.currentUser?.id
+        && !confirm(`${listed.recalled_by_name || 'Someone'} opened this ticket at ${this._storeDateTime(listed.recalled_at)} and hasn't finished it. Open it here anyway?`)) return;
       if (this.cart.length) {
         if (!confirm('Loading this held order will replace your current cart. Continue?')) return;
       }
+      // It stays on hold until it's sold, re-held or cancelled — this only
+      // records who has it open.
+      await this.api('PATCH', `/transactions/${id}/hold/recall`);
       // Each line's share of the held ticket discount — its tax was charged
       // on its total less that share (discount before tax).
       const heldShares = this._allocateTicketDiscount(held.items.map(i => i.total), held.discount_amount).shares;
@@ -2290,6 +2353,7 @@ Object.assign(App, {
       this._renderTicketSalesperson();
       this._ticketPoNumber = held.po_number || null;
       this._renderTicketPoNumber();
+      this._recalledHoldId = id;
       if (held.customer_id) {
         this.cartCustomer = customer;
         if (this.section !== 'pos') return;
@@ -2312,7 +2376,6 @@ Object.assign(App, {
           aqBar.style.display = 'none';
         }
       }
-      await this.api('DELETE', `/transactions/${id}/hold`);
       this.closeModal();
       this.renderCart();
       this.updateHoldBadge();

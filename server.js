@@ -46,6 +46,18 @@ app.use(compression());
 app.use(bodyParser.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Slow API requests go to the server log. The database driver is
+// synchronous, so one slow request holds up every till until it finishes —
+// this names the one behind a "the app froze" report.
+app.use('/api', (req, res, next) => {
+  const t0 = Date.now();
+  res.on('finish', () => {
+    const ms = Date.now() - t0;
+    if (ms >= 3000) console.warn(`[slow] ${ms}ms ${req.method} ${req.baseUrl}${req.path} → ${res.statusCode}${req.employee ? ` (employee ${req.employee.id})` : ''}`);
+  });
+  next();
+});
+
 // Initialize DB before handling any request
 app.use(async (req, res, next) => {
   try { await ensureReady(); next(); } catch(e) { res.status(500).json({ error: 'Database initialization failed' }); }

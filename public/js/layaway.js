@@ -340,7 +340,7 @@ Object.assign(App, {
       // Only clear the POS ticket when this plan was seeded from it — a
       // layaway created normally from the Layaway section has no relation
       // to whatever (if anything) happens to be sitting in this.cart.
-      if (this._layawayFromPOSCart) { this._layawayFromPOSCart = false; this.clearCart(); }
+      if (this._layawayFromPOSCart) { this._layawayFromPOSCart = false; this._dropRecalledHold(); this.clearCart(); }
       this.renderLayaway();
     } catch(e) { this.alert(e.message, 'error'); }
   },

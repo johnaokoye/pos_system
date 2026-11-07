@@ -2900,6 +2900,11 @@ async function _init() {
     // a sale from a quote takes the quote's unless the cashier typed one.
     'ALTER TABLE quotations ADD COLUMN po_number TEXT',
     'ALTER TABLE transactions ADD COLUMN po_number TEXT',
+    // Hold Recall keeps the held ticket until it's sold (POST /transactions
+    // with hold_id removes it), re-held or cancelled, so a sale that fails or
+    // a browser that freezes doesn't lose it; these show who has it open.
+    'ALTER TABLE transactions ADD COLUMN recalled_by INTEGER',
+    'ALTER TABLE transactions ADD COLUMN recalled_at DATETIME',
     'ALTER TABLE work_orders ADD COLUMN po_number TEXT',
     // GCT included in a bill's amount (input tax, base currency) — RetailPOS
     // Books posts it to GCT Recoverable instead of Inventory. NULL = a bill
