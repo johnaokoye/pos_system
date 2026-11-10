@@ -435,11 +435,15 @@ Object.assign(App, {
     this._rentalQuoteProducts = [];
     this._rentalQuoteLineIdx = 0;
     this._spRentalProducts = null;
+    this._spRentalAvail = null;
     const q = editId ? await this.api('GET', `/quotations/${editId}`) : null;
     const quoteCustomer = q?.customer_id ? await this._customerById(q.customer_id) : null;
     const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0,10);
+    // A Special Project is wider: its rental item search shows each item's
+    // details and availability.
+    const spForm = (q && q.quote_type === 'special_project') || (!editId && initialType === 'special_project');
     this.showModal(`
-      <div class="modal" style="max-width:720px">
+      <div class="modal" style="max-width:${spForm ? 'min(1280px, 96vw)' : '720px'}">
         <div class="modal-header"><span class="modal-title">${editId ? `Edit ${(q&&q.quote_type==='special_project')?'Special Project Quotation':'Quotation'}: ${q.quote_number}` : (initialType==='special_project' ? 'New Special Project Quotation' : 'New Quotation')}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           ${!editId && initialType !== 'special_project' ? `<div class="form-group"><label>Quote Type</label>
@@ -814,7 +818,7 @@ Object.assign(App, {
         <input type="text" id="qti-rprod-search-${idx}" placeholder="Search rental items…" autocomplete="off" style="width:100%" value="${this.escapeAttr(name)}"
           oninput="App._filterQuoteRentalOptions(${idx},this.value)" onfocus="App._filterQuoteRentalOptions(${idx},this.value)">
         <input type="hidden" id="qti-rprod-${idx}" value="${prefill&&prefill.product_id||''}">
-        <div id="qti-rprod-dd-${idx}" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
+        <div id="qti-rprod-dd-${idx}" style="display:none;position:absolute;top:100%;left:0;width:max(100%, min(760px, 88vw));background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:420px;overflow-y:auto;margin-top:2px"></div>
       </span>
       <input id="qti-qty-${idx}" type="number" min="1" value="${prefill?prefill.quantity:1}" style="width:60px" placeholder="Qty" oninput="App._quoteRentalEstimate(${idx})">
       <input id="qti-rstart-${idx}" type="date" value="${prefill&&prefill.rental_start||today}" style="width:140px" title="Rental start" onchange="App._quoteRentalEstimate(${idx})">
@@ -841,14 +845,68 @@ Object.assign(App, {
     if (!this._spRentalProducts) {
       try { this._spRentalProducts = await this.api('GET', '/products?is_rental=1&active=1'); } catch(e) { this._spRentalProducts = []; }
     }
+    const avail = await this._spRentalAvailability();
     const q = (query || '').toLowerCase().trim();
-    const matches = this._spRentalProducts.filter(p => !q || `${p.name} ${p.sku || ''}`.toLowerCase().includes(q));
-    dd.innerHTML = matches.length ? matches.slice(0, 50).map(p => `
-      <div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text)" onclick="App._selectQuoteRentalOption(${idx},${p.id})">
-        <strong>${p.name}</strong>
-        <div style="font-size:11px;color:var(--text-muted)">${this.fmt(p.rental_rate || 0)}/day${p.sku ? ' · ' + p.sku : ''}</div>
-      </div>`).join('') : `<div style="padding:10px;color:var(--text-muted);font-size:13px">No rental items found</div>`;
+    const matches = this._spRentalProducts.filter(p => !q || `${p.name} ${p.sku || ''} ${p.model_number || ''}`.toLowerCase().includes(q));
+    dd.innerHTML = matches.length ? matches.slice(0, 50).map(p => this._spRentalOptionHtml(idx, p, avail && avail.byId.get(p.id), avail)).join('')
+      : `<div style="padding:10px;color:var(--text-muted);font-size:13px">No rental items found</div>`;
     dd.style.display = '';
+  },
+
+  // GET /quotations/rental-availability for the form's branch, kept for a
+  // minute (the search reopens on every keystroke). null if it can't load —
+  // the search still works, without availability.
+  async _spRentalAvailability(force) {
+    const branchId = document.getElementById('qt-branch')?.value || '';
+    const c = this._spRentalAvail;
+    if (!force && c && c.branchId === branchId && Date.now() - c.at < 60000) return c;
+    try {
+      const data = await this.api('GET', `/quotations/rental-availability${branchId ? `?branch_id=${branchId}` : ''}`);
+      this._spRentalAvail = { branchId, at: Date.now(), today: data.today, byId: new Map(data.items.map(i => [i.product_id, i])) };
+    } catch(e) { this._spRentalAvail = null; }
+    return this._spRentalAvail;
+  },
+
+  // When it's back: "due back Nov 14" for the earliest rental out, flagged
+  // when that date has passed.
+  _spDueText(a, today) {
+    if (!a || !a.next_due) return '';
+    const overdue = today && a.next_due < today;
+    return overdue
+      ? `<span style="color:var(--danger)">overdue since ${this.fmtDate(a.next_due)}</span>`
+      : `due back ${this.fmtDate(a.next_due)}`;
+  },
+
+  _spRentalOptionHtml(idx, p, a, avail) {
+    const esc = v => this.escapeAttr(v == null ? '' : String(v));
+    const rates = [['day', p.rental_rate], ['wk', p.rental_weekly_rate], ['mo', p.rental_monthly_rate], ['hr', p.rental_hourly_rate]]
+      .filter(([, v]) => Number(v) > 0).map(([u, v]) => `${this.fmt(v)}/${u}`).join(' · ') || 'no rate set';
+    const details = [p.sku, p.model_number && `Model ${p.model_number}`, p.size, p.category_name,
+      p.rental_classification === 'equipment' ? 'Equipment' : 'Tool', p.is_accessory ? 'Accessory' : null,
+      !avail?.branchId && p.assigned_branch_name ? p.assigned_branch_name : null].filter(Boolean).map(esc).join(' · ');
+    let badge = '', stockLine = '', bookingLines = '';
+    if (a) {
+      const color = a.available > 0 ? 'var(--success)' : 'var(--danger)';
+      badge = `<span style="flex-shrink:0;font-weight:700;font-size:12px;color:${color};border:1px solid ${color};border-radius:10px;padding:1px 8px">${a.available} available</span>`;
+      stockLine = [`${a.on_hand} on hand`, a.out ? `${a.out} on rental` : '', a.held ? `${a.held} held` : '', a.out_of_service ? `${a.out_of_service} out of service` : '']
+        .filter(Boolean).join(' · ');
+      const due = this._spDueText(a, avail.today);
+      if (due) stockLine += ` · <strong>${due}</strong>`;
+      bookingLines = a.bookings.slice(0, 4).map(b => {
+        const overdue = b.kind === 'out' && b.due && b.due < avail.today;
+        const what = b.kind === 'held'
+          ? `Held ${b.qty} for ${b.quote_number ? `Special Project ${esc(b.quote_number)}` : `${esc(b.agreement_number)} (awaiting checkout)`}${b.from ? ` · ${this.fmtDate(b.from)}` : ''}${b.due ? ` – ${this.fmtDate(b.due)}` : ''}`
+          : `${b.qty} on rental ${esc(b.agreement_number)}${b.status === 'awaiting_issue' ? ' (paid, not yet issued)' : ''} · due back ${b.due ? this.fmtDate(b.due) : '—'}${overdue ? ' <span style="color:var(--danger)">(overdue)</span>' : ''}`;
+        return `<div>${what}${!avail.branchId && b.branch_name ? ` · ${esc(b.branch_name)}` : ''}</div>`;
+      }).join('') + (a.bookings.length > 4 ? `<div>…and ${a.bookings.length - 4} more</div>` : '');
+    }
+    return `
+      <div class="nav-item" style="padding:8px 10px;cursor:pointer;color:var(--text);display:block;font-weight:400;border-bottom:1px solid var(--border)" onclick="App._selectQuoteRentalOption(${idx},${p.id})">
+        <div style="display:flex;align-items:center;gap:8px"><strong style="flex:1">${esc(p.name)}</strong>${badge}</div>
+        <div style="font-size:11px;color:var(--text-muted)">${details}${details ? ' · ' : ''}${rates}</div>
+        ${stockLine ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">${stockLine}</div>` : ''}
+        ${bookingLines ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px;padding-left:8px;border-left:2px solid var(--border)">${bookingLines}</div>` : ''}
+      </div>`;
   },
 
   _selectQuoteRentalOption(idx, productId) {
@@ -901,9 +959,15 @@ Object.assign(App, {
     if (price && (price.dataset.auto === '1' || price.value === '')) { price.value = est.unit_price; price.dataset.auto = '1'; }
     const cost = document.getElementById(`qti-cost-${idx}`);
     if (cost && cost.value === '' && est.cost != null) cost.value = est.cost;
-    const availText = est.available == null ? 'choose a branch to check availability'
+    let availText = est.available == null ? 'choose a branch to check availability'
       : est.available >= quantity ? `${est.available} available at this branch now`
       : `<span style="color:var(--danger)">only ${est.available} available at this branch now</span>`;
+    if (est.available != null && est.available < quantity) {
+      // Can still be quoted — say when more come back.
+      const avail = await this._spRentalAvailability();
+      const due = this._spDueText(avail && avail.byId.get(Number(product_id)), avail?.today);
+      if (due) availText += ` · ${due}`;
+    }
     info.innerHTML = `${est.days} day${est.days === 1 ? '' : 's'}${rate_plan ? ` · ${this._ratePlanLabel(rate_plan).toLowerCase()}` : ''} · catalog rate ${this.fmt(est.fee)} for ${quantity} · ${availText}${planKept ? '' : ' · <span style="color:var(--warning, #d97706)">rate set back to Automatic — the period is too short for it</span>'}`;
     this.calcQuoteTotal();
     this._updateQuoteItemMargin(idx);

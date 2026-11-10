@@ -11,6 +11,7 @@ const { feeFor, getBranchStock, buildRentalLines, revalidateQuoteLines, insertPe
 const { ratePlanError } = require('../lib/rentalPricing');
 const { allocateTicketDiscount } = require('../lib/ticketDiscount');
 const { RENT_PERIOD_UNITS, quoteLineForSale } = require('../lib/quoteLines');
+const { storeToday } = require('../lib/storeTime');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -119,6 +120,76 @@ async function attachQuoteItemSources(items) {
   for (const item of items) { item.sources = byItem[item.id] || []; }
   return items;
 }
+
+// Every active rental item's availability for the Special Project rental item
+// search, so whoever is quoting sees it before picking (an item can still be
+// quoted when none are free). Per item, at branch_id (else every branch):
+// on_hand (branch_inventory, or products.stock_qty with no branch), out (on
+// rental: active / awaiting_issue), held (pending: a cashier's held checkout
+// or an approved Special Project), out_of_service, available — the same sum
+// as rental-line-estimate and the checkout guard — and bookings: each
+// agreement with units still out, with when it's due back (`due`, a calendar
+// date) and, for a project hold, the project's rental dates.
+router.get('/rental-availability', requirePermission('special_projects'), async (req, res) => {
+  try {
+    const branchId = req.query.branch_id ? Number(req.query.branch_id) : null;
+    const [{ rows: products }, { rows: stock }, { rows: oos }, { rows: bookings }] = await Promise.all([
+      db.execute({ sql: 'SELECT id, stock_qty FROM products WHERE is_rental = 1 AND active = 1', args: [] }),
+      branchId
+        ? db.execute({ sql: 'SELECT product_id, stock_qty FROM branch_inventory WHERE branch_id = ?', args: [branchId] })
+        : Promise.resolve({ rows: [] }),
+      db.execute({
+        sql: `SELECT product_id, COALESCE(SUM(quantity), 0) AS qty FROM rental_out_of_service
+              WHERE returned_to_service_at IS NULL${branchId ? ' AND branch_id = ?' : ''} GROUP BY product_id`,
+        args: branchId ? [branchId] : [],
+      }),
+      db.execute({
+        sql: `SELECT rai.product_id, ra.id AS agreement_id, ra.agreement_number, ra.status, ra.branch_id, b.name AS branch_name,
+                ra.checkout_date, ra.due_date, q.quote_number,
+                (SELECT MIN(qi.rental_start) FROM quotation_items qi WHERE qi.rental_agreement_id = ra.id) AS hold_start,
+                (SELECT MAX(qi.rental_end) FROM quotation_items qi WHERE qi.rental_agreement_id = ra.id) AS hold_end,
+                SUM(rai.quantity - rai.quantity_returned) AS qty
+              FROM rental_agreement_items rai
+              JOIN rental_agreements ra ON ra.id = rai.agreement_id
+              LEFT JOIN branches b ON b.id = ra.branch_id
+              LEFT JOIN quotations q ON q.id = ra.quotation_id
+              WHERE ra.status IN ('active', 'pending', 'awaiting_issue')${branchId ? ' AND ra.branch_id = ?' : ''}
+              GROUP BY rai.product_id, ra.id
+              HAVING SUM(rai.quantity - rai.quantity_returned) > 0
+              ORDER BY ra.due_date, ra.id`,
+        args: branchId ? [branchId] : [],
+      }),
+    ]);
+    const stockBy = new Map(stock.map(r => [r.product_id, Number(r.stock_qty) || 0]));
+    const oosBy = new Map(oos.map(r => [r.product_id, Number(r.qty) || 0]));
+    const bookingsBy = new Map();
+    for (const b of bookings) {
+      const list = bookingsBy.get(b.product_id) || [];
+      const held = b.status === 'pending';
+      list.push({
+        agreement_number: b.agreement_number, status: b.status, qty: Number(b.qty), branch_name: b.branch_name,
+        kind: held ? 'held' : 'out', quote_number: b.quote_number || null,
+        from: held ? (b.hold_start || null) : (b.checkout_date || null),
+        due: held ? (b.hold_end || b.due_date) : b.due_date,
+      });
+      bookingsBy.set(b.product_id, list);
+    }
+    const items = products.map(p => {
+      const on_hand = branchId ? (stockBy.get(p.id) || 0) : (Number(p.stock_qty) || 0);
+      const list = bookingsBy.get(p.id) || [];
+      const out = list.filter(b => b.kind === 'out').reduce((t, b) => t + b.qty, 0);
+      const held = list.filter(b => b.kind === 'held').reduce((t, b) => t + b.qty, 0);
+      const out_of_service = oosBy.get(p.id) || 0;
+      const nextOut = list.filter(b => b.kind === 'out').map(b => b.due).filter(Boolean).sort()[0] || null;
+      return {
+        product_id: p.id, on_hand, out, held, out_of_service,
+        available: Math.max(0, on_hand - out - held - out_of_service),
+        next_due: nextOut, bookings: list,
+      };
+    });
+    res.json({ branch_id: branchId, today: storeToday(), items });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 // Live price/availability for a Special Project rental line while it's being
 // entered: the catalog rate over the period, and how many are free to hold
