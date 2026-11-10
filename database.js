@@ -3016,6 +3016,13 @@ async function _init() {
     // branch; the other way filters by the branch an invoice was raised at).
     // Set on the customer form or in bulk from Accounts Receivable.
     'ALTER TABLE customers ADD COLUMN home_branch_id INTEGER REFERENCES branches(id)',
+    // How a refund was paid out and the cash drawer session it came out of
+    // (cash always has one; card / check / direct deposit when the person had
+    // a drawer open), and when — for a converted exchange that's later than
+    // the return. The drawer report takes refunds off each tender's expected.
+    'ALTER TABLE returns ADD COLUMN refund_method TEXT',
+    'ALTER TABLE returns ADD COLUMN drawer_session_id INTEGER REFERENCES drawer_sessions(id)',
+    'ALTER TABLE returns ADD COLUMN refunded_at DATETIME',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
@@ -4095,6 +4102,7 @@ async function _init() {
     'CREATE INDEX IF NOT EXISTS idx_stock_movements_reference ON stock_movements(reference)',
     'CREATE INDEX IF NOT EXISTS idx_purchase_requests_shop_use ON purchase_requests(shop_use_request_id)',
     'CREATE INDEX IF NOT EXISTS idx_customers_home_branch ON customers(home_branch_id)',
+    'CREATE INDEX IF NOT EXISTS idx_returns_drawer_session ON returns(drawer_session_id)',
   ];
   for (const sql of indexes) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

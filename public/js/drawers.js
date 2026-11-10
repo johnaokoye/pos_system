@@ -337,9 +337,10 @@ Object.assign(App, {
     const sum = r.summary;
     const canVoid = actions && s.status !== 'reconciled' && this._drawerScope() === 'all';
     const tenderRows = r.tenders.filter(t => !t.uncounted || t.sales || t.key === 'available_credit').map(t => {
+      const refunded = t.refunds ? `less ${m(t.refunds)} refunded` : '';
       const note = t.key === 'cash'
-        ? [r.float.included_in_cash ? `incl. ${m(r.float.opening)} float` : 'float returned separately', r.payouts_total ? `less ${m(r.payouts_total)} petty cash` : ''].filter(Boolean).join(', ')
-        : t.key === 'available_credit' ? 'store credit — no money in the drawer' : '';
+        ? [r.float.included_in_cash ? `incl. ${m(r.float.opening)} float` : 'float returned separately', r.payouts_total ? `less ${m(r.payouts_total)} petty cash` : '', refunded].filter(Boolean).join(', ')
+        : t.key === 'available_credit' ? 'store credit — no money in the drawer' : refunded;
       return `<tr>
         <td>${esc(t.label)}${note ? ` <small style="color:var(--text-muted,#777)">(${note})</small>` : ''}</td>
         <td style="text-align:center">${t.tx_count}</td>
@@ -366,6 +367,20 @@ Object.assign(App, {
           ${canVoid ? `<td style="text-align:right">${p.voided_at ? '' : `<button class="btn btn-sm btn-secondary" onclick="App.voidDrawerPayout(${p.id}, ${s.id})">Void</button>`}</td>` : ''}
         </tr>`).join('')}
         <tr style="font-weight:600"><td colspan="4">Total paid out</td><td style="text-align:right">${m(r.payouts_total)}</td>${canVoid ? '<td></td>' : ''}</tr></tbody></table>` : '';
+    // Refunds paid out of this drawer — each comes off its tender's expected.
+    const refundLabel = { cash: 'Cash', card: 'Card', check: 'Cheque', direct_deposit: 'Bank transfer' };
+    const refundsHtml = (r.refunds || []).length ? `
+      <h3 style="font-size:13px;margin:14px 0 6px">Refunds Paid</h3>
+      <table class="table" style="margin-bottom:0"><thead><tr><th>Return #</th><th>Sale</th><th>Customer</th><th>Paid By</th><th>By</th><th style="text-align:right">Amount</th></tr></thead>
+        <tbody>${r.refunds.map(x => `<tr>
+          <td><strong>${esc(x.return_number)}</strong><div style="font-size:11px;color:var(--text-muted,#777)">${this.fmtDateTime(x.refunded_at)}</div></td>
+          <td>${esc(x.transaction_number)}</td>
+          <td>${esc(x.customer_name) || 'Walk-in'}</td>
+          <td>${esc(refundLabel[x.refund_method] || x.refund_method)}</td>
+          <td>${esc(x.employee_name) || '—'}</td>
+          <td style="text-align:right">${m(x.total)}</td>
+        </tr>`).join('')}
+        <tr style="font-weight:600"><td colspan="5">Total refunded</td><td style="text-align:right">${m(r.refunds_total)}</td></tr></tbody></table>` : '';
     const acctHtml = (s.account_payments || []).length ? `
       <h3 style="font-size:13px;margin:14px 0 6px">Customer Account Payments</h3>
       <table class="table" style="margin-bottom:0"><thead><tr><th>Payment #</th><th>Customer</th><th>Tender</th><th style="text-align:right">Amount</th></tr></thead>
@@ -394,9 +409,10 @@ Object.assign(App, {
             <td style="text-align:right">${this._drawerVarianceHtml(sum.takings_variance)}</td>
           </tr>` : ''}</tbody>
       </table>
-      <p style="font-size:12px;color:var(--text-muted,#777);margin:6px 0 0">Expected cash = cash sales &amp; account payments ${m(r.cash_sales)}${r.payouts_total ? ` − petty cash ${m(r.payouts_total)}` : ''}${r.float.included_in_cash ? ` + float ${m(r.float.opening)}` : ''} = <strong>${m(cash.expected)}</strong></p>
+      <p style="font-size:12px;color:var(--text-muted,#777);margin:6px 0 0">Expected cash = cash sales &amp; account payments ${m(r.cash_sales)}${r.payouts_total ? ` − petty cash ${m(r.payouts_total)}` : ''}${r.cash_refunds ? ` − cash refunds ${m(r.cash_refunds)}` : ''}${r.float.included_in_cash ? ` + float ${m(r.float.opening)}` : ''} = <strong>${m(cash.expected)}</strong></p>
       ${sum ? this._drawerOverallHtml(sum, m) : ''}
       ${payoutsHtml}
+      ${refundsHtml}
       ${acctHtml}
       ${denomHtml}
       ${rec?.notes ? `<p style="margin-top:10px;font-size:13px"><strong>Notes:</strong> ${esc(rec.notes)}</p>` : ''}`;
@@ -466,7 +482,7 @@ Object.assign(App, {
     const r = s.report, rec = s.reconciliation || {};
     const base = r.base_currency;
     const cashRow = r.tenders.find(t => t.key === 'cash');
-    const expectedCash = r.float.included_in_cash ? cashRow.expected : Math.round((r.cash_sales - r.payouts_total) * 100) / 100;
+    const expectedCash = r.float.included_in_cash ? cashRow.expected : Math.round((r.cash_sales - r.payouts_total - (r.cash_refunds || 0)) * 100) / 100;
     // Base value of 1 unit of each currency counted (1 USD = 155 JMD → 155).
     const rates = { [base]: 1 };
     (this.altCurrencies || []).forEach(c => { const per = this._altBasePerUnit(c); if (c.code && per) rates[c.code] = per; });
@@ -535,7 +551,7 @@ Object.assign(App, {
             </tr></tbody>
           </table>
           <h3 style="font-size:13px;margin:0 0 6px">2. Count the cash takings</h3>
-          <p style="font-size:12px;color:var(--text-muted);margin:0 0 6px">Cash sales &amp; account payments ${m(r.cash_sales)}${r.payouts_total ? ` − petty cash paid out ${m(r.payouts_total)} (${r.payouts_count})` : ''} = expected <strong>${m(expectedCash)}</strong></p>
+          <p style="font-size:12px;color:var(--text-muted);margin:0 0 6px">Cash sales &amp; account payments ${m(r.cash_sales)}${r.payouts_total ? ` − petty cash paid out ${m(r.payouts_total)} (${r.payouts_count})` : ''}${r.cash_refunds ? ` − cash refunds ${m(r.cash_refunds)}` : ''} = expected <strong>${m(expectedCash)}</strong></p>
           ${exemptTaken ? `<p id="rc-exempt-note" style="font-size:12px;margin:0 0 6px"><strong>Tax Exempt ${m(exemptTaken)} isn't part of this cash.</strong> Keep that money out of this count, including any paid in cash, and enter it on the Tax Exempt line in section 3.</p>` : ''}
           <table class="table" style="margin-bottom:4px">
             <thead><tr><th>Tender</th><th>Expected</th><th>Amount Counted</th><th>Variance</th></tr></thead>
@@ -558,6 +574,20 @@ Object.assign(App, {
                 <td style="padding:3px 6px;text-align:right">${p.voided_at ? `<s>${m(p.amount)}</s> VOID` : m(p.amount)}</td>
               </tr>`).join('')}
               <tr style="font-weight:600;border-top:2px solid var(--border)"><td style="padding:5px 6px" colspan="3">Total paid out (taken off expected cash)</td><td style="padding:5px 6px;text-align:right">${m(r.payouts_total)}</td></tr></tbody>
+            </table>
+          </div>` : ''}
+          ${(r.refunds || []).length ? `
+          <div style="margin:8px 0 4px">
+            <div style="font-size:12px;font-weight:600;margin-bottom:4px">Refunds paid from this drawer</div>
+            <table style="width:100%;font-size:12px;border-collapse:collapse">
+              <thead><tr style="background:var(--bg-alt)"><th style="padding:4px 6px;text-align:left">Return #</th><th style="padding:4px 6px;text-align:left">Sale</th><th style="padding:4px 6px;text-align:left">Paid By</th><th style="padding:4px 6px;text-align:right">Amount</th></tr></thead>
+              <tbody>${r.refunds.map(x => `<tr>
+                <td style="padding:3px 6px"><strong>${this.escapeAttr(x.return_number)}</strong></td>
+                <td style="padding:3px 6px">${this.escapeAttr(x.transaction_number || '')}</td>
+                <td style="padding:3px 6px">${({ cash: 'Cash', card: 'Card', check: 'Cheque', direct_deposit: 'Bank transfer' })[x.refund_method] || this.escapeAttr(x.refund_method)}</td>
+                <td style="padding:3px 6px;text-align:right">${m(x.total)}</td>
+              </tr>`).join('')}
+              <tr style="font-weight:600;border-top:2px solid var(--border)"><td style="padding:5px 6px" colspan="3">Total refunded (cash off expected cash; card, cheque and bank transfer off those lines)</td><td style="padding:5px 6px;text-align:right">${m(r.refunds_total)}</td></tr></tbody>
             </table>
           </div>` : ''}
           ${denomsHtml}

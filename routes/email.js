@@ -2805,8 +2805,8 @@ function drawerReportPdfModel(sess, s) {
   tables.push({ heading: 'Takings by Tender', mainCol: 0, columns: [{ label: 'Tender', width: 2.2 }, { label: 'Txns', width: 0.7, align: 'center' }, { label: 'Sales', width: 1.3, align: 'right' }, { label: 'Expected', width: 1.3, align: 'right' }, { label: 'Counted', width: 1.3, align: 'right' }, { label: 'Variance', width: 1.2, align: 'right' }],
     rows: r.tenders.filter(t => t.sales || t.counted || t.key === 'cash').map(t => ({
       cells: [t.label, t.tx_count, money(t.sales), t.uncounted ? '-' : money(t.expected), t.uncounted ? 'n/a' : money(t.counted), signed(t.variance)],
-      sub: t.key === 'cash' ? [r.payouts_total ? `less petty cash ${fmt(r.payouts_total)}` : '', r.float.included_in_cash ? `incl. ${fmt(r.float.opening)} float` : 'float returned separately'].filter(Boolean).join(' · ')
-        : t.key === 'available_credit' ? 'store credit from customer accounts - no money in the drawer' : '',
+      sub: t.key === 'cash' ? [r.payouts_total ? `less petty cash ${fmt(r.payouts_total)}` : '', t.refunds ? `less refunds ${fmt(t.refunds)}` : '', r.float.included_in_cash ? `incl. ${fmt(r.float.opening)} float` : 'float returned separately'].filter(Boolean).join(' · ')
+        : t.key === 'available_credit' ? 'store credit from customer accounts - no money in the drawer' : t.refunds ? `less refunds ${fmt(t.refunds)}` : '',
     })).concat(r.summary ? [{
       cells: ['All Tenders', r.summary.tx_count ?? '', money(r.summary.sales), money(r.summary.expected), money(r.summary.counted), signed(r.summary.takings_variance)],
       sub: 'every tender as one (store credit has nothing to count)',
@@ -2815,6 +2815,12 @@ function drawerReportPdfModel(sess, s) {
     tables.push({ heading: 'Petty Cash Paid Out', mainCol: 2, columns: [{ label: 'Voucher #', width: 1.3 }, { label: 'Paid To', width: 1.8 }, { label: 'Reason', width: 2.6 }, { label: 'Amount', width: 1.2, align: 'right' }],
       rows: sess.payouts.map(p => ({ cells: [p.voucher_number, p.paid_to || '', `${p.category_name ? `${p.category_name}: ` : ''}${p.reason || ''}`, p.voided_at ? 'VOID' : fmt(p.amount)],
         sub: [pdfDateTime(p.created_at), p.employee_name, p.voided_at ? `voided by ${p.voided_by_name || '-'}: ${p.void_reason || ''}` : ''].filter(Boolean).join(' · ') })) });
+  }
+  if ((r.refunds || []).length) {
+    const paidBy = { cash: 'Cash', card: 'Card', check: 'Cheque', direct_deposit: 'Bank transfer' };
+    tables.push({ heading: 'Refunds Paid', mainCol: 2, columns: [{ label: 'Return #', width: 1.4 }, { label: 'Sale', width: 1.4 }, { label: 'Customer', width: 2.4 }, { label: 'Paid By', width: 1.3 }, { label: 'Amount', width: 1.2, align: 'right' }],
+      rows: r.refunds.map(x => ({ cells: [x.return_number, x.transaction_number || '', x.customer_name || 'Walk-in', paidBy[x.refund_method] || x.refund_method, fmt(x.total)],
+        sub: [pdfDateTime(x.refunded_at), x.employee_name].filter(Boolean).join(' · ') })) });
   }
   if ((sess.account_payments || []).length) {
     tables.push({ heading: 'Customer Account Payments', mainCol: 1, columns: [{ label: 'Payment #', width: 1.4 }, { label: 'Customer', width: 3 }, { label: 'Tender', width: 1.3 }, { label: 'Amount', width: 1.3, align: 'right' }],
@@ -2842,6 +2848,7 @@ function drawerReportPdfModel(sess, s) {
       { label: 'Cash takings', style: 'heading' },
       { label: 'Cash sales & payments', value: fmt(r.cash_sales) },
       r.payouts_total ? { label: `Petty cash (${r.payouts_count})`, value: `-${fmt(r.payouts_total)}` } : null,
+      r.cash_refunds ? { label: 'Cash refunds', value: `-${fmt(r.cash_refunds)}` } : null,
       { label: 'Expected cash', value: fmt(cash.expected) },
       { label: 'Cash counted', value: money(cash.counted) },
       { label: 'Cash variance', value: signed(cash.variance) },

@@ -259,7 +259,7 @@ router.get('/pending-exchanges', requirePermission('pos'), async (req, res) => {
   try {
     const { customer_id } = req.query;
     let sql = `SELECT r.id, r.return_number, r.created_at, r.total, r.customer_id, r.branch_id, r.notes,
-      t.transaction_number as original_transaction_number, (COALESCE(t.is_credit, 0) = 1 OR t.payment_method = 'credit') as charged_to_account,
+      t.transaction_number as original_transaction_number, t.payment_method as original_payment_method, (COALESCE(t.is_credit, 0) = 1 OR t.payment_method = 'credit') as charged_to_account,
       c.first_name || ' ' || c.last_name as customer_name, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name,
       (SELECT GROUP_CONCAT(ri.product_name, ', ') FROM return_items ri WHERE ri.return_id = r.id) as item_names
       FROM returns r
@@ -992,6 +992,37 @@ async function returnAuthorizer(pinValue) {
 // Why this sale can't be refunded, or null. A charge-account sale was never
 // paid — refunding it would hand over money while the customer still owes
 // the full amount. Its return goes back on the account as a credit note instead.
+// How a refund is paid out (returns.refund_method) and the drawer session it
+// comes out of (returns.drawer_session_id), so the drawer report takes it off
+// what that drawer should hold. Cash has to come out of an open drawer: the
+// one sent, else the person's own open one. Card, check and direct deposit
+// go on the drawer when there is one (its card / check / direct deposit
+// line) and need none — a manager can refund those from Transactions.
+// Returns { method, sessionId } or { error, code }.
+const REFUND_METHODS = ['cash', 'card', 'check', 'direct_deposit'];
+async function refundTender({ method, drawerSessionId, employeeId, amount }) {
+  if (!REFUND_METHODS.includes(method)) return { error: 'Choose how the refund is paid: cash, card, cheque or bank transfer', code: 'refund_method_required' };
+  let session = null;
+  if (drawerSessionId) {
+    ({ rows: [session] } = await db.execute({ sql: "SELECT id FROM drawer_sessions WHERE id = ? AND status = 'open'", args: [drawerSessionId] }));
+    if (!session && method === 'cash') return { error: "That cash drawer isn't open any more. Open a drawer to refund cash, or refund by card, cheque or bank transfer.", code: 'drawer_required' };
+  }
+  if (!session && employeeId) {
+    const { rows } = await db.execute({ sql: "SELECT id FROM drawer_sessions WHERE employee_id = ? AND status = 'open' ORDER BY opened_at DESC", args: [employeeId] });
+    if (rows.length > 1 && method === 'cash') return { error: 'You have more than one cash drawer open. Refund cash from the POS, on the drawer the cash comes out of.', code: 'drawer_ambiguous' };
+    session = rows[0] || null;
+  }
+  if (method === 'cash' && !session) return { error: 'A cash refund comes out of a cash drawer. Open one first, or refund by card, cheque or bank transfer.', code: 'drawer_required' };
+  // Same limit as petty cash: no more cash out than the drawer holds.
+  if (method === 'cash' && amount != null) {
+    const { loadDrawerSession } = require('../lib/drawerReport');
+    const r = (await loadDrawerSession(db, session.id)).report;
+    const inDrawer = Math.round((r.float.opening + r.cash_sales - r.payouts_total - r.cash_refunds) * 100) / 100;
+    if (amount > inDrawer + 0.001) return { error: `Only ${inDrawer.toFixed(2)} cash is in this drawer — refund the rest by card, cheque or bank transfer`, code: 'drawer_short' };
+  }
+  return { method, sessionId: session ? session.id : null };
+}
+
 async function refundRefusal(tx) {
   if (tx.is_credit || tx.payment_method === 'credit') return "This sale was charged to the customer's account, so it can't be refunded. Issue a credit note to take the return off their balance.";
   if (daysSinceSale(tx.created_at) > CARD_REFUND_WINDOW_DAYS && await paidByCreditCard(tx)) return `This sale was paid by credit card more than ${CARD_REFUND_WINDOW_DAYS} days ago, so it can't be refunded. Issue a credit note or an exchange instead.`;
@@ -1020,9 +1051,12 @@ router.post('/returns/:id/convert', requirePermission('transactions_returns'), a
     const { rows: [sale] } = await db.execute({ sql: 'SELECT * FROM transactions WHERE id = ?', args: [current.original_transaction_id] });
     if (!sale || sale.status !== 'completed') return res.status(400).json({ error: "The original sale isn't a completed sale any more, so this exchange can't be converted" });
     if (to === 'credit_note' && !current.customer_id) return res.status(400).json({ error: 'Credit note requires a customer on the original transaction' });
+    let refundPaid = null;
     if (to === 'refund') {
       const refused = await refundRefusal(sale);
       if (refused) return res.status(400).json({ error: refused });
+      refundPaid = await refundTender({ method: req.body.refund_method, drawerSessionId: req.body.drawer_session_id, employeeId: req.employee?.id, amount: parseFloat(ret.total) });
+      if (refundPaid.error) return res.status(400).json({ error: refundPaid.error, code: refundPaid.code });
     }
     const amount = parseFloat(ret.total);
     const creditNoteNumber = to === 'credit_note' ? await nextNumber(db, 'account_payments', 'payment_number', 'CN-', 6) : null;
@@ -1040,6 +1074,7 @@ router.post('/returns/:id/convert', requirePermission('transactions_returns'), a
           employeeId: req.employee?.id, branchId: sale.branch_id, amount, number: creditNoteNumber });
       }
       await conv.execute({ sql: 'UPDATE returns SET resolution = ? WHERE id = ?', args: [to, ret.id] });
+      if (refundPaid) await conv.execute({ sql: 'UPDATE returns SET refund_method = ?, drawer_session_id = ?, refunded_at = CURRENT_TIMESTAMP WHERE id = ?', args: [refundPaid.method, refundPaid.sessionId, ret.id] });
       await conv.execute({ sql: 'INSERT INTO exchange_conversions (return_id, to_resolution, amount, credit_note_payment_id, reason, employee_id, override_by) VALUES (?,?,?,?,?,?,?)',
         args: [ret.id, to, amount, creditNoteId, reason, req.employee?.id || null, authorizer.id] });
       await conv.commit();
@@ -1136,6 +1171,15 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
     returnTax = parseFloat(returnTax.toFixed(2));
     const returnTotal = parseFloat((returnSubtotal + returnTax).toFixed(2));
 
+    // How the refund is paid and the drawer it comes out of. An API caller
+    // that doesn't say keeps the old behaviour (no drawer); from the screens
+    // it's required.
+    let refundPaid = null;
+    if (resolution === 'refund' && (!req.apiKey || req.body.refund_method)) {
+      refundPaid = await refundTender({ method: req.body.refund_method, drawerSessionId: req.body.drawer_session_id, employeeId: req.employee?.id, amount: returnTotal });
+      if (refundPaid.error) return res.status(400).json({ error: refundPaid.error, code: refundPaid.code });
+    }
+
     const return_number = await nextNumber(db, 'returns', 'return_number', 'RET-', 6);
     const creditNoteNumber = resolution === 'credit_note' ? await nextNumber(db, 'account_payments', 'payment_number', 'CN-', 6) : null;
 
@@ -1144,6 +1188,7 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
     try {
       const retResult = await retTx.execute({ sql: `INSERT INTO returns (return_number,original_transaction_id,customer_id,employee_id,branch_id,resolution,subtotal,tax_amount,total,notes,override_by) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, args: [return_number, tx.id, tx.customer_id, employee_id || tx.employee_id, tx.branch_id, resolution, returnSubtotal, returnTax, returnTotal, notes || null, overrideBy] });
       const retId = Number(retResult.lastInsertRowid);
+      if (refundPaid) await retTx.execute({ sql: 'UPDATE returns SET refund_method = ?, drawer_session_id = ?, refunded_at = CURRENT_TIMESTAMP WHERE id = ?', args: [refundPaid.method, refundPaid.sessionId, retId] });
 
       for (const { txItem, quantity, lineTotal, lineTax } of processedItems) {
         await retTx.execute({ sql: `INSERT INTO return_items (return_id,transaction_item_id,product_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?,?,?)`, args: [retId, txItem.id, txItem.product_id, txItem.product_name, txItem.sku, quantity, txItem.unit_price, lineTax, lineTotal] });

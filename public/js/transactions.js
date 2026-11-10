@@ -690,7 +690,7 @@ Object.assign(App, {
           </table>
           <div style="margin-bottom:14px">
             <p style="font-size:13px;font-weight:600;margin-bottom:8px">Resolution:</p>
-            <div style="display:flex;flex-direction:column;gap:8px">
+            <div style="display:flex;flex-direction:column;gap:8px" onchange="App._retToggleRefundMethod()">
               ${canRefund ? `<label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px${refundBlocked?';opacity:0.45':''}">
                 <input type="radio" name="ret-resolution" value="refund" ${refundBlocked?'disabled':(firstResolution==='refund'?'checked':'')} style="margin-top:2px">
                 <span><strong>Refund</strong> — return cash or reverse the original payment method${chargeSale?' <em style="color:var(--danger)">(not available — this sale was charged to the customer\'s account; use Credit Note to take it off their balance)</em>':cardRefundExpired?' <em style="color:var(--danger)">(not available — paid by credit card more than 90 days ago)</em>':''}</span>
@@ -704,6 +704,7 @@ Object.assign(App, {
                 <span><strong>Replacement / Exchange</strong> — process return then open POS with credit pre-applied</span>
               </label>
             </div>
+            ${canRefund && !refundBlocked ? this._refundMethodHtml('ret-refund-method', tx, firstResolution === 'refund') : ''}
           </div>
           <div class="form-group" style="margin-bottom:0">
             <label style="font-size:13px">Reason for return *</label>
@@ -779,7 +780,8 @@ Object.assign(App, {
     if (btn) { btn.disabled = true; btn.textContent = 'Processing…'; }
     try {
       const ret = await this.api('POST', `/transactions/${txId}/return`, {
-        items, resolution, notes, employee_id: this.currentUser?.id || null, override_pin
+        items, resolution, notes, employee_id: this.currentUser?.id || null, override_pin,
+        ...(resolution === 'refund' ? { refund_method: document.getElementById('ret-refund-method')?.value || '', drawer_session_id: this.currentDrawerSession?.id || null } : {}),
       });
       document.getElementById('return-overlay')?.remove();
       if (resolution === 'replacement' && this.can('pos')) {
@@ -848,10 +850,11 @@ Object.assign(App, {
         <div class="modal-body" style="font-size:13px">
           <p style="margin-top:0"><strong>${esc(ret.customer_name || 'Walk-in Customer')}</strong> · credit <strong>${this.fmt(ret.total)}</strong><br>
             <span style="color:var(--text-muted)">Returned ${esc(ret.item_names)} from ${esc(ret.original_transaction_number)}. The goods are already back in stock.</span></p>
-          <div class="form-group">
+          <div class="form-group" onchange="const w = document.getElementById('cx-refund-method-wrap'); if (w) w.style.display = document.querySelector('input[name=cx-to]:checked')?.value === 'refund' ? 'block' : 'none'">
             <label>Settle as *</label>
             ${this.can('transactions_refund') ? option('refund', 'Refund', 'pay the customer back', canRefund, ret.charged_to_account ? "this sale was charged to their account" : '') : ''}
             ${this.can('transactions_credit_note') ? option('credit_note', 'Credit Note', "put it on the customer's account", canCredit, ret.customer_id ? '' : 'requires a customer') : ''}
+            ${canRefund ? this._refundMethodHtml('cx-refund-method', { payment_method: ret.original_payment_method || ret.payment_method }, false) : ''}
           </div>
           <div class="form-group">
             <label>Reason *</label>
@@ -878,7 +881,8 @@ Object.assign(App, {
       if (!pinInput.value.trim()) { this.alert('A manager must enter their PIN to authorize this', 'warning'); pinInput.focus(); return; }
       confirmBtn.disabled = true;
       try {
-        const done = await this.api('POST', `/transactions/returns/${returnId}/convert`, { to, reason, override_pin: pinInput.value.trim() });
+        const done = await this.api('POST', `/transactions/returns/${returnId}/convert`, { to, reason, override_pin: pinInput.value.trim(),
+          ...(to === 'refund' ? { refund_method: document.getElementById('cx-refund-method')?.value || '', drawer_session_id: this.currentDrawerSession?.id || null } : {}) });
         this.closeModal();
         this.alert(`${done.return_number} converted to a ${to === 'refund' ? 'refund' : 'credit note'} of ${this.fmt(done.total)}`, 'success');
         this.updateHoldBadge();
@@ -905,6 +909,30 @@ Object.assign(App, {
     } catch(e) {
       this.alert(e.message, 'error');
     }
+  },
+
+  // "Refund paid by" on a return (and on converting an exchange to a refund):
+  // how the money goes back, defaulting to how the sale was paid. Cash comes
+  // out of the cashier's open drawer (returns.drawer_session_id); the other
+  // methods need no drawer. The drawer report takes it off that tender.
+  _refundMethodHtml(id, tx, show) {
+    const m = String(tx?.payment_method || '').toLowerCase();
+    const def = ['credit_card', 'debit_card', 'card'].includes(m) ? 'card' : ['check', 'direct_deposit'].includes(m) ? m : 'cash';
+    const drawer = this.currentDrawerSession;
+    return `<div id="${id}-wrap" style="margin-top:10px;display:${show ? 'block' : 'none'}">
+      <label style="font-size:13px;font-weight:600">Refund paid by *</label>
+      <select id="${id}" style="width:220px;margin-left:8px">
+        ${[['cash', 'Cash from the drawer'], ['card', 'Card (back to the card)'], ['check', 'Cheque'], ['direct_deposit', 'Bank transfer / direct deposit']]
+          .map(([v, l]) => `<option value="${v}" ${v === def ? 'selected' : ''}>${l}</option>`).join('')}
+      </select>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:4px">${drawer
+        ? `Taken off ${this.escapeAttr(drawer.drawer_name || 'your drawer')} at close: a cash refund off its expected cash, a card refund off its card total.`
+        : 'Cash comes out of your open cash drawer (open one at the POS first). Card, cheque and bank transfer refunds need no drawer.'}</div>
+    </div>`;
+  },
+  _retToggleRefundMethod() {
+    const wrap = document.getElementById('ret-refund-method-wrap');
+    if (wrap) wrap.style.display = document.querySelector('input[name="ret-resolution"]:checked')?.value === 'refund' ? 'block' : 'none';
   },
 
   showReturnReceipt(ret) {

@@ -358,7 +358,7 @@ router.post('/sessions/:id/payouts', requirePermission('pos_petty_cash'), async 
     }
     const { rows: [dupe] } = await db.execute({ sql: 'SELECT p.id, p.voucher_number, ds.id as session_id FROM drawer_payouts p JOIN drawer_sessions ds ON ds.id = p.session_id WHERE LOWER(TRIM(p.voucher_number)) = LOWER(?) AND p.voided_at IS NULL', args: [voucher] });
     if (dupe) return res.status(400).json({ error: `Voucher ${dupe.voucher_number} has already been paid out (drawer session #${dupe.session_id})` });
-    const inDrawer = round2(session.report.float.opening + session.report.cash_sales - session.report.payouts_total);
+    const inDrawer = round2(session.report.float.opening + session.report.cash_sales - session.report.payouts_total - session.report.cash_refunds);
     if (amount > inDrawer + 0.001) return res.status(400).json({ error: `Only ${inDrawer.toFixed(2)} cash is in this drawer` });
 
     const result = await db.execute({ sql: 'INSERT INTO drawer_payouts (session_id, amount, voucher_number, paid_to, reason, employee_id, category_id, account_code, gl_status) VALUES (?,?,?,?,?,?,?,?,?)', args: [session.id, amount, voucher, paidTo, reason, req.employee?.id || null, category.id, category.account_code, 'pending'] });

@@ -802,7 +802,8 @@ router.get('/rental-utilization', requirePermission('reports'), async (req, res)
 // reconciled session in range, worked out the way lib/drawerReport.js does
 // for the reconciliation screen: cash sales (split-tender legs from
 // transaction_payments, else the whole transaction) plus cash account
-// payments, less petty cash paid out — plus the opening float only for
+// payments, less petty cash paid out and cash refunds paid from the drawer
+// (returns.drawer_session_id) — plus the opening float only for
 // older reconciliations that counted it with the cash (float_returned NULL).
 router.get('/cash-variance', requirePermission('reports'), async (req, res) => {
   try {
@@ -817,6 +818,7 @@ router.get('/cash-variance', requirePermission('reports'), async (req, res) => {
               ds.employee_id, e.first_name || ' ' || e.last_name as employee_name,
               ds.branch_id, b.name as branch_name, ds.opening_float, dr.cash_counted, dr.float_returned,
               (SELECT COALESCE(SUM(p.amount), 0) FROM drawer_payouts p WHERE p.session_id = ds.id AND p.voided_at IS NULL) as payouts,
+              (SELECT COALESCE(SUM(r.total), 0) FROM returns r WHERE r.drawer_session_id = ds.id AND r.resolution = 'refund' AND r.refund_method = 'cash' AND r.status != 'cancelled') as cash_refunds,
               (
                 SELECT COALESCE(SUM(amount), 0) FROM (
                   SELECT tp.amount FROM transaction_payments tp JOIN transactions t ON t.id = tp.transaction_id
@@ -839,7 +841,7 @@ router.get('/cash-variance', requirePermission('reports'), async (req, res) => {
     });
     for (const row of sessions) {
       const floatInCash = row.float_returned == null;
-      row.expected_cash = parseFloat(((floatInCash ? row.opening_float : 0) + row.cash_sales - row.payouts).toFixed(2));
+      row.expected_cash = parseFloat(((floatInCash ? row.opening_float : 0) + row.cash_sales - row.payouts - row.cash_refunds).toFixed(2));
       row.float_variance = floatInCash ? null : parseFloat((row.float_returned - row.opening_float).toFixed(2));
       row.variance = parseFloat((row.cash_counted - row.expected_cash).toFixed(2));
     }

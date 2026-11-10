@@ -41,6 +41,9 @@ test.describe('Convert Exchange', () => {
     const stockBefore = (await api(page, 'GET', `/products/${p.id}`)).stock_qty;
     await openConvert(page, ret);
     await page.locator('input[name="cx-to"][value="refund"]').check();
+    // How it's paid back: card needs no open drawer (a cash refund would).
+    await expect(page.locator('#cx-refund-method')).toBeVisible();
+    await page.selectOption('#cx-refund-method', 'card');
 
     // Needs a reason and a real manager's PIN.
     await page.click('#cx-confirm');
@@ -59,6 +62,7 @@ test.describe('Convert Exchange', () => {
 
     const after = await api(page, 'GET', `/transactions/returns/${ret.id}`);
     expect(after.resolution).toBe('refund');
+    expect(after.refund_method).toBe('card');
     expect(after.total).toBe(ret.total);
     expect((await api(page, 'GET', '/transactions/pending-exchanges')).map(r => r.id)).not.toContain(ret.id);
     expect((await api(page, 'GET', `/products/${p.id}`)).stock_qty).toBe(stockBefore);

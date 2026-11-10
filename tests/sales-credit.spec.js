@@ -269,6 +269,10 @@ test.describe('Who sees sales targets', () => {
     const group = await api(page, 'POST', '/security-groups', { name: `Targets ${stamp}`, description: '', permissions });
     const username = `tgt${stamp}`;
     const emp = await api(page, 'POST', '/employees', { first_name: 'Target', last_name: `Viewer ${stamp}`, username, pin: stamp.slice(-6), password: 'pw-123456', must_change_password: 0, security_group_id: group.id, active: 1, is_salesperson });
+    // Every authenticated request re-sends the session cookie, so let the
+    // current screen finish loading before signing out, or a late reply
+    // signs the previous user back in.
+    await page.waitForLoadState('networkidle');
     await page.context().clearCookies();
     await page.goto('/');
     await page.fill('#login-user', username);
@@ -290,12 +294,13 @@ test.describe('Who sees sales targets', () => {
     expect((await api(page, 'GET', `/sales-targets?employee_id=${a}`)).map(e => e.id)).toEqual([me.id]);
 
     // Not a salesperson, same group shape: nobody's.
+    await page.waitForLoadState('networkidle');
     await page.context().clearCookies();
     await page.goto('/');
     await page.fill('#login-user', 'admin');
     await page.fill('#login-pass', '123456');
     await page.click('button.login-btn');
-    await page.waitForFunction(() => App.currentUser);
+    await page.waitForFunction(() => App.currentUser && document.querySelector('#content').innerHTML.length > 0);
     await signInAs(page, { crm: true }, 0);
     expect(await api(page, 'GET', '/sales-targets')).toEqual([]);
   });
