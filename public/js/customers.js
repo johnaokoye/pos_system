@@ -408,7 +408,6 @@ Object.assign(App, {
             </div>
             ${id && c.credit_block ? this._creditBlockBoxHtml(c) : ''}
           </div>
-          ${id && !isCredit && !c.credit_enabled ? `<div id="cust-credits" style="margin-top:12px"></div>` : ''}
           <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">
             <label style="display:flex;align-items:center;gap:4px;font-weight:600;cursor:pointer">
               Tax Exempt
@@ -547,9 +546,6 @@ Object.assign(App, {
         </div>
       </div>`);
     this._loadCustomerSalespeople();
-    // A saved cash customer's Available Credit and old credit notes, here as
-    // well as on History.
-    if (id && !isCredit && !c.credit_enabled) this._renderCustomerCredits(id);
   },
 
   toggleCreditFields() {
