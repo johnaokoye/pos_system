@@ -129,7 +129,9 @@ Object.assign(App, {
           </table>
         </div>`}
       </div>` : ''}
-      ${!data.length ? (canManage ? '' : '<div class="empty-state"><p>No sales targets to show yet.</p></div>') : `
+      ${!data.length ? (canManage ? '' : `<div class="empty-state"><p>${this.currentUser.is_salesperson || this.can('reports')
+        ? 'No sales targets to show yet.'
+        : 'Sales targets show to each salesperson (their own) and to sales managers.'}</p></div>`) : `
       <div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
         ${data.map(e => `
           <div class="card">

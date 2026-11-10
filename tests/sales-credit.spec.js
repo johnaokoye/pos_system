@@ -261,3 +261,42 @@ test.describe('Sales credit', () => {
     expect(await api(page, 'GET', `/customers/${c.id}`)).toMatchObject({ notes: 'edited', salesperson_id: a });
   });
 });
+
+test.describe('Who sees sales targets', () => {
+  // Signs in as a new employee in a group with these permissions.
+  async function signInAs(page, permissions, is_salesperson) {
+    const stamp = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+    const group = await api(page, 'POST', '/security-groups', { name: `Targets ${stamp}`, description: '', permissions });
+    const username = `tgt${stamp}`;
+    const emp = await api(page, 'POST', '/employees', { first_name: 'Target', last_name: `Viewer ${stamp}`, username, pin: stamp.slice(-6), password: 'pw-123456', must_change_password: 0, security_group_id: group.id, active: 1, is_salesperson });
+    await page.context().clearCookies();
+    await page.goto('/');
+    await page.fill('#login-user', username);
+    await page.fill('#login-pass', 'pw-123456');
+    await page.click('button.login-btn');
+    await page.waitForFunction(() => App.currentUser && document.querySelector('#content').innerHTML.length > 0);
+    return emp;
+  }
+
+  test('managers see everyone, a salesperson only themselves, anyone else nobody', async ({ page }) => {
+    const { a, b } = await setup(page);
+    const all = await api(page, 'GET', '/sales-targets');
+    expect(all.map(e => e.id)).toEqual(expect.arrayContaining([a, b]));
+
+    // A salesperson with CRM but no reports / sales_manager: just themselves,
+    // even when asking for someone else.
+    const me = await signInAs(page, { crm: true }, 1);
+    expect((await api(page, 'GET', '/sales-targets')).map(e => e.id)).toEqual([me.id]);
+    expect((await api(page, 'GET', `/sales-targets?employee_id=${a}`)).map(e => e.id)).toEqual([me.id]);
+
+    // Not a salesperson, same group shape: nobody's.
+    await page.context().clearCookies();
+    await page.goto('/');
+    await page.fill('#login-user', 'admin');
+    await page.fill('#login-pass', '123456');
+    await page.click('button.login-btn');
+    await page.waitForFunction(() => App.currentUser);
+    await signInAs(page, { crm: true }, 0);
+    expect(await api(page, 'GET', '/sales-targets')).toEqual([]);
+  });
+});

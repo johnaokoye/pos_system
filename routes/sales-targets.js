@@ -19,15 +19,15 @@ const CURRENT_SALES_SELECT = `
   FROM transactions
   WHERE status = 'completed' AND COALESCE(salesperson_id, created_by, employee_id) IS NOT NULL AND date(created_at) >= date('now', '-32 days')`;
 
-// A plain salesperson (no sales_manager/reports) only ever sees their own
-// numbers, regardless of what they ask for — same "mine" scoping pattern
-// routes/reports.js's /dashboard endpoint already uses for is_salesperson.
-function scopedEmployeeId(req) {
+// Who sees whose targets: sales_manager or reports see every salesperson; a
+// Salesperson without them sees only their own numbers, whatever they ask
+// for (same "mine" scoping as routes/reports.js's /dashboard); anyone else
+// sees none. Returns 'all', an employee id, or null for none.
+function targetScope(req) {
   const perms = req.employee && req.employee.permissions;
-  const isSalesperson = !!(req.employee && req.employee.is_salesperson);
-  const elevated = can(perms, 'sales_manager') || can(perms, 'reports');
-  if (isSalesperson && !elevated) return req.employee.id;
-  return null; // no forced scope — caller can see everyone
+  if (can(perms, 'sales_manager') || can(perms, 'reports')) return 'all';
+  if (req.employee && req.employee.is_salesperson) return req.employee.id;
+  return null;
 }
 
 // Every salesperson (is_salesperson=1, active) with their targets (0 if
@@ -35,8 +35,9 @@ function scopedEmployeeId(req) {
 // meters and the Reports → Sales "Salesperson Targets" report.
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const forcedId = scopedEmployeeId(req);
-    const idFilter = forcedId || req.query.employee_id || null;
+    const scope = targetScope(req);
+    if (scope == null) return res.json([]);
+    const idFilter = scope !== 'all' ? scope : (req.query.employee_id || null);
     const ef = idFilter ? ' AND e.id = ?' : '';
     const ep = idFilter ? [idFilter] : [];
 
