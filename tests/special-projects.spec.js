@@ -35,11 +35,13 @@ test.describe('Special Project custom items', () => {
     expect(html).not.toContain('SPECIAL PROJECT');
   });
 
-  test('the quotation says Draft until the project is approved', async ({ page }) => {
+  test('the quotation prints and emails without a Draft mark before and after approval', async ({ page }) => {
     const q = await createProject(page, [line]);
-    expect(await preview(page, q.id)).toContain('>DRAFT<');
+    const draft = await preview(page, q.id);
+    expect(draft).toContain('QUOTATION');
+    expect(draft).not.toContain('DRAFT');
     await api(page, 'PATCH', `/quotations/${q.id}/submit-for-approval`, {});
-    expect(await preview(page, q.id)).toContain('>DRAFT - PENDING APPROVAL<');
+    expect(await preview(page, q.id)).not.toContain('DRAFT');
     await api(page, 'PATCH', `/quotations/${q.id}/approve`, {});
     const approved = await preview(page, q.id);
     expect(approved).toContain('QUOTATION');
@@ -262,7 +264,7 @@ test.describe('Special Project custom items', () => {
       const after = await api(page, 'GET', `/quotations/${q.id}`);
       expect(after).toMatchObject({ status: 'draft', subtotal: 250, approved_at: null, approved_by: null, approval_signature: null });
       const html = await preview(page, q.id);
-      expect(html).toContain('>DRAFT<');
+      expect(html).not.toContain('DRAFT');
       expect(html).not.toContain('Approved By');
       expect(await page.evaluate(id => App.api('POST', `/quotations/${id}/convert`, {}).then(() => 'converted', e => e.message), q.id)).toContain('must be approved');
 
