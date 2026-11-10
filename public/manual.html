@@ -1102,6 +1102,19 @@
             <li><strong>WooCommerce</strong> — two-way sync of products and orders with a WooCommerce store. Once configured, the app syncs automatically on an interval you set, and you can trigger a manual sync or review the sync log here too. Pulling in an order runs it through the same email/phone/full-name duplicate check used everywhere else customers are created (<a href="#customers">Customers</a>): a match links the order to that existing customer, otherwise a new one is created from the order's billing info — a guest or first-time WooCommerce order is no longer left with no customer attached, and a repeat buyer under the same billing details never ends up duplicated.</li>
           </ul>
         </li>
+        <li><strong>Database Backups</strong> (<span class="perm-pill">settings_backups</span> — included with full Settings; anyone else needs it ticked, because a backup holds every customer record and password) — a complete copy of the database, taken while the app runs. <strong>Back up now</strong> makes one straight away (do this before risky work). <strong>Scheduled backups</strong> run <strong>daily</strong> at a store-clock time (default 2:00 AM) or <strong>every few hours</strong>; if the server was off at the time, the day's backup runs as soon as it's back. <strong>Keep the last</strong> deletes older ones automatically. The list shows every run with its size and whether the copy worked, with <strong>Download</strong> and <strong>Delete</strong>; a failed run shows its error, and the card warns when scheduled backups have stopped succeeding. Tills pause for the second or two a backup takes, so schedule it for when the store is closed. Backups are saved on the server in the <code>backups</code> folder beside the database (on the Portainer server, inside the stack's <code>data</code> folder), so they're on the same disk — <strong>Also copy each backup to folder</strong> puts a copy somewhere else too, with its own number to keep (<strong>Test folder</strong> checks the app can write there). On Turso (the Vercel deployment) there's no local database file, and the card says Turso keeps its own backups.
+          <div class="callout"><strong>Copying backups to a shared SMB folder</strong>
+            The app doesn't log in to the share itself; the Ubuntu server that runs Portainer mounts it, and the stack passes it into the app as <code>/app/backups-offsite</code>:
+            <ol>
+              <li>On the Ubuntu server, install the SMB tools: <code>sudo apt install cifs-utils</code>, and make a mount point: <code>sudo mkdir -p /mnt/pos-backups</code>.</li>
+              <li>Find the app's user inside the container: <code>docker exec pos_system_production-app-1 id app</code> (note the uid and gid numbers).</li>
+              <li>Save the share's login in <code>/root/.smb-pos-backups</code> (lines <code>username=…</code>, <code>password=…</code>, and <code>domain=…</code> if needed), then <code>sudo chmod 600 /root/.smb-pos-backups</code>.</li>
+              <li>Add one line to <code>/etc/fstab</code>, using the share path and the uid/gid from step 2:<br><code>//fileserver/PosBackups /mnt/pos-backups cifs credentials=/root/.smb-pos-backups,uid=100,gid=101,file_mode=0660,dir_mode=0770,vers=3.0,_netdev,nofail 0 0</code><br>then <code>sudo mount -a</code> and check with <code>ls /mnt/pos-backups</code>.</li>
+              <li>In Portainer, open the stack → <strong>Environment variables</strong>, add <code>POS_BACKUP_COPY_DIR</code> = <code>/mnt/pos-backups</code>, and redeploy.</li>
+              <li>In Settings → Database Backups, enter <code>/app/backups-offsite</code> as the copy folder, click <strong>Test folder</strong>, then <strong>Save backup settings</strong> and <strong>Back up now</strong> to check a copy arrives on the share.</li>
+            </ol>
+            If the share is ever unreachable, the backup on the server still happens and the list shows the copy as <em>Failed</em> with the reason.</div>
+        </li>
         <li><strong>Customer Categories</strong> — a Categories-style manager (name, discount %, active) for classifying customers as Individual, Company, Contractor, or whatever fits — see <a href="#customers">Customers</a> for how the discount applies at checkout.</li>
       </ul>
       <div class="callout warn"><strong>Shipping carriers</strong>The Shipping screen under Warehouse Management lets you record a carrier and tracking number per shipment freeform (UPS, FedEx, USPS, DHL, Local Delivery, Other) — there's no live carrier-rate or tracking-API integration; it's a record-keeping field, not a connected shipping service.</div>
@@ -1145,7 +1158,7 @@
         <tr><td>promotions</td><td>promotions_create, promotions_codes</td></tr>
         <tr><td>discount-cards</td><td>(none)</td></tr>
         <tr><td>cash-back-cards</td><td>(none)</td></tr>
-        <tr><td>settings</td><td>settings_company, settings_tax, settings_payment, settings_integrations</td></tr>
+        <tr><td>settings</td><td>settings_company, settings_tax, settings_payment, settings_integrations, settings_backups</td></tr>
         <tr><td>services</td><td>(none)</td></tr>
         <tr><td>dashboard</td><td>(none)</td></tr>
       </table>

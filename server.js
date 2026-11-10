@@ -127,6 +127,7 @@ app.use('/api/transactions',     require('./routes/transactions'));
 app.use('/api/employees',        require('./routes/employees'));
 app.use('/api/reports',          require('./routes/reports'));
 app.use('/api/settings',         require('./routes/settings'));
+app.use('/api/backups',          require('./routes/backups'));
 app.use('/api/branches',         require('./routes/branches'));
 app.use('/api/suppliers',        require('./routes/suppliers'));
 app.use('/api/purchase-orders',   require('./routes/purchase-orders'));
@@ -180,6 +181,15 @@ if (!process.env.VERCEL) {
   app.listen(PORT, () => {
     console.log(`\n  POS System running at http://localhost:${PORT}\n`);
   });
+
+  // Scheduled database backups (Settings → Backups, lib/backups.js) —
+  // checked every minute; a no-op unless the schedule is on and due.
+  setInterval(async () => {
+    try {
+      await ensureReady();
+      await require('./lib/backups').tick();
+    } catch (e) { console.error('[backup] scheduler:', e.message); }
+  }, 60000);
 
   // WooCommerce auto-sync — check every 60 s, fire when interval has elapsed
   setInterval(async () => {

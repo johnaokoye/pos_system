@@ -204,6 +204,7 @@ Object.assign(App, {
       { key: 'settings_tax', label: 'Tax Configuration' },
       { key: 'settings_payment', label: 'Payment Methods' },
       { key: 'settings_integrations', label: 'Integrations' },
+      { key: 'settings_backups', label: 'Database Backups (run, schedule, download)' },
     ]},
   ],
 

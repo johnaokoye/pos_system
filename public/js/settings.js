@@ -202,6 +202,7 @@ Object.assign(App, {
           </div>
         </div>
         <div>
+          ${this.can('settings_backups') ? `<div class="card" style="margin-bottom:16px" id="s-backups"><div class="card-header"><span class="card-title">Database Backups</span></div><p style="color:var(--text-muted);font-size:13px">Loading…</p></div>` : ''}
           <div class="card" style="margin-bottom:16px">
             <div class="card-header"><span class="card-title">Categories</span><button class="btn btn-primary btn-sm" onclick="App.showCategoryForm()">+ Add</button></div>
             <table>
@@ -263,6 +264,98 @@ Object.assign(App, {
     this.loadWooLogs();
     this.loadApiKeys();
     this.loadDiscountExcludedBrands();
+    if (this.can('settings_backups')) this.loadBackups();
+  },
+
+  // ─── Database Backups (settings_backups; routes/backups.js) ─────────
+  async loadBackups() {
+    const el = document.getElementById('s-backups');
+    if (!el) return;
+    let d;
+    try { d = await this.api('GET', '/backups'); }
+    catch (e) { el.innerHTML = `<div class="card-header"><span class="card-title">Database Backups</span></div><p style="color:var(--danger);font-size:13px">${this.escapeAttr(e.message)}</p>`; return; }
+    if (!document.getElementById('s-backups')) return;
+    const esc = v => this.escapeAttr(v == null ? '' : String(v));
+    const st = d.settings;
+    const mb = n => n == null ? '—' : `${(n / 1048576).toFixed(1)} MB`;
+    if (!d.available) {
+      el.innerHTML = `<div class="card-header"><span class="card-title">Database Backups</span></div><p style="font-size:13px;color:var(--text-muted)">${esc(d.unavailable_reason)}</p>`;
+      return;
+    }
+    const lastOk = d.backups.find(b => b.status === 'ok');
+    el.innerHTML = `
+      <div class="card-header"><span class="card-title">Database Backups</span>
+        <button class="btn btn-primary btn-sm" id="bk-run" onclick="App.runBackupNow()">Back up now</button></div>
+      ${d.behind ? `<div style="background:rgba(220,38,38,.08);border:1px solid var(--danger);border-radius:6px;padding:8px 10px;font-size:13px;margin-bottom:10px;color:var(--danger)"><strong>Scheduled backups are behind.</strong> No scheduled backup has succeeded in the last ${st.backup_frequency === 'hours' ? `${esc(st.backup_every_hours)} hours` : 'day'} — check the list below for the error.</div>` : ''}
+      <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px">A complete copy of the database, taken while the app runs. Saved on the server in <code>${esc(d.dir)}</code>${lastOk ? ` — last good backup ${this.fmtDateTime(lastOk.created_at)}` : ' — none yet'}. Tills pause for the few seconds a backup takes, so schedule it for when the store is closed.</p>
+      <div class="input-row" style="align-items:flex-end">
+        <div class="form-group"><label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="bk-enabled" ${st.backup_enabled === '1' ? 'checked' : ''} style="width:auto;margin:0"> Scheduled backups</label></div>
+        <div class="form-group"><label>How often</label>
+          <select id="bk-frequency" onchange="document.getElementById('bk-time-wrap').style.display=this.value==='daily'?'':'none';document.getElementById('bk-hours-wrap').style.display=this.value==='hours'?'':'none'">
+            <option value="daily" ${st.backup_frequency !== 'hours' ? 'selected' : ''}>Daily</option><option value="hours" ${st.backup_frequency === 'hours' ? 'selected' : ''}>Every few hours</option>
+          </select></div>
+        <div class="form-group" id="bk-time-wrap" style="${st.backup_frequency === 'hours' ? 'display:none' : ''}"><label>At (store time)</label><input type="time" id="bk-time" value="${esc(st.backup_time)}"></div>
+        <div class="form-group" id="bk-hours-wrap" style="${st.backup_frequency === 'hours' ? '' : 'display:none'}"><label>Every (hours)</label><input type="number" id="bk-hours" min="1" max="168" value="${esc(st.backup_every_hours)}"></div>
+        <div class="form-group"><label>Keep the last</label><input type="number" id="bk-keep" min="1" max="365" value="${esc(st.backup_keep)}"></div>
+      </div>
+      <div class="input-row" style="align-items:flex-end">
+        <div class="form-group" style="flex:3"><label>Also copy each backup to folder <span style="font-weight:400;color:var(--text-muted)">(optional — e.g. a mounted network share)</span></label><input id="bk-copy-dir" placeholder="/app/backups-offsite" value="${esc(st.backup_copy_dir)}"></div>
+        <div class="form-group" style="flex:1"><label>Keep there</label><input type="number" id="bk-copy-keep" min="1" max="3650" value="${esc(st.backup_copy_keep)}"></div>
+        <div style="padding-bottom:4px"><button class="btn btn-secondary btn-sm" onclick="App.testBackupCopyDir()">Test folder</button></div>
+      </div>
+      <p style="font-size:11px;color:var(--text-muted);margin:-4px 0 10px">The backups folder is on the same disk as the database. A copy folder on another machine (a shared SMB folder mounted into the app — see the manual) keeps a backup if this server is lost.</p>
+      <button class="btn btn-primary btn-sm" onclick="App.saveBackupSettings()">Save backup settings</button>
+      <div class="table-wrap" style="margin-top:12px;max-height:320px;overflow-y:auto"><table>
+        <thead><tr><th>When</th><th>Type</th><th>Size</th><th>Copy</th><th></th></tr></thead>
+        <tbody>${d.backups.length ? d.backups.map(b => `<tr>
+          <td style="white-space:nowrap">${this.fmtDateTime(b.created_at)}${b.status === 'ok' ? `<div style="font-size:11px;color:var(--text-muted);font-family:monospace">${esc(b.filename)}</div>` : `<div style="font-size:11px;color:var(--danger)">Failed: ${esc(b.error)}</div>`}</td>
+          <td>${b.kind === 'scheduled' ? 'Scheduled' : `Manual${b.employee_name ? `<div style="font-size:11px;color:var(--text-muted)">${esc(b.employee_name)}</div>` : ''}`}</td>
+          <td>${mb(b.size_bytes)}</td>
+          <td>${b.copy_status === 'ok' ? '<span style="color:var(--success)">Copied</span>' : b.copy_status === 'failed' ? `<span style="color:var(--danger)" title="${esc(b.copy_error)}">Failed</span><div style="font-size:11px;color:var(--danger);max-width:220px">${esc(b.copy_error)}</div>` : '—'}</td>
+          <td style="white-space:nowrap;text-align:right">${b.status === 'ok' && b.exists ? `<a class="btn btn-sm btn-outline" href="/api/backups/${b.id}/download" download>Download</a> <button class="btn btn-sm btn-danger" onclick="App.deleteBackup(${b.id}, '${esc(b.filename)}')">Delete</button>` : b.status === 'ok' ? '<span style="font-size:11px;color:var(--text-muted)">file removed</span>' : ''}</td>
+        </tr>`).join('') : '<tr><td colspan="5" class="empty-state">No backups yet</td></tr>'}</tbody>
+      </table></div>`;
+  },
+
+  _backupSettingsBody() {
+    const v = id => document.getElementById(id)?.value;
+    return {
+      enabled: !!document.getElementById('bk-enabled')?.checked, frequency: v('bk-frequency'), time: v('bk-time'),
+      every_hours: v('bk-hours'), keep: v('bk-keep'), copy_dir: (v('bk-copy-dir') || '').trim(), copy_keep: v('bk-copy-keep'),
+    };
+  },
+
+  async saveBackupSettings() {
+    try {
+      await this.api('PUT', '/backups/settings', this._backupSettingsBody());
+      this.alert('Backup settings saved');
+      this.loadBackups();
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  async testBackupCopyDir() {
+    const dir = (document.getElementById('bk-copy-dir')?.value || '').trim();
+    if (!dir) return this.alert('Enter the folder to test', 'warning');
+    try {
+      const r = await this.api('POST', '/backups/test-copy', { copy_dir: dir });
+      this.alert(r.ok ? `${dir} is writable — backups can be copied there` : r.error, r.ok ? 'success' : 'error');
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  async runBackupNow() {
+    const btn = document.getElementById('bk-run');
+    if (btn) { btn.disabled = true; btn.textContent = 'Backing up…'; }
+    try {
+      const b = await this.api('POST', '/backups/run', {});
+      this.alert(`Backup ${b.filename} made${b.copy_status === 'failed' ? `, but copying it failed: ${b.copy_error}` : b.copy_status === 'ok' ? ' and copied' : ''}`, b.copy_status === 'failed' ? 'warning' : 'success');
+    } catch (e) { this.alert(e.message, 'error'); }
+    this.loadBackups();
+  },
+
+  async deleteBackup(id, filename) {
+    if (!confirm(`Delete backup ${filename} from the server? A copy in the copy folder is kept.`)) return;
+    try { await this.api('DELETE', `/backups/${id}`); this.loadBackups(); }
+    catch (e) { this.alert(e.message, 'error'); }
   },
 
   async loadDiscountExcludedBrands() {

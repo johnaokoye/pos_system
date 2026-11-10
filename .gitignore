@@ -35,3 +35,7 @@ uploads/shop-use-signatures/*
 .vercel
 test-results/
 /data
+
+# Database backups (Settings → Database Backups) — never commit
+backups/
+backups-offsite/

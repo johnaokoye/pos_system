@@ -21,7 +21,7 @@ npx playwright test --headed           # run with browser visible
 npm run check:frontend                 # public/js rules: unique App member names, script tags, file shape
 ```
 
-Test files: `auth.spec.js`, `dashboard.spec.js`, `pos.spec.js`, `inventory.spec.js`, `api.spec.js`, `frontend.spec.js` (runs the public/js check; every screen renders without a script error), `special-projects.spec.js`, `sales-credit.spec.js`, `customer-salespeople.spec.js`, `inventory-view.spec.js`, `customer-merge.spec.js`, `exchange-convert.spec.js`, `hold-recall.spec.js`, `sku-kinds.spec.js`, `zero-stock.spec.js`, `legacy-credit.spec.js`, `sp-rental-availability.spec.js`, `ar-branch.spec.js`, `refund-drawer.spec.js`. Shared login helper is in `tests/fixtures.js`. The config auto-builds `/tmp/libasound.so.2` stub on systems without `libasound2` installed (WSL/headless Linux).
+Test files: `auth.spec.js`, `dashboard.spec.js`, `pos.spec.js`, `inventory.spec.js`, `api.spec.js`, `frontend.spec.js` (runs the public/js check; every screen renders without a script error), `special-projects.spec.js`, `sales-credit.spec.js`, `customer-salespeople.spec.js`, `inventory-view.spec.js`, `customer-merge.spec.js`, `exchange-convert.spec.js`, `hold-recall.spec.js`, `sku-kinds.spec.js`, `zero-stock.spec.js`, `legacy-credit.spec.js`, `sp-rental-availability.spec.js`, `ar-branch.spec.js`, `refund-drawer.spec.js`, `backups.spec.js`. Shared login helper is in `tests/fixtures.js`. The config auto-builds `/tmp/libasound.so.2` stub on systems without `libasound2` installed (WSL/headless Linux).
 
 There is no linter configured.
 
@@ -147,7 +147,7 @@ The `security_groups.permissions` JSON blob uses these keys (all boolean). Modul
 - `security` → `security_manage`, `security_assign`
 - `user-sessions` → `sessions_logout` (Admin > Active Sessions; force-logout is the sub-key)
 - `promotions` → `promotions_create`, `promotions_codes`
-- `settings` → `settings_company`, `settings_tax`, `settings_payment`, `settings_integrations`
+- `settings` → `settings_company`, `settings_tax`, `settings_payment`, `settings_integrations`, `settings_backups` (Database Backups — view/run/schedule/download; inherited from full `settings`)
 
 `multi_branch_access`, `pos_view_margin` (per-line margin on the POS cart), `customers_credit_block` (the credit-account Block box), `pos_receive_payment` (POS Receive Payment — cashiers only), `pos_petty_cash` (POS Petty Cash payouts), `customers_legacy_credit` / `customers_legacy_credit_void` (old credit notes on cash customers) and `returns_override` (the manager PIN every return needs — checked server-side in `POST /transactions/:id/return`, stored as `returns.override_by`) are stored directly in the permissions blob and checked standalone; they have no sub-permissions and do not appear in `_permissionTree` — each is its own checkbox in the Security Group editor. `pos_view_margin` is deliberately not a `pos` sub-key, since subs are inherited from a full `pos` grant and cashiers shouldn't see cost by default; `customers_credit_block`, `pos_receive_payment`, `pos_petty_cash` and `returns_override` are kept out of `customers`/`pos`/`transactions` for the same reason.
 
@@ -166,6 +166,9 @@ Three built-in groups seed on first run: **Administrator** (all true), **Manager
 | `TURSO_AUTH_TOKEN` | Turso auth token | (none) |
 
 Email/SMTP is configured through the Settings UI and persisted in the `settings` table — not via env vars.
+
+### Database backups
+Settings → Database Backups (`routes/backups.js` at `/api/backups`, `settings_backups`, never API keys; `lib/backups.js`, schedule rule in `lib/backupSchedule.js`). `VACUUM INTO` a `pos-YYYYMMDD-HHMMSS.db` (store clock) in `backups/` beside the database file (local `file:` databases only — not Turso), each run logged in `backups`; `server.js` calls `tick()` every minute (daily at `backup_time` or every `backup_every_hours`, `backup_last_scheduled_at` marks the slot); keep-last-N pruning only touches files matching that name pattern; optional `backup_copy_dir` copy (as `.partial`, then renamed). On Docker, `/app/backups-offsite` is bind-mounted from `POS_BACKUP_COPY_DIR` (an SMB share mounted on the host — manual has the steps). The synchronous driver blocks every request while a backup runs (~0.4 s per 136 MB measured).
 
 ### Deployment
 `vercel.json` routes all traffic to `server.js` as a serverless function. Switch the DB to Turso for stateful production use (local `pos.db` is ephemeral on Vercel).

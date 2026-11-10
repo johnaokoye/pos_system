@@ -1565,6 +1565,24 @@ async function _init() {
       rental_before TEXT NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // One row per database backup run (lib/backups.js) — scheduled or made
+    // with Back up now; a failed run keeps its error. deleted_at once the
+    // file was removed (by hand or by the keep-the-last-N rule).
+    { sql: `CREATE TABLE IF NOT EXISTS backups (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      filename TEXT,
+      size_bytes INTEGER,
+      kind TEXT NOT NULL,
+      status TEXT NOT NULL,
+      error TEXT,
+      copy_status TEXT,
+      copy_error TEXT,
+      copied_path TEXT,
+      employee_id INTEGER REFERENCES employees(id),
+      duration_ms INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      deleted_at DATETIME
+    )` },
     // Same reviewable/reversible batch pattern as product_import_batches,
     // for CSV customer imports (routes/customer-imports.js).
     { sql: `CREATE TABLE IF NOT EXISTS customer_import_batches (

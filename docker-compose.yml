@@ -19,6 +19,12 @@ services:
     volumes:
       - ./data:/app/data
       - ./uploads:/app/uploads
+      # Off-server backup copies (Settings → Database Backups → "Also copy
+      # each backup to folder: /app/backups-offsite"). Set POS_BACKUP_COPY_DIR
+      # in the stack's environment to a host folder — e.g. a shared SMB folder
+      # the host mounts at /mnt/pos-backups (see the manual). Unset, it's a
+      # plain folder beside the stack and nothing is copied unless chosen.
+      - ${POS_BACKUP_COPY_DIR:-./backups-offsite}:/app/backups-offsite
     expose:
       - "3001"
     # No `ports:` mapping — internal-only on the Docker network. Point your
