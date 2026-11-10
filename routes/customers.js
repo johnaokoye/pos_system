@@ -116,6 +116,20 @@ function hardDuplicateError(matches) {
 // (canGrant) — preapproval exists for migrated legacy records, so a customer
 // keyed in by hand must have the full rental paperwork before they can rent.
 // Revoking (1->0) is always allowed.
+// Home branch (A/R branch filter): only changed when the caller sends
+// home_branch_id, so older callers' full-row PUTs never clear it. Returns an
+// error message or null.
+async function saveHomeBranch(customerId, body) {
+  if (!('home_branch_id' in body)) return null;
+  const id = body.home_branch_id ? Number(body.home_branch_id) : null;
+  if (id) {
+    const { rows: [b] } = await db.execute({ sql: 'SELECT id FROM branches WHERE id = ?', args: [id] });
+    if (!b) return 'Unknown home branch';
+  }
+  await db.execute({ sql: 'UPDATE customers SET home_branch_id = ? WHERE id = ?', args: [id, customerId] });
+  return null;
+}
+
 async function createdByImport(customerId) {
   const { rows } = await db.execute({ sql: "SELECT 1 FROM customer_import_batch_items WHERE customer_id = ? AND action = 'created' LIMIT 1", args: [customerId] });
   return rows.length > 0;
@@ -1035,10 +1049,11 @@ router.post('/', requirePermission('customers_add'), async (req, res) => {
     const newId = Number(result.lastInsertRowid);
     await syncPhoneKeys(db, newId, phone);
     if (names) await db.execute({ sql: 'UPDATE customers SET customer_kind = ?, business_name = ? WHERE id = ?', args: [names.kind, names.business_name, newId] });
+    const homeErr = await saveHomeBranch(newId, req.body);
     if (contactSet) await saveContacts(newId, contactSet.rows);
     if (!assignedSalesperson.unchanged) await setCustomerSalesperson(newId, null, assignedSalesperson.id, req.employee?.id);
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [newId] });
-    res.status(201).json(row);
+    res.status(201).json(homeErr ? { ...row, warning: homeErr } : row);
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -1065,6 +1080,10 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
   const contactSet = 'contacts' in req.body ? cleanContacts(req.body.contacts) : null;
   if (contactSet?.error) return res.status(400).json({ error: contactSet.error });
   try {
+    if (req.body.home_branch_id) {
+      const { rows: [hb] } = await db.execute({ sql: 'SELECT id FROM branches WHERE id = ?', args: [Number(req.body.home_branch_id)] });
+      if (!hb) return res.status(400).json({ error: 'Unknown home branch' });
+    }
     const cardError = await validateDiscountCard(discount_card_type_id, discount_card_number, req.params.id);
     if (cardError) return res.status(400).json({ error: cardError });
     const cashBackCardError = await validateCashBackCard(cash_back_card_type_id, cash_back_card_number, req.params.id);
@@ -1113,6 +1132,8 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
         cash_back_card_type_id || null, cash_back_card_type_id ? (cash_back_card_number || null) : null,
         customer_category_id || null, req.params.id] });
     if (names) await db.execute({ sql: 'UPDATE customers SET customer_kind = ?, business_name = ? WHERE id = ?', args: [names.kind, names.business_name, req.params.id] });
+    const homeErr = await saveHomeBranch(req.params.id, req.body);
+    if (homeErr) return res.status(400).json({ error: homeErr });
     await syncPhoneKeys(db, req.params.id, phone);
     if (contactSet) await saveContacts(req.params.id, contactSet.rows);
     if (type === 'cash') {

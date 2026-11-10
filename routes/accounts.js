@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { runCreditCheck } = require('./customers');
-const { requirePermission } = require('../lib/permissions');
+const { requirePermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { LEGACY_BALANCE_SQL, openArInvoices, buildAllocations, insertAllocations, paymentAllocations } = require('../lib/legacyInvoices');
 const { UNAPPLIED_SQL, allArInvoices, currentAllocations, setPaymentAllocations } = require('../lib/customerPayments');
@@ -14,20 +14,78 @@ const { customerArDetail } = require('../lib/arDetail');
 // matching how the section itself is gated in the frontend.
 router.use(requirePermission('accounts'));
 
+// Branch filter for the A/R screen, from ?branch_by=home|invoice&branch_id=.
+// home: customers whose home branch (customers.home_branch_id) is that branch
+// — branch_id 'none' = customers with no home branch — with their whole
+// account. invoice: what's owed on credit invoices raised at that branch —
+// 'none' = old-system (legacy) invoices, which have no branch — and the
+// payments taken there. No branch_id = everything, as before.
+function arBranch(req) {
+  const by = req.query.branch_by === 'invoice' ? 'invoice' : 'home';
+  const raw = req.query.branch_id;
+  if (raw === 'none') return { by, branch: 'none' };
+  const id = Number(raw);
+  return { by, branch: Number.isInteger(id) && id > 0 ? id : null };
+}
+
+// Credit sales that are invoices (a returned rental's checkout isn't).
+const CREDIT_INVOICE_SQL = `t.payment_method = 'credit' AND t.status = 'completed'
+  AND t.id NOT IN (SELECT checkout_transaction_id FROM rental_agreements WHERE status = 'returned' AND checkout_transaction_id IS NOT NULL)`;
+// What's still owed on credit invoice t.
+const TX_OPEN_SQL = `MAX(0, t.total - COALESCE((SELECT SUM(pa.amount) FROM payment_allocations pa WHERE pa.transaction_id = t.id), 0))`;
+const HOME_SQL = scope => scope.branch === 'none' ? ' AND c.home_branch_id IS NULL' : ' AND c.home_branch_id = ?';
+
+// Credit accounts for the Customer Balances list (and the stat cards). With an
+// invoice-branch filter each row also has branch_balance — owed on that
+// branch's invoices (or the legacy ones) — and only customers owing there
+// are listed.
+async function arAccounts(scope) {
+  const homeF = scope.by === 'home' && scope.branch ? HOME_SQL(scope) : '';
+  const homeA = scope.by === 'home' && typeof scope.branch === 'number' ? [scope.branch] : [];
+  const invoice = scope.by === 'invoice' && scope.branch;
+  const txBranch = invoice ? (scope.branch === 'none' ? ' AND 0' : ' AND t.branch_id = ?') : '';
+  const txBranchA = invoice && scope.branch !== 'none' ? [scope.branch] : [];
+  const branchBalance = !invoice ? '' : scope.branch === 'none'
+    ? `, (SELECT COALESCE(SUM(${LEGACY_BALANCE_SQL}), 0) FROM ar_legacy_invoices li WHERE li.customer_id = c.id AND li.status = 'open') AS branch_balance`
+    : `, (SELECT COALESCE(SUM(${TX_OPEN_SQL}), 0) FROM transactions t WHERE t.customer_id = c.id AND ${CREDIT_INVOICE_SQL} AND t.branch_id = ?) AS branch_balance`;
+  const { rows } = await db.execute({
+    sql: `SELECT c.id, c.customer_number, c.first_name, c.last_name, c.business_name, c.email, c.phone, c.credit_limit, c.account_balance, c.credit_enabled,
+        c.home_branch_id, hb.name AS home_branch_name,
+        COUNT(DISTINCT t.id) as credit_invoices, COALESCE(SUM(CASE WHEN t.status = 'completed' AND t.payment_method = 'credit' THEN t.total ELSE 0 END), 0) as total_invoiced,
+        COALESCE((SELECT SUM(p.amount) FROM account_payments p WHERE p.customer_id = c.id), 0) as total_paid${branchBalance}
+      FROM customers c
+      LEFT JOIN branches hb ON hb.id = c.home_branch_id
+      LEFT JOIN transactions t ON c.id = t.customer_id AND t.payment_method = 'credit' AND t.status = 'completed'${txBranch}
+      WHERE c.credit_enabled = 1 AND c.active = 1${homeF}
+      GROUP BY c.id ORDER BY c.account_balance DESC, c.last_name`,
+    args: [...(invoice && scope.branch !== 'none' ? [scope.branch] : []), ...txBranchA, ...homeA],
+  });
+  if (!invoice) return rows;
+  return rows.filter(r => r.branch_balance > 0.005).map(r => ({ ...r, branch_balance: parseFloat(Number(r.branch_balance).toFixed(2)) }));
+}
+
 // AR summary - all credit-enabled customers with balances
 router.get('/', async (req, res) => {
   try {
-    const { rows: customers } = await db.execute({ sql: `SELECT c.id, c.customer_number, c.first_name, c.last_name, c.business_name, c.email, c.phone, c.credit_limit, c.account_balance, c.credit_enabled, COUNT(DISTINCT t.id) as credit_invoices, COALESCE(SUM(CASE WHEN t.status = 'completed' AND t.payment_method = 'credit' THEN t.total ELSE 0 END), 0) as total_invoiced, COALESCE((SELECT SUM(p.amount) FROM account_payments p WHERE p.customer_id = c.id), 0) as total_paid FROM customers c LEFT JOIN transactions t ON c.id = t.customer_id AND t.payment_method = 'credit' AND t.status = 'completed' WHERE c.credit_enabled = 1 AND c.active = 1 GROUP BY c.id ORDER BY c.account_balance DESC, c.last_name`, args: [] });
-    res.json(customers);
+    res.json(await arAccounts(arBranch(req)));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // AR aging report
+// AR aging. Branch filter: by home branch, those customers' whole aging; by
+// invoice branch, only invoices raised there (branch 'none': only the
+// old-system invoices). Unapplied credit is the customer's whole, either way.
 router.get('/aging', async (req, res) => {
   try {
+    const scope = arBranch(req);
+    const invoice = scope.by === 'invoice' && scope.branch;
+    const homeF = scope.by === 'home' && scope.branch ? HOME_SQL(scope) : '';
+    const homeA = scope.by === 'home' && typeof scope.branch === 'number' ? [scope.branch] : [];
+    const txBranch = invoice ? (scope.branch === 'none' ? ' AND 0' : ' AND t.branch_id = ?') : '';
+    const txBranchA = invoice && scope.branch !== 'none' ? [scope.branch] : [];
     const { rows: aging } = await db.execute({ sql: `
       SELECT c.id, c.customer_number, c.first_name || ' ' || c.last_name as customer_name,
-        c.business_name, c.email, c.phone, c.account_balance,
+        c.business_name, c.email, c.phone, c.account_balance, hb.name AS home_branch_name,
         COALESCE(SUM(CASE WHEN CAST(julianday('now') - julianday(t.created_at) AS INTEGER) <= 30
           THEN MAX(0, t.total - COALESCE(alloc.total_allocated, 0)) ELSE 0 END), 0) as current_30,
         COALESCE(SUM(CASE WHEN CAST(julianday('now') - julianday(t.created_at) AS INTEGER) BETWEEN 31 AND 60
@@ -37,13 +95,14 @@ router.get('/aging', async (req, res) => {
         COALESCE(SUM(CASE WHEN CAST(julianday('now') - julianday(t.created_at) AS INTEGER) > 90
           THEN MAX(0, t.total - COALESCE(alloc.total_allocated, 0)) ELSE 0 END), 0) as over_90
       FROM customers c
+      LEFT JOIN branches hb ON hb.id = c.home_branch_id
       LEFT JOIN transactions t ON c.id = t.customer_id AND t.payment_method = 'credit' AND t.status = 'completed'
-        AND t.id NOT IN (SELECT checkout_transaction_id FROM rental_agreements WHERE status = 'returned' AND checkout_transaction_id IS NOT NULL)
+        AND t.id NOT IN (SELECT checkout_transaction_id FROM rental_agreements WHERE status = 'returned' AND checkout_transaction_id IS NOT NULL)${txBranch}
       LEFT JOIN (SELECT transaction_id, SUM(amount) as total_allocated FROM payment_allocations GROUP BY transaction_id) alloc
         ON t.id = alloc.transaction_id
-      WHERE c.credit_enabled = 1 AND c.active = 1
+      WHERE c.credit_enabled = 1 AND c.active = 1${homeF}
       GROUP BY c.id
-      ORDER BY c.account_balance DESC`, args: [] });
+      ORDER BY c.account_balance DESC`, args: [...txBranchA, ...homeA] });
     // Legacy invoices (lib/legacyInvoices.js) age from their old-system
     // invoice date, into the same buckets.
     const { rows: legacy } = await db.execute({ sql: `
@@ -55,7 +114,7 @@ router.get('/aging', async (req, res) => {
       FROM ar_legacy_invoices li WHERE li.status = 'open' AND ${LEGACY_BALANCE_SQL} > 0.001
       GROUP BY li.customer_id`, args: [] });
     const byCustomer = new Map(aging.map(a => [a.id, a]));
-    for (const l of legacy) {
+    for (const l of (invoice && scope.branch !== 'none') ? [] : legacy) {
       const a = byCustomer.get(l.customer_id);
       if (!a) continue;
       for (const k of ['current_30', 'days_31_60', 'days_61_90', 'over_90']) a[k] = parseFloat(((a[k] || 0) + (l[k] || 0)).toFixed(2));
@@ -66,15 +125,31 @@ router.get('/aging', async (req, res) => {
     const { rows: unapplied } = await db.execute({ sql: `SELECT ap.customer_id, SUM(${UNAPPLIED_SQL}) AS unapplied FROM account_payments ap
       WHERE ap.payment_method != 'writeoff' AND ${UNAPPLIED_SQL} > 0.005 GROUP BY ap.customer_id`, args: [] });
     for (const u of unapplied) { const a = byCustomer.get(u.customer_id); if (a) a.unapplied_credit = parseFloat(Number(u.unapplied).toFixed(2)); }
-    res.json(aging);
+    const BUCKETS = ['current_30', 'days_31_60', 'days_61_90', 'over_90'];
+    res.json(invoice ? aging.filter(a => BUCKETS.some(k => Number(a[k]) > 0.005)) : aging);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// AR summary stats
+// AR stat cards, for the same branch filter: credit customers listed, what
+// they owe (their whole balances by home branch; what's owed at the branch by
+// invoice branch), how many are over their limit, and payments today (of
+// those customers by home branch; taken at the branch by invoice branch).
 router.get('/stats', async (req, res) => {
   try {
-    const { rows: [stats] } = await db.execute({ sql: `SELECT COUNT(DISTINCT c.id) as credit_customers, COALESCE(SUM(c.account_balance), 0) as total_outstanding, COALESCE(SUM(CASE WHEN c.account_balance > c.credit_limit AND c.credit_limit > 0 THEN 1 ELSE 0 END), 0) as over_limit_count, COALESCE((SELECT SUM(amount) FROM account_payments WHERE date(created_at) = date('now')), 0) as payments_today FROM customers c WHERE c.credit_enabled = 1 AND c.active = 1`, args: [] });
-    res.json(stats);
+    const scope = arBranch(req);
+    const rows = await arAccounts(scope);
+    const owed = r => scope.by === 'invoice' && scope.branch ? r.branch_balance : (Number(r.account_balance) || 0);
+    let paySql = "SELECT COALESCE(SUM(p.amount), 0) AS n FROM account_payments p LEFT JOIN customers c ON c.id = p.customer_id WHERE date(p.created_at) = date('now')";
+    const payArgs = [];
+    if (scope.branch && scope.by === 'home') { paySql += HOME_SQL(scope); if (scope.branch !== 'none') payArgs.push(scope.branch); }
+    if (scope.branch && scope.by === 'invoice') { paySql += scope.branch === 'none' ? ' AND p.branch_id IS NULL' : ' AND p.branch_id = ?'; if (scope.branch !== 'none') payArgs.push(scope.branch); }
+    const { rows: [{ n }] } = await db.execute({ sql: paySql, args: payArgs });
+    res.json({
+      credit_customers: rows.length,
+      total_outstanding: parseFloat(rows.reduce((t, r) => t + owed(r), 0).toFixed(2)),
+      over_limit_count: rows.filter(r => r.credit_limit > 0 && r.account_balance > r.credit_limit).length,
+      payments_today: Number(n) || 0,
+    });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -304,6 +379,40 @@ router.get('/statement/:customer_id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Home branch in bulk from the Customer Balances list (customers_edit too):
+// ids[] (up to 1000) get branch_id (null clears it).
+router.patch('/home-branch', async (req, res) => {
+  try {
+    if (!can(req.employee?.permissions, 'customers_edit')) return res.status(403).json({ error: 'Missing permission: customers_edit' });
+    const ids = (Array.isArray(req.body.ids) ? req.body.ids : []).map(Number).filter(n => Number.isInteger(n) && n > 0);
+    if (!ids.length) return res.status(400).json({ error: 'Choose at least one customer' });
+    if (ids.length > 1000) return res.status(400).json({ error: 'Up to 1,000 customers at a time' });
+    const branchId = req.body.branch_id ? Number(req.body.branch_id) : null;
+    if (branchId) {
+      const { rows: [b] } = await db.execute({ sql: 'SELECT id FROM branches WHERE id = ?', args: [branchId] });
+      if (!b) return res.status(400).json({ error: 'Unknown branch' });
+    }
+    const r = await db.execute({ sql: `UPDATE customers SET home_branch_id = ? WHERE id IN (${ids.map(() => '?').join(',')})`, args: [branchId, ...ids] });
+    res.json({ updated: Number(r.rowsAffected) || 0 });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Fill in the home branch of every active credit customer who has none, from
+// their credit invoices: the branch with the most invoiced (ties: the most
+// recent). Customers with no credit invoices are left blank.
+router.post('/home-branch/fill', async (req, res) => {
+  try {
+    if (!can(req.employee?.permissions, 'customers_edit')) return res.status(403).json({ error: 'Missing permission: customers_edit' });
+    const r = await db.execute({ sql: `UPDATE customers SET home_branch_id = (
+        SELECT t.branch_id FROM transactions t
+        WHERE t.customer_id = customers.id AND t.payment_method = 'credit' AND t.status = 'completed' AND t.branch_id IS NOT NULL
+        GROUP BY t.branch_id ORDER BY SUM(t.total) DESC, MAX(t.created_at) DESC LIMIT 1)
+      WHERE home_branch_id IS NULL AND credit_enabled = 1 AND active = 1
+        AND EXISTS (SELECT 1 FROM transactions t WHERE t.customer_id = customers.id AND t.payment_method = 'credit' AND t.status = 'completed' AND t.branch_id IS NOT NULL)`, args: [] });
+    res.json({ updated: Number(r.rowsAffected) || 0 });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // List payments
 router.get('/payments', async (req, res) => {
   try {
@@ -311,6 +420,10 @@ router.get('/payments', async (req, res) => {
     let sql = `SELECT p.*, CASE WHEN p.payment_method = 'writeoff' THEN 0 ELSE ${UNAPPLIED_SQL.replace(/\bap\./g, 'p.')} END AS unapplied, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.business_name, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name FROM account_payments p LEFT JOIN customers c ON p.customer_id = c.id LEFT JOIN employees e ON p.employee_id = e.id LEFT JOIN branches b ON p.branch_id = b.id WHERE 1=1`;
     const params = [];
     if (customer_id) { sql += ' AND p.customer_id = ?'; params.push(customer_id); }
+    // Branch filter: the customer's home branch, or where it was taken.
+    const scope = arBranch(req);
+    if (scope.branch && scope.by === 'home') { sql += HOME_SQL(scope); if (scope.branch !== 'none') params.push(scope.branch); }
+    if (scope.branch && scope.by === 'invoice') { sql += scope.branch === 'none' ? ' AND p.branch_id IS NULL' : ' AND p.branch_id = ?'; if (scope.branch !== 'none') params.push(scope.branch); }
     if (start) { sql += ' AND date(p.created_at) >= ?'; params.push(start); }
     if (end) { sql += ' AND date(p.created_at) <= ?'; params.push(end); }
     // Free-text search: payment #, reference, method, customer (name,

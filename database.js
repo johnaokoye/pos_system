@@ -3012,6 +3012,10 @@ async function _init() {
     'ALTER TABLE quotation_items ADD COLUMN discount_applied INTEGER NOT NULL DEFAULT 0',
     // The salesperson who owns this customer's transactions (lib/salesCredit.js).
     'ALTER TABLE customers ADD COLUMN salesperson_id INTEGER REFERENCES employees(id)',
+    // The branch a customer belongs to, for the A/R branch filter (by home
+    // branch; the other way filters by the branch an invoice was raised at).
+    // Set on the customer form or in bulk from Accounts Receivable.
+    'ALTER TABLE customers ADD COLUMN home_branch_id INTEGER REFERENCES branches(id)',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
@@ -4090,6 +4094,7 @@ async function _init() {
     'CREATE INDEX IF NOT EXISTS idx_shop_use_audit_request_id ON shop_use_audit(request_id)',
     'CREATE INDEX IF NOT EXISTS idx_stock_movements_reference ON stock_movements(reference)',
     'CREATE INDEX IF NOT EXISTS idx_purchase_requests_shop_use ON purchase_requests(shop_use_request_id)',
+    'CREATE INDEX IF NOT EXISTS idx_customers_home_branch ON customers(home_branch_id)',
   ];
   for (const sql of indexes) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

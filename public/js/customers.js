@@ -327,12 +327,15 @@ Object.assign(App, {
   },
 
   async showCustomerForm(id, opts = {}) {
-    const [c, cardTypes, cashBackCardTypes, customerCategories] = await Promise.all([
+    const [c, cardTypes, cashBackCardTypes, customerCategories, allBranches] = await Promise.all([
       id ? this.api('GET', `/customers/${id}`).then(c => ({ ...c, ...(opts.prefill || {}) })) : Promise.resolve({ ...(opts.prefill || {}) }),
       this.api('GET', '/discount-cards'),
       this.api('GET', '/cash-back-cards'),
       this.api('GET', '/customer-categories'),
+      this.api('GET', '/branches').catch(() => []),
     ]);
+    // Active branches, plus the customer's own even if since deactivated.
+    const homeBranches = (allBranches || []).filter(b => b.active || b.id === c.home_branch_id);
     this._custFormNumber = c.customer_number || '';
     const isCredit = (c.customer_type || 'cash') === 'credit';
     const isTaxExempt = c.tax_exempt ? true : false;
@@ -400,6 +403,13 @@ Object.assign(App, {
               ${customerCategoryOptions.map(cat => `<option value="${cat.id}" ${c.customer_category_id===cat.id?'selected':''}>${cat.name}${cat.discount_percent > 0 ? ` (${cat.discount_percent}% off)` : ''}</option>`).join('')}
             </select>
             <p style="font-size:11px;color:var(--text-muted);margin-top:4px">A classification like Individual/Company/Contractor — separate from the Cash/Credit type above. Set up in Settings.</p>
+          </div>
+          <div class="form-group"><label>Home Branch</label>
+            <select id="cf-home-branch">
+              <option value="">— None —</option>
+              ${homeBranches.map(b => `<option value="${b.id}" ${c.home_branch_id === b.id ? 'selected' : ''}>${this.escapeAttr(b.name)}</option>`).join('')}
+            </select>
+            <p style="font-size:11px;color:var(--text-muted);margin-top:4px">The branch this customer belongs to — Accounts Receivable can be filtered by it.</p>
           </div>
           <div id="cf-credit-fields" style="display:${isCredit?'block':'none'}">
             <div class="input-row">
@@ -769,6 +779,7 @@ Object.assign(App, {
       cash_back_card_type_id: document.getElementById('cf-cash-back-card-type')?.value || null,
       cash_back_card_number: document.getElementById('cf-cash-back-card-number')?.value.trim() || null,
       customer_category_id: document.getElementById('cf-category')?.value || null,
+      home_branch_id: document.getElementById('cf-home-branch')?.value || null,
       ...(this.can('sales_manager') ? { salesperson_id: document.getElementById('cf-salesperson')?.value || null } : {}),
     };
     if (customerKind === 'business' && !data.business_name) { this.alert('Business name is required', 'error'); return; }

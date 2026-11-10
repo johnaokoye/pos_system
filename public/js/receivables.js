@@ -4,18 +4,41 @@ Object.assign(App, {
   async renderAccounts() {
     const c = document.getElementById('content');
     c.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
-    const [accounts, stats, aging] = await Promise.all([
-      this.api('GET', '/accounts'),
-      this.api('GET', '/accounts/stats'),
-      this.api('GET', '/accounts/aging'),
+    const br = this._arBranchState();
+    const bq = this._arBranchQs();
+    const [accounts, stats, aging, branches] = await Promise.all([
+      this.api('GET', `/accounts${bq ? '?' + bq : ''}`),
+      this.api('GET', `/accounts/stats${bq ? '?' + bq : ''}`),
+      this.api('GET', `/accounts/aging${bq ? '?' + bq : ''}`),
+      this._arBranchList ? Promise.resolve(this._arBranchList) : this.api('GET', '/branches').catch(() => []),
     ]);
     if (this.section !== 'accounts') return;
+    this._arBranchList = branches;
+    const activeBranches = (branches || []).filter(b => b.active);
+    const noneLabel = br.by === 'invoice' ? 'Old system (no branch)' : 'No home branch';
     const maxBal = Math.max(...accounts.map(a => a.account_balance), 1);
     c.innerHTML = `
       <div class="section-header"><h2>Accounts Receivable</h2></div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px">
+        <label style="font-size:13px;font-weight:600">Branch</label>
+        <select id="ar-branch" style="width:190px" onchange="App._arSetBranch()">
+          <option value="">All branches</option>
+          ${activeBranches.map(b => `<option value="${b.id}" ${String(br.id) === String(b.id) ? 'selected' : ''}>${this.escapeAttr(b.name)}</option>`).join('')}
+          <option value="none" ${br.id === 'none' ? 'selected' : ''}>${noneLabel}</option>
+        </select>
+        <label style="font-size:13px;font-weight:600">By</label>
+        <select id="ar-branch-by" style="width:230px" onchange="App._arSetBranch()" title="Customer's home branch: those customers' whole accounts. Where the invoice was raised: only what's owed on that branch's invoices, and payments taken there.">
+          <option value="home" ${br.by === 'home' ? 'selected' : ''}>Customer's home branch</option>
+          <option value="invoice" ${br.by === 'invoice' ? 'selected' : ''}>Where the invoice was raised</option>
+        </select>
+        ${br.id ? `<span style="font-size:12px;color:var(--text-muted)">${br.by === 'invoice'
+          ? 'Balances and aging count only invoices raised there; payments are those taken there.'
+          : "Those customers' whole accounts; payments are theirs."}</span>` : ''}
+        ${this.can('customers_edit') ? `<button class="btn btn-sm btn-outline" style="margin-left:auto" onclick="App._arFillHomeBranches()" title="Give every credit customer without a home branch the branch where most of their credit sales were made">Fill blank home branches from invoices</button>` : ''}
+      </div>
       <div class="stats-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:18px">
         <div class="stat-card blue"><div class="stat-label">Credit Customers</div><div class="stat-value">${stats.credit_customers}</div></div>
-        <div class="stat-card orange"><div class="stat-label">Total Outstanding</div><div class="stat-value">${this.fmt(stats.total_outstanding)}</div></div>
+        <div class="stat-card orange"><div class="stat-label">${br.id && br.by === 'invoice' ? 'Owed at This Branch' : 'Total Outstanding'}</div><div class="stat-value">${this.fmt(stats.total_outstanding)}</div></div>
         <div class="stat-card red"><div class="stat-label">Over Limit</div><div class="stat-value">${stats.over_limit_count}</div></div>
         <div class="stat-card green"><div class="stat-label">Payments Today</div><div class="stat-value">${this.fmt(stats.payments_today)}</div></div>
       </div>
@@ -33,6 +56,13 @@ Object.assign(App, {
               ${this.can('customers_credit') ? '<button class="btn btn-sm btn-primary" onclick="App.showEnableCreditModal()">Enable Credit for Customer</button>' : ''}
             </div>
           </div>
+          ${this.can('customers_edit') ? `<div id="ar-sel-bar" style="display:none;gap:8px;align-items:center;flex-wrap:wrap;padding:0 0 10px">
+            <span id="ar-sel-count" class="fw-600" style="font-size:13px"></span>
+            <span style="font-size:13px">Set home branch to</span>
+            <select id="ar-sel-branch" style="width:180px"><option value="">— None —</option>${activeBranches.map(b => `<option value="${b.id}">${this.escapeAttr(b.name)}</option>`).join('')}</select>
+            <button class="btn btn-sm btn-primary" onclick="App._arApplyHomeBranch()">Apply</button>
+            <button class="btn btn-sm btn-outline" onclick="App._arSel = new Set(); App._renderARAccounts()">Clear selection</button>
+          </div>` : ''}
           <div class="table-wrap">
             <table>
               <thead id="ar-acct-head"></thead>
@@ -80,6 +110,7 @@ Object.assign(App, {
       </div>`;
     this._arCustomers = null;
     this._arCustomerId = '';
+    this._arSel = new Set();
     this._arAccounts = accounts;
     this._arAcct = { q: '', key: 'balance', dir: 'desc' };
     this._renderARAccounts();
@@ -88,6 +119,11 @@ Object.assign(App, {
     this._renderARAging();
     this._arPay = { q: '', start: '', end: '', sortBy: 'date', dir: 'desc' };
     this._loadARPayments();
+    // Back on the tab that was open before a branch change.
+    if (this._arTab && this._arTab !== 'ar-list') {
+      const tabBtn = [...document.querySelectorAll('.tab-btn')].find(b => (b.getAttribute('onclick') || '').includes(`'${this._arTab}'`));
+      if (tabBtn) this.showARTab(tabBtn, this._arTab);
+    }
     document.addEventListener('click', (e) => {
       if (!e.target.closest('#ar-cust-search') && !e.target.closest('#ar-cust-dd')) {
         const dd = document.getElementById('ar-cust-dd');
@@ -110,6 +146,8 @@ Object.assign(App, {
     if (f.q) qs.set('q', f.q);
     if (f.start) qs.set('start', f.start);
     if (f.end) qs.set('end', f.end);
+    const br = this._arBranchState();
+    if (br.id) { qs.set('branch_id', br.id); qs.set('branch_by', br.by); }
     const seq = (this._arPaySeq = (this._arPaySeq || 0) + 1);
     const payments = await this.api('GET', `/accounts/payments?${qs}`);
     if (seq !== this._arPaySeq) return; // a newer search is on its way
@@ -205,7 +243,7 @@ Object.assign(App, {
       .replace('title="Sort by Unapplied Payments"', 'title="Payments received on account but not yet applied to the invoices aged here — click to sort"')}</tr>`;
     body.innerHTML = rows.length ? rows.map(a => `
       <tr>
-        <td><div class="fw-600">${this.escapeAttr(a.customer_name)}</div><div style="font-size:11px;color:var(--text-muted)">${a.customer_number||''}${a.business_name ? ` · ${this.escapeAttr(a.business_name)}` : ''} ${this.escapeAttr(a.email||'')}</div></td>
+        <td><div class="fw-600">${this.escapeAttr(a.customer_name)}</div><div style="font-size:11px;color:var(--text-muted)">${a.customer_number||''}${a.business_name ? ` · ${this.escapeAttr(a.business_name)}` : ''} ${this.escapeAttr(a.email||'')}${a.home_branch_name ? ` · ${this.escapeAttr(a.home_branch_name)}` : ''}</div></td>
         <td class="fw-600 color-danger">${this.fmt(a.account_balance||0)}</td>
         <td class="color-success">${this.fmt(a.current_30||0)}</td>
         <td class="${a.days_31_60 > 0 ? 'color-warning' : ''}">${this.fmt(a.days_31_60||0)}</td>
@@ -236,19 +274,33 @@ Object.assign(App, {
     const val = {
       customer: a => name(a).toLowerCase(), limit: a => a.credit_limit || 0, balance: a => a.account_balance || 0,
       invoiced: a => a.total_invoiced || 0, paid: a => a.total_paid || 0, available: avail,
-    }[key];
+      home: a => String(a.home_branch_name || '').toLowerCase(), here: a => a.branch_balance || 0,
+    }[key] || (a => a.account_balance || 0);
+    const br = this._arBranchState();
+    const owedHere = br.id && br.by === 'invoice';
+    const canSel = this.can('customers_edit');
+    const sel = this._arSel || (this._arSel = new Set());
     const rows = (this._arAccounts || [])
       .filter(a => !q || [name(a), a.business_name, a.customer_number, a.phone, a.email].some(v => String(v || '').toLowerCase().includes(q)))
       .sort((x, y) => { const p = val(x), r = val(y); return (p < r ? -1 : p > r ? 1 : 0) * (dir === 'asc' ? 1 : -1); });
-    head.innerHTML = `<tr>${[['customer','Customer'],['limit','Credit Limit'],['balance','Balance'],['invoiced','Invoiced'],['paid','Paid'],['available','Available']]
+    const cols = [['customer','Customer'],['home','Home Branch'],['limit','Credit Limit'],['balance','Balance'], ...(owedHere ? [['here','Owed Here']] : []),
+      ['invoiced', owedHere ? 'Invoiced Here' : 'Invoiced'],['paid','Paid'],['available','Available']];
+    const allSel = rows.length > 0 && rows.every(a => sel.has(a.id));
+    head.innerHTML = `<tr>${canSel ? `<th style="width:28px"><input type="checkbox" ${allSel ? 'checked' : ''} title="Select all shown" onchange="App._arToggleAllSel(this.checked)"></th>` : ''}${cols
       .map(([k, l]) => this._arSortTh(l, k, key, dir, `App._arAcctSort('${k}')`)).join('')}<th>Actions</th></tr>`;
+    this._arShown = rows.map(a => a.id);
+    const bar = document.getElementById('ar-sel-bar');
+    if (bar) { bar.style.display = sel.size ? 'flex' : 'none'; document.getElementById('ar-sel-count').textContent = `${sel.size} selected`; }
     body.innerHTML = rows.length ? rows.map(a => {
       const pct = a.credit_limit > 0 ? Math.min(100, (a.account_balance / a.credit_limit) * 100) : 0;
       const color = pct >= 90 ? 'var(--danger)' : pct >= 70 ? 'var(--warning)' : 'var(--success)';
       return `<tr>
+        ${canSel ? `<td><input type="checkbox" ${sel.has(a.id) ? 'checked' : ''} onchange="App._arToggleSel(${a.id}, this.checked)"></td>` : ''}
         <td><div class="fw-600">${this.escapeAttr(name(a))}</div><div style="font-size:11px;color:var(--text-muted)">${a.customer_number}${a.business_name ? ` · ${this.escapeAttr(a.business_name)}` : ''}</div></td>
+        <td>${a.home_branch_name ? this.escapeAttr(a.home_branch_name) : '<span style="color:var(--text-muted)">—</span>'}</td>
         <td>${this.fmt(a.credit_limit||0)}</td>
         <td><div class="fw-600 color-danger">${this.fmt(a.account_balance||0)}</div><div class="aging-bar"><div class="aging-fill" style="width:${pct}%;background:${color}"></div></div></td>
+        ${owedHere ? `<td class="fw-600">${this.fmt(a.branch_balance||0)}</td>` : ''}
         <td>${this.fmt(a.total_invoiced||0)}</td>
         <td>${this.fmt(a.total_paid||0)}</td>
         <td class="${avail(a) > 0 ? 'color-success' : 'color-danger'}">${this.fmt(avail(a))}</td>
@@ -257,7 +309,55 @@ Object.assign(App, {
           <button class="btn btn-sm btn-secondary" onclick="App.viewCustomerAccount(${a.id})">Details</button>
         </td>
       </tr>`;
-    }).join('') : `<tr><td colspan="7" class="empty-state">${q ? 'No credit accounts match that search' : 'No credit accounts. Enable credit for a customer to get started.'}</td></tr>`;
+    }).join('') : `<tr><td colspan="${cols.length + 1 + (canSel ? 1 : 0)}" class="empty-state">${q ? 'No credit accounts match that search' : br.id ? 'No credit accounts for this branch' : 'No credit accounts. Enable credit for a customer to get started.'}</td></tr>`;
+  },
+
+  // A/R branch filter (GET /accounts… ?branch_id=&branch_by=home|invoice):
+  // kept per viewer in this browser.
+  _arBranchState() {
+    if (!this._arBr) {
+      let saved = null;
+      try { saved = JSON.parse(localStorage.getItem('ar-branch') || 'null'); } catch (e) { saved = null; }
+      this._arBr = { by: saved && saved.by === 'invoice' ? 'invoice' : 'home', id: saved && saved.id ? String(saved.id) : '' };
+    }
+    return this._arBr;
+  },
+  _arBranchQs() {
+    const br = this._arBranchState();
+    return br.id ? new URLSearchParams({ branch_id: br.id, branch_by: br.by }).toString() : '';
+  },
+  _arSetBranch() {
+    this._arBr = { id: document.getElementById('ar-branch')?.value || '', by: document.getElementById('ar-branch-by')?.value === 'invoice' ? 'invoice' : 'home' };
+    try { localStorage.setItem('ar-branch', JSON.stringify(this._arBr)); } catch (e) { /* not kept */ }
+    this.renderAccounts();
+  },
+  _arToggleSel(id, on) {
+    if (on) this._arSel.add(id); else this._arSel.delete(id);
+    this._renderARAccounts();
+  },
+  _arToggleAllSel(on) {
+    for (const id of this._arShown || []) { if (on) this._arSel.add(id); else this._arSel.delete(id); }
+    this._renderARAccounts();
+  },
+  async _arApplyHomeBranch() {
+    const ids = [...(this._arSel || [])];
+    if (!ids.length) return;
+    const sel = document.getElementById('ar-sel-branch');
+    const label = sel.value ? sel.options[sel.selectedIndex].text : 'no home branch';
+    if (!confirm(`Set ${ids.length} customer${ids.length === 1 ? '' : 's'} to ${label}?`)) return;
+    try {
+      const out = await this.api('PATCH', '/accounts/home-branch', { ids, branch_id: sel.value || null });
+      this.alert(`${out.updated} customer${out.updated === 1 ? '' : 's'} updated`);
+      this.renderAccounts();
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+  async _arFillHomeBranches() {
+    if (!confirm('Give every credit customer without a home branch the branch where most of their credit sales were made? Customers who already have one are left alone.')) return;
+    try {
+      const out = await this.api('POST', '/accounts/home-branch/fill', {});
+      this.alert(`${out.updated} customer${out.updated === 1 ? '' : 's'} given a home branch`);
+      this.renderAccounts();
+    } catch (e) { this.alert(e.message, 'error'); }
   },
 
   showStatementModal(customerId, info) {
@@ -438,6 +538,7 @@ Object.assign(App, {
   },
 
   showARTab(btn, tabId) {
+    this._arTab = tabId;
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     ['ar-list','ar-aging','ar-payments'].forEach(id => {
