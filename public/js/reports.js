@@ -64,7 +64,104 @@ Object.assign(App, {
   renderReportsInventory() {
     document.getElementById('content').innerHTML = `
       <div class="section-header"><h2>Inventory Reports</h2>${this.can('inventory') ? `<button class="btn btn-outline btn-sm" onclick="App.showSection('inventory')">← Retail Inventory</button>` : ''}</div>
-      ${this._reportButtonCard('Items Sold', 'Every item sold over a period — units sold and returned, net sales, cost, margin and what\'s on hand now — filterable by location, category, brand or item.', 'App.showItemsSoldReport()')}`;
+      ${this._reportButtonCard('Items Sold', 'Every item sold over a period — units sold and returned, net sales, cost, margin and what\'s on hand now — filterable by location, category, brand or item.', 'App.showItemsSoldReport()')}
+      ${this._reportButtonCard('Zero &amp; Negative Stock', 'Every inventory item at or below zero on hand, per location — negative counts to investigate and zero counts to reorder — with cost value, last sold and last received.', 'App.showZeroStockReport()')}`;
+  },
+
+  // ─── Zero & Negative Stock ──────────────────────────────────────────────
+  // GET /reports/zero-negative-stock — one row per item per location at or
+  // below 0 (an item at no location: its overall stock).
+
+  async showZeroStockReport() {
+    const [branches, categories, brands] = await Promise.all([
+      this.api('GET', '/branches').catch(() => []),
+      this.api('GET', '/categories').catch(() => []),
+      this.api('GET', '/brands').catch(() => []),
+    ]);
+    const filters = `
+      <select id="zns-status" style="width:170px" title="Which counts to list">
+        <option value="all">Zero and negative</option><option value="negative">Negative only</option><option value="zero">Zero only</option>
+      </select>
+      <select id="zns-branch" style="width:150px"><option value="">All Locations</option>${(branches || []).filter(b => b.active).map(b => `<option value="${b.id}">${this.escapeAttr(b.name)}</option>`).join('')}</select>
+      <select id="zns-category" style="width:160px"><option value="">All Categories</option><option value="none">Uncategorized</option>${(categories || []).map(c => `<option value="${c.id}">${this.escapeAttr(c.name)}</option>`).join('')}</select>
+      <select id="zns-brand" style="width:150px"><option value="">All Brands</option>${(brands || []).map(b => `<option value="${this.escapeAttr(b.name || '')}">${this.escapeAttr(b.name || '')}</option>`).join('')}</select>
+      <input type="text" id="zns-q" placeholder="Item name, SKU or barcode" style="width:200px" onkeydown="if(event.key==='Enter')App.loadZeroStockReport()">
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;white-space:nowrap"><input type="checkbox" id="zns-inactive"> Include inactive items</label>
+      <select id="zns-sort" style="width:170px" onchange="App._renderZeroStock()" title="Sort by">
+        <option value="qty">Most negative first</option><option value="value">Largest value at cost</option><option value="location">Location, then item</option>
+        <option value="name">Item name A–Z</option><option value="sold">Most recently sold</option>
+      </select>`;
+    this._showReportModal('Zero &amp; Negative Stock', filters, 'loadZeroStockReport');
+    document.querySelector('#rpt-modal-content')?.closest('.modal')?.style.setProperty('max-width', '1150px');
+  },
+
+  async loadZeroStockReport() {
+    const statusEl = document.getElementById('zns-status');
+    if (!statusEl) return;
+    const params = new URLSearchParams({ status: statusEl.value });
+    for (const [id, key] of [['zns-branch', 'branch_id'], ['zns-category', 'category_id'], ['zns-brand', 'brand'], ['zns-q', 'q']]) {
+      const v = document.getElementById(id).value.trim();
+      if (v) params.set(key, v);
+    }
+    if (document.getElementById('zns-inactive').checked) params.set('include_inactive', '1');
+    const content = document.getElementById('rpt-modal-content');
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let data;
+    try { data = await this.api('GET', `/reports/zero-negative-stock?${params}`); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${this.escapeAttr(e.message)}</p></div>`; return; }
+    if (!document.getElementById('rpt-modal-content')) return;
+    const branchSel = document.getElementById('zns-branch');
+    data.branchName = branchSel.value ? branchSel.options[branchSel.selectedIndex].text : '';
+    this._zeroStockData = data;
+    this._renderZeroStock();
+  },
+
+  _renderZeroStock() {
+    const data = this._zeroStockData;
+    const content = document.getElementById('rpt-modal-content');
+    if (!data || !content) return;
+    const { summary } = data;
+    const loc = r => r.branch_name || 'No location';
+    const sorters = {
+      qty: (a, b) => a.on_hand - b.on_hand || String(a.product_name).localeCompare(String(b.product_name)),
+      value: (a, b) => a.value - b.value,
+      location: (a, b) => loc(a).localeCompare(loc(b)) || String(a.product_name).localeCompare(String(b.product_name)),
+      name: (a, b) => String(a.product_name || '').localeCompare(String(b.product_name || '')) || loc(a).localeCompare(loc(b)),
+      sold: (a, b) => String(b.last_sold || '').localeCompare(String(a.last_sold || '')),
+    };
+    const items = [...data.items].sort(sorters[document.getElementById('zns-sort')?.value] || sorters.qty);
+    const qty = n => Number(n || 0).toLocaleString('en-US', { maximumFractionDigits: 3 });
+    const statusLabel = { all: 'Zero and negative', negative: 'Negative only', zero: 'Zero only' }[data.status];
+
+    content.innerHTML = `
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">On hand now · ${statusLabel} · ${data.branchName ? this.escapeAttr(data.branchName) : 'All locations'}</div>
+      <div class="stats-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:18px">
+        <div class="stat-card"><div class="stat-label">Items</div><div class="stat-value">${summary.items}</div><div class="stat-sub">${summary.lines} item-location line${summary.lines === 1 ? '' : 's'}</div></div>
+        <div class="stat-card red"><div class="stat-label">Negative</div><div class="stat-value" style="color:var(--danger)">${summary.negative}</div><div class="stat-sub">${qty(summary.negative_units)} units in all</div></div>
+        <div class="stat-card orange"><div class="stat-label">Zero</div><div class="stat-value">${summary.zero}</div></div>
+        <div class="stat-card blue"><div class="stat-label">Negative Value at Cost</div><div class="stat-value" style="font-size:20px;color:${summary.negative_value < 0 ? 'var(--danger)' : 'inherit'}">${this.fmt(summary.negative_value)}</div></div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">Zero &amp; Negative Stock</span></div>
+        ${!items.length ? '<div class="empty-state"><p>No items at or below zero.</p></div>' : `
+        <div class="table-wrap"><table>
+          <thead><tr><th>Location</th><th>SKU</th><th>Item</th><th>Category</th><th>Brand</th><th>On Hand</th><th>Min</th><th>Cost</th><th>Value at Cost</th><th>Last Sold</th><th>Last Received</th></tr></thead>
+          <tbody>${items.map(r => `<tr>
+            <td>${this.escapeAttr(loc(r))}</td>
+            <td style="font-family:monospace;font-size:12px">${this.escapeAttr(r.sku || '')}</td>
+            <td class="fw-600" style="min-width:200px">${this.escapeAttr(r.product_name || '')}${r.active ? '' : ' <span class="badge-pill badge-warning" style="font-size:10px">Inactive</span>'}</td>
+            <td>${this.escapeAttr(r.category_name || '')}</td>
+            <td>${this.escapeAttr(r.brand || '—')}</td>
+            <td class="fw-600"${r.on_hand < 0 ? ' style="color:var(--danger)"' : ''}>${qty(r.on_hand)}</td>
+            <td>${r.min_stock == null ? '—' : qty(r.min_stock)}</td>
+            <td>${this.fmt(r.cost)}</td>
+            <td${r.value < 0 ? ' style="color:var(--danger)"' : ''}>${this.fmt(r.value)}</td>
+            <td>${r.last_sold ? this.fmtDate(r.last_sold) : '—'}</td>
+            <td>${r.last_received ? this.fmtDate(r.last_received) : '—'}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>`}
+      </div>
+      <p style="font-size:11px;color:var(--text-muted);margin-top:10px">Inventory items only — no services, rentals or non-inventory items. One line per item per location; an item not set up at any location shows its overall stock as "No location". Value at cost = on hand × the item's current cost. Last sold / last received are at that location (completed sales; purchase-order receipts and receipts without a PO, not reversed).</p>`;
   },
 
   // ─── Items Sold ─────────────────────────────────────────────────────────

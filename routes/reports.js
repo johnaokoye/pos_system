@@ -1231,6 +1231,80 @@ router.get('/items-sold', requireAnyPermission('reports', 'inventory'), async (r
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Zero and negative stock — Retail Inventory items (no services, rentals or
+// non-inventory, never the SN carrier item) at or below 0 on hand, one row per
+// item per location from branch_inventory; an item with no branch rows at all
+// is read from its overall products.stock_qty (location null). status
+// zero|negative narrows it (default both), branch_id to one location; inactive
+// items only with include_inactive=1. value = on hand × current cost (so a
+// negative row is negative), last_sold / last_received at that location
+// (completed sales; PO receipts and receipts without a PO not reversed).
+router.get('/zero-negative-stock', requireAnyPermission('reports', 'inventory'), async (req, res) => {
+  try {
+    const { branch_id, category_id, brand, q } = req.query;
+    const status = ['zero', 'negative'].includes(req.query.status) ? req.query.status : 'all';
+    const qtyCond = status === 'zero' ? '= 0' : status === 'negative' ? '< 0' : '<= 0';
+
+    let pf = ' AND COALESCE(p.is_service, 0) = 0 AND COALESCE(p.is_rental, 0) = 0 AND COALESCE(p.is_non_inventory, 0) = 0'
+      + ' AND p.merged_into_product_id IS NULL AND upper(COALESCE(p.sku, \'\')) != ?';
+    const pp = [SERIAL_NUMBER_SKU];
+    if (req.query.include_inactive !== '1') pf += ' AND p.active = 1';
+    if (category_id === 'none') pf += ' AND p.category_id IS NULL';
+    else if (category_id) { pf += ' AND p.category_id = ?'; pp.push(Number(category_id)); }
+    if (brand) { pf += ' AND p.brand = ?'; pp.push(brand); }
+    if (q && q.trim()) {
+      const like = `%${q.trim()}%`;
+      pf += ' AND (p.name LIKE ? OR p.sku LIKE ? OR p.barcode LIKE ?)';
+      pp.push(like, like, like);
+    }
+
+    // Per-location rows, plus items never put at a location (overall stock).
+    const located = `SELECT p.id AS product_id, bi.branch_id, bi.stock_qty AS on_hand, COALESCE(bi.min_stock, p.min_stock) AS min_stock
+      FROM branch_inventory bi JOIN products p ON p.id = bi.product_id
+      WHERE bi.stock_qty ${qtyCond}${branch_id ? ' AND bi.branch_id = ?' : ''}${pf}`;
+    const unlocated = `SELECT p.id, NULL, p.stock_qty, p.min_stock FROM products p
+      WHERE p.stock_qty ${qtyCond} AND NOT EXISTS (SELECT 1 FROM branch_inventory bi WHERE bi.product_id = p.id)${pf}`;
+    const parts = branch_id ? located : `${located} UNION ALL ${unlocated}`;
+    const partArgs = branch_id ? [Number(branch_id), ...pp] : [...pp, ...pp];
+
+    const { rows } = await db.execute({
+      sql: `WITH s AS (${parts})
+        SELECT s.product_id, s.branch_id, b.name AS branch_name, s.on_hand, s.min_stock,
+          p.sku, p.name AS product_name, p.active, COALESCE(c.name, 'Uncategorized') AS category_name, p.brand,
+          COALESCE(p.cost, 0) AS cost,
+          (SELECT MAX(t.created_at) FROM transaction_items ti JOIN transactions t ON t.id = ti.transaction_id
+            WHERE ti.product_id = s.product_id AND t.status = 'completed'
+              AND (s.branch_id IS NULL OR t.branch_id = s.branch_id)) AS last_sold,
+          (SELECT MAX(d) FROM (
+            SELECT r.received_at AS d FROM po_receipt_items ri JOIN po_receipts r ON r.id = ri.receipt_id
+              WHERE ri.product_id = s.product_id AND r.status != 'reversed' AND (s.branch_id IS NULL OR r.branch_id = s.branch_id)
+            UNION ALL
+            SELECT r.received_at FROM direct_receipt_items ri JOIN direct_receipts r ON r.id = ri.receipt_id
+              WHERE ri.product_id = s.product_id AND r.status != 'reversed' AND (s.branch_id IS NULL OR r.branch_id = s.branch_id))) AS last_received
+        FROM s JOIN products p ON p.id = s.product_id
+        LEFT JOIN branches b ON b.id = s.branch_id
+        LEFT JOIN categories c ON c.id = p.category_id
+        ORDER BY s.on_hand ASC, p.name`,
+      args: partArgs,
+    });
+
+    const items = rows.map(r => {
+      const on_hand = Number(r.on_hand) || 0;
+      return { ...r, on_hand, cost: Number(r.cost), value: parseFloat((on_hand * Number(r.cost)).toFixed(2)) };
+    });
+    const neg = items.filter(r => r.on_hand < 0);
+    const summary = {
+      lines: items.length,
+      items: new Set(items.map(r => r.product_id)).size,
+      zero: items.length - neg.length,
+      negative: neg.length,
+      negative_units: Math.round(neg.reduce((t, r) => t + r.on_hand, 0) * 1000) / 1000,
+      negative_value: parseFloat(neg.reduce((t, r) => t + r.value, 0).toFixed(2)),
+    };
+    res.json({ status, summary, items });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Rental deposit breakdown — where every deposit taken in the period ended
 // up: still held on an open rental, used (consumed by rental fees / damage /
 // tax at return), refunded (cash / bank transfer / original card, or still
