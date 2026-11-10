@@ -511,7 +511,8 @@ async function syncOrders() {
 
           for (const item of order.line_items || []) {
             const { rows: [prod] } = await db.execute({
-              sql: 'SELECT id FROM products WHERE sku = ?',
+              // A rental item may share the SKU; the online order is for the retail one.
+              sql: 'SELECT id FROM products WHERE sku = ? ORDER BY is_rental, id LIMIT 1',
               args: [item.sku || ''],
             });
             await db.execute({

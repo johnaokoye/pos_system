@@ -217,7 +217,10 @@ Object.assign(App, {
       const choice = this._unitChoices(p).find(c => !c.isBase && (c.barcode || '').toLowerCase() === ql);
       if (choice) { if (input) { input.value = ''; input.focus(); } this.addToCart(p.id, choice, qty); return; }
     }
-    let product = this.allProducts.find(p => (p.sku || '').toLowerCase() === ql || (p.barcode || '').toLowerCase() === ql);
+    // A rental item sold off the rental fleet may share its SKU with the
+    // retail item: the retail one rings up.
+    const exact = this.allProducts.filter(p => (p.sku || '').toLowerCase() === ql || (p.barcode || '').toLowerCase() === ql);
+    let product = exact.find(p => !p.is_rental) || exact[0];
     if (!product) product = this.allProducts.find(p => (p.name || '').toLowerCase().includes(ql) || (p.sku || '').toLowerCase().includes(ql));
     if (!product) { this.alert(`No item found matching "${q}"`, 'warning'); return; }
     if (input) { input.value = ''; input.focus(); }

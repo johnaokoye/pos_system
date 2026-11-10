@@ -21,7 +21,7 @@ npx playwright test --headed           # run with browser visible
 npm run check:frontend                 # public/js rules: unique App member names, script tags, file shape
 ```
 
-Test files: `auth.spec.js`, `dashboard.spec.js`, `pos.spec.js`, `inventory.spec.js`, `api.spec.js`, `frontend.spec.js` (runs the public/js check; every screen renders without a script error), `special-projects.spec.js`, `sales-credit.spec.js`, `customer-salespeople.spec.js`, `inventory-view.spec.js`, `customer-merge.spec.js`, `exchange-convert.spec.js`, `hold-recall.spec.js`. Shared login helper is in `tests/fixtures.js`. The config auto-builds `/tmp/libasound.so.2` stub on systems without `libasound2` installed (WSL/headless Linux).
+Test files: `auth.spec.js`, `dashboard.spec.js`, `pos.spec.js`, `inventory.spec.js`, `api.spec.js`, `frontend.spec.js` (runs the public/js check; every screen renders without a script error), `special-projects.spec.js`, `sales-credit.spec.js`, `customer-salespeople.spec.js`, `inventory-view.spec.js`, `customer-merge.spec.js`, `exchange-convert.spec.js`, `hold-recall.spec.js`, `sku-kinds.spec.js`. Shared login helper is in `tests/fixtures.js`. The config auto-builds `/tmp/libasound.so.2` stub on systems without `libasound2` installed (WSL/headless Linux).
 
 There is no linter configured.
 
@@ -64,6 +64,9 @@ New columns must be appended to the `migrations` array in `database.js:_init()` 
 
 ### Retail Inventory access
 Retail products need `inventory_add` / `inventory_edit` / `inventory_delete` to create, change or delete (`requiredProductPermission`); bulk tax, bulk branch, promote and the stock-mismatch CSV need `inventory_edit`; variations and photos take add or edit. Cost on the Retail Inventory screen and its CSVs shows only with add, edit or import (`canSeeInventoryCost` / `App._canSeeInventoryCost`). `hidesProductCost` also takes cost off `GET /products`, `/:id` and `/:id/variations` for someone who can open the screen without those and has no other screen reading cost (`OTHER_PRODUCT_COST_KEYS`); everyone else's product API is unchanged, because the POS margin, PO/PR and Special Project boxes would otherwise fill in 0.
+
+### SKUs per kind (retail / rental)
+`products.sku` is unique per kind, not overall: `UNIQUE INDEX idx_products_sku_kind (sku, is_rental)` (older DBs rebuilt once at startup by `relaxProductSkuUnique` in `lib/productKinds.js` via `db.migrate()` — foreign keys must be off to drop `products`). Barcodes stay globally unique. Any new lookup by SKU must say which kind it wants (`AND is_rental = 0/1`, or `ORDER BY is_rental` to prefer retail): the retail/services imports match `is_rental = 0`, the rental import `is_rental = 1`, `itemCodeConflict` checks SKUs within the item's kind, the POS scan prefers the retail item. `splitRetailFromRentalImports` (same file) took apart, once, rental items the retail import had overwritten (found from `product_import_batch_items.previous_values` with `is_rental = 1`), logged in `product_kind_splits`.
 
 ### Customer merge
 `lib/customerMerge.js` via `POST /customers/merge` (`customers_merge`), from Find Duplicates (shared phone/email only) or `App.showMergeCustomerIn` (Merge Customer In on the customer's History, any two active customers). Books has no merge handling: its customer page reads the POS by the id it's linked to, so keep the number Books uses; a retired credit customer stays listed there, empty, and invoices Books already synced stay under it.

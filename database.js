@@ -95,9 +95,11 @@ async function _init() {
       description TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // sku is unique per kind (retail / rental), not overall: see
+    // lib/productKinds.js, which adds idx_products_sku_kind after migrations.
     { sql: `CREATE TABLE IF NOT EXISTS products (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      sku TEXT UNIQUE NOT NULL,
+      sku TEXT NOT NULL,
       barcode TEXT UNIQUE,
       name TEXT NOT NULL,
       description TEXT,
@@ -1545,6 +1547,22 @@ async function _init() {
       previous_values TEXT,
       error_message TEXT,
       reverse_outcome TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    // Rental items the retail import wrote a retail item's details over
+    // (before SKUs were unique per kind), taken apart once at startup by
+    // splitRetailFromRentalImports in lib/productKinds.js. outcome 'split' =
+    // retail_product_id was created with the same SKU; 'existing_retail' =
+    // staff had already made it under another spelling (existing_retail_id).
+    // rental_before is the rental row as it was before.
+    { sql: `CREATE TABLE IF NOT EXISTS product_kind_splits (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      rental_product_id INTEGER NOT NULL UNIQUE REFERENCES products(id),
+      retail_product_id INTEGER REFERENCES products(id),
+      existing_retail_id INTEGER REFERENCES products(id),
+      sku TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      rental_before TEXT NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
     // Same reviewable/reversible batch pattern as product_import_batches,
@@ -2997,6 +3015,18 @@ async function _init() {
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
+  }
+
+  // SKUs unique per kind (retail / rental) instead of overall, then take
+  // apart the rental items the retail import wrote retail details over.
+  // After the migrations so the rebuilt products table has every column.
+  {
+    const { relaxProductSkuUnique, splitRetailFromRentalImports } = require('./lib/productKinds');
+    let skuPerKind = false;
+    try { await relaxProductSkuUnique(db); skuPerKind = true; } catch(e) { console.error('[products] SKU-per-kind rebuild failed:', e.message); }
+    if (skuPerKind) {
+      try { await splitRetailFromRentalImports(db); } catch(e) { console.error('[products] retail/rental split failed:', e.message); }
+    }
   }
 
   // One-time: credit-note returns made before they were recorded as credit
