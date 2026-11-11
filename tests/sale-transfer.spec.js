@@ -198,3 +198,31 @@ test('a cancelled request leaves everything still owed short', async ({ page }) 
   expect(row.short).toBe(true);
   expect(row.lines[0].short).toBe(2);
 });
+
+test('the inventory team sees a paid customer order, and is warned before sending less', async ({ page }) => {
+  const s = await setup(page);
+  const sale = await sell(page, s);
+  const trf = (await api(page, 'GET', `/transactions/${sale.id}`)).sale_transfers[0];
+
+  await page.evaluate(() => App.showSection('transfers'));
+  const row = page.locator('tr', { hasText: trf.transfer_number });
+  await expect(row).toContainText('Customer order — paid');
+  await expect(row).toContainText(sale.transaction_number);
+
+  await page.evaluate(id => App.showSendTransfer(id), trf.id);
+  await expect(page.locator('.modal')).toContainText('The customer has already paid for these');
+  const input = page.locator('.modal input[id^="tsend-"]').first();
+  await input.fill('1');
+
+  // Dismissing the warning sends nothing.
+  let message = '';
+  page.once('dialog', d => { message = d.message(); d.dismiss(); });
+  await page.click('#tsend-btn');
+  await expect.poll(() => message).toContain('has paid for 2; sending 1 leaves them 1 short');
+  expect((await api(page, 'GET', `/transfers/${trf.id}`)).status).toBe('requested');
+
+  // Accepting it sends the 1.
+  page.once('dialog', d => d.accept());
+  await page.click('#tsend-btn');
+  await expect.poll(async () => (await api(page, 'GET', `/transfers/${trf.id}`)).status).toBe('pending');
+});

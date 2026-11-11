@@ -188,7 +188,8 @@ Object.assign(App, {
     this._paintCollectionsBadge();
     this.updateClock();
 
-    document.getElementById('pos-item-input').addEventListener('keydown', e => {
+    // Missing only if another screen replaced the POS meanwhile.
+    document.getElementById('pos-item-input')?.addEventListener('keydown', e => {
       if (e.key === 'Enter') this.posSubmitItemInput();
     });
   },
@@ -253,12 +254,12 @@ Object.assign(App, {
       </div>`);
     this.renderProductGrid();
     let searchTimer = null;
-    document.getElementById('pos-search').addEventListener('input', e => {
+    document.getElementById('pos-search')?.addEventListener('input', e => {
       this.posSearch = e.target.value;
       clearTimeout(searchTimer);
       searchTimer = setTimeout(() => this.renderProductGrid(), 150);
     });
-    document.getElementById('cat-bar').addEventListener('click', e => {
+    document.getElementById('cat-bar')?.addEventListener('click', e => {
       const btn = e.target.closest('.cat-btn');
       if (!btn) return;
       document.querySelectorAll('.cat-btn').forEach(b => b.classList.remove('active'));

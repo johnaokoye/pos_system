@@ -31,7 +31,7 @@ Object.assign(App, {
             <tbody id="trf-tbody">
               ${transfers.length ? transfers.map(t => `
                 <tr data-trf-num="${(t.transfer_number||'').toLowerCase()}">
-                  <td class="fw-600">${t.transfer_number}</td>
+                  <td class="fw-600">${t.transfer_number}${this._transferCustomerOrderBadge(t)}</td>
                   <td>${t.from_branch_name||'-'}</td>
                   <td>${t.to_branch_name||'-'}</td>
                   <td><span class="badge-pill ${statusColor[t.status]||'badge-info'}">${this._transferStatusLabel(t.status)}</span>${t.is_quick ? ' <span class="badge-pill badge-secondary" title="Quick transfer — moved instantly">⚡ Quick</span>' : ''}</td>
@@ -278,6 +278,7 @@ Object.assign(App, {
             ${t.sent_at ? `<div><strong>Sent by:</strong> ${t.sent_by_name||'-'} · ${this.fmtDate(t.sent_at)}</div>` : ''}
             ${t.dispatched_at ? `<div><strong>Picked up by:</strong> ${this.escapeAttr(t.driver_display_name||'-')} · ${this.fmtDateTime(t.dispatched_at)}${t.dispatched_by_name && t.dispatched_by_name !== t.driver_display_name ? ` <span style="color:var(--text-muted)">(marked by ${this.escapeAttr(t.dispatched_by_name)})</span>` : ''}</div>` : ''}
           </div>
+          ${this._transferCustomerOrderBanner(t)}
           ${t.notes ? `<p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">${t.notes}</p>` : ''}
           <div class="table-wrap">
             <table>
@@ -399,6 +400,7 @@ Object.assign(App, {
   // send — stock leaves the sending branch at this point.
   async showSendTransfer(id) {
     const t = await this.api('GET', `/transfers/${id}`);
+    this._sendingTransfer = t;
     if (t.status !== 'requested') { this.alert('This transfer has already been sent', 'warning'); return this.viewTransfer(id); }
     const stock = t.items.map(i => i.product_id ? (i.source_stock ?? 0) : null);
     this.showModal(`
@@ -406,6 +408,7 @@ Object.assign(App, {
         <div class="modal-header"><span class="modal-title">Send Transfer — ${t.transfer_number}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:6px">From <strong>${t.from_branch_name}</strong> to <strong>${t.to_branch_name}</strong> · requested by ${t.employee_name || '—'}</p>
+          ${this._transferCustomerOrderBanner(t)}
           ${t.notes ? `<p style="font-size:13px;color:var(--text-muted);margin-bottom:6px">${t.notes}</p>` : ''}
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px">Enter the quantity you're sending for each item (0 to leave it out). Stock is taken from ${t.from_branch_name} when you send.</p>
           ${t.items.map((i, n) => {
@@ -498,6 +501,14 @@ Object.assign(App, {
   async confirmSendTransfer(transferId, itemIds) {
     const items = itemIds.map(id => ({ item_id: id, quantity: parseInt(document.getElementById(`tsend-${id}`).value) || 0 }));
     if (!items.some(i => i.quantity > 0)) { this.alert('Enter a quantity for at least one item, or cancel the request', 'error'); return; }
+    // A paid customer order: sending less leaves the customer short — say so.
+    const t = this._sendingTransfer;
+    if (t && t.id === transferId && this._isCustomerOrderTransfer(t)) {
+      const short = items.map(i => ({ i, line: t.items.find(l => l.id === i.item_id) }))
+        .filter(x => x.line && x.i.quantity < x.line.quantity_requested)
+        .map(x => `• ${x.line.product_name}: the customer has paid for ${x.line.quantity_requested}; sending ${x.i.quantity} leaves them ${x.line.quantity_requested - x.i.quantity} short`);
+      if (short.length && !confirm(`This is a paid customer order (sale ${t.sale_number}${t.sale_customer_name ? `, ${t.sale_customer_name}` : ''}).\n\n${short.join('\n')}\n\nThe branch selling it will see it as short and can refund the rest. Send anyway?`)) return;
+    }
     const btn = document.getElementById('tsend-btn');
     if (btn) btn.disabled = true;
     try {
@@ -506,6 +517,22 @@ Object.assign(App, {
       this.alert('Transfer sent — stock taken from the sending branch; the receiving branch can now receive it');
       this._refreshTransferView();
     } catch(e) { if (btn) btn.disabled = false; this.alert(e.message, 'error'); }
+  },
+
+  // A transfer raised for a paid POS sale (sell now, collect later —
+  // lib/saleTransfers.js), while that sale stands.
+  _isCustomerOrderTransfer(t) { return !!(t && t.transaction_id && t.sale_status === 'completed'); },
+  _transferCustomerOrderBadge(t) {
+    if (!this._isCustomerOrderTransfer(t)) return '';
+    return ` <span class="badge-pill badge-purple" style="font-size:10px" title="Sale ${this.escapeAttr(t.sale_number)}${t.sale_customer_name ? ` · ${this.escapeAttr(t.sale_customer_name)}` : ''} — the customer has paid and collects at ${this.escapeAttr(t.to_branch_name || 'the receiving branch')}">Customer order — paid</span>`
+      + `<div style="font-size:11px;color:var(--text-muted);font-weight:400">${this.escapeAttr(t.sale_number)}${t.sale_customer_name ? ` · ${this.escapeAttr(t.sale_customer_name)}` : ''}</div>`;
+  },
+  _transferCustomerOrderBanner(t) {
+    if (!this._isCustomerOrderTransfer(t)) return '';
+    return `<div style="border:2px solid #7c3aed;background:rgba(124,58,237,.07);border-radius:6px;padding:8px 10px;margin-bottom:10px;font-size:13px">
+      <span class="badge-pill badge-purple" style="font-size:10px">Customer order — paid</span>
+      <strong>Sale ${this.escapeAttr(t.sale_number)}</strong>${t.sale_customer_name ? ` · ${this.escapeAttr(t.sale_customer_name)}` : ''}<br>
+      The customer has already paid for these and collects them at <strong>${this.escapeAttr(t.to_branch_name || 'the receiving branch')}</strong>. Send everything requested if you can — anything you don't send leaves them short.</div>`;
   },
 
   async showReceiveTransfer(id) {

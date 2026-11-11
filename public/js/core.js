@@ -374,7 +374,7 @@ const App = {
       } else {
         for (const r of fresh.slice().reverse()) {
           this._notify({
-            title: `📦 Transfer request ${r.transfer_number}`,
+            title: `📦 Transfer request ${r.transfer_number}${r.transaction_id && r.sale_status === 'completed' ? ' — customer order, paid' : ''}`,
             body: `<strong>${this.escapeAttr(r.to_branch_name)}</strong> requests ${r.item_count} item${r.item_count === 1 ? '' : 's'} (${r.unit_count} unit${r.unit_count === 1 ? '' : 's'}) from ${this.escapeAttr(r.from_branch_name)}${r.employee_name ? ` · ${this.escapeAttr(r.employee_name)}` : ''}${r.notes ? `<div style="color:var(--text-muted);margin-top:4px">${this.escapeAttr(r.notes)}</div>` : ''}`,
             actions: [
               { label: 'Review &amp; Send', primary: true, run: () => this.showSendTransfer(r.id) },

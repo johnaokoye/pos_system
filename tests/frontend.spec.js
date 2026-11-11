@@ -21,7 +21,8 @@ test('every screen renders without a script error', async ({ page }) => {
   test.setTimeout(180_000);
   const errors = [];
   let section = '';
-  page.on('pageerror', e => errors.push(`${section}: ${e.message}`));
+  // The first lines of the stack, so a failure says where it came from.
+  page.on('pageerror', e => errors.push(`${section}: ${e.message} @ ${String(e.stack || '').split('\n').slice(1, 4).map(l => l.trim()).join(' < ')}`));
   for (section of SECTIONS) {
     await page.evaluate(s => App.showSection(s), section);
     await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});

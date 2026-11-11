@@ -14,9 +14,10 @@ router.get('/', requirePermission('transfers'), async (req, res) => {
     const { status, from_branch_id, to_branch_id, limit = 100 } = req.query;
     let sql = `SELECT t.*, fb.name as from_branch_name, tb.name as to_branch_name, e.first_name || ' ' || e.last_name as employee_name,
       COALESCE(dr.first_name || ' ' || dr.last_name, t.driver_name) as driver_display_name,
-      (SELECT GROUP_CONCAT(product_name || ' x' || quantity_requested, ', ') FROM branch_transfer_items WHERE transfer_id = t.id) as item_summary
+      (SELECT GROUP_CONCAT(product_name || ' x' || quantity_requested, ', ') FROM branch_transfer_items WHERE transfer_id = t.id) as item_summary,
+      st.transaction_number AS sale_number, st.status AS sale_status, sc.first_name || ' ' || sc.last_name AS sale_customer_name
       FROM branch_transfers t LEFT JOIN branches fb ON t.from_branch_id = fb.id LEFT JOIN branches tb ON t.to_branch_id = tb.id LEFT JOIN employees e ON t.employee_id = e.id
-      LEFT JOIN employees dr ON dr.id = t.driver_id WHERE 1=1`;
+      LEFT JOIN employees dr ON dr.id = t.driver_id LEFT JOIN transactions st ON st.id = t.transaction_id LEFT JOIN customers sc ON sc.id = st.customer_id WHERE 1=1`;
     const params = [];
     if (status) { sql += ' AND t.status = ?'; params.push(status); }
     if (from_branch_id) { sql += ' AND t.from_branch_id = ?'; params.push(from_branch_id); }
@@ -42,9 +43,9 @@ router.get('/inbox', requirePermission('transfers_approve'), async (req, res) =>
     const { rows } = await db.execute({ sql: `SELECT t.id, t.transfer_number, t.created_at, t.notes, t.from_branch_id, t.to_branch_id,
         fb.name AS from_branch_name, tb.name AS to_branch_name, e.first_name || ' ' || e.last_name AS employee_name,
         (SELECT COUNT(*) FROM branch_transfer_items WHERE transfer_id = t.id) AS item_count,
-        (SELECT COALESCE(SUM(quantity_requested), 0) FROM branch_transfer_items WHERE transfer_id = t.id) AS unit_count
+        (SELECT COALESCE(SUM(quantity_requested), 0) FROM branch_transfer_items WHERE transfer_id = t.id) AS unit_count, t.transaction_id, st.transaction_number AS sale_number, st.status AS sale_status, sc.first_name || ' ' || sc.last_name AS sale_customer_name
       FROM branch_transfers t LEFT JOIN branches fb ON fb.id = t.from_branch_id LEFT JOIN branches tb ON tb.id = t.to_branch_id
-      LEFT JOIN employees e ON e.id = t.employee_id
+      LEFT JOIN employees e ON e.id = t.employee_id LEFT JOIN transactions st ON st.id = t.transaction_id LEFT JOIN customers sc ON sc.id = st.customer_id
       WHERE t.status = 'requested'${scope} AND COALESCE(t.employee_id, 0) != ? ORDER BY t.id DESC LIMIT 50`, args: [...branchIds, empId || 0] });
     res.json({ count: rows.length, requests: rows });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -80,9 +81,9 @@ router.get('/:id', requirePermission('transfers'), async (req, res) => {
     const { rows: [transfer] } = await db.execute({ sql: `SELECT t.*, fb.name as from_branch_name, tb.name as to_branch_name, e.first_name || ' ' || e.last_name as employee_name,
       se.first_name || ' ' || se.last_name as sent_by_name,
       COALESCE(dr.first_name || ' ' || dr.last_name, t.driver_name) as driver_display_name,
-      dp.first_name || ' ' || dp.last_name as dispatched_by_name
+      dp.first_name || ' ' || dp.last_name as dispatched_by_name, st.transaction_number AS sale_number, st.status AS sale_status, sc.first_name || ' ' || sc.last_name AS sale_customer_name
       FROM branch_transfers t LEFT JOIN branches fb ON t.from_branch_id = fb.id LEFT JOIN branches tb ON t.to_branch_id = tb.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN employees se ON t.sent_by = se.id
-      LEFT JOIN employees dr ON dr.id = t.driver_id LEFT JOIN employees dp ON dp.id = t.dispatched_by WHERE t.id = ?`, args: [req.params.id] });
+      LEFT JOIN employees dr ON dr.id = t.driver_id LEFT JOIN employees dp ON dp.id = t.dispatched_by LEFT JOIN transactions st ON st.id = t.transaction_id LEFT JOIN customers sc ON sc.id = st.customer_id WHERE t.id = ?`, args: [req.params.id] });
     if (!transfer) return res.status(404).json({ error: 'Not found' });
     // Each delivery received: who brought it, who received it, what was in it.
     const { rows: receipts } = await db.execute({ sql: `SELECT r.*, rb.first_name || ' ' || rb.last_name AS received_by_name,
