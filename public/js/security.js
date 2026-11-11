@@ -16,6 +16,7 @@ Object.assign(App, {
       { key: 'pos_cancel_ticket', label: 'Cancel Ticket' },
       { key: 'pos_payment', label: 'Take Payment' },
       { key: 'pos_q_item', label: 'Q Items (add something not in inventory — the ticket goes to a quote)' },
+      { key: 'pos_request_transfer', label: 'Get items from another branch (sell now, transfer request raised, customer collects when it arrives)' },
     ]},
     { key: 'drawers', label: 'Cash Drawers', subs: [
       { key: 'drawers_manage', label: 'Manage Drawers (setup & access)' },

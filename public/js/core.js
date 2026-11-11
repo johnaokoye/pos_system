@@ -317,6 +317,7 @@ const App = {
     this.checkLowStock();
     this._startTransferInbox();
     this._startShopUseInbox();
+    this._startCollectionsInbox();
     this._startPayablesInbox();
     this._resumeDownloadAfterLogin();
   },
@@ -830,6 +831,7 @@ const App = {
     this.api('POST', '/employees/logout').catch(() => {});
     this._stopTransferInbox();
     this._stopShopUseInbox();
+    this._stopCollectionsInbox();
     this._stopPayablesInbox();
     this.currentUser = null;
     this.currentDrawerSession = null;
@@ -904,6 +906,7 @@ const App = {
       if (res.status === 401 && url !== '/employees/login' && this.currentUser) {
         this._stopTransferInbox();
         this._stopShopUseInbox();
+        this._stopCollectionsInbox();
         this._stopPayablesInbox();
         this.currentUser = null;
         this.showLoginScreen();

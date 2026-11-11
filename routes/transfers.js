@@ -1,4 +1,5 @@
 const express = require('express');
+const { arrive: arriveForSale } = require('../lib/saleTransfers');
 const router = express.Router();
 const { db } = require('../database');
 const { createTransfer, deductTransferStock, addTransferStock } = require('../lib/transfers');
@@ -276,6 +277,9 @@ router.patch('/:id/receive', requirePermission('transfers_dropoff'), async (req,
 
         if (item.product_id) {
           await addTransferStock(tx, transfer.to_branch_id, item.product_id, actual);
+          // For a sale waiting on it: that much is the customer's, so it
+          // comes straight back off this branch (lib/saleTransfers.js).
+          await arriveForSale(tx, transfer, item.product_id, actual);
         }
       }
 

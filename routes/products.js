@@ -67,8 +67,8 @@ function applyBranchTotal(row) {
 }
 
 async function accessoryBranchStock(executor, productId) {
-  const { rows } = await executor.execute({ sql: 'SELECT bi.branch_id, b.name AS branch_name, bi.stock_qty FROM branch_inventory bi JOIN branches b ON b.id = bi.branch_id WHERE bi.product_id = ? ORDER BY b.name', args: [productId] });
-  return rows.map(r => ({ branch_id: r.branch_id, branch_name: r.branch_name, stock_qty: r.stock_qty }));
+  const { rows } = await executor.execute({ sql: 'SELECT bi.branch_id, b.name AS branch_name, b.active, bi.stock_qty FROM branch_inventory bi JOIN branches b ON b.id = bi.branch_id WHERE bi.product_id = ? ORDER BY b.name', args: [productId] });
+  return rows.map(r => ({ branch_id: r.branch_id, branch_name: r.branch_name, stock_qty: r.stock_qty, active: r.active ? 1 : 0 }));
 }
 
 // Product images are named after the SKU (both the upload route below and the

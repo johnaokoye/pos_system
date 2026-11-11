@@ -3045,6 +3045,27 @@ async function _init() {
     'ALTER TABLE returns ADD COLUMN refund_method TEXT',
     'ALTER TABLE returns ADD COLUMN drawer_session_id INTEGER REFERENCES drawer_sessions(id)',
     'ALTER TABLE returns ADD COLUMN refunded_at DATETIME',
+    // Sold now, collected later: a ticket line the selling branch is short of
+    // can come from another branch (POS "Get from another branch"). The sale is
+    // completed and paid as usual; transfer_qty stock units of the line come
+    // on a transfer request from transfer_from_branch_id (branch_transfers
+    // .transaction_id links it back), and transfer_received_qty of them have
+    // arrived — each arrival comes straight off the selling branch's stock,
+    // since they're the customer's. transactions.collection_status (not
+    // fulfillment_status, which is online orders' pending/ready/shipped):
+    // awaiting_transfer → ready (all arrived; staff contact the customer) →
+    // collected (handed over). See lib/saleTransfers.js.
+    'ALTER TABLE transaction_items ADD COLUMN transfer_from_branch_id INTEGER REFERENCES branches(id)',
+    'ALTER TABLE transaction_items ADD COLUMN transfer_qty REAL',
+    'ALTER TABLE transaction_items ADD COLUMN transfer_received_qty REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE transactions ADD COLUMN collection_status TEXT',
+    'ALTER TABLE transactions ADD COLUMN ready_at DATETIME',
+    'ALTER TABLE transactions ADD COLUMN contacted_at DATETIME',
+    'ALTER TABLE transactions ADD COLUMN contacted_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE transactions ADD COLUMN contact_note TEXT',
+    'ALTER TABLE transactions ADD COLUMN collected_at DATETIME',
+    'ALTER TABLE transactions ADD COLUMN collected_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE branch_transfers ADD COLUMN transaction_id INTEGER REFERENCES transactions(id)',
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}
@@ -4125,6 +4146,8 @@ async function _init() {
     'CREATE INDEX IF NOT EXISTS idx_purchase_requests_shop_use ON purchase_requests(shop_use_request_id)',
     'CREATE INDEX IF NOT EXISTS idx_customers_home_branch ON customers(home_branch_id)',
     'CREATE INDEX IF NOT EXISTS idx_returns_drawer_session ON returns(drawer_session_id)',
+    'CREATE INDEX IF NOT EXISTS idx_transactions_collection ON transactions(collection_status)',
+    'CREATE INDEX IF NOT EXISTS idx_branch_transfers_transaction ON branch_transfers(transaction_id)',
   ];
   for (const sql of indexes) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

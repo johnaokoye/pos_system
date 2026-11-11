@@ -97,6 +97,7 @@ Object.assign(App, {
       this.can('pos_hold') ? `<button class="pos-grid-btn hold" onclick="App.holdOrder()">Hold</button>` : '',
       this.can('pos_hold') ? `<button class="pos-grid-btn hold" onclick="App.recallOrder()">Hold Recall <span id="hold-count-badge" style="display:none;background:rgba(0,0,0,0.15);border-radius:10px;padding:0 5px;font-size:10px;margin-left:2px"></span></button>` : '',
       this.can('pos_reprint_ticket') ? `<button class="pos-grid-btn" onclick="App.posReprintTicket()">Reprint Ticket</button>` : '',
+      `<button class="pos-grid-btn" onclick="App.showCollections()" title="Paid orders waiting on goods from another branch — contact the customer and hand over">Collections <span id="collect-count-badge" style="display:none;background:rgba(0,0,0,0.15);border-radius:10px;padding:0 5px;font-size:10px;margin-left:4px"></span></button>`,
       this.can('transactions') ? `<button class="pos-grid-btn" onclick="App.showSection('transactions')">Returns</button>` : '',
       this.can('pos_pay_on_account') ? `<button class="pos-grid-btn pay-acct" onclick="App.processPayment('credit')">Pay On Acct</button>` : '',
       this.currentUser?.permissions?.pos_receive_payment ? `<button class="pos-grid-btn pay-acct" onclick="App.showReceivePaymentModal()" title="Take a payment from a customer toward their account">Receive Payment</button>` : '',
@@ -184,6 +185,7 @@ Object.assign(App, {
     this.renderCart();
     this.checkPOSDrawer();
     if (this.can('pos_hold')) this.updateHoldBadge();
+    this._paintCollectionsBadge();
     this.updateClock();
 
     document.getElementById('pos-item-input').addEventListener('keydown', e => {
@@ -995,6 +997,7 @@ Object.assign(App, {
     const more = products.length - GRID_LIMIT;
     if (more > 0) products = products.slice(0, GRID_LIMIT);
 
+    const canGetElsewhere = this.can('pos_request_transfer');
     grid.innerHTML = products.map(p => {
       const hasVars = p.has_variations > 0;
       const oos = !hasVars && !p.is_service && p.stock_qty <= 0;
@@ -1011,6 +1014,7 @@ Object.assign(App, {
         <div class="product-price">${this.fmt(p.price)}${p.base_unit_id ? ` <span style="font-size:11px;font-weight:400">/ ${this.escapeAttr(p.base_unit_abbr || p.base_unit_name)}</span>` : ''}</div>
         ${altUnits.length && !oos ? `<div title="You'll be asked which unit" style="margin:4px auto 2px;font-size:11px;font-weight:600;padding:2px 6px;border:1px solid var(--primary);color:var(--primary);border-radius:10px;display:inline-block">Also by ${altUnits.map(c => this.escapeAttr(c.label)).join(', ')}</div>` : ''}
         <div class="product-stock">${stockLabel}</div>
+        ${canGetElsewhere && !hasVars && !p.is_service && !p.is_rental && p.stock_qty <= Math.max(0, Number(p.min_stock) || 0) ? `<div style="margin-top:4px"><a href="#" style="font-size:11px;color:var(--primary)" onclick="event.preventDefault();event.stopPropagation();App.showOtherBranchStock(${p.id}, 1)">Other branches…</a></div>` : ''}
       </div>`;
     }).join('') + (more > 0 ? `<div style="grid-column:1/-1;padding:8px;text-align:center;font-size:12px;color:var(--text-muted)">${more} more — search or pick a category to narrow it down</div>` : '');
   },
@@ -1060,7 +1064,7 @@ Object.assign(App, {
 
   // Stock units of a product already on the ticket, across all its unit lines.
   _cartStockUnits(productId, exceptIdx = -1) {
-    return this.cart.reduce((n, i, idx) => n + (idx !== exceptIdx && i.product_id === productId && !i.variation_id ? i.quantity * (i.units_per || 1) : 0), 0);
+    return this.cart.reduce((n, i, idx) => n + (idx !== exceptIdx && i.product_id === productId && !i.variation_id ? i.quantity * (i.units_per || 1) - (i.transfer_qty || 0) : 0), 0);
   },
 
   // unit: a _unitChoices() entry (e.g. from a scanned unit barcode); when
@@ -1101,11 +1105,15 @@ Object.assign(App, {
     }
     if (product.has_variations > 0) { this.showVariationPicker(product); return; }
     if (!product.is_service) {
-      if (product.stock_qty <= 0) return;
       const stockLeft = product.stock_qty - this._cartStockUnits(product.id);
-      if (qty > stockLeft) { this.alert(qty === 1 ? 'Not enough stock' : `Not enough stock for ${qty} — only ${fmtQty(Math.max(0, stockLeft))} available`, 'warning'); return; }
+      if (qty > stockLeft) {
+        // Short here: offer it from another branch (pos_request_transfer).
+        if (this.can('pos_request_transfer') && Number.isInteger(qty)) return this.showOtherBranchStock(product.id, qty);
+        if (product.stock_qty <= 0) return;
+        this.alert(qty === 1 ? 'Not enough stock' : `Not enough stock for ${qty} — only ${fmtQty(Math.max(0, stockLeft))} available`, 'warning'); return;
+      }
     }
-    const existing = this.cart.find(i => i.product_id === productId && !i.variation_id && !i.sell_unit && !i.uom_id);
+    const existing = this.cart.find(i => i.product_id === productId && !i.variation_id && !i.sell_unit && !i.uom_id && !i.transfer_from_branch_id);
     if (existing) {
       existing.quantity = fmtQty(existing.quantity + qty);
     } else {
@@ -1245,6 +1253,62 @@ Object.assign(App, {
     setTimeout(() => document.getElementById('pos-item-input')?.focus(), 0);
   },
 
+  // ── Get from another branch (pos_request_transfer; lib/saleTransfers.js) ──
+  // Stock at the other branches for an item this branch is short of. Picking
+  // a branch puts the line on the ticket with the part this branch can't
+  // cover marked as coming from there; paying for the sale raises the
+  // transfer request, and the customer collects when it arrives.
+  async showOtherBranchStock(productId, wanted = 1) {
+    const product = this.allProducts.find(p => p.id === productId);
+    if (!product) return;
+    let full;
+    try { full = await this.api('GET', `/products/${productId}`); } catch (e) { return this.alert(e.message, 'error'); }
+    const here = this.posBranch?.id;
+    const localAvail = Math.max(0, (Number(product.stock_qty) || 0) - this._cartStockUnits(productId));
+    const others = (full.branch_stock || []).filter(b => b.active && b.branch_id !== here).sort((a, b) => b.stock_qty - a.stock_qty);
+    const esc = v => this.escapeAttr(v == null ? '' : String(v));
+    const unit = product.base_unit_id ? ` ${esc(product.base_unit_abbr || product.base_unit_name)}` : '';
+    document.getElementById('obs-overlay')?.remove();
+    document.body.insertAdjacentHTML('beforeend', `<div id="obs-overlay" style="position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:3000;display:flex;align-items:center;justify-content:center;padding:16px">
+      <div class="modal" style="max-width:520px;width:100%">
+        <div class="modal-header"><span class="modal-title">${esc(product.name)}</span><button class="modal-close" onclick="document.getElementById('obs-overlay').remove()">✕</button></div>
+        <div class="modal-body" style="font-size:13px">
+          <p style="margin-top:0"><strong>${esc(this.posBranch?.name || 'This branch')}</strong>: ${localAvail}${unit} available${product.sku ? ` <span style="color:var(--text-muted)">· ${esc(product.sku)}</span>` : ''}</p>
+          <div class="form-group"><label>How many does the customer want?</label><input type="number" id="obs-qty" min="1" step="1" value="${Math.max(1, wanted)}" style="width:120px" oninput="App._obsUpdate(${localAvail})"></div>
+          ${others.length ? `<table style="margin:0"><thead><tr><th>Branch</th><th style="text-align:right">On hand</th><th></th></tr></thead><tbody>
+            ${others.map(b => `<tr>
+              <td>${esc(b.branch_name)}</td>
+              <td style="text-align:right;${b.stock_qty > 0 ? '' : 'color:var(--text-muted)'}">${b.stock_qty}${unit}</td>
+              <td style="text-align:right">${b.stock_qty > 0 ? `<button class="btn btn-sm btn-primary obs-get" data-stock="${b.stock_qty}" onclick="App._obsGet(${productId}, ${b.branch_id}, '${esc(b.branch_name).replace(/'/g, "\\'")}', ${b.stock_qty}, ${localAvail})">Get from here</button>` : ''}</td>
+            </tr>`).join('')}</tbody></table>` : '<p style="color:var(--text-muted)">No other branch stocks this item.</p>'}
+          <p id="obs-note" style="font-size:12px;color:var(--text-muted);margin:10px 0 0"></p>
+        </div>
+      </div></div>`);
+    this._obsUpdate(localAvail);
+  },
+
+  _obsUpdate(localAvail) {
+    const qty = parseInt(document.getElementById('obs-qty')?.value, 10) || 0;
+    const fromElsewhere = Math.max(0, qty - localAvail);
+    const note = document.getElementById('obs-note');
+    if (note) note.innerHTML = qty <= 0 ? 'Enter a quantity.'
+      : !fromElsewhere ? `There's enough here — close this and ring it up as usual.`
+      : `${Math.min(qty, localAvail) ? `${Math.min(qty, localAvail)} from here and ` : ''}<strong>${fromElsewhere} from the branch you pick</strong>. The sale is completed and paid now; a transfer request goes to that branch, and the customer collects here when it arrives.`;
+    document.querySelectorAll('.obs-get').forEach(b => { b.disabled = !fromElsewhere || fromElsewhere > Number(b.dataset.stock); });
+  },
+
+  _obsGet(productId, branchId, branchName, branchStock, localAvail) {
+    const product = this.allProducts.find(p => p.id === productId);
+    const qty = parseInt(document.getElementById('obs-qty')?.value, 10) || 0;
+    const fromElsewhere = qty - Math.min(qty, localAvail);
+    if (!product || fromElsewhere <= 0) return;
+    if (fromElsewhere > branchStock) return this.alert(`${branchName} only has ${branchStock}`, 'warning');
+    this.cart.push({ product_id: product.id, category_id: product.category_id || null, name: product.name, price: product.price, cost: product.cost, tax_rate: product.tax_rate,
+      quantity: qty, is_service: 0, transfer_from_branch_id: branchId, transfer_from_name: branchName, transfer_qty: fromElsewhere });
+    document.getElementById('obs-overlay')?.remove();
+    this._checkAutoPromos();
+  },
+
   removeFromCart(idx) {
     this.cart.splice(idx, 1);
     this._checkAutoPromos();
@@ -1255,6 +1319,7 @@ Object.assign(App, {
     if (!item) return;
     const newQty = Math.round((item.quantity + delta) * 1000) / 1000;
     if (item.serial_number && newQty > 1) { this.alert('Each SN line holds one serial number — add SN again for another', 'warning'); return; }
+    if (item.transfer_from_branch_id && newQty > 0) { this.alert('This line includes items from another branch — remove it and add the item again to change how many', 'warning'); return; }
     if (newQty <= 0) { this.cart.splice(idx, 1); }
     else {
       const stockLimit = item.variation_id ? (item.stock_qty ?? Infinity) : (this.allProducts.find(p => p.id === item.product_id)?.stock_qty ?? Infinity);
@@ -1667,7 +1732,7 @@ Object.assign(App, {
       return `
       <tr class="pos-ticket-row${this._selectedCartLine === idx ? ' selected' : ''}" onclick="App.selectCartLine(event,${idx})">
         <td style="font-family:monospace;font-size:12px">${sku}</td>
-        <td>${item.name}${item.variation_name ? `<div style="font-size:11px;color:var(--text-muted)">${item.variation_name}</div>` : ''}${item.discountPercent > 0 || item.discountFixed > 0 ? `<div style="font-size:11px;color:var(--success)">-${item.discountFixed > 0 ? this.fmt(item.discountFixed) : `${item.discountPercent}%`} off${item.discountOverrideName ? ` (override: ${item.discountOverrideName})` : ''}</div>` : ''}${showMargin ? this._cartLineMarginTag(item) : ''}</td>
+        <td>${item.name}${item.variation_name ? `<div style="font-size:11px;color:var(--text-muted)">${item.variation_name}</div>` : ''}${item.transfer_from_branch_id ? `<div style="font-size:11px;color:var(--primary);font-weight:600" title="Sold now; a transfer request is raised when the sale is paid and the customer collects when it arrives">${item.transfer_qty} coming from ${this.escapeAttr(item.transfer_from_name || 'another branch')} — customer collects later</div>` : ''}${item.discountPercent > 0 || item.discountFixed > 0 ? `<div style="font-size:11px;color:var(--success)">-${item.discountFixed > 0 ? this.fmt(item.discountFixed) : `${item.discountPercent}%`} off${item.discountOverrideName ? ` (override: ${item.discountOverrideName})` : ''}</div>` : ''}${showMargin ? this._cartLineMarginTag(item) : ''}</td>
         <td style="text-align:center">
           <div class="qty-ctrl" style="justify-content:center">
             <button class="qty-btn" onclick="App.updateCartQty(${idx},-1)">−</button>
@@ -2039,7 +2104,7 @@ Object.assign(App, {
         // directly for that case only; a real product_id line still has its
         // price/tax authoritatively re-derived server-side, never trusted
         // from the client.
-        items: this.cart.map(i => ({ product_id: i.product_id, variation_id: i.variation_id||null, serial_number: i.serial_number||null, uom_id: i.uom_id ?? null, sell_unit: i.sell_unit || null, quantity: i.quantity, discount_percent: i.discountPercent||0, discount_fixed: i.discountFixed||0, discount_override_employee_id: i.discountOverrideEmployeeId||null, ...(i.product_id ? {} : { product_name: i.name, unit_price: i.price, tax_rate: i.tax_rate||0, is_comment: i.is_comment ? 1 : 0, is_delivery: i.is_delivery ? 1 : 0, is_q_item: i.is_q_item ? 1 : 0 }) })),
+        items: this.cart.map(i => ({ product_id: i.product_id, variation_id: i.variation_id||null, serial_number: i.serial_number||null, uom_id: i.uom_id ?? null, sell_unit: i.sell_unit || null, quantity: i.quantity, discount_percent: i.discountPercent||0, discount_fixed: i.discountFixed||0, discount_override_employee_id: i.discountOverrideEmployeeId||null, ...(i.transfer_from_branch_id ? { transfer_from_branch_id: i.transfer_from_branch_id, transfer_qty: i.transfer_qty } : {}), ...(i.product_id ? {} : { product_name: i.name, unit_price: i.price, tax_rate: i.tax_rate||0, is_comment: i.is_comment ? 1 : 0, is_delivery: i.is_delivery ? 1 : 0, is_q_item: i.is_q_item ? 1 : 0 }) })),
         discount_amount: discount,
         promotion_code: this.appliedDiscountCard ? (this.appliedDiscountCard.card_number || null) : (this.appliedPromoCode?.code || null),
         promotion_name: this.appliedDiscountCard ? `${this.appliedDiscountCard.type_name} ${this.appliedDiscountCard.label || 'Discount Card'}` : (this.appliedPromoCode?.promo_name || this.autoAppliedPromo?.name || null),
@@ -2070,7 +2135,7 @@ Object.assign(App, {
           item.stock_qty = Math.max(0, (item.stock_qty || 0) - item.quantity);
         } else {
           const p = this.allProducts.find(p => p.id === item.product_id);
-          if (p) p.stock_qty -= item.quantity * (item.units_per || 1);
+          if (p) p.stock_qty -= item.quantity * (item.units_per || 1) - (item.transfer_qty || 0); // the part from another branch wasn't here
         }
       });
 
@@ -2080,6 +2145,12 @@ Object.assign(App, {
 
       this.showReceipt(tx, changeAmount, cashResult, splitForeignCash);
       this.clearCart();
+      // Goods coming from other branches: say which requests went out.
+      if (tx.sale_transfers?.length) {
+        this._notify({ title: `📦 ${tx.transaction_number}: transfer request${tx.sale_transfers.length === 1 ? '' : 's'} raised`,
+          body: `${tx.sale_transfers.map(t => this.escapeAttr(t.transfer_number)).join(', ')} — the customer collects here when ${tx.sale_transfers.length === 1 ? 'it arrives' : 'they arrive'}. It's listed under <strong>Collections</strong>.`,
+          actions: [{ label: 'Open Collections', primary: true, run: () => this.showCollections() }] });
+      }
       this.renderProductGrid();
       this.updateHoldBadge();
     } catch (e) {
@@ -2118,6 +2189,7 @@ Object.assign(App, {
 
   async holdOrder() {
     if (!this.cart.length) { this.alert('Cart is empty', 'warning'); return; }
+    if (this.cart.some(i => i.transfer_from_branch_id)) { this.alert('A ticket with items coming from another branch can\'t be held — complete the sale (the transfer request is raised then) or remove those lines', 'warning'); return; }
     try {
       const cartItems = this.cart.map(i => {
         const product = this.allProducts?.find(p => p.id === i.product_id);
@@ -2691,6 +2763,7 @@ Object.assign(App, {
               <div>${i.sku ? `<span style="font-size:11px;color:#555">${i.sku}</span> ` : ''}${i.product_name}</div>
               <div class="receipt-row"><span style="padding-left:8px">${i.quantity} x ${this.fmt(i.unit_price)}</span><span>${this.fmt(i.total)}</span></div>
               ${pct > 0 ? `<div style="color:#666;font-size:11px;padding-left:8px">less ${i.discount_fixed > 0 ? this.fmt(i.discount_amount) : `${pct}% (-${this.fmt(i.discount_amount)})`}</div>` : ''}
+              ${i.transfer_qty > 0 ? `<div style="font-size:11px;font-weight:600;padding-left:8px">TO COLLECT: ${i.transfer_qty} — coming from another branch; we'll contact you when it's here</div>` : ''}
             </div>`; }).join('')}
             <hr>
             <div class="receipt-row"><span>Subtotal</span><span>${this.fmt(tx.subtotal)}</span></div>

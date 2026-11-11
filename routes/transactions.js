@@ -5,6 +5,7 @@ const { calcCommission } = require('./commissions');
 const { customerSalesperson } = require('../lib/salesCredit');
 const { getWcSettings, wcRequest } = require('./woocommerce');
 const { syncBinQty } = require('../lib/binSync');
+const saleTransfers = require('../lib/saleTransfers');
 const { requireAuth, requirePermission, requireAnyPermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { refreshStoreTz, storeToday } = require('../lib/storeTime');
@@ -255,6 +256,87 @@ router.get('/', requireTransactionsList, async (req, res) => {
 // closed before the replacement was rung up) isn't lost. Must stay above
 // GET /:id, like /returns below.
 const EXCHANGE_SPENT_SQL = `EXISTS (SELECT 1 FROM transactions st WHERE st.source_return_id = r.id AND st.status != 'voided')`;
+// The transfers raised for sales (lib/saleTransfers.js): transaction id ->
+// [{ id, transfer_number, status, from_branch_name, items }].
+async function saleTransfersFor(ids) {
+  const out = new Map();
+  if (!ids.length) return out;
+  const { rows } = await db.execute({
+    sql: `SELECT bt.id, bt.transaction_id, bt.transfer_number, bt.status, fb.name AS from_branch_name, bt.sent_at, bt.dispatched_at, bt.received_at,
+            (SELECT json_group_array(json_object('product_name', i.product_name, 'asked', i.quantity_asked, 'sent', i.quantity_requested, 'received', i.quantity_received))
+               FROM branch_transfer_items i WHERE i.transfer_id = bt.id) AS items
+          FROM branch_transfers bt LEFT JOIN branches fb ON fb.id = bt.from_branch_id
+          WHERE bt.transaction_id IN (${ids.map(() => '?').join(',')}) ORDER BY bt.id`,
+    args: ids,
+  });
+  for (const r of rows) {
+    const list = out.get(r.transaction_id) || [];
+    list.push({ ...r, items: JSON.parse(r.items || '[]') });
+    out.set(r.transaction_id, list);
+  }
+  return out;
+}
+
+// Sales waiting on goods from other branches, for the POS Collections list:
+// awaiting_transfer and ready (add ?include=collected for the last 30 days
+// handed over too), at branch_id if given. Each with the customer's contact
+// details, the lines still owed and the transfers.
+const canCollections = requireAnyPermission('pos', 'transactions');
+router.get('/collections', canCollections, async (req, res) => {
+  try {
+    const where = ["t.status = 'completed'", req.query.include === 'collected'
+      ? "(t.collection_status IN ('awaiting_transfer', 'ready') OR (t.collection_status = 'collected' AND t.collected_at >= datetime('now', '-30 days')))"
+      : "t.collection_status IN ('awaiting_transfer', 'ready')"];
+    const args = [];
+    if (req.query.branch_id) { where.push('t.branch_id = ?'); args.push(Number(req.query.branch_id)); }
+    const { rows } = await db.execute({
+      sql: `SELECT t.id, t.transaction_number, t.created_at, t.total, t.payment_method, t.branch_id, b.name AS branch_name, t.collection_status, t.ready_at,
+              t.contacted_at, t.contact_note, ct.first_name || ' ' || ct.last_name AS contacted_by_name, t.collected_at, cl.first_name || ' ' || cl.last_name AS collected_by_name,
+              t.customer_id, c.first_name || ' ' || c.last_name AS customer_name, c.business_name, c.phone AS customer_phone, c.email AS customer_email, c.customer_number,
+              sp.first_name || ' ' || sp.last_name AS salesperson_name, ${CREDITED_SQL} AS credited_id, t.employee_id
+            FROM transactions t LEFT JOIN customers c ON c.id = t.customer_id LEFT JOIN branches b ON b.id = t.branch_id
+            LEFT JOIN employees ct ON ct.id = t.contacted_by LEFT JOIN employees cl ON cl.id = t.collected_by
+            LEFT JOIN employees sp ON sp.id = ${CREDITED_SQL}
+            WHERE ${where.join(' AND ')}
+            ORDER BY CASE t.collection_status WHEN 'ready' THEN 0 WHEN 'awaiting_transfer' THEN 1 ELSE 2 END, t.created_at`,
+      args,
+    });
+    const ids = rows.map(r => r.id);
+    const transfers = await saleTransfersFor(ids);
+    const { rows: lines } = ids.length ? await db.execute({
+      sql: `SELECT transaction_id, product_name, quantity, units_per, transfer_qty, transfer_received_qty, transfer_from_branch_id
+            FROM transaction_items WHERE transaction_id IN (${ids.map(() => '?').join(',')}) AND product_id IS NOT NULL AND COALESCE(is_comment, 0) = 0 ORDER BY id`,
+      args: ids }) : { rows: [] };
+    for (const r of rows) {
+      r.transfers = transfers.get(r.id) || [];
+      r.lines = lines.filter(l => l.transaction_id === r.id);
+    }
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Staff told the customer their goods are in (or tried to): who, when, note.
+router.patch('/:id/collection-contacted', canCollections, async (req, res) => {
+  try {
+    const note = String(req.body?.note || '').trim() || null;
+    const r = await db.execute({ sql: "UPDATE transactions SET contacted_at = CURRENT_TIMESTAMP, contacted_by = ?, contact_note = ? WHERE id = ? AND status = 'completed' AND collection_status IN ('awaiting_transfer', 'ready')", args: [req.employee?.id || null, note, req.params.id] });
+    if (!Number(r.rowsAffected)) return res.status(400).json({ error: "That sale isn't waiting to be collected" });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// The customer collected: only once everything has arrived.
+router.patch('/:id/collected', canCollections, async (req, res) => {
+  try {
+    const { rows: [t] } = await db.execute({ sql: 'SELECT status, collection_status FROM transactions WHERE id = ?', args: [req.params.id] });
+    if (!t || t.status !== 'completed' || !t.collection_status) return res.status(400).json({ error: "That sale isn't waiting to be collected" });
+    if (t.collection_status === 'collected') return res.status(400).json({ error: 'Already handed over' });
+    if (await saleTransfers.refreshFulfillment(db, req.params.id) !== 'ready') return res.status(400).json({ error: "Not everything has arrived from the other branch yet — it can be handed over once the transfer is received here" });
+    await db.execute({ sql: "UPDATE transactions SET collection_status = 'collected', collected_at = CURRENT_TIMESTAMP, collected_by = ? WHERE id = ?", args: [req.employee?.id || null, req.params.id] });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/pending-exchanges', requirePermission('pos'), async (req, res) => {
   try {
     const { customer_id } = req.query;
@@ -413,6 +495,8 @@ router.get('/:id', requireAuth, async (req, res) => {
     tx.items = items;
     const { rows: payments } = await db.execute({ sql: 'SELECT * FROM transaction_payments WHERE transaction_id = ? ORDER BY id', args: [req.params.id] });
     tx.payments = payments;
+    // Goods coming from other branches for this sale (lib/saleTransfers.js).
+    if (tx.collection_status) tx.sale_transfers = await saleTransfersFor([tx.id]).then(m => m.get(tx.id) || []);
     const isSpRentalLine = await spRentalLineMatcher(req.params.id);
     for (const item of items) if (isSpRentalLine(item)) item.is_sp_rental = 1;
     // Each line's share of the ticket discount — the return screen takes it
@@ -668,7 +752,13 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       const lineTax = isTaxExempt ? 0 : parseFloat((lineTotal * product.tax_rate / 100).toFixed(2));
       subtotal += lineTotal;
       tax_amount += lineTax;
-      processedItems.push({ product, variation, unit, quantity: item.quantity, unit_price, lineTotal, lineTax, taxRate: product.tax_rate || 0, discount: discountAmount, discountPercent, discountOverrideBy, discountFixed: discountPercent > 0 ? discountFixed : null, spRental: !!spRentalLine });
+      // Part of the line coming from another branch (lib/saleTransfers.js).
+      let transfer = null;
+      if (item.transfer_from_branch_id) {
+        if (!req.apiKey && !can(req.employee?.permissions, 'pos_request_transfer')) return res.status(403).json({ error: 'Missing permission: pos_request_transfer (get items from another branch)' });
+        transfer = await saleTransfers.transferLine(db, { item, product, variation, unit, stockUnits: stockUnits(item.quantity, unit?.units_per || 1), branchId: branch_id, spRental: !!spRentalLine });
+      }
+      processedItems.push({ product, variation, unit, quantity: item.quantity, unit_price, lineTotal, lineTax, taxRate: product.tax_rate || 0, discount: discountAmount, discountPercent, discountOverrideBy, discountFixed: discountPercent > 0 ? discountFixed : null, spRental: !!spRentalLine, transfer });
     }
 
     if (!processedItems.some(p => !p.isComment)) return res.status(400).json({ error: 'No items in transaction' });
@@ -775,23 +865,33 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         await tx.execute({ sql: 'INSERT INTO transaction_payments (transaction_id, payment_method, amount, approval_code) VALUES (?,?,?,?)', args: [txId, leg.payment_method, leg.amount, leg.approval_code || null] });
       }
 
-      for (const { product, variation, unit, customName, isComment, isDelivery, spRental, serialNumber, quantity: lineQty, unit_price, lineTotal, lineTax, ticketDiscount, discount, discountPercent, discountOverrideBy, discountFixed } of processedItems) {
+      const saleTransferLines = [];
+      for (const { product, variation, unit, customName, isComment, isDelivery, spRental, serialNumber, quantity: lineQty, unit_price, lineTotal, lineTax, ticketDiscount, discount, discountPercent, discountOverrideBy, discountFixed, transfer } of processedItems) {
         const itemName = customName || (serialNumber ? serialNumberLabel(serialNumber) : variation ? `${product.name} — ${variation.name}` : lineName(product.name, unit));
         const itemSku = customName ? '' : (variation ? variation.sku : product.sku);
         const unitsPer = unit?.units_per || 1;
-        await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,discount_percent,discount_override_by,serial_number,sell_unit,units_per,uom_id,ticket_discount,is_comment,is_delivery,discount_fixed) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [txId, product ? product.id : null, itemName, itemSku, lineQty, unit_price, discount, lineTax, lineTotal, variation?.id||null, variation?.name||null, discountPercent || 0, discountOverrideBy || null, serialNumber || null, variation ? null : unit?.sell_unit || null, variation ? 1 : unitsPer, variation ? null : unit?.uom_id ?? null, ticketDiscount ?? null, isComment ? 1 : 0, isDelivery ? 1 : 0, discountFixed || null] });
+        const lineInsert = await tx.execute({ sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,discount_percent,discount_override_by,serial_number,sell_unit,units_per,uom_id,ticket_discount,is_comment,is_delivery,discount_fixed) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [txId, product ? product.id : null, itemName, itemSku, lineQty, unit_price, discount, lineTax, lineTotal, variation?.id||null, variation?.name||null, discountPercent || 0, discountOverrideBy || null, serialNumber || null, variation ? null : unit?.sell_unit || null, variation ? 1 : unitsPer, variation ? null : unit?.uom_id ?? null, ticketDiscount ?? null, isComment ? 1 : 0, isDelivery ? 1 : 0, discountFixed || null] });
+        if (transfer) {
+          await tx.execute({ sql: 'UPDATE transaction_items SET transfer_from_branch_id = ?, transfer_qty = ? WHERE id = ?', args: [transfer.from, transfer.qty, Number(lineInsert.lastInsertRowid)] });
+          saleTransferLines.push({ product_id: product.id, from: transfer.from, qty: transfer.qty });
+        }
         // A custom/temp line has no catalog product — nothing to deduct; an
         // SN line is a stockless placeholder for the serial; a Special
         // Project rental line is rented, not sold (the agreement holds it).
         if (!product || serialNumber || spRental) continue;
         // Stock is in the stock unit: a line moves quantity × its unit's size.
         const quantity = stockUnits(lineQty, unitsPer);
+        // The part coming from another branch isn't here: it comes off (this
+        // branch and overall) when it arrives (saleTransfers.arrive), so the
+        // overall figure always matches the branches added up.
+        const branchQty = transfer ? Math.max(0, quantity - transfer.qty) : quantity;
         if (variation) {
           await tx.execute({ sql: 'UPDATE product_variations SET stock_qty = stock_qty - ? WHERE id = ?', args: [quantity, variation.id] });
         } else {
-          await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty - ? WHERE id = ?', args: [quantity, product.id] });
+          await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty - ? WHERE id = ?', args: [branchQty, product.id] });
         }
-        if (branch_id) {
+        if (branch_id && branchQty > 0) {
+          const quantity = branchQty;
           if (req.apiKey) {
             // Online order: only touch the selected branch's existing stock record — no INSERT
             // to avoid creating a record with a wrong initial value from global stock
@@ -801,6 +901,14 @@ router.post('/', requirePermission('pos'), async (req, res) => {
           }
           await syncBinQty(tx, product.id, branch_id, -quantity);
         }
+      }
+
+      // Lines coming from other branches: a transfer request per branch, and
+      // the sale waits for them before the customer collects.
+      let saleTransfersMade = [];
+      if (saleTransferLines.length) {
+        saleTransfersMade = await saleTransfers.raiseSaleTransfers(tx, { transactionId: txId, transactionNumber: transaction_number, branchId: branch_id, employeeId: req.employee?.id || employee_id || null, lines: saleTransferLines });
+        await tx.execute({ sql: "UPDATE transactions SET collection_status = 'awaiting_transfer' WHERE id = ?", args: [txId] });
       }
 
       if (customer_id) {
@@ -861,6 +969,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       // Block box (lib/creditBlock.js) reflects it straight away, as rental
       // credit checkouts already do. Required lazily: customers.js loads after.
       if (isCredit && customer_id) { try { await require('./customers').runCreditCheck(customer_id); } catch(e) {} }
+      if (saleTransfersMade.length) savedTx.sale_transfers = saleTransfersMade;
       res.status(201).json(savedTx);
     } catch(e) {
       // Once committed, the sale is saved — rolling back a closed transaction
@@ -1196,13 +1305,20 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
         if (!txItem.product_id) continue;
         // Returned quantity is in the line's unit; stock is in singles.
         const restock = stockUnits(quantity, txItem.units_per);
-        await retTx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [restock, txItem.product_id] });
-        if (tx.branch_id) {
-          await retTx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [txItem.product_id, tx.branch_id, restock, txItem.product_id, restock] });
-          await syncBinQty(retTx, txItem.product_id, tx.branch_id, restock);
+        // Returning goods still to come on a transfer: the customer no longer
+        // wants them, so they stop being owed (they'll arrive as ordinary
+        // stock) and, never having been taken off, aren't put back.
+        const notHere = Math.min(restock, saleTransfers.stillOwed(txItem));
+        if (notHere > 0) await retTx.execute({ sql: 'UPDATE transaction_items SET transfer_qty = transfer_qty - ? WHERE id = ?', args: [notHere, txItem.id] });
+        const branchRestock = restock - notHere;
+        if (branchRestock > 0) await retTx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [branchRestock, txItem.product_id] });
+        if (tx.branch_id && branchRestock > 0) {
+          await retTx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [txItem.product_id, tx.branch_id, branchRestock, txItem.product_id, branchRestock] });
+          await syncBinQty(retTx, txItem.product_id, tx.branch_id, branchRestock);
         }
       }
 
+      if (tx.collection_status) await saleTransfers.refreshFulfillment(retTx, tx.id);
       if (tx.customer_id) {
         const loyaltyPts = Math.floor(returnTotal * 0.5);
         await retTx.execute({ sql: 'UPDATE customers SET loyalty_points = MAX(0, loyalty_points - ?), total_spent = MAX(0, total_spent - ?) WHERE id = ?', args: [loyaltyPts, returnTotal, tx.customer_id] });
@@ -1271,16 +1387,24 @@ router.patch('/:id/void', requireAuth, async (req, res) => {
     const voidTxn = await db.transaction('write');
     try {
       await voidTxn.execute({ sql: "UPDATE transactions SET status='voided', voided_by=?, voided_at=CURRENT_TIMESTAMP, void_reason=? WHERE id=?", args: [authorizer.id, reason || null, req.params.id] });
+      // Its transfer requests not sent yet aren't needed any more; one already
+      // sent carries on (the goods are moving) and is just no longer owed.
+      await voidTxn.execute({ sql: "UPDATE branch_transfers SET status = 'cancelled' WHERE transaction_id = ? AND status = 'requested'", args: [req.params.id] });
       const { rows: items } = await voidTxn.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [req.params.id] });
       for (const item of items) {
         if (!item.product_id) continue; // delivery/comment lines carry no stock
         const restock = stockUnits(item.quantity, item.units_per); // in stock units
-        await voidTxn.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [restock, item.product_id] });
-        if (tx.branch_id) {
-          await voidTxn.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, tx.branch_id, restock, item.product_id, restock] });
-          await syncBinQty(voidTxn, item.product_id, tx.branch_id, restock);
+        // What's still to come on a transfer was never taken off (lib/saleTransfers.js).
+        const branchRestock = Math.max(0, restock - saleTransfers.stillOwed(item));
+        await voidTxn.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [branchRestock, item.product_id] });
+        if (tx.branch_id && branchRestock > 0) {
+          await voidTxn.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, tx.branch_id, branchRestock, item.product_id, branchRestock] });
+          await syncBinQty(voidTxn, item.product_id, tx.branch_id, branchRestock);
         }
       }
+      // Nothing is owed on a voided sale: goods still on their way arrive as
+      // ordinary stock.
+      await voidTxn.execute({ sql: 'UPDATE transaction_items SET transfer_qty = transfer_received_qty WHERE transaction_id = ? AND transfer_qty IS NOT NULL', args: [req.params.id] });
       if (tx.customer_id) {
         const loyaltyPts = Math.floor(tx.total * 0.5);
         await voidTxn.execute({ sql: 'UPDATE customers SET loyalty_points = loyalty_points - ?, total_spent = total_spent - ? WHERE id = ?', args: [loyaltyPts, tx.total, tx.customer_id] });
