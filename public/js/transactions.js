@@ -620,7 +620,9 @@ Object.assign(App, {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
-  async processReturn(txId) {
+  // prefill: { items: { [transaction_item_id]: qty }, reason } — e.g. Collections'
+  // Short — refund the rest, which ticks the lines that didn't come.
+  async processReturn(txId, prefill = null) {
     const [tx, existingReturns] = await Promise.all([
       this.api('GET', `/transactions/${txId}`),
       this.api('GET', `/transactions/${txId}/returns`),
@@ -726,6 +728,16 @@ Object.assign(App, {
       </div>`;
     document.body.appendChild(overlay);
     this._retTx = tx;
+    if (prefill) {
+      for (const [itemId, qty] of Object.entries(prefill.items || {})) {
+        const chk = overlay.querySelector(`.ret-chk[data-item-id="${itemId}"]`);
+        const q = overlay.querySelector(`.ret-qty[data-item-id="${itemId}"]`);
+        if (!chk || !q) continue;
+        chk.checked = true;
+        q.value = Math.min(Number(qty), Number(chk.dataset.max));
+      }
+      if (prefill.reason) document.getElementById('ret-notes').value = prefill.reason;
+    }
     this._retCalcTotal();
   },
 
@@ -784,6 +796,8 @@ Object.assign(App, {
         ...(resolution === 'refund' ? { refund_method: document.getElementById('ret-refund-method')?.value || '', drawer_session_id: this.currentDrawerSession?.id || null } : {}),
       });
       document.getElementById('return-overlay')?.remove();
+      // Opened from POS Collections (Short — refund the rest): show the change.
+      if (document.getElementById('coll-list')) this._loadCollections();
       if (resolution === 'replacement' && this.can('pos')) {
         await this._startExchange({ ...ret, customer_id: ret.customer_id ?? this._retTx?.customer_id });
         this.alert(`Return ${ret.return_number} processed. Return credit ${this.fmt(ret.total)} applied to cart.`, 'success');

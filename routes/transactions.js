@@ -262,8 +262,8 @@ async function saleTransfersFor(ids) {
   const out = new Map();
   if (!ids.length) return out;
   const { rows } = await db.execute({
-    sql: `SELECT bt.id, bt.transaction_id, bt.transfer_number, bt.status, fb.name AS from_branch_name, bt.sent_at, bt.dispatched_at, bt.received_at,
-            (SELECT json_group_array(json_object('product_name', i.product_name, 'asked', i.quantity_asked, 'sent', i.quantity_requested, 'received', i.quantity_received))
+    sql: `SELECT bt.id, bt.transaction_id, bt.transfer_number, bt.status, bt.from_branch_id, fb.name AS from_branch_name, bt.sent_at, bt.dispatched_at, bt.received_at,
+            (SELECT json_group_array(json_object('product_id', i.product_id, 'product_name', i.product_name, 'asked', i.quantity_asked, 'sent', i.quantity_requested, 'received', i.quantity_received))
                FROM branch_transfer_items i WHERE i.transfer_id = bt.id) AS items
           FROM branch_transfers bt LEFT JOIN branches fb ON fb.id = bt.from_branch_id
           WHERE bt.transaction_id IN (${ids.map(() => '?').join(',')}) ORDER BY bt.id`,
@@ -304,12 +304,17 @@ router.get('/collections', canCollections, async (req, res) => {
     const ids = rows.map(r => r.id);
     const transfers = await saleTransfersFor(ids);
     const { rows: lines } = ids.length ? await db.execute({
-      sql: `SELECT transaction_id, product_name, quantity, units_per, transfer_qty, transfer_received_qty, transfer_from_branch_id
+      sql: `SELECT id, transaction_id, product_id, product_name, quantity, units_per, transfer_qty, transfer_received_qty, transfer_from_branch_id
             FROM transaction_items WHERE transaction_id IN (${ids.map(() => '?').join(',')}) AND product_id IS NOT NULL AND COALESCE(is_comment, 0) = 0 ORDER BY id`,
       args: ids }) : { rows: [] };
     for (const r of rows) {
       r.transfers = transfers.get(r.id) || [];
       r.lines = lines.filter(l => l.transaction_id === r.id);
+      // Lines that won't get everything from the transfers raised (fewer
+      // sent than asked, or a request cancelled) — Short — refund the rest.
+      const short = new Map(saleTransfers.shortfalls(r.lines, r.transfers).map(x => [x.id, x.short]));
+      for (const l of r.lines) l.short = short.get(l.id) || 0;
+      r.short = r.lines.some(l => l.short > 0);
     }
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }

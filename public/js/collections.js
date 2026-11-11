@@ -80,6 +80,7 @@ Object.assign(App, {
     let rows;
     try { rows = await this.api('GET', `/transactions/collections?${qs}`); }
     catch (e) { el.innerHTML = `<div class="empty-state"><p>${this.escapeAttr(e.message)}</p></div>`; return; }
+    this._collRows = rows;
     const esc = v => this.escapeAttr(v == null ? '' : String(v));
     const trfStatus = { requested: 'Requested — waiting for the inventory team to send it', pending: 'Sent — waiting for pickup', in_transit: 'On its way', received: 'Received here', cancelled: 'Cancelled' };
     const badge = s => s === 'ready' ? '<span class="badge-pill badge-success">Ready to collect</span>'
@@ -96,12 +97,13 @@ Object.assign(App, {
           <div style="display:flex;gap:6px;flex-wrap:wrap">
             ${r.collection_status !== 'collected' ? `<button class="btn btn-sm btn-outline" onclick="App._collContacted(${r.id})">${r.contacted_at ? 'Contacted again' : 'Customer contacted'}</button>` : ''}
             ${r.collection_status === 'ready' ? `<button class="btn btn-sm btn-success" onclick="App._collHandOver(${r.id}, '${esc(r.transaction_number)}')">Hand over</button>` : ''}
+            ${r.short && this.can('transactions_returns') ? `<button class="btn btn-sm btn-danger" onclick="App._collShortRefund(${r.id})" title="Return what isn't coming — refund or credit note — so the rest can be handed over">Short — refund the rest</button>` : ''}
             <button class="btn btn-sm btn-secondary" onclick="App.viewTransaction(${r.id})">View sale</button>
           </div>
         </div>
-        <table style="margin:8px 0 0;font-size:12px"><thead><tr><th>Item</th><th style="text-align:right">Sold</th><th style="text-align:right">From other branch</th><th style="text-align:right">Arrived</th></tr></thead><tbody>
+        <table style="margin:8px 0 0;font-size:12px"><thead><tr><th>Item</th><th style="text-align:right">Sold</th><th style="text-align:right">From other branch</th><th style="text-align:right">Arrived</th>${r.short ? '<th style="text-align:right">Short</th>' : ''}</tr></thead><tbody>
           ${r.lines.filter(l => l.transfer_qty > 0).map(l => `<tr><td>${esc(l.product_name)}</td><td style="text-align:right">${l.quantity * (l.units_per || 1)}</td><td style="text-align:right">${l.transfer_qty}</td>
-            <td style="text-align:right;${l.transfer_received_qty >= l.transfer_qty ? 'color:var(--success);font-weight:600' : ''}">${l.transfer_received_qty}</td></tr>`).join('')}
+            <td style="text-align:right;${l.transfer_received_qty >= l.transfer_qty ? 'color:var(--success);font-weight:600' : ''}">${l.transfer_received_qty}</td>${r.short ? `<td style="text-align:right;${l.short ? 'color:var(--danger);font-weight:600' : ''}">${l.short || ''}</td>` : ''}</tr>`).join('')}
         </tbody></table>
         <div style="font-size:12px;margin-top:6px">${r.transfers.map(t => `<div>Transfer <strong>${esc(t.transfer_number)}</strong> from ${esc(t.from_branch_name)}: ${esc(trfStatus[t.status] || t.status)}${t.items.some(i => i.sent < i.asked) && t.status !== 'requested' ? ' <span style="color:var(--danger)">— fewer sent than asked</span>' : ''}${t.status === 'cancelled' ? ' <span style="color:var(--danger)">— speak to the inventory team</span>' : ''}</div>`).join('')}</div>
         ${r.contacted_at ? `<div style="font-size:12px;color:var(--text-muted);margin-top:4px">Contacted ${this.fmtDateTime(r.contacted_at)}${r.contacted_by_name ? ` by ${esc(r.contacted_by_name)}` : ''}${r.contact_note ? ` — ${esc(r.contact_note)}` : ''}</div>` : ''}
@@ -114,6 +116,20 @@ Object.assign(App, {
     if (note == null) return;
     try { await this.api('PATCH', `/transactions/${id}/collection-contacted`, { note }); this._loadCollections(); this._pollCollections(); }
     catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  // Short — refund the rest: the return window with the lines that won't come
+  // ticked at their short quantity. The return takes them off what's owed,
+  // so what did arrive is then ready to hand over.
+  _collShortRefund(id) {
+    const r = (this._collRows || []).find(x => x.id === id);
+    if (!r) return;
+    const shortLines = r.lines.filter(l => l.short > 0);
+    const from = [...new Set(r.transfers.map(t => t.from_branch_name))].join(', ');
+    this.processReturn(id, {
+      items: Object.fromEntries(shortLines.map(l => [l.id, l.short])),
+      reason: `Short on transfer from ${from}: ${shortLines.map(l => `${l.short} × ${l.product_name}`).join(', ')} didn't come`,
+    });
   },
 
   async _collHandOver(id, number) {

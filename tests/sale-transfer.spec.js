@@ -142,3 +142,59 @@ test('an ordinary sale never shows in Collections, and a return leaves its onlin
   expect(after.collection_status).toBeNull();
   expect((await api(page, 'GET', '/transactions/collections')).some(r => r.id === sale.id)).toBe(false);
 });
+
+test('short on the transfer: Collections offers Short — refund the rest, and then the order can be handed over', async ({ page }) => {
+  const s = await setup(page);
+  const { here, there, p } = s;
+  const sale = await sell(page, s);
+  const trf = (await api(page, 'GET', `/transactions/${sale.id}`)).sale_transfers[0];
+  const full = await api(page, 'GET', `/transfers/${trf.id}`);
+  // The inventory team only sends 1 of the 2 asked for, and it arrives.
+  await api(page, 'PATCH', `/transfers/${trf.id}/send`, { items: full.items.map(i => ({ item_id: i.id, quantity: 1 })) });
+  await api(page, 'PATCH', `/transfers/${trf.id}/dispatch`, { driver_name: 'Test Driver' });
+  await api(page, 'PATCH', `/transfers/${trf.id}/receive`, { delivered_by_name: 'Test Driver', items: full.items.map(i => ({ item_id: i.id, quantity_received: 1 })) });
+
+  const row = (await api(page, 'GET', `/transactions/collections?branch_id=${here.id}`)).find(r => r.id === sale.id);
+  expect(row).toMatchObject({ collection_status: 'awaiting_transfer', short: true });
+  expect(row.lines[0]).toMatchObject({ transfer_qty: 2, transfer_received_qty: 1, short: 1 });
+
+  // A manager to authorize the return.
+  const group = (await api(page, 'GET', '/security-groups')).find(g => g.name === 'Manager');
+  const pin = `${Date.now()}`.slice(-6);
+  await api(page, 'POST', '/employees', { first_name: 'Short', last_name: 'Mgr', username: `sm${Date.now()}`, pin, password: 'pw-123456', must_change_password: 0, security_group_id: group.id, active: 1 });
+
+  await page.evaluate(b => { App.posBranch = b; }, here);
+  await page.evaluate(() => App.showCollections());
+  const card = page.locator('#coll-list .card', { hasText: sale.transaction_number });
+  await card.getByRole('button', { name: 'Short — refund the rest' }).click();
+  // The return window opens with the short line ticked at 1 and the reason filled in.
+  await expect(page.locator('#return-overlay')).toBeVisible();
+  const lineId = row.lines[0].id;
+  await expect(page.locator(`.ret-chk[data-item-id="${lineId}"]`)).toBeChecked();
+  await expect(page.locator(`.ret-qty[data-item-id="${lineId}"]`)).toHaveValue('1');
+  await expect(page.locator('#ret-notes')).toHaveValue(new RegExp(`Short on transfer from ${there.name}`));
+  await page.locator('input[name="ret-resolution"][value="refund"]').check();
+  await page.selectOption('#ret-refund-method', 'card');
+  await page.fill('#ret-override-pin', pin);
+  await page.click('#ret-submit-btn');
+  await expect(page.locator('#return-overlay')).toHaveCount(0);
+
+  // The return receipt shows (as for any refund); back in Collections the order is ready.
+  await expect(page.locator('.modal')).toContainText('REFUND');
+  await page.evaluate(() => { App.closeModal(); App.showCollections(); });
+  await expect(page.locator('#coll-list .card', { hasText: sale.transaction_number })).toContainText('Ready to collect');
+  // The shelf is right: 1 here went to the customer at the sale, 1 arrived for them,
+  // and the refunded 1 never left the other branch.
+  expect(await stockAt(page, p.id)).toMatchObject({ global: 4, by: { [here.id]: 0, [there.id]: 4 } });
+  await api(page, 'PATCH', `/transactions/${sale.id}/collected`, {});
+});
+
+test('a cancelled request leaves everything still owed short', async ({ page }) => {
+  const s = await setup(page);
+  const sale = await sell(page, s);
+  const trf = (await api(page, 'GET', `/transactions/${sale.id}`)).sale_transfers[0];
+  await api(page, 'PATCH', `/transfers/${trf.id}/cancel`, {});
+  const row = (await api(page, 'GET', `/transactions/collections?branch_id=${s.here.id}`)).find(r => r.id === sale.id);
+  expect(row.short).toBe(true);
+  expect(row.lines[0].short).toBe(2);
+});
