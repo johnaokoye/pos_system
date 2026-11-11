@@ -65,7 +65,129 @@ Object.assign(App, {
     document.getElementById('content').innerHTML = `
       <div class="section-header"><h2>Inventory Reports</h2>${this.can('inventory') ? `<button class="btn btn-outline btn-sm" onclick="App.showSection('inventory')">← Retail Inventory</button>` : ''}</div>
       ${this._reportButtonCard('Items Sold', 'Every item sold over a period — units sold and returned, net sales, cost, margin and what\'s on hand now — filterable by location, category, brand or item.', 'App.showItemsSoldReport()')}
+      ${this._reportButtonCard('Items Returned', 'Every item returned over a period — how often, how many, the value, the return rate against what sold, and which customers returned it (with their last reason).', 'App.showItemsReturnedReport()')}
       ${this._reportButtonCard('Zero &amp; Negative Stock', 'Every inventory item at or below zero on hand, per location — negative counts to investigate and zero counts to reorder — with cost value, last sold and last received.', 'App.showZeroStockReport()')}`;
+  },
+
+  // ─── Items Returned ─────────────────────────────────────────────────────
+  // GET /reports/items-returned — per item, with the customers who returned it.
+
+  async showItemsReturnedReport() {
+    const [branches, categories, brands] = await Promise.all([
+      this.api('GET', '/branches').catch(() => []),
+      this.api('GET', '/categories').catch(() => []),
+      this.api('GET', '/brands').catch(() => []),
+    ]);
+    const filters = `
+      <select id="irr-range" onchange="App._applyItemsReturnedRange()" style="width:150px">
+        <option value="this_month">This month</option><option value="today">Today</option><option value="this_week">This week</option>
+        <option value="last_month">Last month</option><option value="last_3_months">Last 3 months</option><option value="this_quarter">This quarter</option>
+        <option value="last_12_months">Last 12 months</option><option value="this_year">This year</option><option value="last_year">Last year</option>
+        <option value="custom">Custom</option>
+      </select>
+      <input type="date" id="irr-start" style="width:145px" onchange="document.getElementById('irr-range').value='custom'">
+      <span>to</span>
+      <input type="date" id="irr-end" style="width:145px" onchange="document.getElementById('irr-range').value='custom'">
+      <select id="irr-branch" style="width:150px"><option value="">All Locations</option>${(branches || []).filter(b => b.active).map(b => `<option value="${b.id}">${this.escapeAttr(b.name)}</option>`).join('')}</select>
+      <select id="irr-category" style="width:160px"><option value="">All Categories</option><option value="none">Uncategorized</option>${(categories || []).map(c => `<option value="${c.id}">${this.escapeAttr(c.name)}</option>`).join('')}</select>
+      <select id="irr-brand" style="width:150px"><option value="">All Brands</option>${(brands || []).map(b => `<option value="${this.escapeAttr(b.name || '')}">${this.escapeAttr(b.name || '')}</option>`).join('')}</select>
+      <select id="irr-resolution" style="width:170px" title="How the return was settled">
+        <option value="">Refunds, credit notes &amp; exchanges</option><option value="refund">Refunds only</option><option value="credit_note">Credit notes only</option><option value="replacement">Exchanges only</option>
+      </select>
+      <select id="irr-type" style="width:170px"><option value="stock">Inventory items only</option><option value="all">All items (incl. services &amp; rentals)</option></select>
+      <input type="text" id="irr-q" placeholder="Item name, SKU or barcode" style="width:200px" onkeydown="if(event.key==='Enter')App.loadItemsReturnedReport()">
+      <select id="irr-sort" style="width:170px" onchange="App._renderItemsReturned()" title="Sort items by">
+        <option value="returns">Most often returned</option><option value="value">Highest value returned</option><option value="units">Most units returned</option>
+        <option value="rate">Highest return rate</option><option value="name">Item name A–Z</option>
+      </select>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;white-space:nowrap"><input type="checkbox" id="irr-customers" checked style="width:auto;margin:0" onchange="App._renderItemsReturned()"> Show customers</label>`;
+    this._showReportModal('Items Returned', filters, 'loadItemsReturnedReport');
+    document.querySelector('#rpt-modal-content')?.closest('.modal')?.style.setProperty('max-width', '1150px');
+  },
+
+  _applyItemsReturnedRange() {
+    const r = this._supplierSalesRanges()[document.getElementById('irr-range')?.value];
+    if (!r) return;
+    document.getElementById('irr-start').value = r[0];
+    document.getElementById('irr-end').value = r[1];
+  },
+
+  async loadItemsReturnedReport() {
+    const startEl = document.getElementById('irr-start');
+    if (!startEl) return;
+    if (!startEl.value) this._applyItemsReturnedRange();
+    const params = new URLSearchParams({ start: startEl.value, end: document.getElementById('irr-end').value, type: document.getElementById('irr-type').value });
+    for (const [id, key] of [['irr-branch', 'branch_id'], ['irr-category', 'category_id'], ['irr-brand', 'brand'], ['irr-q', 'q'], ['irr-resolution', 'resolution']]) {
+      const v = document.getElementById(id).value.trim();
+      if (v) params.set(key, v);
+    }
+    const content = document.getElementById('rpt-modal-content');
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let data;
+    try { data = await this.api('GET', `/reports/items-returned?${params}`); }
+    catch(e) { content.innerHTML = `<div class="empty-state"><p>${this.escapeAttr(e.message)}</p></div>`; return; }
+    if (!document.getElementById('rpt-modal-content')) return;
+    const branchSel = document.getElementById('irr-branch');
+    data.branchName = branchSel.value ? branchSel.options[branchSel.selectedIndex].text : '';
+    this._itemsReturnedData = data;
+    this._renderItemsReturned();
+  },
+
+  _renderItemsReturned() {
+    const data = this._itemsReturnedData;
+    const content = document.getElementById('rpt-modal-content');
+    if (!data || !content) return;
+    const esc = v => this.escapeAttr(v == null ? '' : String(v));
+    const qty = n => Number(n || 0).toLocaleString('en-US', { maximumFractionDigits: 3 });
+    const fmtDay = d => new Date(d + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    const sorters = {
+      returns: (a, b) => b.returns - a.returns || b.value - a.value,
+      value: (a, b) => b.value - a.value,
+      units: (a, b) => b.units - a.units,
+      rate: (a, b) => (b.return_rate ?? -1) - (a.return_rate ?? -1),
+      name: (a, b) => String(a.product_name || '').localeCompare(String(b.product_name || '')),
+    };
+    const items = [...data.items].sort(sorters[document.getElementById('irr-sort')?.value] || sorters.returns);
+    const showCustomers = document.getElementById('irr-customers')?.checked !== false;
+    const { summary } = data;
+    const rateColor = r => r == null ? 'var(--text-muted)' : r >= 20 ? 'var(--danger)' : r >= 10 ? 'var(--warning)' : 'inherit';
+    content.innerHTML = `
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">${fmtDay(data.start)} – ${fmtDay(data.end)}${data.branchName ? ' · ' + esc(data.branchName) : ' · All locations'}</div>
+      <div class="stats-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:18px">
+        <div class="stat-card"><div class="stat-label">Items Returned</div><div class="stat-value">${summary.items}</div><div class="stat-sub">${qty(summary.units)} unit${summary.units === 1 ? '' : 's'}</div></div>
+        <div class="stat-card orange"><div class="stat-label">Returns</div><div class="stat-value">${summary.returns}</div></div>
+        <div class="stat-card red"><div class="stat-label">Value Returned</div><div class="stat-value" style="font-size:20px">${this.fmt(summary.value)}</div><div class="stat-sub">before tax</div></div>
+        <div class="stat-card blue"><div class="stat-label">Customers</div><div class="stat-value">${summary.customers}</div></div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">Items Returned</span></div>
+        ${!items.length ? '<div class="empty-state"><p>No items returned in this range.</p></div>' : `
+        <div class="table-wrap"><table>
+          <thead><tr><th>SKU</th><th>Item / Customer</th><th>Category</th><th style="text-align:right">Times Returned</th><th style="text-align:right">Units</th><th style="text-align:right">Value</th><th style="text-align:right">Customers</th><th style="text-align:right">Units Sold</th><th style="text-align:right">Return Rate</th><th>Last Returned / Reason</th></tr></thead>
+          <tbody>${items.map(r => `<tr style="border-top:2px solid var(--border)">
+            <td style="font-family:monospace;font-size:12px">${esc(r.sku)}</td>
+            <td class="fw-600" style="min-width:200px">${esc(r.product_name)}</td>
+            <td>${esc(r.category_name)}</td>
+            <td style="text-align:right" class="fw-600">${r.returns}</td>
+            <td style="text-align:right">${qty(r.units)}</td>
+            <td style="text-align:right" class="fw-600">${this.fmt(r.value)}</td>
+            <td style="text-align:right">${r.customer_count}</td>
+            <td style="text-align:right">${qty(r.units_sold)}</td>
+            <td style="text-align:right;font-weight:600;color:${rateColor(r.return_rate)}">${r.return_rate == null ? '—' : r.return_rate + '%'}</td>
+            <td></td>
+          </tr>${showCustomers ? r.customers.map(c => `<tr style="font-size:12px;color:var(--text-muted)">
+            <td></td>
+            <td style="padding-left:18px">↳ ${esc(c.customer_name)}${c.business_name ? ` · ${esc(c.business_name)}` : ''}${c.customer_number ? ` <span style="font-family:monospace">${esc(c.customer_number)}</span>` : ''}${c.customer_phone ? ` · ${esc(c.customer_phone)}` : ''}</td>
+            <td></td>
+            <td style="text-align:right">${c.returns}</td>
+            <td style="text-align:right">${qty(c.units)}</td>
+            <td style="text-align:right">${this.fmt(c.value)}</td>
+            <td></td><td></td><td></td>
+            <td>${c.last_returned_at ? this.fmtDate(c.last_returned_at) : ''}${c.last_reason ? ` — ${esc(String(c.last_reason).slice(0, 80))}` : ''}</td>
+          </tr>`).join('') : ''}`).join('')}</tbody>
+        </table></div>`}
+      </div>
+      <p style="font-size:11px;color:var(--text-muted);margin-top:10px">Returns counted by the day they were processed; cancelled returns left out. Value is what each return credited for the item, before tax. Units are in each item's stock unit (a case of 12 counts as 12). Units Sold and Return Rate compare with the item's completed sales in the same period and location — an item sold before the period and returned in it can go over 100%. "Times Returned" counts returns, so one return of 3 units counts once.</p>`;
   },
 
   // ─── Zero & Negative Stock ──────────────────────────────────────────────

@@ -1233,6 +1233,100 @@ router.get('/items-sold', requireAnyPermission('reports', 'inventory'), async (r
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Items returned — for the Inventory Reports screen: each item returned in the
+// period (by return date; cancelled returns left out), how many returns it was
+// on, units returned (stock units, like Items Sold), the value returned (line
+// totals before tax, after any discount — what the return credited), how many
+// customers returned it, units sold in the same period and the return rate;
+// with, per item, each customer who returned it (count, units, value, last
+// return date and reason). type 'stock' (default) keeps to Retail Inventory
+// items; resolution refund|credit_note|replacement narrows it; branch_id is
+// the branch the return was processed at.
+router.get('/items-returned', requireAnyPermission('reports', 'inventory'), async (req, res) => {
+  try {
+    const { start, end, branch_id, category_id, brand, q, resolution } = req.query;
+    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+    const e = end || new Date().toISOString().slice(0, 10);
+    let rf = " AND r.status != 'cancelled'";
+    const rp = [];
+    if (branch_id) { rf += ' AND r.branch_id = ?'; rp.push(Number(branch_id)); }
+    if (['refund', 'credit_note', 'replacement'].includes(resolution)) { rf += ' AND r.resolution = ?'; rp.push(resolution); }
+    let pf = '';
+    const pp = [];
+    if (req.query.type !== 'all') pf += ' AND COALESCE(p.is_service, 0) = 0 AND COALESCE(p.is_rental, 0) = 0 AND COALESCE(p.is_non_inventory, 0) = 0';
+    if (category_id === 'none') pf += ' AND p.category_id IS NULL';
+    else if (category_id) { pf += ' AND p.category_id = ?'; pp.push(Number(category_id)); }
+    if (brand) { pf += ' AND p.brand = ?'; pp.push(brand); }
+    if (q && q.trim()) {
+      const like = `%${q.trim()}%`;
+      pf += ' AND (p.name LIKE ? OR p.sku LIKE ? OR p.barcode LIKE ?)';
+      pp.push(like, like, like);
+    }
+    const { rows: lines } = await db.execute({
+      sql: `SELECT ri.product_id, r.id AS return_id, r.customer_id, r.created_at, r.notes,
+              ri.quantity * COALESCE(ti.units_per, 1) AS units, ri.total AS value,
+              c.first_name || ' ' || c.last_name AS customer_name, c.business_name, c.customer_number, c.phone AS customer_phone
+            FROM return_items ri JOIN returns r ON r.id = ri.return_id
+            JOIN products p ON p.id = ri.product_id
+            LEFT JOIN transaction_items ti ON ti.id = ri.transaction_item_id
+            LEFT JOIN customers c ON c.id = r.customer_id
+            WHERE date(r.created_at) BETWEEN date(?) AND date(?)${rf}
+              AND upper(COALESCE(p.sku, '')) != ?${pf}
+            ORDER BY r.created_at`,
+      args: [s, e, ...rp, SERIAL_NUMBER_SKU, ...pp],
+    });
+    const ids = [...new Set(lines.map(l => l.product_id))];
+    const products = new Map();
+    const sold = new Map();
+    if (ids.length) {
+      const ph = ids.map(() => '?').join(',');
+      const { rows: prows } = await db.execute({ sql: `SELECT p.id, p.sku, p.name, p.brand, COALESCE(c.name, 'Uncategorized') AS category_name FROM products p LEFT JOIN categories c ON c.id = p.category_id WHERE p.id IN (${ph})`, args: ids });
+      for (const r of prows) products.set(r.id, r);
+      const { rows: srows } = await db.execute({
+        sql: `SELECT ti.product_id, SUM(ti.quantity * COALESCE(ti.units_per, 1)) AS units FROM transaction_items ti JOIN transactions t ON t.id = ti.transaction_id
+              WHERE t.status = 'completed' AND ti.product_id IN (${ph}) AND date(t.created_at) BETWEEN date(?) AND date(?)${branch_id ? ' AND t.branch_id = ?' : ''}
+              GROUP BY ti.product_id`,
+        args: [...ids, s, e, ...(branch_id ? [Number(branch_id)] : [])],
+      });
+      for (const r of srows) sold.set(r.product_id, Number(r.units) || 0);
+    }
+    const r3 = n => Math.round(n * 1000) / 1000, r2 = n => parseFloat(n.toFixed(2));
+    const byItem = new Map();
+    for (const l of lines) {
+      let it = byItem.get(l.product_id);
+      if (!it) {
+        const p = products.get(l.product_id) || {};
+        it = { product_id: l.product_id, sku: p.sku, product_name: p.name, category_name: p.category_name, brand: p.brand, returns: new Set(), units: 0, value: 0, customers: new Map() };
+        byItem.set(l.product_id, it);
+      }
+      it.returns.add(l.return_id); it.units += Number(l.units) || 0; it.value += Number(l.value) || 0;
+      const key = l.customer_id || 'walkin';
+      let c = it.customers.get(key);
+      if (!c) { c = { customer_id: l.customer_id || null, customer_name: l.customer_id ? l.customer_name : 'Walk-in', business_name: l.business_name || null, customer_number: l.customer_number || null, customer_phone: l.customer_phone || null, returns: new Set(), units: 0, value: 0 }; it.customers.set(key, c); }
+      c.returns.add(l.return_id); c.units += Number(l.units) || 0; c.value += Number(l.value) || 0;
+      c.last_returned_at = l.created_at; c.last_reason = l.notes || null;
+    }
+    const items = [...byItem.values()].map(it => {
+      const soldUnits = sold.get(it.product_id) || 0;
+      const customers = [...it.customers.values()].map(c => ({ ...c, returns: c.returns.size, units: r3(c.units), value: r2(c.value) }))
+        .sort((a, b) => b.returns - a.returns || b.value - a.value);
+      return {
+        product_id: it.product_id, sku: it.sku, product_name: it.product_name, category_name: it.category_name, brand: it.brand,
+        returns: it.returns.size, units: r3(it.units), value: r2(it.value), customer_count: customers.length,
+        units_sold: r3(soldUnits), return_rate: soldUnits > 0 ? parseFloat((it.units / soldUnits * 100).toFixed(1)) : null,
+        customers,
+      };
+    });
+    const allReturns = new Set(lines.map(l => l.return_id));
+    const allCustomers = new Set(lines.map(l => l.customer_id || 'walkin'));
+    const summary = {
+      items: items.length, returns: allReturns.size, customers: allCustomers.size,
+      units: r3(items.reduce((t, i) => t + i.units, 0)), value: r2(items.reduce((t, i) => t + i.value, 0)),
+    };
+    res.json({ start: s, end: e, summary, items });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Zero and negative stock — Retail Inventory items (no services, rentals or
 // non-inventory, never the SN carrier item) at or below 0 on hand, one row per
 // item per location from branch_inventory; an item with no branch rows at all
