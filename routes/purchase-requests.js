@@ -162,7 +162,8 @@ router.post('/', async (req, res) => {
     try {
       const result = await tx.execute({
         sql: 'INSERT INTO purchase_requests (pr_number, branch_id, employee_id, department, notes, internal_notes, required_date, request_type, supplier_id, currency, is_online_purchase, tax_rate, tax_amount) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
-        args: [pr_number, branch_id||null, employee_id||null, department||null, notes||null, String(req.body.internal_notes || '').trim() || null, required_date||null,
+        // The requester is whoever raises it (the form doesn't send one).
+        args: [pr_number, branch_id||null, employee_id||req.employee?.id||null, department||null, notes||null, String(req.body.internal_notes || '').trim() || null, required_date||null,
                request_type, supplier_id||null, currency||null, is_online_purchase?1:0,
                parseFloat(tax_rate)||0, parseFloat(tax_amount)||0]
       });
@@ -241,6 +242,25 @@ router.put('/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Edit & Resubmit: a rejected request goes back to draft under the same
+// number (items, attachments and all) for its requester to fix and submit
+// again; the rejection reason stays on it until it's approved. Only the
+// person who raised it — or, for an older request with no requester
+// recorded, anyone who can raise requests (pr_create).
+router.patch('/:id/reopen', async (req, res) => {
+  try {
+    const { rows: [pr] } = await db.execute({ sql: 'SELECT id, status, employee_id, converted_to_po_id FROM purchase_requests WHERE id = ?', args: [req.params.id] });
+    if (!pr) return res.status(404).json({ error: 'Not found' });
+    if (pr.status !== 'rejected' || pr.converted_to_po_id) return res.status(400).json({ error: 'Only a rejected request can be edited and resubmitted' });
+    const me = req.employee?.id;
+    const allowed = pr.employee_id ? pr.employee_id === me : can(req.employee?.permissions, 'pr_create');
+    if (!allowed) return res.status(403).json({ error: 'Only the person who raised this request can edit and resubmit it' });
+    await db.execute({ sql: "UPDATE purchase_requests SET status = 'draft', employee_id = COALESCE(employee_id, ?) WHERE id = ?", args: [me || null, pr.id] });
+    const { rows: [row] } = await db.execute({ sql: PR_SELECT + ' WHERE pr.id = ?', args: [pr.id] });
+    res.json(row);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.patch('/:id/status', async (req, res) => {
   try {
     const { status, rejection_reason, signature } = req.body;
@@ -254,6 +274,9 @@ router.patch('/:id/status', async (req, res) => {
     const { rows: [pr] } = await db.execute({ sql: 'SELECT * FROM purchase_requests WHERE id = ?', args: [req.params.id] });
     if (!pr) return res.status(404).json({ error: 'Not found' });
     if (pr.status === 'converted') return res.status(400).json({ error: 'Cannot change status of a converted PR' });
+    // A rejected request goes back to draft only by Edit & Resubmit (PATCH
+    // /:id/reopen — the requester's own call).
+    if (pr.status === 'rejected' && status === 'draft') return res.status(400).json({ error: 'Use Edit & Resubmit to rework a rejected request' });
 
     if (status === 'approved') {
       // Signed with the approver's saved signature (or a newly drawn one).
@@ -262,7 +285,8 @@ router.patch('/:id/status', async (req, res) => {
       try { sigUrl = await resolveApprovalSignature(db, approverId, signature); }
       catch (e) { return res.status(e.status || 500).json({ error: e.message, code: e.code }); }
       await db.execute({
-        sql: 'UPDATE purchase_requests SET status = ?, approved_by = ?, approved_at = CURRENT_TIMESTAMP, approval_signature = ? WHERE id = ?',
+        // An earlier rejection is settled once it's approved.
+        sql: 'UPDATE purchase_requests SET status = ?, approved_by = ?, approved_at = CURRENT_TIMESTAMP, approval_signature = ?, rejection_reason = NULL WHERE id = ?',
         args: [status, approverId, sigUrl, req.params.id]
       });
     } else if (status === 'rejected') {

@@ -315,6 +315,7 @@ Object.assign(App, {
       <div class="modal" style="max-width:800px">
         <div class="modal-header"><span class="modal-title">${editId ? `Edit Purchase Request: ${pr.pr_number}` : 'New Purchase Request'}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
+          ${pr?.rejection_reason ? `<div style="padding:8px 12px;background:#fff3f3;border-left:3px solid var(--danger);border-radius:0 6px 6px 0;font-size:13px;margin-bottom:12px"><strong>Rejected earlier:</strong> ${this.escapeAttr(pr.rejection_reason)}<div style="color:var(--text-muted);font-size:12px;margin-top:2px">Fix what's needed, then Submit Request to send it for approval again.</div></div>` : ''}
           <div class="form-group" style="margin-bottom:14px">
             <label style="font-weight:600;margin-bottom:6px;display:block">Request Type</label>
             <div style="display:flex;gap:0;border:1px solid var(--border);border-radius:6px;overflow:hidden;width:fit-content">
@@ -847,6 +848,7 @@ Object.assign(App, {
         </div>
         <div class="modal-footer">
           ${pr.status==='draft' ? `<button class="btn btn-secondary" onclick="App.closeModal();App.showPRForm(${pr.id})">Edit</button>` : ''}
+          ${pr.status==='rejected' && !pr.converted_to_po_id && (pr.employee_id ? pr.employee_id === this.currentUser?.id : this.can('pr_create')) ? `<button class="btn btn-primary" onclick="App.reopenPR(${pr.id})" title="Back to draft under the same number — fix it and submit it again">Edit &amp; Resubmit</button>` : ''}
           ${pr.status==='draft' ? `<button class="btn btn-primary" onclick="App.updatePRStatus(${pr.id},'submitted');App.closeModal()">Submit Request</button>` : ''}
           ${pr.status==='submitted' ? `<button class="btn btn-success" onclick="App.closeModal();App.approvePR(${pr.id})">Approve</button><button class="btn btn-danger" onclick="App.closeModal();App.rejectPR(${pr.id})">Reject</button>` : ''}
           ${supplierPriced && ['approved','converted','received'].includes(pr.status) ? `<button class="btn btn-secondary" onclick="App.printPumpAuthorization(${pr.id})">🖨️ Print Authorization</button>
@@ -969,6 +971,15 @@ Object.assign(App, {
       this.alert(`${number} deleted`);
       this.renderPurchasing('requests');
     } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // Edit & Resubmit on a rejected request (PATCH /purchase-requests/:id/reopen).
+  async reopenPR(id) {
+    try {
+      await this.api('PATCH', `/purchase-requests/${id}/reopen`, {});
+      this.closeModal();
+      this.showPRForm(id);
+    } catch (e) { this.alert(e.message, 'error'); }
   },
 
   async updatePRStatus(id, status) {
