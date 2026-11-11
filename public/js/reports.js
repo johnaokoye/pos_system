@@ -162,32 +162,33 @@ Object.assign(App, {
       <div class="card">
         <div class="card-header"><span class="card-title">Items Returned</span></div>
         ${!items.length ? '<div class="empty-state"><p>No items returned in this range.</p></div>' : `
-        <div class="table-wrap"><table>
-          <thead><tr><th>SKU</th><th>Item / Customer</th><th>Category</th><th style="text-align:right">Times Returned</th><th style="text-align:right">Units</th><th style="text-align:right">Value</th><th style="text-align:right">Customers</th><th style="text-align:right">Units Sold</th><th style="text-align:right">Return Rate</th><th>Last Returned / Reason</th></tr></thead>
+        <div class="table-wrap" style="overflow-x:auto"><table>
+          <thead><tr>${[['SKU', '', ''], ['Item / Customer', '', ''], ['Returns', 'right', 'How many returns it was on'], ['Units', 'right', 'Units returned'], ['Value', 'right', 'Value returned, before tax'], ['Customers', 'right', 'How many customers returned it'], ['Sold', 'right', 'Units sold in the same period and location'], ['Return %', 'right', 'Units returned ÷ units sold']]
+            .map(([l, a, t]) => `<th style="white-space:normal;${a ? `text-align:${a};` : ''}"${t ? ` title="${t}"` : ''}>${l}</th>`).join('')}</tr></thead>
           <tbody>${items.map(r => `<tr style="border-top:2px solid var(--border)">
             <td style="font-family:monospace;font-size:12px">${esc(r.sku)}</td>
-            <td class="fw-600" style="min-width:200px">${esc(r.product_name)}</td>
-            <td>${esc(r.category_name)}</td>
+            <td style="min-width:180px"><div class="fw-600">${esc(r.product_name)}</div><div style="font-size:11px;color:var(--text-muted)">${esc(r.category_name)}${r.brand ? ` · ${esc(r.brand)}` : ''}</div></td>
             <td style="text-align:right" class="fw-600">${r.returns}</td>
             <td style="text-align:right">${qty(r.units)}</td>
-            <td style="text-align:right" class="fw-600">${this.fmt(r.value)}</td>
+            <td style="text-align:right;white-space:nowrap" class="fw-600">${this.fmt(r.value)}</td>
             <td style="text-align:right">${r.customer_count}</td>
             <td style="text-align:right">${qty(r.units_sold)}</td>
             <td style="text-align:right;font-weight:600;color:${rateColor(r.return_rate)}">${r.return_rate == null ? '—' : r.return_rate + '%'}</td>
-            <td></td>
-          </tr>${showCustomers ? r.customers.map(c => `<tr style="font-size:12px;color:var(--text-muted)">
-            <td></td>
-            <td style="padding-left:18px">↳ ${esc(c.customer_name)}${c.business_name ? ` · ${esc(c.business_name)}` : ''}${c.customer_number ? ` <span style="font-family:monospace">${esc(c.customer_number)}</span>` : ''}${c.customer_phone ? ` · ${esc(c.customer_phone)}` : ''}</td>
-            <td></td>
+          </tr>${showCustomers ? r.customers.map(c => {
+            // A business account's name is often its business name too — show it once.
+            const extra = c.business_name && String(c.business_name).trim().toLowerCase() !== String(c.customer_name || '').trim().toLowerCase() ? ` · ${esc(c.business_name)}` : '';
+            const detail = [c.customer_number, c.customer_phone].filter(Boolean).map(esc).join(' · ');
+            const last = [c.last_returned_at ? `Last returned ${this.fmtDate(c.last_returned_at)}` : '', c.last_reason ? `“${esc(String(c.last_reason).slice(0, 120))}”` : ''].filter(Boolean).join(' — ');
+            return `<tr style="font-size:12px;color:var(--text-muted)">
+            <td colspan="2" style="padding-left:18px">↳ <span style="color:var(--text)">${esc(c.customer_name)}${extra}</span>${detail ? ` <span style="font-family:monospace">${detail}</span>` : ''}${last ? `<div style="padding-left:14px">${last}</div>` : ''}</td>
             <td style="text-align:right">${c.returns}</td>
             <td style="text-align:right">${qty(c.units)}</td>
-            <td style="text-align:right">${this.fmt(c.value)}</td>
-            <td></td><td></td><td></td>
-            <td>${c.last_returned_at ? this.fmtDate(c.last_returned_at) : ''}${c.last_reason ? ` — ${esc(String(c.last_reason).slice(0, 80))}` : ''}</td>
-          </tr>`).join('') : ''}`).join('')}</tbody>
+            <td style="text-align:right;white-space:nowrap">${this.fmt(c.value)}</td>
+            <td colspan="3"></td>
+          </tr>`; }).join('') : ''}`).join('')}</tbody>
         </table></div>`}
       </div>
-      <p style="font-size:11px;color:var(--text-muted);margin-top:10px">Returns counted by the day they were processed; cancelled returns left out. Value is what each return credited for the item, before tax. Units are in each item's stock unit (a case of 12 counts as 12). Units Sold and Return Rate compare with the item's completed sales in the same period and location — an item sold before the period and returned in it can go over 100%. "Times Returned" counts returns, so one return of 3 units counts once.</p>`;
+      <p style="font-size:11px;color:var(--text-muted);margin-top:10px">Returns counted by the day they were processed; cancelled returns left out. Value is what each return credited for the item, before tax. Units are in each item's stock unit (a case of 12 counts as 12). <em>Sold</em> is the item's units sold in the same period and location, and <em>Return %</em> is units returned ÷ sold — an item sold before the period and returned in it can go over 100%. <em>Returns</em> counts returns, so one return of 3 units counts once.</p>`;
   },
 
   // ─── Zero & Negative Stock ──────────────────────────────────────────────
