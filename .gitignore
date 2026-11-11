@@ -39,3 +39,7 @@ test-results/
 # Database backups (Settings → Database Backups) — never commit
 backups/
 backups-offsite/
+restore-staged.db
+restore-pending.json
+restore-last.json
+pos-before-restore-*.db*

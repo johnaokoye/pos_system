@@ -287,6 +287,9 @@ Object.assign(App, {
       <div class="card-header"><span class="card-title">Database Backups</span>
         <button class="btn btn-primary btn-sm" id="bk-run" onclick="App.runBackupNow()">Back up now</button></div>
       ${d.behind ? `<div style="background:rgba(220,38,38,.08);border:1px solid var(--danger);border-radius:6px;padding:8px 10px;font-size:13px;margin-bottom:10px;color:var(--danger)"><strong>Scheduled backups are behind.</strong> No scheduled backup has succeeded in the last ${st.backup_frequency === 'hours' ? `${esc(st.backup_every_hours)} hours` : 'day'} — check the list below for the error.</div>` : ''}
+      ${d.last_restore ? `<div style="border:1px solid ${d.last_restore.status === 'ok' ? 'var(--success)' : 'var(--danger)'};border-radius:6px;padding:8px 10px;font-size:12px;margin-bottom:10px">${d.last_restore.status === 'ok'
+        ? `<strong>Restored from ${esc(d.last_restore.filename)}</strong> on ${this.fmtDateTime(d.last_restore.started_at)} by ${esc(d.last_restore.requested_by_name || '—')}. The data as it was just before is in backup ${esc(d.last_restore.pre_restore_backup || '—')} (and kept on the server as ${esc(d.last_restore.previous || '—')}).`
+        : `<strong style="color:var(--danger)">The restore of ${esc(d.last_restore.filename)} on ${this.fmtDateTime(d.last_restore.started_at)} failed</strong> — nothing was changed: ${esc(d.last_restore.error)}`}</div>` : ''}
       <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px">A complete copy of the database, taken while the app runs. Saved on the server in <code>${esc(d.dir)}</code>${lastOk ? ` — last good backup ${this.fmtDateTime(lastOk.created_at)}` : ' — none yet'}. Tills pause for the few seconds a backup takes, so schedule it for when the store is closed.</p>
       <div class="input-row" style="align-items:flex-end">
         <div class="form-group"><label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="bk-enabled" ${st.backup_enabled === '1' ? 'checked' : ''} style="width:auto;margin:0"> Scheduled backups</label></div>
@@ -307,13 +310,22 @@ Object.assign(App, {
       <button class="btn btn-primary btn-sm" onclick="App.saveBackupSettings()">Save backup settings</button>
       <div class="table-wrap" style="margin-top:12px;max-height:320px;overflow-y:auto"><table>
         <thead><tr><th>When</th><th>Type</th><th>Size</th><th>Copy</th><th></th></tr></thead>
-        <tbody>${d.backups.length ? d.backups.map(b => `<tr>
-          <td style="white-space:nowrap">${this.fmtDateTime(b.created_at)}${b.status === 'ok' ? `<div style="font-size:11px;color:var(--text-muted);font-family:monospace">${esc(b.filename)}</div>` : `<div style="font-size:11px;color:var(--danger)">Failed: ${esc(b.error)}</div>`}</td>
-          <td>${b.kind === 'scheduled' ? 'Scheduled' : `Manual${b.employee_name ? `<div style="font-size:11px;color:var(--text-muted)">${esc(b.employee_name)}</div>` : ''}`}</td>
+        <tbody>${d.backups.length ? d.backups.map(b => {
+          const when = b.id ? this.fmtDateTime(b.created_at) : `${esc(b.store_time || '')} <span style="font-size:11px;color:var(--text-muted)">(store time)</span>`;
+          const kind = { scheduled: 'Scheduled', pre_restore: 'Before restore', found: b.exists ? 'Found on server' : 'In copy folder' }[b.kind]
+            || `Manual${b.employee_name ? `<div style="font-size:11px;color:var(--text-muted)">${esc(b.employee_name)}</div>` : ''}`;
+          const from = b.exists ? '' : '?from=copy';
+          const usable = b.status === 'ok' && (b.exists || b.in_copy);
+          return `<tr>
+          <td style="white-space:nowrap">${when}${b.status === 'ok' ? `<div style="font-size:11px;color:var(--text-muted);font-family:monospace">${esc(b.filename)}</div>` : `<div style="font-size:11px;color:var(--danger)">Failed: ${esc(b.error)}</div>`}</td>
+          <td>${kind}</td>
           <td>${mb(b.size_bytes)}</td>
-          <td>${b.copy_status === 'ok' ? '<span style="color:var(--success)">Copied</span>' : b.copy_status === 'failed' ? `<span style="color:var(--danger)" title="${esc(b.copy_error)}">Failed</span><div style="font-size:11px;color:var(--danger);max-width:220px">${esc(b.copy_error)}</div>` : '—'}</td>
-          <td style="white-space:nowrap;text-align:right">${b.status === 'ok' && b.exists ? `<a class="btn btn-sm btn-outline" href="/api/backups/${b.id}/download" download>Download</a> <button class="btn btn-sm btn-danger" onclick="App.deleteBackup(${b.id}, '${esc(b.filename)}')">Delete</button>` : b.status === 'ok' ? '<span style="font-size:11px;color:var(--text-muted)">file removed</span>' : ''}</td>
-        </tr>`).join('') : '<tr><td colspan="5" class="empty-state">No backups yet</td></tr>'}</tbody>
+          <td>${b.in_copy ? '<span style="color:var(--success)">Copied</span>' : b.copy_status === 'failed' ? `<span style="color:var(--danger)" title="${esc(b.copy_error)}">Failed</span><div style="font-size:11px;color:var(--danger);max-width:220px">${esc(b.copy_error)}</div>` : '—'}</td>
+          <td style="white-space:nowrap;text-align:right">${usable ? `<a class="btn btn-sm btn-outline" href="/api/backups/files/${encodeURIComponent(b.filename)}/download${from}" download>Download</a>
+            <button class="btn btn-sm btn-outline" style="color:var(--warning,#d97706);border-color:var(--warning,#d97706)" onclick="App.showRestoreBackup('${esc(b.filename)}', '${b.exists ? 'local' : 'copy'}', '${esc(b.id ? b.created_at : (b.store_time || ''))}', ${b.id ? 'true' : 'false'})">Restore</button>
+            ${b.exists ? `<button class="btn btn-sm btn-danger" onclick="App.deleteBackup('${esc(b.filename)}')">Delete</button>` : ''}`
+            : b.status === 'ok' ? '<span style="font-size:11px;color:var(--text-muted)">file removed</span>' : ''}</td>
+        </tr>`; }).join('') : '<tr><td colspan="5" class="empty-state">No backups yet</td></tr>'}</tbody>
       </table></div>`;
   },
 
@@ -352,10 +364,70 @@ Object.assign(App, {
     this.loadBackups();
   },
 
-  async deleteBackup(id, filename) {
+  async deleteBackup(filename) {
     if (!confirm(`Delete backup ${filename} from the server? A copy in the copy folder is kept.`)) return;
-    try { await this.api('DELETE', `/backups/${id}`); this.loadBackups(); }
+    try { await this.api('DELETE', `/backups/files/${encodeURIComponent(filename)}`); this.loadBackups(); }
     catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  // Restore (POST /backups/restore, lib/restore.js): password + RESTORE, then
+  // the app backs up the current data, restarts and comes back on the backup.
+  showRestoreBackup(filename, from, when, isUtc) {
+    const esc = v => this.escapeAttr(v == null ? '' : String(v));
+    const whenText = isUtc ? this.fmtDateTime(when) : `${esc(when)} (store time)`;
+    this.showModal(`
+      <div class="modal" style="max-width:520px">
+        <div class="modal-header"><span class="modal-title">Restore ${esc(filename)}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body" style="font-size:13px">
+          <p style="margin-top:0">This puts the whole database back as it was at <strong>${whenText}</strong>.</p>
+          <ul style="margin:0 0 12px;padding-left:18px">
+            <li><strong>Everything entered after that is lost</strong> — sales, payments, stock changes, edits. Re-enter them afterwards (and check RetailPOS Books for sales it already received).</li>
+            <li>A backup of the data <strong>as it is now</strong> is taken first, so this can be undone by restoring that one.</li>
+            <li>The app restarts: <strong>every till goes offline for about a minute</strong> and everyone has to sign in again.</li>
+          </ul>
+          <div class="form-group"><label>Type <strong>RESTORE</strong> to confirm</label><input id="rs-confirm" autocomplete="off" style="width:200px"></div>
+          <div class="form-group" style="margin-bottom:0"><label>Your password</label><input id="rs-password" type="password" autocomplete="current-password" style="width:240px"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-danger" id="rs-go" onclick="App._restoreBackup('${esc(filename)}', '${from === 'copy' ? 'copy' : 'local'}')">Restore</button>
+        </div>
+      </div>`);
+    document.getElementById('rs-confirm').focus();
+  },
+
+  async _restoreBackup(filename, from) {
+    const confirmText = document.getElementById('rs-confirm')?.value.trim();
+    const password = document.getElementById('rs-password')?.value || '';
+    if (confirmText !== 'RESTORE') return this.alert('Type RESTORE to confirm', 'warning');
+    if (!password) return this.alert('Enter your password', 'warning');
+    const btn = document.getElementById('rs-go');
+    btn.disabled = true; btn.textContent = 'Backing up the current data…';
+    let out;
+    try { out = await this.api('POST', '/backups/restore', { filename, from, password, confirm: 'RESTORE' }); }
+    catch (e) { btn.disabled = false; btn.textContent = 'Restore'; return this.alert(e.message, 'error'); }
+    this.closeModal();
+    document.body.insertAdjacentHTML('beforeend', `<div style="position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:5000;display:flex;align-items:center;justify-content:center;padding:16px">
+      <div class="card" style="max-width:440px;text-align:center;padding:24px">
+        <h3 style="margin-top:0">Restoring ${this.escapeAttr(filename)}…</h3>
+        <p style="font-size:13px">The current data was saved as backup <strong>${this.escapeAttr(out.pre_restore_backup)}</strong>. ${out.restarts_itself
+          ? 'The app is restarting with the restored database — this page reloads to the sign-in screen when it’s back.'
+          : '<strong>Start the app again</strong> (it isn’t running under Docker, so it can’t restart itself) — the restore happens as it starts.'}</p>
+        <p id="rs-wait" style="font-size:12px;color:var(--text-muted)">Waiting for the app…</p>
+      </div></div>`);
+    // Wait for the server to go away and come back, then reload.
+    let wentDown = false;
+    const started = Date.now();
+    const poll = async () => {
+      try {
+        const r = await fetch('/api/employees/me', { cache: 'no-store' });
+        if (wentDown || Date.now() - started > 15000) { if (r.status) return location.reload(); }
+      } catch (e) { wentDown = true; }
+      const w = document.getElementById('rs-wait');
+      if (w) w.textContent = `Waiting for the app… ${Math.round((Date.now() - started) / 1000)}s`;
+      setTimeout(poll, 1500);
+    };
+    setTimeout(poll, 1500);
   },
 
   async loadDiscountExcludedBrands() {

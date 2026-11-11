@@ -8,6 +8,8 @@ const fs = require('fs');
 const { db } = require('../database');
 const { requirePermission } = require('../lib/permissions');
 const backups = require('../lib/backups');
+const bcrypt = require('bcryptjs');
+const { createClient } = require('@libsql/client');
 
 // Never through an API key (requirePermission lets those through by scope).
 router.use((req, res, next) => req.apiKey ? res.status(403).json({ error: 'Backups are not available to API keys' }) : next());
@@ -68,29 +70,83 @@ router.post('/test-copy', async (req, res) => {
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-async function backupRow(id) {
-  const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM backups WHERE id = ? AND deleted_at IS NULL', args: [id] });
-  const file = row && backups.backupFile(row.filename);
-  return { row, file: file && fs.existsSync(file) ? file : null };
-}
-
-router.get('/:id/download', async (req, res) => {
+// Download / delete by file name — also files the database has no row for
+// (after a restore, or only in the copy folder). ?from=copy reads the copy
+// folder; delete only ever removes the copy on the server.
+router.get('/files/:filename/download', async (req, res) => {
   try {
-    const { file, row } = await backupRow(req.params.id);
-    if (!file) return res.status(404).json({ error: 'That backup file is no longer on the server' });
-    console.log(`[backup] ${row.filename} downloaded by employee ${req.employee?.id || '?'}`);
-    res.download(file, row.filename);
+    const file = await backups.backupFile(req.params.filename, req.query.from === 'copy' ? 'copy' : 'local');
+    if (!file) return res.status(404).json({ error: 'That backup file is no longer there' });
+    console.log(`[backup] ${req.params.filename} downloaded by employee ${req.employee?.id || '?'}`);
+    res.download(file, req.params.filename);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/:id', async (req, res) => {
+router.delete('/files/:filename', async (req, res) => {
   try {
-    const { row, file } = await backupRow(req.params.id);
-    if (!row) return res.status(404).json({ error: 'Backup not found' });
-    if (file) await fs.promises.unlink(file);
-    await db.execute({ sql: 'UPDATE backups SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?', args: [row.id] });
+    const file = await backups.backupFile(req.params.filename, 'local');
+    if (!file) return res.status(404).json({ error: 'That backup file is no longer on the server' });
+    await fs.promises.unlink(file);
+    await db.execute({ sql: 'UPDATE backups SET deleted_at = CURRENT_TIMESTAMP WHERE filename = ? AND deleted_at IS NULL', args: [req.params.filename] });
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Restore: puts the database back as it was in a backup (lib/restore.js).
+// Needs the person's own password and `confirm: 'RESTORE'`. The backup is
+// copied to restore-staged.db and checked (opens, quick_check ok, has the
+// POS's tables), a backup of the data as it is now is taken (kind
+// 'pre_restore', so this can be undone from the same list), then the restore
+// is left pending and the app exits; Docker starts it again and the swap
+// happens before the database is opened. Everyone is signed out.
+let restoring = false;
+router.post('/restore', async (req, res) => {
+  const paths = require('../lib/restore').restorePaths();
+  if (!paths) return res.status(400).json({ error: 'Restore is only for a local database file' });
+  if (restoring || fs.existsSync(paths.pending)) return res.status(409).json({ error: 'A restore is already under way' });
+  restoring = true;
+  let staged = false;
+  try {
+    const { filename, from, password, confirm } = req.body || {};
+    if (confirm !== 'RESTORE') { restoring = false; return res.status(400).json({ error: 'Type RESTORE to confirm' }); }
+    const { rows: [me] } = await db.execute({ sql: 'SELECT id, first_name, last_name, password FROM employees WHERE id = ? AND active = 1', args: [req.employee?.id || 0] });
+    const stored = me?.password;
+    const ok = !!stored && !!password && (/^\$2[aby]\$/.test(stored) ? await bcrypt.compare(String(password), stored) : String(password) === stored);
+    if (!ok) { restoring = false; return res.status(403).json({ error: 'That password is not right', code: 'bad_password' }); }
+    const source = await backups.backupFile(filename, from === 'copy' ? 'copy' : 'local');
+    if (!source) { restoring = false; return res.status(404).json({ error: 'That backup file is no longer there' }); }
+
+    // Stage a copy first, so pruning by the backup below can't remove the
+    // source, then check the copy is a sound POS database.
+    await fs.promises.copyFile(source, `${paths.staged}.partial`);
+    await fs.promises.rename(`${paths.staged}.partial`, paths.staged);
+    staged = true;
+    const check = createClient({ url: `file:${paths.staged}` });
+    try {
+      const { rows: [qc] } = await check.execute('PRAGMA quick_check');
+      if (String(Object.values(qc)[0]) !== 'ok') throw new Error(`the backup file is damaged (${Object.values(qc)[0]})`);
+      const { rows } = await check.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('employees', 'products', 'transactions')");
+      if (rows.length < 3) throw new Error("it isn't a POS database");
+    } finally { check.close(); }
+
+    const before = await backups.runBackup({ kind: 'pre_restore', employeeId: me.id });
+    if (before.status !== 'ok') throw new Error(`the backup of the current data failed (${before.error}), so nothing was restored`);
+
+    fs.writeFileSync(paths.pending, JSON.stringify({
+      filename, from: from === 'copy' ? 'copy' : 'local', requested_by: me.id, requested_by_name: `${me.first_name} ${me.last_name}`,
+      requested_at: new Date().toISOString(), pre_restore_backup: before.filename,
+    }, null, 2));
+    console.log(`[restore] ${me.first_name} ${me.last_name} is restoring ${filename}; current data backed up as ${before.filename}; restarting`);
+    const docker = fs.existsSync('/.dockerenv');
+    res.json({ ok: true, pre_restore_backup: before.filename, restarts_itself: docker });
+    // Let the reply go out, then exit: Docker starts the app again with the
+    // restored database. Outside Docker it has to be started by hand.
+    setTimeout(() => process.exit(0), 750);
+  } catch (e) {
+    restoring = false;
+    if (staged) { try { fs.unlinkSync(paths.staged); } catch (_) { /* leftover */ } }
+    res.status(400).json({ error: `Couldn't restore that backup: ${e.message}` });
+  }
 });
 
 module.exports = router;
