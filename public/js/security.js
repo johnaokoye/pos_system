@@ -117,6 +117,11 @@ Object.assign(App, {
       { key: 'purchasing_request_payment', label: 'Request Payment on an approved PO (advance / deposit, sent to Accounts Payable)' },
       { key: 'purchasing_receive_direct', label: 'Receive Without PO (stock on hand at once, updates cost, raises the A/P bill)' },
     ]},
+    { key: 'consignment', label: 'Consignment (supplier-owned stock)', subs: [
+      { key: 'consignment_agreements', label: 'Agreements & Orders (create, edit, submit)' },
+      { key: 'consignment_receive', label: 'Receive Consignment Stock (enter a GRN against the delivery note)' },
+      { key: 'consignment_grn_approve', label: 'Approve Consignment GRNs (puts the stock on hand)' },
+    ]},
     { key: 'transfers', label: 'Branch Transfers', subs: [
       { key: 'transfers_create', label: 'Create Transfers' },
       { key: 'transfers_approve', label: 'Approve Transfers' },
@@ -152,6 +157,7 @@ Object.assign(App, {
     // Its own checkbox for the same reason as Approve Special Projects —
     // whoever raises a payment request shouldn't get to sign it off.
     { key: 'payables_approve', label: 'Approve Payment Requests', subs: [] },
+    { key: 'consignment_finance', label: 'Consignment — Finance (revenue/GCT treatment, approve agreements, reconciliations and settlements)', subs: [] },
     { key: 'shop_use', label: 'Shop Use', subs: [
       { key: 'shop_use_request', label: 'Raise Requests' },
       { key: 'shop_use_issue', label: 'Issue Items, Returns & Tool Register' },

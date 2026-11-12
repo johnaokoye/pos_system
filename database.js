@@ -1681,6 +1681,143 @@ async function _init() {
     // ap_payment_allocations (the allocations always sum to amount). Voiding
     // a payment keeps its allocations for the record but they stop counting
     // toward any bill's paid amount.
+    // ── Consignment (supplier-owned stock) ─────────────────────────────
+    // Agreement with a supplier (CAG-): items with agreed costs (versioned by
+    // effective date — the cost in effect on the day a sale qualifies is what
+    // the supplier is owed, decision A8), ownership terms, what makes a
+    // quantity billable, who bears shortages/damage, settlement frequency,
+    // payment terms, and Finance's revenue / output GCT treatment (F3, set per
+    // agreement before approval). draft → submitted → approved | rejected; ended.
+    { sql: `CREATE TABLE IF NOT EXISTS consignment_agreements (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agreement_number TEXT UNIQUE NOT NULL,
+      supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
+      status TEXT NOT NULL DEFAULT 'draft',
+      start_date TEXT,
+      end_date TEXT,
+      ownership_terms TEXT,
+      billing_trigger TEXT NOT NULL DEFAULT 'sale',
+      billable_rule TEXT,
+      shortage_responsibility TEXT NOT NULL DEFAULT 'supplier',
+      damage_responsibility TEXT NOT NULL DEFAULT 'supplier',
+      allow_work_orders INTEGER NOT NULL DEFAULT 0,
+      allow_shop_use INTEGER NOT NULL DEFAULT 0,
+      settlement_frequency TEXT NOT NULL DEFAULT 'monthly',
+      payment_terms TEXT,
+      revenue_treatment TEXT,
+      output_gct_treatment TEXT,
+      finance_notes TEXT,
+      finance_set_by INTEGER REFERENCES employees(id),
+      finance_set_at DATETIME,
+      notes TEXT,
+      created_by INTEGER REFERENCES employees(id),
+      submitted_at DATETIME,
+      approved_by INTEGER REFERENCES employees(id),
+      approved_at DATETIME,
+      approval_signature TEXT,
+      rejected_by INTEGER REFERENCES employees(id),
+      rejected_at DATETIME,
+      rejection_reason TEXT,
+      ended_by INTEGER REFERENCES employees(id),
+      ended_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS consignment_agreement_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agreement_id INTEGER NOT NULL REFERENCES consignment_agreements(id),
+      product_id INTEGER NOT NULL REFERENCES products(id),
+      active INTEGER NOT NULL DEFAULT 1,
+      UNIQUE (agreement_id, product_id)
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS consignment_agreement_costs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agreement_item_id INTEGER NOT NULL REFERENCES consignment_agreement_items(id),
+      cost REAL NOT NULL,
+      effective_from TEXT NOT NULL,
+      created_by INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    // Order to a supplier for consignment stock (CON-), received in part or
+    // whole by Consignment GRNs.
+    { sql: `CREATE TABLE IF NOT EXISTS consignment_orders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_number TEXT UNIQUE NOT NULL,
+      agreement_id INTEGER NOT NULL REFERENCES consignment_agreements(id),
+      supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
+      branch_id INTEGER NOT NULL REFERENCES branches(id),
+      status TEXT NOT NULL DEFAULT 'open',
+      expected_date TEXT,
+      notes TEXT,
+      created_by INTEGER REFERENCES employees(id),
+      cancelled_by INTEGER REFERENCES employees(id),
+      cancelled_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS consignment_order_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL REFERENCES consignment_orders(id),
+      product_id INTEGER NOT NULL REFERENCES products(id),
+      quantity_ordered REAL NOT NULL,
+      quantity_received REAL NOT NULL DEFAULT 0
+    )` },
+    // Consignment GRN (CGRN-): Warehouse enters the supplier's delivery note
+    // and quantities (pending); approval puts the stock on hand at the
+    // branch as supplier-owned lots (stock_lots), saleable at the POS.
+    { sql: `CREATE TABLE IF NOT EXISTS consignment_grns (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      grn_number TEXT UNIQUE NOT NULL,
+      order_id INTEGER NOT NULL REFERENCES consignment_orders(id),
+      agreement_id INTEGER NOT NULL REFERENCES consignment_agreements(id),
+      supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
+      branch_id INTEGER NOT NULL REFERENCES branches(id),
+      delivery_note_number TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      notes TEXT,
+      received_by INTEGER REFERENCES employees(id),
+      received_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      approved_by INTEGER REFERENCES employees(id),
+      approved_at DATETIME,
+      rejected_by INTEGER REFERENCES employees(id),
+      rejected_at DATETIME,
+      rejection_reason TEXT
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS consignment_grn_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      grn_id INTEGER NOT NULL REFERENCES consignment_grns(id),
+      order_item_id INTEGER NOT NULL REFERENCES consignment_order_items(id),
+      product_id INTEGER NOT NULL REFERENCES products(id),
+      quantity REAL NOT NULL
+    )` },
+    // Stock receipts under the branch quantity (lib/stockLots.js): owner
+    // 'owned' | 'consignment' (supplier_id + agreement_id), what received it
+    // (source_type opening | po_receipt | direct_receipt | consignment_grn …,
+    // source_number), when, and what's left on hand / reserved.
+    { sql: `CREATE TABLE IF NOT EXISTS stock_lots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_id INTEGER NOT NULL REFERENCES products(id),
+      branch_id INTEGER NOT NULL REFERENCES branches(id),
+      owner TEXT NOT NULL DEFAULT 'owned',
+      supplier_id INTEGER REFERENCES suppliers(id),
+      agreement_id INTEGER REFERENCES consignment_agreements(id),
+      source_type TEXT NOT NULL,
+      source_id INTEGER,
+      source_number TEXT,
+      received_at DATETIME NOT NULL,
+      qty_received REAL NOT NULL,
+      qty_on_hand REAL NOT NULL,
+      qty_reserved REAL NOT NULL DEFAULT 0,
+      unit_cost REAL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS stock_lot_moves (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      lot_id INTEGER NOT NULL REFERENCES stock_lots(id),
+      qty_change REAL NOT NULL,
+      kind TEXT NOT NULL,
+      reference TEXT,
+      created_by INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     // Bank accounts vendors are paid from — RetailPOS Books' own list, sent
     // here on every sync (PUT /api/payables/bank-accounts), so Process
     // Payment can say which one paid and Books posts to it.
@@ -3800,6 +3937,16 @@ async function _init() {
       // with whoever can approve them.
       if (!('purchasing_delete' in perms)) { perms.purchasing_delete = can(perms, 'purchasing_approve'); changed = true; }
       if (!('pr_delete' in perms)) { perms.pr_delete = can(perms, 'pr_approve'); changed = true; }
+      // Consignment (2026-11-12, decision A9): agreements and orders with
+      // whoever creates POs (Purchasing), entering a Consignment GRN with
+      // whoever receives POs, approving one with whoever approves POs
+      // (authorised receiving), and Finance's part (revenue/GCT treatment,
+      // agreement approval, later reconciliation and settlement) with
+      // whoever approves vendor payments.
+      if (!('consignment_agreements' in perms)) { perms.consignment_agreements = can(perms, 'purchasing_create'); changed = true; }
+      if (!('consignment_receive' in perms)) { perms.consignment_receive = can(perms, 'purchasing_receive'); changed = true; }
+      if (!('consignment_grn_approve' in perms)) { perms.consignment_grn_approve = can(perms, 'purchasing_approve'); changed = true; }
+      if (!('consignment_finance' in perms)) { perms.consignment_finance = !!perms.payables_approve; changed = true; }
       // Deleting quotes (2026-11-12) starts with whoever can approve them.
       if (!('quotations_delete' in perms)) { perms.quotations_delete = can(perms, 'quotations_approve'); changed = true; }
       // Requesting an (advance) payment from an approved PO (2026-11-02)
@@ -4143,6 +4290,8 @@ async function _init() {
     'CREATE INDEX IF NOT EXISTS idx_transaction_items_product_id ON transaction_items(product_id)',
     'CREATE INDEX IF NOT EXISTS idx_transaction_payments_transaction_id ON transaction_payments(transaction_id)',
     'CREATE INDEX IF NOT EXISTS idx_quotation_items_quote_id ON quotation_items(quote_id)',
+    'CREATE INDEX IF NOT EXISTS idx_stock_lots_item_branch ON stock_lots(product_id, branch_id, qty_on_hand)',
+    'CREATE INDEX IF NOT EXISTS idx_stock_lot_moves_lot ON stock_lot_moves(lot_id)',
     'CREATE INDEX IF NOT EXISTS idx_quotation_item_sources_quotation_item_id ON quotation_item_sources(quotation_item_id)',
     'CREATE INDEX IF NOT EXISTS idx_rental_agreements_customer_id ON rental_agreements(customer_id)',
     'CREATE INDEX IF NOT EXISTS idx_rental_agreements_status ON rental_agreements(status)',

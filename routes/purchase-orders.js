@@ -3,6 +3,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { resolvePurchaseUnit, lineName, stockUnits } = require('../lib/units');
 const { syncBinQty } = require('../lib/binSync');
+const { addOwnedLot } = require('../lib/stockLots');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -409,7 +410,7 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
     const perms = req.employee?.permissions;
     const tx = await db.transaction('write');
     try {
-      let receiptValue = 0, receiptTax = 0, receiptId = null, repriced = false;
+      let receiptValue = 0, receiptTax = 0, receiptId = null, receiptNumber = null, repriced = false;
       const priceChanges = [];
       for (const { item_id, quantity_received, unit_cost: newCostRaw, selling_price: newPriceRaw } of (items || [])) {
         const qty = Math.round((Number(quantity_received) || 0) * 1000) / 1000; // part quantities for measured units
@@ -421,6 +422,7 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
           const receipt_number = await nextNumber(tx, 'po_receipts', 'receipt_number', 'RCV-', 6);
           const r = await tx.execute({ sql: 'INSERT INTO po_receipts (receipt_number, po_id, branch_id, received_by) VALUES (?,?,?,?)', args: [receipt_number, po.id, po.branch_id || null, req.employee?.id || null] });
           receiptId = Number(r.lastInsertRowid);
+          receiptNumber = receipt_number;
         }
         // A new unit cost (in the PO's currency, per the line's unit) reprices
         // the PO line before it's received — the vendor dropped the price after
@@ -486,6 +488,8 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
           if (po.branch_id) {
             await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, po.branch_id, singles, item.product_id, singles] });
             await syncBinQty(tx, item.product_id, po.branch_id, singles);
+            // A dated owned receipt for oldest-first selling (lib/stockLots.js), once tracking has started.
+            await addOwnedLot(tx, { product_id: item.product_id, branch_id: po.branch_id, source_type: 'po_receipt', source_id: receiptId, source_number: receiptNumber, qty: singles, unit_cost: newCost, employee_id: req.employee?.id || null });
           }
         }
         await tx.execute({ sql: 'INSERT INTO po_receipt_items (receipt_id, po_item_id, product_id, quantity, stock_units, prev_cost, new_cost) VALUES (?,?,?,?,?,?,?)', args: [receiptId, item.id, item.product_id || null, qty, singles, prevCost, newCost] });

@@ -12,6 +12,9 @@ fs.mkdirSync(dir, { recursive: true });
 process.env.TURSO_DATABASE_URL = `file:${path.join(dir, 'test.db')}`;
 process.env.TURSO_AUTH_TOKEN = '';
 process.env.PORT = process.env.POS_TEST_PORT;
+// Consignment is built in phases and switched off elsewhere until selling is
+// in place (lib/stockLots.js); the tests run it.
+process.env.CONSIGNMENT_ENABLED = '1';
 
 const { ensureReady, db } = require('../../database');
 

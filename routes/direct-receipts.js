@@ -11,6 +11,7 @@ const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { resolvePurchaseUnit, lineName, parseQty, stockUnits } = require('../lib/units');
 const { syncBinQty } = require('../lib/binSync');
+const { addOwnedLot } = require('../lib/stockLots');
 const { autoBills, createBill, dueDateFor, today, PAID_SQL, round2 } = require('../lib/payables');
 const { localTaxRate, defaultTaxOption, priceLine, poTotals } = require('../lib/poLines');
 
@@ -136,6 +137,8 @@ router.post('/', async (req, res) => {
               ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`,
             args: [p.id, branch_id, singles, p.id, singles] });
           await syncBinQty(tx, p.id, branch_id, singles);
+          // A dated owned receipt for oldest-first selling (lib/stockLots.js), once tracking has started.
+          await addOwnedLot(tx, { product_id: p.id, branch_id, source_type: 'direct_receipt', source_id: receiptId, source_number: receipt_number, qty: singles, unit_cost: newCost, employee_id: req.employee?.id || null });
         }
         await tx.execute({ sql: `INSERT INTO direct_receipt_items (receipt_id, product_id, product_name, sku, uom_id, purchase_unit, units_per, quantity, stock_units, unit_cost, tax_option, tax_rate, tax_amount, total, prev_cost, new_cost)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
