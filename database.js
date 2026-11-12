@@ -1975,6 +1975,153 @@ async function _init() {
       employee_id INTEGER REFERENCES employees(id),
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // Settlement statement (CST-) from an approved month-end reconciliation:
+    // what's owed to the supplier per item — sales, layaways paid off, work
+    // order parts, returns (earlier months' ones listed as referenced
+    // adjustments, A3), shop use and approved shortages/damage — at the agreed
+    // costs. A/P enters the supplier's invoice against it
+    // (consignment_invoices); differences go to Finance, who correct the
+    // settlement or approve them to Consignment Variance (F2); accepting
+    // raises the A/P bill (bill_id), paid through a payment request.
+    // open → in_review → matched → billed; cancelled when the month reopens.
+    { sql: `CREATE TABLE IF NOT EXISTS consignment_settlements (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      settlement_number TEXT UNIQUE NOT NULL,
+      recon_id INTEGER NOT NULL REFERENCES consignment_reconciliations(id),
+      agreement_id INTEGER NOT NULL REFERENCES consignment_agreements(id),
+      supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
+      period TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open',
+      subtotal REAL NOT NULL DEFAULT 0,
+      expected_tax REAL NOT NULL DEFAULT 0,
+      total REAL NOT NULL DEFAULT 0,
+      adjustments_json TEXT,
+      bill_id INTEGER REFERENCES ap_bills(id),
+      created_by INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      cancelled_at DATETIME,
+      cancel_reason TEXT
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS consignment_settlement_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      settlement_id INTEGER NOT NULL REFERENCES consignment_settlements(id),
+      product_id INTEGER NOT NULL REFERENCES products(id),
+      sales_qty REAL NOT NULL DEFAULT 0,
+      sales_value REAL NOT NULL DEFAULT 0,
+      layaway_qty REAL NOT NULL DEFAULT 0,
+      layaway_value REAL NOT NULL DEFAULT 0,
+      work_order_qty REAL NOT NULL DEFAULT 0,
+      work_order_value REAL NOT NULL DEFAULT 0,
+      returns_qty REAL NOT NULL DEFAULT 0,
+      returns_value REAL NOT NULL DEFAULT 0,
+      prior_returns_qty REAL NOT NULL DEFAULT 0,
+      prior_returns_value REAL NOT NULL DEFAULT 0,
+      shop_use_qty REAL NOT NULL DEFAULT 0,
+      shop_use_value REAL NOT NULL DEFAULT 0,
+      chargeable_qty REAL NOT NULL DEFAULT 0,
+      chargeable_value REAL NOT NULL DEFAULT 0,
+      billable_qty REAL NOT NULL DEFAULT 0,
+      billable_value REAL NOT NULL DEFAULT 0,
+      tax_rate REAL NOT NULL DEFAULT 0,
+      expected_tax REAL NOT NULL DEFAULT 0,
+      original_qty REAL,
+      original_value REAL,
+      original_tax REAL,
+      corrected_by INTEGER REFERENCES employees(id),
+      corrected_at DATETIME,
+      correction_reason TEXT
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS consignment_settlement_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      settlement_id INTEGER NOT NULL REFERENCES consignment_settlements(id),
+      action TEXT NOT NULL,
+      details TEXT,
+      employee_id INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    // The supplier's invoice entered by A/P against a settlement, line by
+    // line, with the differences worked out (quantity, cost, tax, total).
+    // Each flagged line is resolved by Finance: 'corrected' (the settlement
+    // line takes the invoice's figures) or 'variance' (the difference goes to
+    // Consignment Variance). Nothing goes to variance automatically.
+    // in_review → matched → accepted (bill_id) | rejected.
+    { sql: `CREATE TABLE IF NOT EXISTS consignment_invoices (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      settlement_id INTEGER NOT NULL REFERENCES consignment_settlements(id),
+      supplier_invoice_number TEXT NOT NULL,
+      invoice_date TEXT NOT NULL,
+      supplier_trn TEXT,
+      tax_invoice INTEGER NOT NULL DEFAULT 0,
+      subtotal REAL NOT NULL DEFAULT 0,
+      tax_amount REAL NOT NULL DEFAULT 0,
+      total REAL NOT NULL DEFAULT 0,
+      variance_amount REAL NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'in_review',
+      notes TEXT,
+      entered_by INTEGER REFERENCES employees(id),
+      entered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      accepted_by INTEGER REFERENCES employees(id),
+      accepted_at DATETIME,
+      bill_id INTEGER REFERENCES ap_bills(id),
+      rejected_by INTEGER REFERENCES employees(id),
+      rejected_at DATETIME,
+      reject_reason TEXT
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS consignment_invoice_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      invoice_id INTEGER NOT NULL REFERENCES consignment_invoices(id),
+      product_id INTEGER NOT NULL REFERENCES products(id),
+      qty REAL NOT NULL DEFAULT 0,
+      unit_cost REAL NOT NULL DEFAULT 0,
+      amount REAL NOT NULL DEFAULT 0,
+      tax_amount REAL NOT NULL DEFAULT 0,
+      settlement_qty REAL NOT NULL DEFAULT 0,
+      settlement_value REAL NOT NULL DEFAULT 0,
+      settlement_tax REAL NOT NULL DEFAULT 0,
+      qty_diff REAL NOT NULL DEFAULT 0,
+      cost_diff REAL NOT NULL DEFAULT 0,
+      value_diff REAL NOT NULL DEFAULT 0,
+      tax_diff REAL NOT NULL DEFAULT 0,
+      flagged INTEGER NOT NULL DEFAULT 0,
+      resolution TEXT,
+      resolution_reason TEXT,
+      resolved_by INTEGER REFERENCES employees(id),
+      resolved_at DATETIME
+    )` },
+    // Consignment accounting entries for RetailPOS Books (F1, F4): the
+    // obligation accrued when a sale / paid-off layaway / work-order issue
+    // qualifies (Dr Consignment Cost of Sales / Cr Accrued Consignment
+    // Obligation, at the cost saved on it), reversed by a return, and at
+    // month-end approval the approved chargeable shortages/damage (Dr
+    // Shortages and Damage Chargeable) and shop use (Dr inventory_account_code)
+    // against the obligation. Accounts are roles Books maps in its Settings —
+    // entries wait there until they're filled in. source_key is unique, so an
+    // entry is queued once (GET /consignment/postings-feed → postings-ack).
+    { sql: `CREATE TABLE IF NOT EXISTS consignment_postings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_key TEXT UNIQUE NOT NULL,
+      source_type TEXT NOT NULL,
+      source_id INTEGER,
+      recon_id INTEGER REFERENCES consignment_reconciliations(id),
+      agreement_id INTEGER REFERENCES consignment_agreements(id),
+      supplier_id INTEGER REFERENCES suppliers(id),
+      product_id INTEGER REFERENCES products(id),
+      posting_date TEXT NOT NULL,
+      debit_role TEXT NOT NULL,
+      credit_role TEXT NOT NULL,
+      inventory_account_code TEXT,
+      amount REAL NOT NULL,
+      reference TEXT,
+      memo TEXT,
+      reverses_id INTEGER REFERENCES consignment_postings(id),
+      reversed INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      external_ref TEXT,
+      posted_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     // A work order's parts issued from stock (Issue from Stock): per item
     // (not per part line — the parts list is rewritten when edited), from the
     // WO's branch, recorded once (issue_key). Takes the stock off then.
@@ -3388,6 +3535,16 @@ async function _init() {
     'ALTER TABLE consignment_reconciliation_lines ADD COLUMN work_orders REAL NOT NULL DEFAULT 0',
     'ALTER TABLE consignment_reconciliation_lines ADD COLUMN work_order_qty REAL NOT NULL DEFAULT 0',
     'ALTER TABLE consignment_reconciliation_lines ADD COLUMN work_order_value REAL NOT NULL DEFAULT 0',
+    // Consignment settlement bills (F2): what clears the accrued obligation and
+    // what Finance approved to Consignment Variance. Supplier credit notes are
+    // ap_payments rows (method/posting_mode 'credit_note') with their GCT and
+    // what they credit ('purchases' or 'consignment').
+    'ALTER TABLE ap_bills ADD COLUMN consignment_settlement_id INTEGER REFERENCES consignment_settlements(id)',
+    'ALTER TABLE ap_bills ADD COLUMN obligation_amount REAL',
+    'ALTER TABLE ap_bills ADD COLUMN variance_amount REAL',
+    'ALTER TABLE ap_payments ADD COLUMN tax_amount REAL',
+    'ALTER TABLE ap_payments ADD COLUMN credit_account TEXT',
+    'ALTER TABLE ap_payments ADD COLUMN consignment_settlement_id INTEGER REFERENCES consignment_settlements(id)',
     'ALTER TABLE account_payments ADD COLUMN contra_id INTEGER REFERENCES contras(id)',
     // The customer account of a business that's also this supplier — the
     // link a contra (routes/contras.js) needs.

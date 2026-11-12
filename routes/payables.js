@@ -143,6 +143,18 @@ router.put('/bills/:id', requirePermission('payables_bills'), async (req, res) =
     const { rows: [bill] } = await db.execute({ sql: `${billSelect} WHERE b.id = ?`, args: [req.params.id] });
     if (!bill) return res.status(404).json({ error: 'Bill not found' });
     if (bill.status === 'void') return res.status(400).json({ error: 'A void bill cannot be edited' });
+    // A consignment settlement bill is the matched invoice: its amounts,
+    // vendor and invoice # stay as matched (void it and accept it again).
+    if (bill.consignment_settlement_id) {
+      const b = req.body;
+      const changed = (b.amount !== undefined && round2(b.amount) !== round2(bill.amount))
+        || (b.tax_amount !== undefined && round2(b.tax_amount) !== round2(bill.tax_amount))
+        || (b.supplier_id !== undefined && Number(b.supplier_id) !== Number(bill.supplier_id))
+        || (b.vendor_invoice_number !== undefined && String(b.vendor_invoice_number || '').trim() !== String(bill.vendor_invoice_number || ''))
+        || (b.currency !== undefined && (b.currency || null) !== (bill.currency || null));
+      if (changed)
+        return res.status(400).json({ error: 'This bill is a matched consignment settlement — its vendor, invoice # and amounts can only change by voiding it and matching the invoice again' });
+    }
     const body = { ...req.body, supplier_id: req.body.supplier_id || bill.supplier_id };
     let cur;
     try { cur = await billCurrency(body, bill); } catch (e) { return res.status(e.status || 500).json({ error: e.message }); }
@@ -188,6 +200,8 @@ router.post('/bills/:id/void', requirePermission('payables_void'), async (req, r
       { sql: 'DELETE FROM ap_payment_allocations WHERE bill_id = ? AND payment_id IN (SELECT id FROM ap_payments WHERE po_id IS NOT NULL)', args: [bill.id] },
       { sql: "UPDATE ap_bills SET status = 'void', void_reason = ?, voided_by = ?, voided_at = CURRENT_TIMESTAMP WHERE id = ?", args: [reason, req.employee?.id || null, bill.id] },
     ], 'write');
+    // A consignment settlement's bill: its invoice goes back to matched.
+    if (bill.consignment_settlement_id) await require('../lib/consignmentSettlement').afterBillVoid(db, bill, req.employee?.id);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -416,16 +430,85 @@ router.put('/bank-accounts', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Supplier credit notes ─────────────────────────────────
+// What a vendor credits us: reduces one or more of their bills now, or stays
+// on their account (unapplied) to apply later with Apply. Stored as an
+// ap_payments row (method / posting_mode 'credit_note', VCN-) so it counts
+// toward bill balances, aging and statements like a payment; RetailPOS Books
+// posts it from the payments feed. { supplier_id, reference (their credit
+// note #), credit_date, amount (incl. GCT), tax_amount, credit_account
+// 'purchases' | 'consignment', consignment_settlement_id, notes,
+// allocations: [{ bill_id, amount }] }
+router.post('/credit-notes', requirePermission('payables_bills'), async (req, res) => {
+  const b = req.body || {};
+  const amount = round2(b.amount);
+  const tax = round2(b.tax_amount);
+  const reference = String(b.reference || '').trim();
+  if (!b.supplier_id) return res.status(400).json({ error: 'Choose the vendor' });
+  if (!reference) return res.status(400).json({ error: "Enter the vendor's credit note number" });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(b.credit_date || '')) return res.status(400).json({ error: 'Enter the credit note date' });
+  if (!(amount > 0)) return res.status(400).json({ error: 'Amount must be greater than zero' });
+  if (tax < 0 || tax > amount) return res.status(400).json({ error: 'GCT must be between 0 and the amount' });
+  const creditAccount = b.credit_account === 'consignment' ? 'consignment' : 'purchases';
+  if (!String(b.notes || '').trim()) return res.status(400).json({ error: 'Give the reason for the credit' });
+  const allocations = (Array.isArray(b.allocations) ? b.allocations : []).map(a => ({ bill_id: Number(a.bill_id), amount: round2(a.amount) })).filter(a => a.bill_id && a.amount > 0);
+  if (round2(allocations.reduce((t, a) => t + a.amount, 0)) > amount) return res.status(400).json({ error: "You can't apply more than the credit note" });
+  const tx = await db.transaction('write');
+  let committed = false;
+  try {
+    const { rows: [supplier] } = await tx.execute({ sql: 'SELECT id FROM suppliers WHERE id = ?', args: [b.supplier_id] });
+    if (!supplier) throw Object.assign(new Error('Vendor not found'), { status: 400 });
+    const { rows: [dupe] } = await tx.execute({
+      sql: "SELECT payment_number FROM ap_payments WHERE supplier_id = ? AND method = 'credit_note' AND status != 'void' AND LOWER(TRIM(reference)) = LOWER(?)",
+      args: [b.supplier_id, reference],
+    });
+    if (dupe) throw Object.assign(new Error(`Credit note ${reference} from this vendor is already entered as ${dupe.payment_number}`), { status: 400 });
+    let settlementId = null;
+    if (b.consignment_settlement_id) {
+      const { rows: [cs] } = await tx.execute({ sql: 'SELECT id, supplier_id FROM consignment_settlements WHERE id = ?', args: [b.consignment_settlement_id] });
+      if (!cs || Number(cs.supplier_id) !== Number(b.supplier_id)) throw Object.assign(new Error("That settlement isn't this vendor's"), { status: 400 });
+      settlementId = cs.id;
+    }
+    for (const a of allocations) {
+      const { rows: [bill] } = await tx.execute({ sql: `SELECT b.id, b.bill_number, b.supplier_id, b.status, b.amount - ${PAID_SQL} AS balance FROM ap_bills b WHERE b.id = ?`, args: [a.bill_id] });
+      if (!bill || Number(bill.supplier_id) !== Number(b.supplier_id) || bill.status === 'void') throw Object.assign(new Error("A bill to apply it to isn't this vendor's open bill"), { status: 400 });
+      if (a.amount > round2(bill.balance)) throw Object.assign(new Error(`Only ${round2(bill.balance).toFixed(2)} is owing on ${bill.bill_number}`), { status: 400 });
+    }
+    const number = await require('../lib/nextNumber').nextNumber(tx, 'ap_payments', 'payment_number', 'VCN-', 6);
+    const ins = await tx.execute({
+      sql: `INSERT INTO ap_payments (payment_number, supplier_id, payment_date, amount, method, reference, notes, status, created_by, posting_mode, tax_amount, credit_account, consignment_settlement_id)
+            VALUES (?,?,?,?, 'credit_note', ?,?, 'posted', ?, 'credit_note', ?,?,?)`,
+      args: [number, b.supplier_id, b.credit_date, amount, reference, String(b.notes).trim(), req.employee?.id || null, tax, creditAccount, settlementId],
+    });
+    const id = Number(ins.lastInsertRowid);
+    for (const a of allocations) await tx.execute({ sql: 'INSERT INTO ap_payment_allocations (payment_id, bill_id, amount) VALUES (?,?,?)', args: [id, a.bill_id, a.amount] });
+    if (settlementId) {
+      await tx.execute({ sql: 'INSERT INTO consignment_settlement_log (settlement_id, action, details, employee_id) VALUES (?,?,?,?)', args: [settlementId, 'credit_note', JSON.stringify({ number, reference, amount }), req.employee?.id || null] });
+    }
+    await tx.commit();
+    committed = true;
+    res.status(201).json(await loadPayment(id));
+  } catch (e) {
+    if (!committed) await tx.rollback().catch(() => {});
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
 // Payments Books posts as a whole (posting_mode 'payment'): Dr A/P / Cr the
 // bank account they were paid from, once, keyed appay:<id>; voided ones are
-// reversed. Applying them to bills is recorded without a journal.
+// reversed. Applying them to bills is recorded without a journal. Supplier
+// credit notes (posting_mode 'credit_note') come the same way: Dr A/P / Cr
+// input GCT (tax_amount) / Cr the purchases account, or the Accrued
+// Consignment Obligation when credit_account is 'consignment'.
 router.get('/payments-feed', requirePermission('payables'), async (req, res) => {
   try {
     const { rows } = await db.execute({
       sql: `SELECT p.id, p.payment_number, p.supplier_id, s.name AS supplier_name, s.supplier_number, p.payment_date, p.amount, p.currency, p.exchange_rate, p.amount_fx,
-              p.method, p.reference, p.status, p.books_bank_account_id, p.bank_account_name, p.bank_currency, po.po_number, r.request_number, ${UNAPPLIED_SQL} AS unapplied
+              p.method, p.reference, p.status, p.books_bank_account_id, p.bank_account_name, p.bank_currency, po.po_number, r.request_number, ${UNAPPLIED_SQL} AS unapplied,
+              p.posting_mode, p.tax_amount, p.credit_account, p.notes, cs.settlement_number
             FROM ap_payments p JOIN suppliers s ON s.id = p.supplier_id LEFT JOIN purchase_orders po ON po.id = p.po_id LEFT JOIN payment_requests r ON r.id = p.payment_request_id
-            WHERE p.posting_mode = 'payment' ORDER BY p.id`,
+            LEFT JOIN consignment_settlements cs ON cs.id = p.consignment_settlement_id
+            WHERE p.posting_mode IN ('payment', 'credit_note') ORDER BY p.id`,
       args: [],
     });
     res.json(rows.map(r => ({ ...r, unapplied: round2(r.unapplied) })));

@@ -1,6 +1,7 @@
 // Consignment — supplier-owned stock: agreements, orders, Consignment GRNs and the consignment stock report (routes/consignment.js).
 Object.assign(App, {
-  _consCanOpen() { return this.can('consignment') || this.can('consignment_finance'); },
+  _consCanOpen() { return this.can('consignment') || this.can('consignment_finance') || this.can('payables'); },
+  _consFull() { return this.can('consignment') || this.can('consignment_finance'); },
   _consStatusBadge: { draft: 'badge-secondary', submitted: 'badge-warning', approved: 'badge-success', rejected: 'badge-danger', ended: 'badge-secondary',
     open: 'badge-info', partial: 'badge-warning', received: 'badge-success', cancelled: 'badge-secondary', pending: 'badge-warning' },
   _consStatusLabel: { draft: 'Draft', submitted: 'Awaiting Finance', approved: 'Approved', rejected: 'Rejected', ended: 'Ended',
@@ -8,9 +9,13 @@ Object.assign(App, {
   _consResp: { supplier: 'Supplier', total_tools: 'Total Tools' },
 
   async renderConsignment(tab) {
-    this._consTab = tab || this._consTab || 'agreements';
+    // A/P without consignment access sees only the settlements to match.
+    const tabs = this._consFull()
+      ? [['agreements', 'Agreements'], ['orders', 'Orders'], ['grns', 'Goods Received (GRN)'], ['stock', 'Consignment Stock'], ['recon', 'Month-End Reconciliation'], ['settlements', 'Settlements'], ['postings', 'Books Postings']]
+      : [['settlements', 'Settlements']];
+    this._consTab = tab || this._consTab || tabs[0][0];
+    if (!tabs.some(([k]) => k === this._consTab)) this._consTab = tabs[0][0];
     const c = document.getElementById('content');
-    const tabs = [['agreements', 'Agreements'], ['orders', 'Orders'], ['grns', 'Goods Received (GRN)'], ['stock', 'Consignment Stock'], ['recon', 'Month-End Reconciliation']];
     c.innerHTML = `
       <div class="page-header"><h2>Consignment</h2>
         <div style="display:flex;gap:8px">
@@ -30,6 +35,8 @@ Object.assign(App, {
       else if (this._consTab === 'orders') await this._consOrdersTab();
       else if (this._consTab === 'grns') await this._consGrnsTab();
       else if (this._consTab === 'recon') await this._consReconTab();
+      else if (this._consTab === 'settlements') await this._consSettlementsTab();
+      else if (this._consTab === 'postings') await this._consPostingsTab();
       else await this._consStockTab();
     } catch (e) {
       const el = document.getElementById('cons-body');
@@ -421,6 +428,8 @@ Object.assign(App, {
         <div class="modal-footer" style="flex-wrap:wrap;gap:8px">
           ${canPrep ? `<button class="btn btn-outline" onclick="App._consReconAction(${r.id}, 'refresh')">Refresh Figures</button>` : ''}
           ${draft && fin ? `<button class="btn btn-success" ${r.period_ended ? '' : 'disabled title="After the month has ended"'} onclick="App._consApproveRecon(${r.id})">Approve &amp; Lock</button>` : ''}
+          ${!draft && r.settlement ? `<button class="btn btn-primary" onclick="App.viewConsSettlement(${r.settlement.id})">Settlement ${r.settlement.settlement_number}</button>` : ''}
+          ${!draft && !r.settlement && fin ? `<button class="btn btn-outline" onclick="App._consMakeSettlement(${r.id})">Make Settlement Statement</button>` : ''}
           ${!draft && this.can('settings') ? `<button class="btn btn-danger" onclick="App._consReopenRecon(${r.id})">Reopen…</button>` : ''}
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
@@ -484,4 +493,167 @@ Object.assign(App, {
       this.renderConsignment('stock');
     } catch (e) { this.alert(e.message, 'error'); }
   },
+
+  // ── Settlements and invoice matching (Phase 4) ─────────────────────────────
+  _consSettleStatus: { open: ['Awaiting invoice', 'badge-info'], in_review: ['Differences — Finance', 'badge-warning'], matched: ['Matched — to accept', 'badge-info'], billed: ['Billed', 'badge-success'], cancelled: ['Cancelled', 'badge-secondary'] },
+  _consSettleBadge(st) { const [l, c] = this._consSettleStatus[st] || [st, '']; return `<span class="badge-pill ${c}">${l}</span>`; },
+
+  async _consSettlementsTab() {
+    const rows = await this.api('GET', '/consignment/settlements');
+    const el = document.getElementById('cons-body');
+    if (!el) return;
+    el.innerHTML = `<div class="card"><div style="font-size:13px;color:var(--text-muted);margin-bottom:8px">A settlement statement is made when Finance approves a month. A/P enters the supplier's invoice against it; any difference goes to Finance; accepting it raises the A/P bill, paid through a payment request.</div>
+      <div class="table-wrap"><table>
+      <thead><tr><th>Settlement #</th><th>Period</th><th>Supplier</th><th>Agreement</th><th>Supplier invoice</th><th style="text-align:right">Total</th><th>Bill</th><th>Status</th></tr></thead>
+      <tbody>${rows.length ? rows.map(r => `<tr style="cursor:pointer" onclick="App.viewConsSettlement(${r.id})"><td class="fw-600">${r.settlement_number}</td><td>${r.period}</td><td>${this.escapeAttr(r.supplier_name)}</td><td>${r.agreement_number}</td>
+        <td>${this.escapeAttr(r.invoice_number || '—')}</td><td style="text-align:right">${this.fmt(r.total)}</td><td>${r.bill_number || '—'}</td><td>${this._consSettleBadge(r.status)}</td></tr>`).join('')
+        : '<tr><td colspan="8" class="empty-state">No settlements yet — they are made when a month-end reconciliation is approved</td></tr>'}</tbody></table></div></div>`;
+  },
+
+  async _consMakeSettlement(reconId) {
+    try { const s = await this.api('POST', `/consignment/reconciliations/${reconId}/settlement`, {}); this.viewConsSettlement(s.id); }
+    catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  async viewConsSettlement(id) {
+    let s;
+    try { s = await this.api('GET', `/consignment/settlements/${id}`); } catch (e) { this.alert(e.message, 'error'); return; }
+    this._consSettlement = s;
+    const esc = x => this.escapeAttr(x ?? '');
+    const n = v => (v == null ? '' : (Math.abs(v) < 0.0005 ? '0' : String(Math.round(v * 1000) / 1000)));
+    const th = (x, right = true) => `<th style="text-align:${right ? 'right' : 'left'};white-space:nowrap">${x}</th>`;
+    const inv = s.invoice;
+    const ap = this.can('payables_bills');
+    const fin = this.can('consignment_finance');
+    const live = s.status !== 'cancelled';
+    const diff = (v, money) => (Math.abs(v) < (money ? 0.005 : 0.0005) ? '<span style="color:var(--text-muted)">—</span>' : `<span style="color:var(--danger);font-weight:600">${v > 0 ? '+' : ''}${money ? this.fmt(v) : n(v)}</span>`);
+    const resLabel = { corrected: 'Settlement corrected', variance: 'Approved to Consignment Variance' };
+    const invoiceHtml = !inv ? '' : `
+      <div style="font-weight:600;margin:14px 0 4px">Supplier invoice ${esc(inv.supplier_invoice_number)} · ${this.fmtDate(inv.invoice_date)} ${this._consSettleBadge(inv.status === 'accepted' ? 'billed' : inv.status)}</div>
+      <div style="font-size:12px;margin-bottom:6px">Entered by ${esc(inv.entered_by_name)} · ${inv.tax_invoice ? `Valid tax invoice${inv.supplier_trn ? `, TRN ${esc(inv.supplier_trn)}` : ''}` : 'Not marked as a valid tax invoice'}${inv.notes ? ` · ${esc(inv.notes)}` : ''}</div>
+      <div class="table-wrap"><table style="font-size:12px">
+        <thead><tr>${th('Item', false)}${th('Settlement qty')}${th('Invoice qty')}${th('Qty diff.')}${th('Unit cost')}${th('Cost diff.')}${th('Settlement amount')}${th('Invoice amount')}${th('Amount diff.')}${th('GCT diff.')}${th('Finance', false)}</tr></thead>
+        <tbody>${inv.lines.map(l => `<tr style="${l.flagged && !l.resolution ? 'background:rgba(220,38,38,.06)' : ''}"><td>${esc(l.product_name)}</td>
+          <td style="text-align:right">${n(l.settlement_qty)}</td><td style="text-align:right">${n(l.qty)}</td><td style="text-align:right">${diff(l.qty_diff)}</td>
+          <td style="text-align:right">${this.fmt(l.unit_cost)}</td><td style="text-align:right">${diff(l.cost_diff, true)}</td>
+          <td style="text-align:right">${this.fmt(l.settlement_value)}</td><td style="text-align:right">${this.fmt(l.amount)}</td><td style="text-align:right">${diff(l.value_diff, true)}</td><td style="text-align:right">${diff(l.tax_diff, true)}</td>
+          <td>${!l.flagged ? '<span style="color:var(--success, #16a34a)">Matches</span>' : l.resolution ? `${resLabel[l.resolution]}<div style="color:var(--text-muted)">${esc(l.resolved_by_name)}: ${esc(l.resolution_reason)}</div>`
+            : fin && inv.status === 'in_review' ? `<button class="btn btn-sm btn-outline" onclick="App._consResolveLine(${s.id}, ${l.id}, 'corrected')">Correct settlement</button> <button class="btn btn-sm btn-outline" onclick="App._consResolveLine(${s.id}, ${l.id}, 'variance')">Approve to variance</button>`
+            : '<span style="color:var(--warning, #d97706)">Waiting for Finance</span>'}</td></tr>`).join('')}</tbody>
+        <tfoot><tr><td colspan="7" style="text-align:right">Invoice subtotal ${this.fmt(inv.subtotal)} · GCT ${this.fmt(inv.tax_amount)} · <strong>Total ${this.fmt(inv.total)}</strong></td><td colspan="4" style="text-align:right">${inv.variance_amount ? `Approved variance ${this.fmt(inv.variance_amount)}` : ''}</td></tr></tfoot>
+      </table></div>
+      ${inv.bill_number ? `<div style="margin-top:6px">A/P bill <strong>${inv.bill_number}</strong>${this.can('payables') ? ` — <a href="#" style="color:var(--primary)" onclick="event.preventDefault();App.viewBill(${inv.bill_id})">open it</a>` : ''}; it's paid through a payment request.</div>` : ''}`;
+    this.showModal(`
+      <div class="modal" style="max-width:1150px;width:96vw">
+        <div class="modal-header"><span class="modal-title">${s.settlement_number} — ${esc(s.supplier_name)} · ${s.agreement_number} · ${s.period}</span>
+          <div style="display:flex;gap:8px;align-items:center">${this._consSettleBadge(s.status)}<button class="modal-close">✕</button></div></div>
+        <div class="modal-body" style="font-size:12px">
+          ${s.status === 'cancelled' ? `<div class="card" style="border-color:var(--danger);color:var(--danger);margin-bottom:10px">Cancelled: ${esc(s.cancel_reason)}</div>` : ''}
+          <div style="margin-bottom:8px">From reconciliation <a href="#" style="color:var(--primary)" onclick="event.preventDefault();App.viewConsRecon(${s.recon_id})">${s.recon_number}</a> · made ${this.fmtDateTime(s.created_at)}</div>
+          <div class="table-wrap"><table style="font-size:12px">
+            <thead><tr>${th('Item', false)}${th('Sold')}${th('Layaways')}${th('Work orders')}${th('Returned')}${th('Shop use')}${th('Chargeable')}${th('Billable qty')}${th('Unit cost')}${th('Amount')}${th('Expected GCT')}</tr></thead>
+            <tbody>${s.lines.map(l => `<tr><td>${esc(l.product_name)}${l.corrected_at ? `<div style="color:var(--warning, #d97706)">Corrected by ${esc(l.corrected_by_name)} (was ${n(l.original_qty)} · ${this.fmt(l.original_value)}): ${esc(l.correction_reason)}</div>` : ''}</td>
+              <td style="text-align:right">${n(l.sales_qty)}</td><td style="text-align:right">${n(l.layaway_qty)}</td><td style="text-align:right">${n(l.work_order_qty)}</td>
+              <td style="text-align:right">${n(-(l.returns_qty + l.prior_returns_qty))}</td><td style="text-align:right">${n(l.shop_use_qty)}</td><td style="text-align:right">${n(l.chargeable_qty)}</td>
+              <td style="text-align:right" class="fw-600">${n(l.billable_qty)}</td><td style="text-align:right">${l.unit_cost == null ? '' : this.fmt(l.unit_cost)}</td>
+              <td style="text-align:right" class="fw-600">${this.fmt(l.billable_value)}</td><td style="text-align:right">${this.fmt(l.expected_tax)}</td></tr>`).join('')}</tbody>
+            <tfoot><tr><td colspan="9" style="text-align:right">Subtotal</td><td style="text-align:right" class="fw-600">${this.fmt(s.subtotal)}</td><td style="text-align:right">${this.fmt(s.expected_tax)}</td></tr>
+              <tr><td colspan="9" style="text-align:right;font-weight:700">Total owed</td><td colspan="2" style="text-align:right;font-weight:700">${this.fmt(s.total)}</td></tr></tfoot></table></div>
+          ${s.adjustments.length ? `<div style="font-weight:600;margin:12px 0 4px">Adjustments — returns this month of earlier months' sales (credited here; those months stay locked)</div>
+            ${s.adjustments.map(a => `<div>${esc(a.return_number || a.kind)} of sale ${esc(a.sale_number)} (${esc(String(a.sale_qualified_on || '').slice(0, 7))}) — ${esc(a.product_name)} × ${n(a.qty)} · credit ${this.fmt(a.value)}${a.goods_condition ? ` · ${esc(a.goods_condition)}` : ''}</div>`).join('')}` : ''}
+          ${invoiceHtml}
+          ${!inv && live && ap ? this._consInvoiceFormHtml(s) : ''}
+          ${!inv && live && !ap ? `<div style="margin-top:12px;color:var(--text-muted)">Waiting for A/P to enter the supplier's invoice.</div>` : ''}
+          ${s.credit_notes.length ? `<div style="font-weight:600;margin:12px 0 4px">Supplier credit notes</div>${s.credit_notes.map(c => `<div>${c.payment_number} · ${esc(c.reference)} · ${this.fmtDate(c.payment_date)} · ${this.fmt(c.amount)} ${c.status === 'void' ? '(void)' : ''}</div>`).join('')}` : ''}
+          ${s.rejected_invoices.length ? `<div style="font-weight:600;margin:12px 0 4px">Rejected invoices</div>${s.rejected_invoices.map(i => `<div>${esc(i.supplier_invoice_number)} · ${this.fmt(i.total)} — ${esc(i.reject_reason)}</div>`).join('')}` : ''}
+          ${s.log.length ? `<div style="font-weight:600;margin:12px 0 4px">History</div>${s.log.map(g => `<div>${this.fmtDateTime(g.created_at)} — ${esc(g.action.replace(/_/g, ' '))} by ${esc(g.employee_name || '—')}${g.details?.reason ? `: ${esc(g.details.reason)}` : ''}</div>`).join('')}` : ''}
+        </div>
+        <div class="modal-footer" style="flex-wrap:wrap;gap:8px">
+          <button class="btn btn-outline" onclick="App._printServerDocument('/api/consignment/settlements/${s.id}/statement', 'consignment-settlement', 'settlement statement')">Print Statement</button>
+          ${!inv && live && ap ? `<button class="btn btn-primary" onclick="App._consSaveInvoice(${s.id})">Match Invoice</button>` : ''}
+          ${inv && inv.status === 'matched' && ap ? `<button class="btn btn-success" onclick="App._consAcceptInvoice(${s.id})">Accept — Create A/P Bill</button>` : ''}
+          ${inv && ['in_review', 'matched'].includes(inv.status) && (ap || fin) ? `<button class="btn btn-danger" onclick="App._consRejectInvoice(${s.id})">Reject Invoice</button>` : ''}
+          ${live && ap ? `<button class="btn btn-outline" onclick="App.showApCreditNoteForm({ supplier_id: ${s.supplier_id}, consignment_settlement_id: ${s.id}, credit_account: 'consignment' })">+ Supplier Credit Note</button>` : ''}
+          <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+        </div>
+      </div>`);
+  },
+
+  // Prefilled from the settlement; A/P types what the supplier's invoice says.
+  _consInvoiceFormHtml(s) {
+    const esc = x => this.escapeAttr(x ?? '');
+    return `<div class="card" style="margin-top:14px;padding:12px">
+      <div style="font-weight:600;margin-bottom:8px">Enter the supplier's invoice</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;margin-bottom:8px">
+        <div class="form-group" style="margin:0"><label>Invoice # *</label><input id="csi-number"></div>
+        <div class="form-group" style="margin:0"><label>Invoice date *</label><input id="csi-date" type="date" value="${this._storeDay()}"></div>
+        <div class="form-group" style="margin:0"><label>Supplier TRN</label><input id="csi-trn"></div>
+        <div class="form-group" style="margin:0;display:flex;align-items:flex-end"><label style="display:flex;gap:6px;align-items:center"><input id="csi-taxinv" type="checkbox"> Valid supplier tax invoice (GCT)</label></div>
+      </div>
+      <div class="table-wrap"><table style="font-size:12px" id="csi-lines"><thead><tr><th>Item</th><th style="text-align:right">Qty</th><th style="text-align:right">Unit cost</th><th style="text-align:right">GCT</th></tr></thead>
+        <tbody>${s.lines.map(l => `<tr data-product="${l.product_id}"><td>${esc(l.product_name)}</td>
+          <td style="text-align:right"><input class="csi-qty" type="number" step="any" value="${l.billable_qty}" style="width:80px;text-align:right"></td>
+          <td style="text-align:right"><input class="csi-cost" type="number" step="0.01" min="0" value="${l.unit_cost ?? 0}" style="width:100px;text-align:right"></td>
+          <td style="text-align:right"><input class="csi-tax" type="number" step="0.01" value="${l.expected_tax}" style="width:90px;text-align:right"></td></tr>`).join('')}</tbody></table></div>
+      <div class="form-group" style="margin:8px 0 0"><label>Notes</label><input id="csi-notes"></div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:6px">Prefilled with the settlement's figures — change them to what the supplier's invoice says. Any difference is flagged for Finance.</div>
+    </div>`;
+  },
+
+  async _consSaveInvoice(id) {
+    const lines = [...document.querySelectorAll('#csi-lines tbody tr')].map(tr => ({
+      product_id: Number(tr.dataset.product), qty: Number(tr.querySelector('.csi-qty').value) || 0,
+      unit_cost: Number(tr.querySelector('.csi-cost').value) || 0, tax_amount: Number(tr.querySelector('.csi-tax').value) || 0,
+    }));
+    const body = {
+      supplier_invoice_number: document.getElementById('csi-number').value, invoice_date: document.getElementById('csi-date').value,
+      supplier_trn: document.getElementById('csi-trn').value, tax_invoice: document.getElementById('csi-taxinv').checked,
+      notes: document.getElementById('csi-notes').value, lines,
+    };
+    try {
+      const s = await this.api('POST', `/consignment/settlements/${id}/invoice`, body);
+      this.alert(s.invoice.status === 'matched' ? 'The invoice matches the settlement — accept it to create the A/P bill' : 'Differences found — sent to Finance', s.invoice.status === 'matched' ? 'success' : 'warning');
+      this.viewConsSettlement(id);
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  async _consResolveLine(id, lineId, resolution) {
+    const reason = prompt(resolution === 'corrected' ? "Why was the settlement wrong? (it will take the invoice's figures)" : 'Why is this difference approved to Consignment Variance?');
+    if (!reason) return;
+    try { await this.api('POST', `/consignment/settlements/${id}/invoice/lines/${lineId}/resolve`, { resolution, reason }); this.viewConsSettlement(id); }
+    catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  async _consAcceptInvoice(id) {
+    if (!confirm('Create the A/P bill for this invoice? It is then paid through a payment request.')) return;
+    try { await this.api('POST', `/consignment/settlements/${id}/invoice/accept`, {}); this.alert('A/P bill created', 'success'); this.viewConsSettlement(id); }
+    catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  async _consRejectInvoice(id) {
+    const reason = prompt('Why is the invoice rejected? (e.g. the supplier is sending a corrected one)');
+    if (!reason) return;
+    try { await this.api('POST', `/consignment/settlements/${id}/invoice/reject`, { reason }); this.viewConsSettlement(id); }
+    catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  // ── Books postings (accruals, month-end, reversals) ────────────────────────
+  async _consPostingsTab() {
+    const { postings, counts } = await this.api('GET', '/consignment/postings');
+    const el = document.getElementById('cons-body');
+    if (!el) return;
+    const role = { cost_of_sales: 'Consignment Cost of Sales', obligation: 'Accrued Consignment Obligation', variance: 'Consignment Variance', chargeable: 'Shortages & Damage Chargeable', inventory: 'Inventory' };
+    const label = { pending: 'Waiting for Books', waiting: 'Books accounts not set', failed: 'Failed', posted: 'Posted' };
+    const badge = { pending: 'badge-info', waiting: 'badge-warning', failed: 'badge-danger', posted: 'badge-success' };
+    el.innerHTML = `<div class="card">
+      <div style="font-size:13px;color:var(--text-muted);margin-bottom:8px">Entries RetailPOS Books posts: the supplier's cost accrued as each sale qualifies (and reversed by returns), and at month-end the approved chargeable shortages/damage and shop use. Books posts them once its four consignment accounts are set in its Settings. Settlement bills and supplier credit notes go through Accounts Payable.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">${counts.map(c => `<span class="badge-pill ${badge[c.status] || ''}">${label[c.status] || c.status}: ${c.n} · ${this.fmt(c.amount)}</span>`).join('') || '<span style="color:var(--text-muted)">Nothing yet</span>'}</div>
+      <div class="table-wrap"><table style="font-size:12px">
+        <thead><tr><th>Date</th><th>Supplier</th><th>Reference</th><th>For</th><th>Debit</th><th>Credit</th><th style="text-align:right">Amount</th><th>Status</th></tr></thead>
+        <tbody>${postings.length ? postings.map(p => `<tr><td>${this.fmtDate(p.posting_date)}</td><td>${this.escapeAttr(p.supplier_name || '')}</td><td>${this.escapeAttr(p.reference || '')}</td><td>${this.escapeAttr(p.memo || '')}</td>
+          <td>${role[p.debit_role] || p.debit_role}${p.debit_role === 'inventory' && p.inventory_account_code ? ` (${p.inventory_account_code})` : ''}</td><td>${role[p.credit_role] || p.credit_role}</td>
+          <td style="text-align:right">${this.fmt(p.amount)}</td><td><span class="badge-pill ${badge[p.status] || ''}" ${p.last_error ? `title="${this.escapeAttr(p.last_error)}"` : ''}>${label[p.status] || p.status}</span>${p.external_ref ? `<div>${this.escapeAttr(p.external_ref)}</div>` : ''}</td></tr>`).join('')
+          : '<tr><td colspan="8" class="empty-state">No entries yet</td></tr>'}</tbody></table></div></div>`;
+  },
 });
+

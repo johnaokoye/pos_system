@@ -8,7 +8,7 @@ Object.assign(App, {
   _apStatusBadge: { open: 'badge-info', partial: 'badge-purple', overdue: 'badge-danger', paid: 'badge-success', void: 'badge-secondary' },
   _apMethods: [['cheque', 'Cheque'], ['bank_transfer', 'Bank Transfer'], ['cash', 'Cash'], ['card', 'Card'], ['other', 'Other']],
   // Shown for payments, never offered when paying: a contra offset is posted from Payables → Contra.
-  _apMethodNames: { contra: 'Contra (offset)' },
+  _apMethodNames: { contra: 'Contra (offset)', credit_note: 'Supplier credit note' },
   // Bill/payment dates are plain YYYY-MM-DD; fmtDate shows a bare date as
   // that calendar day.
   _apDate(d) { return d ? this.fmtDate(String(d).slice(0, 10)) : '—'; },
@@ -42,7 +42,7 @@ Object.assign(App, {
       <div class="section-header">
         <h2>Accounts Payable</h2>
         <div style="display:flex;gap:10px">
-          ${this.can('payables_bills') ? `<button class="btn btn-secondary" onclick="App.showBillForm()">+ Enter Bill</button>` : ''}
+          ${this.can('payables_bills') ? `<button class="btn btn-secondary" onclick="App.showBillForm()">+ Enter Bill</button><button class="btn btn-secondary" onclick="App.showApCreditNoteForm()">+ Credit Note</button>` : ''}
           ${this.can('payables_requests') ? `<button class="btn btn-primary" onclick="App.showPaymentRequestForm()">+ Payment Request</button>` : ''}
         </div>
       </div>
@@ -421,6 +421,67 @@ Object.assign(App, {
     await load();
   },
 
+  // ── Supplier credit notes (POST /payables/credit-notes) ───────────────────
+  // Reduces the vendor's bills now, or stays on their account to apply later.
+  async showApCreditNoteForm(opts = {}) {
+    const suppliers = await this.api('GET', '/suppliers');
+    this._apCnOpts = opts;
+    this.showModal(`
+      <div class="modal" style="max-width:640px">
+        <div class="modal-header"><span class="modal-title">Supplier Credit Note</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div class="two-col">
+            <div class="form-group"><label>Vendor *</label><select id="cn-supplier" onchange="App._apCnVendorChanged()" ${opts.supplier_id ? 'disabled' : ''}><option value="">— Choose —</option>${suppliers.map(v => `<option value="${v.id}" ${Number(opts.supplier_id) === v.id ? 'selected' : ''}>${this.escapeAttr(v.name)}</option>`).join('')}</select></div>
+            <div class="form-group"><label>Their credit note # *</label><input id="cn-ref"></div>
+            <div class="form-group"><label>Date *</label><input id="cn-date" type="date" value="${this._apToday()}"></div>
+            <div class="form-group"><label>Amount (incl. GCT) *</label><input id="cn-amount" type="number" step="0.01" min="0" oninput="App._apCnSum()"></div>
+            <div class="form-group"><label>GCT in it</label><input id="cn-tax" type="number" step="0.01" min="0" value="0"></div>
+            <div class="form-group"><label>Credits</label><select id="cn-account"><option value="purchases" ${opts.credit_account !== 'consignment' ? 'selected' : ''}>Purchases (goods/services bought)</option><option value="consignment" ${opts.credit_account === 'consignment' ? 'selected' : ''}>Consignment obligation</option></select></div>
+          </div>
+          <div class="form-group"><label>Reason *</label><input id="cn-notes" placeholder="e.g. returned goods, price correction"></div>
+          <div style="font-weight:600;font-size:13px;margin:8px 0 4px">Apply to their open bills <span style="font-weight:400;color:var(--text-muted)">(what isn't applied stays on their account)</span></div>
+          <div id="cn-bills" style="font-size:13px;color:var(--text-muted)">Choose the vendor</div>
+          <div id="cn-sum" style="font-size:12px;margin-top:6px"></div>
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button><button class="btn btn-primary" onclick="App._apCnSave()">Save Credit Note</button></div>
+      </div>`);
+    if (opts.supplier_id) this._apCnVendorChanged();
+  },
+
+  async _apCnVendorChanged() {
+    const id = document.getElementById('cn-supplier').value;
+    const el = document.getElementById('cn-bills');
+    if (!id) { el.innerHTML = 'Choose the vendor'; return; }
+    const bills = (await this.api('GET', `/payables/bills?supplier_id=${id}&status=unpaid`)).filter(b => b.balance > 0);
+    if (!el.isConnected) return;
+    el.innerHTML = bills.length ? `<table style="width:100%"><tbody>${bills.map(b => `<tr><td>${b.bill_number}${b.vendor_invoice_number ? ` · ${this.escapeAttr(b.vendor_invoice_number)}` : ''}</td><td>${this._apDate(b.bill_date)}</td><td style="text-align:right">owing ${this.fmt(b.balance)}</td>
+      <td style="text-align:right"><input class="cn-alloc" data-bill="${b.id}" type="number" step="0.01" min="0" max="${b.balance}" style="width:100px;text-align:right" oninput="App._apCnSum()"></td></tr>`).join('')}</tbody></table>` : 'No open bills — the credit stays on their account';
+  },
+
+  _apCnSum() {
+    const applied = [...document.querySelectorAll('.cn-alloc')].reduce((t, i) => t + (Number(i.value) || 0), 0);
+    const amount = Number(document.getElementById('cn-amount')?.value) || 0;
+    const el = document.getElementById('cn-sum');
+    if (el) el.innerHTML = `Applied ${this.fmt(applied)} · on account ${this.fmt(Math.max(0, amount - applied))}${applied > amount + 0.004 ? ' <span style="color:var(--danger)">— more than the credit note</span>' : ''}`;
+  },
+
+  async _apCnSave() {
+    const o = this._apCnOpts || {};
+    const body = {
+      supplier_id: o.supplier_id || document.getElementById('cn-supplier').value, reference: document.getElementById('cn-ref').value,
+      credit_date: document.getElementById('cn-date').value, amount: document.getElementById('cn-amount').value, tax_amount: document.getElementById('cn-tax').value,
+      credit_account: document.getElementById('cn-account').value, notes: document.getElementById('cn-notes').value, consignment_settlement_id: o.consignment_settlement_id || null,
+      allocations: [...document.querySelectorAll('.cn-alloc')].map(i => ({ bill_id: Number(i.dataset.bill), amount: Number(i.value) || 0 })).filter(a => a.amount > 0),
+    };
+    try {
+      const p = await this.api('POST', '/payables/credit-notes', body);
+      this.closeModal();
+      this.alert(`Credit note ${p.payment_number} saved`, 'success');
+      if (o.consignment_settlement_id) this.viewConsSettlement(o.consignment_settlement_id);
+      else if (this.section === 'payables') this.renderPayables('payments');
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
   async _renderApPayments() {
     const el = document.getElementById('ap-tab-body');
     const payments = await this.api('GET', '/payables/payments');
@@ -618,7 +679,7 @@ Object.assign(App, {
   async viewBill(id) {
     const b = await this.api('GET', `/payables/bills/${id}`);
     const methodLabel = { ...Object.fromEntries(this._apMethods), ...this._apMethodNames };
-    const sourceLabel = { receipt: 'Created automatically when the PO was received', direct_receipt: 'Created automatically when goods were received without a PO', po: 'Entered from a purchase order', manual: 'Entered manually' };
+    const sourceLabel = { receipt: 'Created automatically when the PO was received', direct_receipt: 'Created automatically when goods were received without a PO', po: 'Entered from a purchase order', manual: 'Entered manually', consignment_settlement: 'Supplier invoice matched to a consignment settlement' };
     this.showModal(`
       <div class="modal" style="max-width:620px">
         <div class="modal-header">
@@ -641,6 +702,7 @@ Object.assign(App, {
             </div>
           </div>
           ${b.description ? `<p style="font-size:13px;margin-bottom:14px">${this.escapeAttr(b.description)}</p>` : ''}
+          ${b.consignment_settlement_id ? `<p style="font-size:13px;margin-bottom:14px">Clears the accrued consignment obligation ${this.fmt(b.obligation_amount)}${b.variance_amount ? ` · Consignment Variance approved by Finance ${this.fmt(b.variance_amount)}` : ''} · <a href="#" style="color:var(--primary)" onclick="event.preventDefault();App.closeModal();App.viewConsSettlement(${b.consignment_settlement_id})">open the settlement</a></p>` : ''}
           ${b.status === 'void' ? `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:10px 12px;margin-bottom:14px;font-size:13px;color:#991b1b"><strong>Void:</strong> ${this.escapeAttr(b.void_reason)}</div>` : ''}
           <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px">
             <div class="card" style="padding:10px;text-align:center"><div style="font-size:18px;font-weight:700">${this.fmt(b.amount)}</div>${b.currency ? `<div style="font-size:12px;font-weight:600">${b.currency} ${this._n2(b.amount_fx)} @ ${b.exchange_rate}</div>` : ''}<div style="font-size:11px;color:var(--text-muted)">Amount${b.tax_amount > 0 ? ` (incl. GCT ${this.fmt(b.tax_amount)})` : ''}</div></div>

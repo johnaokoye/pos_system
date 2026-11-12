@@ -7,6 +7,7 @@ const { syncBinQty } = require('../lib/binSync');
 const { resolveApprovalSignature } = require('../lib/signatures');
 const { storeToday } = require('../lib/storeTime');
 const { goLive, addLot, startTracking, lotsOnHand, round3, consignmentEnabled, costOn } = require('../lib/stockLots');
+const settlement = require('../lib/consignmentSettlement');
 
 // Consignment — supplier-owned stock (mounted at /api/consignment).
 //   Agreement (CAG-): Purchasing drafts it (consignment_agreements) and
@@ -590,6 +591,8 @@ async function loadRecon(id) {
   const { rows: log } = await db.execute({ sql: `SELECT g.*, e.first_name || ' ' || e.last_name AS employee_name FROM consignment_reconciliation_log g LEFT JOIN employees e ON e.id = g.employee_id WHERE g.recon_id = ? ORDER BY g.id`, args: [r.id] });
   r.log = log;
   r.period_ended = periodBounds(r.period).last < storeToday();
+  const { rows: sts } = await db.execute({ sql: "SELECT id, settlement_number, status, total FROM consignment_settlements WHERE recon_id = ? ORDER BY id DESC", args: [r.id] });
+  r.settlement = sts.find(x => x.status !== 'cancelled') || null;
   return r;
 }
 const reconLog = (ex, reconId, action, employeeId, extra = {}) => ex.execute({
@@ -723,7 +726,10 @@ router.post('/reconciliations/:id/approve', requirePermission('consignment_finan
       const { r, a } = await draftRecon(tx, cur.id);
       await writeLines(tx, r, a);
       await tx.execute({ sql: "UPDATE consignment_reconciliations SET status = 'approved', approved_by = ?, approved_at = CURRENT_TIMESTAMP, approval_signature = ? WHERE id = ? AND status = 'draft'", args: [req.employee?.id || null, sig, r.id] });
-      await reconLog(tx, r.id, 'approved', req.employee?.id);
+      const logged = await reconLog(tx, r.id, 'approved', req.employee?.id);
+      // The month's settlement statement, and its month-end entries for Books.
+      await settlement.createSettlement(tx, r.id, req.employee?.id);
+      await settlement.queueReconPostings(tx, r.id, Number(logged.lastInsertRowid));
       await tx.commit();
       committed = true;
     } catch (e) {
@@ -745,9 +751,191 @@ router.post('/reconciliations/:id/reopen', requirePermission('settings'), async 
     const r = await loadRecon(req.params.id);
     if (!r) return res.status(404).json({ error: 'Reconciliation not found' });
     if (r.status !== 'approved') return res.status(400).json({ error: `${r.recon_number} isn't locked` });
-    await db.execute({ sql: "UPDATE consignment_reconciliations SET status = 'draft', approved_by = NULL, approved_at = NULL, approval_signature = NULL WHERE id = ?", args: [r.id] });
-    await reconLog(db, r.id, 'reopened', req.employee?.id, { reason, finance_approver: approver, approval_reference: reference });
+    const tx = await db.transaction('write');
+    let committed = false;
+    try {
+      // Refused while its settlement is on a live A/P bill; otherwise the
+      // settlement is cancelled and its month-end entries reversed.
+      await settlement.cancelForReopen(tx, r.id, `Month reopened: ${reason}`, req.employee?.id);
+      await settlement.reverseReconPostings(tx, r.id);
+      await tx.execute({ sql: "UPDATE consignment_reconciliations SET status = 'draft', approved_by = NULL, approved_at = NULL, approval_signature = NULL WHERE id = ?", args: [r.id] });
+      await reconLog(tx, r.id, 'reopened', req.employee?.id, { reason, finance_approver: approver, approval_reference: reference });
+      await tx.commit();
+      committed = true;
+    } catch (e) {
+      if (!committed) await tx.rollback().catch(() => {});
+      throw e;
+    }
     res.json(await loadRecon(r.id));
+  } catch (e) { send(res, e); }
+});
+
+// ── Settlements, invoice matching (Phase 4) ─────────────────
+// lib/consignmentSettlement.js. Made when Finance approves a month; A/P
+// enters the supplier's invoice against it (payables_bills), Finance resolves
+// any differences (consignment_finance), A/P accepts it into an A/P bill.
+const canSeeSettlements = requireAnyPermission('consignment', 'consignment_finance', 'payables');
+const inTx = async (res, work, status = 200) => {
+  const tx = await db.transaction('write');
+  let committed = false;
+  try {
+    const out = await work(tx);
+    await tx.commit();
+    committed = true;
+    return out;
+  } catch (e) {
+    if (!committed) await tx.rollback().catch(() => {});
+    throw e;
+  }
+};
+
+router.get('/settlements', canSeeSettlements, async (req, res) => {
+  try {
+    const args = [];
+    let sql = `SELECT s.id, s.settlement_number, s.period, s.status, s.subtotal, s.expected_tax, s.total, s.created_at, a.agreement_number, sp.name AS supplier_name, r.recon_number, b.bill_number,
+                 (SELECT i.supplier_invoice_number FROM consignment_invoices i WHERE i.settlement_id = s.id AND i.status != 'rejected' ORDER BY i.id DESC LIMIT 1) AS invoice_number
+               FROM consignment_settlements s JOIN consignment_agreements a ON a.id = s.agreement_id JOIN suppliers sp ON sp.id = s.supplier_id
+               JOIN consignment_reconciliations r ON r.id = s.recon_id LEFT JOIN ap_bills b ON b.id = s.bill_id WHERE 1=1`;
+    if (req.query.status) { sql += ' AND s.status = ?'; args.push(req.query.status); }
+    if (req.query.supplier_id) { sql += ' AND s.supplier_id = ?'; args.push(req.query.supplier_id); }
+    sql += ' ORDER BY s.period DESC, s.id DESC LIMIT 500';
+    res.json((await db.execute({ sql, args })).rows);
+  } catch (e) { send(res, e); }
+});
+
+router.get('/settlements/:id', canSeeSettlements, async (req, res) => {
+  try {
+    const s = await settlement.loadSettlement(db, req.params.id);
+    if (!s) return res.status(404).json({ error: 'Settlement not found' });
+    res.json(s);
+  } catch (e) { send(res, e); }
+});
+
+// A month approved before settlements existed (or one with nothing owed then
+// corrected) gets its statement made here.
+router.post('/reconciliations/:id/settlement', requirePermission('consignment_finance'), async (req, res) => {
+  try {
+    const id = await inTx(res, async tx => {
+      const { rows: [r] } = await tx.execute({ sql: 'SELECT * FROM consignment_reconciliations WHERE id = ?', args: [req.params.id] });
+      if (!r) throw err(404, 'Reconciliation not found');
+      if (r.status !== 'approved') throw err(400, `${r.recon_number} has to be approved first`);
+      const { rows: [live] } = await tx.execute({ sql: "SELECT settlement_number FROM consignment_settlements WHERE recon_id = ? AND status != 'cancelled'", args: [r.id] });
+      if (live) throw err(400, `${live.settlement_number} already covers ${r.recon_number}`);
+      const made = await settlement.createSettlement(tx, r.id, req.employee?.id);
+      if (!made) throw err(400, `Nothing is owed to or by the supplier for ${r.period}`);
+      return made;
+    });
+    res.status(201).json(await settlement.loadSettlement(db, id));
+  } catch (e) { send(res, e); }
+});
+
+router.post('/settlements/:id/invoice', requirePermission('payables_bills'), async (req, res) => {
+  try {
+    await inTx(res, tx => settlement.enterInvoice(tx, req.params.id, req.body || {}, req.employee?.id));
+    res.status(201).json(await settlement.loadSettlement(db, req.params.id));
+  } catch (e) { send(res, e); }
+});
+
+router.post('/settlements/:id/invoice/lines/:lineId/resolve', requirePermission('consignment_finance'), async (req, res) => {
+  try {
+    await inTx(res, tx => settlement.resolveLine(tx, req.params.id, req.params.lineId, req.body || {}, req.employee?.id));
+    res.json(await settlement.loadSettlement(db, req.params.id));
+  } catch (e) { send(res, e); }
+});
+
+router.post('/settlements/:id/invoice/accept', requirePermission('payables_bills'), async (req, res) => {
+  try {
+    await inTx(res, tx => settlement.acceptInvoice(tx, req.params.id, req.employee?.id));
+    res.json(await settlement.loadSettlement(db, req.params.id));
+  } catch (e) { send(res, e); }
+});
+
+router.post('/settlements/:id/invoice/reject', requireAnyPermission('payables_bills', 'consignment_finance'), async (req, res) => {
+  try {
+    await inTx(res, tx => settlement.rejectInvoice(tx, req.params.id, req.body?.reason, req.employee?.id));
+    res.json(await settlement.loadSettlement(db, req.params.id));
+  } catch (e) { send(res, e); }
+});
+
+// Printable settlement statement.
+router.get('/settlements/:id/statement', canSeeSettlements, async (req, res) => {
+  try {
+    const s = await settlement.loadSettlement(db, req.params.id);
+    if (!s) return res.status(404).json({ error: 'Settlement not found' });
+    const { rows: [co] } = await db.execute({ sql: "SELECT value FROM settings WHERE key = 'company_name'", args: [] });
+    const esc = v => String(v ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+    const money = n => (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const q = n => String(Math.round((Number(n) || 0) * 1000) / 1000);
+    const td = (v, right = true) => `<td style="padding:4px 6px;border-bottom:1px solid #ddd;${right ? 'text-align:right' : ''}">${v}</td>`;
+    const th = (v, right = true) => `<th style="padding:4px 6px;border-bottom:2px solid #333;${right ? 'text-align:right' : 'text-align:left'}">${v}</th>`;
+    res.set('X-Pos-Document', 'consignment-settlement');
+    res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(s.settlement_number)}</title></head>
+      <body style="font-family:Arial,sans-serif;font-size:12px;color:#111;margin:24px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start">
+          <div><div style="font-size:18px;font-weight:700">${esc(co?.value || 'Total Tools')}</div><div style="font-size:16px;margin-top:6px">Consignment Settlement Statement</div></div>
+          <div style="text-align:right"><div style="font-size:16px;font-weight:700">${esc(s.settlement_number)}</div><div>Period: ${esc(s.period)}</div><div>Reconciliation ${esc(s.recon_number)}</div></div>
+        </div>
+        <div style="margin:14px 0">Supplier: <strong>${esc(s.supplier_name)}</strong>${s.supplier_number ? ` (${esc(s.supplier_number)})` : ''} · Agreement ${esc(s.agreement_number)}</div>
+        <table style="width:100%;border-collapse:collapse"><thead><tr>${th('Item', false)}${th('Sold')}${th('Layaways paid')}${th('Work orders')}${th('Returned')}${th('Shop use')}${th('Chargeable short/damage')}${th('Billable qty')}${th('Unit cost')}${th('Amount')}${th('GCT')}</tr></thead>
+          <tbody>${s.lines.map(l => `<tr>${td(esc(l.product_name) + (l.corrected_at ? ` <em style="color:#666">(corrected: ${esc(l.correction_reason)})</em>` : ''), false)}${td(q(l.sales_qty))}${td(q(l.layaway_qty))}${td(q(l.work_order_qty))}${td(q(-(l.returns_qty + l.prior_returns_qty)))}${td(q(l.shop_use_qty))}${td(q(l.chargeable_qty))}${td(q(l.billable_qty))}${td(l.unit_cost == null ? '' : money(l.unit_cost))}${td(money(l.billable_value))}${td(money(l.expected_tax))}</tr>`).join('')}</tbody>
+          <tfoot><tr><td colspan="9" style="padding:6px;text-align:right">Subtotal</td>${td(money(s.subtotal))}${td(money(s.expected_tax))}</tr>
+            <tr><td colspan="9" style="padding:6px;text-align:right;font-weight:700">Total owed</td><td colspan="2" style="padding:6px;text-align:right;font-weight:700">${money(s.total)}</td></tr></tfoot></table>
+        ${s.adjustments.length ? `<div style="margin-top:16px;font-weight:700">Adjustments — returns this month of earlier months' sales</div>
+          <table style="width:100%;border-collapse:collapse;margin-top:4px"><thead><tr>${th('Return', false)}${th('Original sale', false)}${th('Sale month', false)}${th('Item', false)}${th('Qty')}${th('Credit')}</tr></thead>
+          <tbody>${s.adjustments.map(a => `<tr>${td(esc(a.return_number || a.kind), false)}${td(esc(a.sale_number), false)}${td(esc(String(a.sale_qualified_on || '').slice(0, 7)), false)}${td(esc(a.product_name), false)}${td(q(a.qty))}${td(money(-a.value))}</tr>`).join('')}</tbody></table>` : ''}
+        <div style="margin-top:16px;color:#555">Sales and returns are at the agreed cost saved on each sale; shop use and chargeable shortages/damage at the agreed cost on the last day of the month. Expected GCT is a guide — input GCT is taken from the supplier's tax invoice.</div>
+      </body></html>`);
+  } catch (e) { send(res, e); }
+});
+
+// ── Accounting feed for RetailPOS Books (F1, F4) ────────────
+// API key scopes consignment:read (feed) / consignment:write (ack).
+router.get('/postings-feed', requirePermission('consignment_finance'), async (req, res) => {
+  try {
+    await inTx(res, tx => settlement.queueAccruals(tx));
+    const { rows } = await db.execute({
+      sql: `SELECT p.id, p.source_key AS external_id, p.source_type, p.posting_date AS date, p.debit_role, p.credit_role, p.inventory_account_code, p.amount, p.reference, p.memo, p.status,
+              a.agreement_number, s.name AS supplier_name, a.revenue_treatment
+            FROM consignment_postings p LEFT JOIN consignment_agreements a ON a.id = p.agreement_id LEFT JOIN suppliers s ON s.id = p.supplier_id
+            WHERE p.status IN ('pending', 'failed', 'waiting') ORDER BY p.posting_date, p.id LIMIT 1000`,
+      args: [],
+    });
+    res.json(rows);
+  } catch (e) { send(res, e); }
+});
+
+// { id, status: 'posted' | 'failed' | 'waiting', external_ref, error }
+// 'waiting' = Books hasn't got the consignment accounts set yet (F4).
+router.post('/postings-ack', requirePermission('consignment_finance'), async (req, res) => {
+  try {
+    const { id, status } = req.body || {};
+    const { rows: [p] } = await db.execute({ sql: 'SELECT * FROM consignment_postings WHERE id = ?', args: [id || 0] });
+    if (!p) return res.status(404).json({ error: 'Posting not found' });
+    if (status === 'posted') {
+      const ref = String(req.body.external_ref || '').trim();
+      if (!ref) return res.status(400).json({ error: 'external_ref is required' });
+      if (p.status === 'posted' && p.external_ref && p.external_ref !== ref) return res.status(409).json({ error: `Already posted as ${p.external_ref}` });
+      await db.execute({ sql: "UPDATE consignment_postings SET status = 'posted', external_ref = ?, posted_at = COALESCE(posted_at, CURRENT_TIMESTAMP), last_error = NULL WHERE id = ?", args: [ref, p.id] });
+    } else if (status === 'failed' || status === 'waiting') {
+      if (p.status === 'posted') return res.status(409).json({ error: `Already posted as ${p.external_ref}` });
+      await db.execute({ sql: 'UPDATE consignment_postings SET status = ?, last_error = ?, attempts = attempts + 1 WHERE id = ?', args: [status, String(req.body.error || '').slice(0, 500) || null, p.id] });
+    } else return res.status(400).json({ error: 'status must be posted, failed or waiting' });
+    res.json({ success: true });
+  } catch (e) { send(res, e); }
+});
+
+// The entries and how they went, for the Consignment screen.
+router.get('/postings', canView, async (req, res) => {
+  try {
+    await inTx(res, tx => settlement.queueAccruals(tx));
+    const args = [];
+    let sql = `SELECT p.*, a.agreement_number, s.name AS supplier_name FROM consignment_postings p LEFT JOIN consignment_agreements a ON a.id = p.agreement_id
+               LEFT JOIN suppliers s ON s.id = p.supplier_id WHERE 1=1`;
+    if (req.query.status) { sql += ' AND p.status = ?'; args.push(req.query.status); }
+    sql += ' ORDER BY p.id DESC LIMIT 500';
+    const { rows } = await db.execute({ sql, args });
+    const { rows: counts } = await db.execute({ sql: 'SELECT status, COUNT(*) AS n, COALESCE(SUM(amount), 0) AS amount FROM consignment_postings GROUP BY status', args: [] });
+    res.json({ postings: rows, counts });
   } catch (e) { send(res, e); }
 });
 
