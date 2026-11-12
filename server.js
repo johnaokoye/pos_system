@@ -66,7 +66,7 @@ app.use(async (req, res, next) => {
 // Document attachments are only ever served through their authenticated
 // /api/.../download routes — never hand them out as public static files,
 // even to someone holding the stored filename.
-app.use(['/uploads/quote-attachments', '/uploads/po-attachments', '/uploads/pr-attachments', '/uploads/rental-po-attachments', '/uploads/payment-request-attachments', '/uploads/shop-use-attachments'], (req, res) => res.status(404).json({ error: 'Not found' }));
+app.use(['/uploads/quote-attachments', '/uploads/po-attachments', '/uploads/pr-attachments', '/uploads/rental-po-attachments', '/uploads/payment-request-attachments', '/uploads/shop-use-attachments', '/uploads/ap-payment-attachments', '/uploads/payment-advices'], (req, res) => res.status(404).json({ error: 'Not found' }));
 // Customer ID/address-proof scans and captured signatures are shown by the
 // SPA straight from their /uploads path (<img src>), so they stay static
 // files — but only for a signed-in session (the pos_session cookie is

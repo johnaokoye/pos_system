@@ -78,7 +78,7 @@ router.get('/bills/:id', requirePermission('payables'), async (req, res) => {
     decorateBill(bill, asOfDate(req));
     const { rows: payments } = await db.execute({
       sql: `SELECT a.amount AS applied, a.amount_fx AS applied_fx, p.id, p.payment_number, p.payment_date, p.method, p.reference, p.status,
-              p.currency, p.exchange_rate, p.amount_fx
+              p.currency, p.exchange_rate, p.amount_fx, p.posting_mode, p.books_bank_account_id
             FROM ap_payment_allocations a JOIN ap_payments p ON p.id = a.payment_id
             WHERE a.bill_id = ? ORDER BY p.payment_date, p.id`,
       args: [req.params.id],
@@ -237,7 +237,198 @@ router.post('/payments/:id/void', requirePermission('payables_void'), async (req
       sql: "UPDATE ap_payments SET status = 'void', void_reason = ?, voided_by = ?, voided_at = CURRENT_TIMESTAMP WHERE id = ?",
       args: [reason, req.employee?.id || null, payment.id],
     });
+    // Its request has that much to pay again (Paid → Approved if it no longer covers it).
+    if (payment.payment_request_id) await require('./payment-requests').reopenAfterVoid(db, payment.payment_request_id);
     res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Payment detail, applying, proof of payment ────────────
+// One payment with what it was applied to, what's left on the vendor's
+// account (unapplied), proof of payment, payment advices sent and — while
+// some is unapplied — the vendor's open bills it could go on.
+router.get('/payments/:id', requirePermission('payables'), async (req, res) => {
+  try {
+    const p = await loadPayment(req.params.id);
+    if (!p) return res.status(404).json({ error: 'Payment not found' });
+    res.json(p);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+async function loadPayment(id) {
+  const { rows: [p] } = await db.execute({
+    sql: `SELECT p.*, s.name AS supplier_name, s.supplier_number, s.email AS supplier_email, s.contact_name AS supplier_contact, s.address AS supplier_address, s.city AS supplier_city, s.state AS supplier_state, s.zip AS supplier_zip,
+            po.po_number, r.request_number, r.request_type, e.first_name || ' ' || e.last_name AS created_by_name, ${UNAPPLIED_SQL} AS unapplied
+          FROM ap_payments p JOIN suppliers s ON s.id = p.supplier_id
+          LEFT JOIN purchase_orders po ON po.id = p.po_id LEFT JOIN payment_requests r ON r.id = p.payment_request_id
+          LEFT JOIN employees e ON e.id = p.created_by WHERE p.id = ?`,
+    args: [id],
+  });
+  if (!p) return null;
+  p.unapplied = round2(p.unapplied);
+  // Its share in its own currency (a foreign payment), at the rate it was booked at.
+  p.unapplied_fx = p.currency && Number(p.amount) > 0 && Number(p.amount_fx) > 0 ? round2(p.unapplied * Number(p.amount_fx) / Number(p.amount)) : null;
+  const [{ rows: allocations }, { rows: attachments }, { rows: advices }] = await Promise.all([
+    db.execute({
+      sql: `SELECT a.id, a.amount, a.amount_fx, b.id AS bill_id, b.bill_number, b.vendor_invoice_number, b.bill_date, b.po_id, bpo.po_number AS bill_po_number
+            FROM ap_payment_allocations a JOIN ap_bills b ON b.id = a.bill_id LEFT JOIN purchase_orders bpo ON bpo.id = b.po_id WHERE a.payment_id = ? ORDER BY a.id`,
+      args: [p.id],
+    }),
+    db.execute({ sql: `SELECT a.id, a.original_name, a.size, a.uploaded_at, e.first_name || ' ' || e.last_name AS uploaded_by_name FROM ap_payment_attachments a LEFT JOIN employees e ON e.id = a.uploaded_by WHERE a.payment_id = ? ORDER BY a.id`, args: [p.id] }),
+    db.execute({ sql: `SELECT d.id, d.sent_to, d.cc, d.subject, d.sent_at, d.stored_name IS NOT NULL AS has_copy, e.first_name || ' ' || e.last_name AS sent_by_name FROM payment_advice_sends d LEFT JOIN employees e ON e.id = d.sent_by WHERE d.payment_id = ? ORDER BY d.id DESC`, args: [p.id] }),
+  ]);
+  p.allocations = allocations;
+  p.attachments = attachments;
+  p.advices = advices;
+  p.open_bills = [];
+  if (p.status === 'posted' && p.unapplied > 0.005) {
+    const { rows } = await db.execute({
+      sql: `${billSelect} WHERE b.supplier_id = ? AND b.status != 'void' AND b.amount - ${PAID_SQL} > 0.005 ORDER BY b.due_date, b.id`,
+      args: [p.supplier_id],
+    });
+    p.open_bills = rows.map(b => decorateBill(b, today()));
+  }
+  return p;
+}
+
+// Apply what's unapplied on a payment (an advance / COD payment, or the rest
+// of one) to the vendor's bills: { allocations: [{ bill_id, amount }] } in base
+// currency. Only the Payables records change — the money left the bank when
+// the payment was posted, so RetailPOS Books posts nothing for this.
+router.post('/payments/:id/apply', requirePermission('payables_payments'), async (req, res) => {
+  const list = Array.isArray(req.body.allocations) ? req.body.allocations.map(a => ({ bill_id: Number(a.bill_id), amount: round2(a.amount) })).filter(a => a.amount > 0) : [];
+  if (!list.length) return res.status(400).json({ error: 'Enter an amount to apply to at least one bill' });
+  const tx = await db.transaction('write');
+  let committed = false;
+  try {
+    const { rows: [p] } = await tx.execute({ sql: `SELECT p.*, ${UNAPPLIED_SQL} AS unapplied FROM ap_payments p WHERE p.id = ?`, args: [req.params.id] });
+    if (!p) throw Object.assign(new Error('Payment not found'), { status: 404 });
+    if (p.status !== 'posted') throw Object.assign(new Error('This payment is void'), { status: 400 });
+    if (p.method === 'contra') throw Object.assign(new Error('A contra offset is applied from the contra itself'), { status: 400 });
+    const total = round2(list.reduce((t, a) => t + a.amount, 0));
+    if (total - round2(p.unapplied) > 0.005) throw Object.assign(new Error(`Only ${round2(p.unapplied).toFixed(2)} is left on ${p.payment_number} to apply`), { status: 400 });
+    const fxPerBase = p.currency && Number(p.amount) > 0 && Number(p.amount_fx) > 0 ? Number(p.amount_fx) / Number(p.amount) : 0;
+    for (const a of list) {
+      const { rows: [b] } = await tx.execute({ sql: `SELECT b.*, ${PAID_SQL} AS paid FROM ap_bills b WHERE b.id = ?`, args: [a.bill_id] });
+      if (!b || Number(b.supplier_id) !== Number(p.supplier_id)) throw Object.assign(new Error('That bill isn\'t one of this vendor\'s'), { status: 400 });
+      if (b.status === 'void') throw Object.assign(new Error(`Bill ${b.bill_number} is void`), { status: 400 });
+      const balance = round2(b.amount - b.paid);
+      if (a.amount - balance > 0.005) throw Object.assign(new Error(`Only ${balance.toFixed(2)} is owed on bill ${b.bill_number}`), { status: 400 });
+      await tx.execute({ sql: 'INSERT INTO ap_payment_allocations (payment_id, bill_id, amount, amount_fx) VALUES (?,?,?,?)', args: [p.id, b.id, a.amount, fxPerBase ? round2(a.amount * fxPerBase) : null] });
+    }
+    await tx.commit();
+    committed = true;
+    res.json(await loadPayment(p.id));
+  } catch (e) {
+    if (!committed) await tx.rollback().catch(() => {});
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+// Proof of payment (bank confirmation, cheque copy) — download-only.
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
+const { cloudUpload } = require('../lib/cloudinary');
+const proofDir = path.join(__dirname, '../uploads/ap-payment-attachments');
+const proofUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => cb(null, ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(file.mimetype)),
+});
+router.post('/payments/:id/attachments', requirePermission('payables_payments'), (req, res, next) => {
+  proofUpload.array('files', 10)(req, res, err => err ? res.status(400).json({ error: err.message }) : next());
+}, async (req, res) => {
+  try {
+    const { rows: [p] } = await db.execute({ sql: 'SELECT id FROM ap_payments WHERE id = ?', args: [req.params.id] });
+    if (!p) return res.status(404).json({ error: 'Payment not found' });
+    if (!req.files?.length) return res.status(400).json({ error: 'Attach a PDF or image of the proof of payment' });
+    for (const f of req.files) {
+      let stored;
+      const up = await cloudUpload(f.buffer, { folder: 'ap-payment-attachments', resource_type: 'auto' }).catch(() => null);
+      if (up?.secure_url) stored = up.secure_url;
+      else {
+        fs.mkdirSync(proofDir, { recursive: true });
+        stored = `payment-${p.id}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}${path.extname(f.originalname).toLowerCase()}`;
+        fs.writeFileSync(path.join(proofDir, stored), f.buffer);
+      }
+      await db.execute({ sql: 'INSERT INTO ap_payment_attachments (payment_id, original_name, stored_name, mime_type, size, uploaded_by) VALUES (?,?,?,?,?,?)', args: [p.id, f.originalname, stored, f.mimetype, f.size, req.employee?.id || null] });
+    }
+    res.json((await loadPayment(p.id)).attachments);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+router.get('/payments/:id/attachments/:aid/download', requirePermission('payables'), async (req, res) => {
+  try {
+    const { rows: [a] } = await db.execute({ sql: 'SELECT * FROM ap_payment_attachments WHERE id = ? AND payment_id = ?', args: [req.params.aid, req.params.id] });
+    if (!a) return res.status(404).json({ error: 'Not found' });
+    if (a.stored_name.startsWith('https://')) return res.redirect(a.stored_name);
+    const file = path.join(proofDir, path.basename(a.stored_name));
+    if (!fs.existsSync(file)) return res.status(404).json({ error: 'The file is missing' });
+    res.download(file, a.original_name);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+router.delete('/payments/:id/attachments/:aid', requirePermission('payables_payments'), async (req, res) => {
+  try {
+    const { rows: [a] } = await db.execute({ sql: 'SELECT * FROM ap_payment_attachments WHERE id = ? AND payment_id = ?', args: [req.params.aid, req.params.id] });
+    if (!a) return res.status(404).json({ error: 'Not found' });
+    if (!a.stored_name.startsWith('https://')) { try { fs.unlinkSync(path.join(proofDir, path.basename(a.stored_name))); } catch (e) {} }
+    await db.execute({ sql: 'DELETE FROM ap_payment_attachments WHERE id = ?', args: [a.id] });
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// The copy of a payment advice as it was emailed (routes/email.js keeps it).
+router.get('/payments/:id/advices/:sid/download', requirePermission('payables'), async (req, res) => {
+  try {
+    const { rows: [d] } = await db.execute({ sql: 'SELECT d.*, p.payment_number FROM payment_advice_sends d JOIN ap_payments p ON p.id = d.payment_id WHERE d.id = ? AND d.payment_id = ?', args: [req.params.sid, req.params.id] });
+    if (!d || !d.stored_name) return res.status(404).json({ error: 'No copy was kept of that advice' });
+    const file = path.join(__dirname, '../uploads/payment-advices', path.basename(d.stored_name));
+    if (!fs.existsSync(file)) return res.status(404).json({ error: 'The file is missing' });
+    res.download(file, `payment-advice-${d.payment_number}.pdf`);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── RetailPOS Books ───────────────────────────────────────
+// Books' bank accounts, sent on every sync (API key payables:write): upserted
+// by books_id; any not in the list is marked inactive (kept, since payments
+// name it).
+router.put('/bank-accounts', async (req, res) => {
+  if (!req.apiKey) return res.status(403).json({ error: 'Bank accounts come from RetailPOS Books' });
+  try {
+    const list = Array.isArray(req.body) ? req.body : Array.isArray(req.body?.accounts) ? req.body.accounts : null;
+    if (!list) return res.status(400).json({ error: 'Send the list of bank accounts' });
+    const seen = [];
+    for (const b of list) {
+      const id = Number(b.id ?? b.books_id);
+      const currency = String(b.currency || '').trim().toUpperCase();
+      if (!(id > 0) || !String(b.name || '').trim() || !/^[A-Z]{3}$/.test(currency)) continue;
+      seen.push(id);
+      await db.execute({
+        sql: `INSERT INTO ap_bank_accounts (books_id, name, bank_name, last4, currency, gl_code, active, synced_at) VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+              ON CONFLICT(books_id) DO UPDATE SET name = excluded.name, bank_name = excluded.bank_name, last4 = excluded.last4, currency = excluded.currency,
+                gl_code = excluded.gl_code, active = excluded.active, synced_at = CURRENT_TIMESTAMP`,
+        args: [id, String(b.name).trim(), b.bank_name || null, b.last4 || null, currency, b.gl_code || null, b.active === false || b.active === 0 ? 0 : 1],
+      });
+    }
+    await db.execute({ sql: `UPDATE ap_bank_accounts SET active = 0 WHERE books_id NOT IN (${seen.length ? seen.map(() => '?').join(',') : '0'})`, args: seen });
+    res.json({ received: seen.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Payments Books posts as a whole (posting_mode 'payment'): Dr A/P / Cr the
+// bank account they were paid from, once, keyed appay:<id>; voided ones are
+// reversed. Applying them to bills is recorded without a journal.
+router.get('/payments-feed', requirePermission('payables'), async (req, res) => {
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT p.id, p.payment_number, p.supplier_id, s.name AS supplier_name, s.supplier_number, p.payment_date, p.amount, p.currency, p.exchange_rate, p.amount_fx,
+              p.method, p.reference, p.status, p.books_bank_account_id, p.bank_account_name, p.bank_currency, po.po_number, r.request_number, ${UNAPPLIED_SQL} AS unapplied
+            FROM ap_payments p JOIN suppliers s ON s.id = p.supplier_id LEFT JOIN purchase_orders po ON po.id = p.po_id LEFT JOIN payment_requests r ON r.id = p.payment_request_id
+            WHERE p.posting_mode = 'payment' ORDER BY p.id`,
+      args: [],
+    });
+    res.json(rows.map(r => ({ ...r, unapplied: round2(r.unapplied) })));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -291,8 +482,12 @@ router.get('/vendors/:id/statement', requirePermission('payables'), async (req, 
       if (!l.void) running = round2(running + l.charge - l.payment);
       l.balance = running;
     }
-    res.json({ supplier, lines, balance: running });
+    // Paid but not yet applied to a bill (advances / COD payments awaiting
+    // the invoice): already in the running balance, shown so it can be applied.
+    const { rows: [un] } = await db.execute({ sql: `SELECT COALESCE(SUM(${UNAPPLIED_SQL}), 0) AS v FROM ap_payments p WHERE p.supplier_id = ? AND p.status = 'posted' AND p.method != 'contra'`, args: [supplier.id] });
+    res.json({ supplier, lines, balance: running, available_to_apply: round2(un.v) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 module.exports = router;
+module.exports.loadPayment = loadPayment;

@@ -19,6 +19,8 @@ uploads/wo-photos/*
 uploads/payment-request-attachments/*
 uploads/shop-use-attachments/*
 uploads/shop-use-signatures/*
+uploads/ap-payment-attachments/*
+uploads/payment-advices/*
 !uploads/products/.gitkeep
 !uploads/po-attachments/.gitkeep
 !uploads/branding/.gitkeep

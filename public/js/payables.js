@@ -428,13 +428,13 @@ Object.assign(App, {
       <thead><tr><th>Payment #</th><th>Date</th><th>Vendor</th><th>Method</th><th>Reference</th><th>Request</th><th>Applied To</th><th style="text-align:right">Amount</th><th>Status</th><th></th></tr></thead>
       <tbody>${payments.length ? payments.map(p => `
         <tr style="${p.status === 'void' ? 'opacity:.6' : ''}">
-          <td class="fw-600">${p.payment_number}</td>
+          <td class="fw-600"><a href="#" style="color:var(--primary)" onclick="event.preventDefault();App.viewApPayment(${p.id})">${p.payment_number}</a></td>
           <td>${this._apDate(p.payment_date)}</td>
-          <td>${this.escapeAttr(p.supplier_name)}</td>
+          <td>${this.escapeAttr(p.supplier_name)}${p.bank_account_name ? `<div style="font-size:11px;color:var(--text-muted)">from ${this.escapeAttr(p.bank_account_name)}</div>` : ''}</td>
           <td>${methodLabel[p.method] || p.method}</td>
           <td>${this.escapeAttr(p.reference || '—')}</td>
           <td>${p.payment_request_id ? `<a href="#" style="color:var(--primary)" onclick="event.preventDefault();App.viewPaymentRequest(${p.payment_request_id})">${p.request_number}</a>` : '—'}</td>
-          <td style="font-size:12px">${p.po_number ? `Advance on ${p.po_number}${p.bill_numbers ? ` → ${p.bill_numbers}` : ''}${p.status !== 'void' && p.unapplied > 0.004 ? `<div style="color:var(--text-muted)">${this.fmt(p.unapplied)} not yet billed</div>` : ''}` : (p.bill_numbers || '—')}</td>
+          <td style="font-size:12px">${p.po_number ? `Advance on ${p.po_number}${p.bill_numbers ? ` → ${p.bill_numbers}` : ''}` : (p.bill_numbers || '—')}${p.status !== 'void' && p.method !== 'contra' && p.unapplied > 0.004 ? `<div style="color:var(--warning, #d97706)">${this.fmt(p.unapplied)} available to apply</div>` : ''}</td>
           <td style="text-align:right" class="fw-600">${this.fmt(p.amount)}</td>
           <td><span class="badge-pill ${p.status === 'void' ? 'badge-secondary' : 'badge-success'}" ${p.void_reason ? `title="${this.escapeAttr(p.void_reason)}"` : ''}>${p.status}</span></td>
           <td>${p.status !== 'void' && this.can('payables_void') ? `<button class="btn btn-sm btn-outline" onclick="App.voidApPayment(${p.id}, '${p.payment_number}')">Void</button>` : ''}</td>
@@ -732,7 +732,7 @@ Object.assign(App, {
           <td style="white-space:nowrap">${['paid', 'cancelled'].includes(r.status) || r.scheduled_date ? (r.required_date ? this._apDate(r.required_date) : '—') : this._prqPayByHtml(r.required_date, { short: true })}</td>
           <td style="white-space:nowrap">${!r.scheduled_date ? '<span style="color:var(--text-muted)">—</span>' : ['paid', 'cancelled'].includes(r.status) ? this._apDate(r.scheduled_date) : this._prqPayByHtml(r.scheduled_date, { short: true })}</td>
           <td>${this.escapeAttr(r.requested_by_name || '—')}</td>
-          <td><span class="badge-pill ${this._prqStatusBadge[r.status] || ''}">${this._prqStatusLabel[r.status] || r.status}</span></td>
+          <td><span class="badge-pill ${this._prqStatusBadge[r.status] || ''}">${this._prqStatusLabel[r.status] || r.status}</span>${r.status === 'approved' && Number(r.paid_total) > 0.005 ? ' <span class="badge-pill badge-warning" style="font-size:10px">part paid</span>' : ''}</td>
         </tr>`).join('') : '<tr><td colspan="10" class="empty-state">No payment requests found</td></tr>';
     };
     document.getElementById('prq-f-status').addEventListener('change', e => { f.status = e.target.value; load(); });
@@ -1070,7 +1070,7 @@ Object.assign(App, {
       actions.push(btn('btn-danger', 'Reject', `App.rejectPaymentRequest(${r.id})`));
       actions.push(btn('btn-success', 'Approve', `App.approvePaymentRequest(${r.id})`));
     }
-    if (r.status === 'approved' && this.can('payables_payments')) actions.push(btn('btn-primary', 'Process Payment', `App.showPayRequestForm(${r.id})`));
+    if (r.status === 'approved' && this.can('payables_payments')) actions.push(btn('btn-primary', r.paid_amount > 0 ? 'Pay Remaining' : 'Process Payment', `App.showPayRequestForm(${r.id})`));
     if (['draft', 'submitted', 'approved', 'rejected'].includes(r.status) && canEdit) actions.unshift(btn('btn-outline', 'Cancel Request', `App.cancelPaymentRequest(${r.id})`));
     this.showModal(`
       <div class="modal" style="max-width:680px">
@@ -1082,7 +1082,9 @@ Object.assign(App, {
           ${r.status === 'submitted' && mine && canApprove ? note('#fffbeb', '#fde68a', '#92400e', 'You raised this request, so someone else has to approve it.') : ''}
           ${r.status === 'rejected' ? note('#fef2f2', '#fecaca', '#991b1b', `<strong>Rejected</strong> by ${this.escapeAttr(r.rejected_by_name || '—')} · ${this.fmtDate(r.rejected_at)}<br>${this.escapeAttr(r.rejection_reason || '')}`) : ''}
           ${r.status === 'cancelled' ? note('#f9fafb', '#e5e7eb', '#374151', `<strong>Cancelled</strong> by ${this.escapeAttr(r.cancelled_by_name || '—')} · ${this.fmtDate(r.cancelled_at)}<br>${this.escapeAttr(r.cancel_reason || '')}`) : ''}
-          ${r.payment_id ? note('#f0fdf4', '#bbf7d0', '#166534', `<strong>Paid</strong> — ${r.payment_number} on ${this._apDate(r.payment_date)} by ${methodLabel[r.payment_method] || r.payment_method}${r.payment_reference ? ` · Ref ${this.escapeAttr(r.payment_reference)}` : ''}${r.paid_by_name ? ` · processed by ${this.escapeAttr(r.paid_by_name)}` : ''}${r.payment_status === 'void' ? '<br><strong style="color:#dc2626">That payment has since been voided.</strong>' : ''}`) : ''}
+          ${(r.payments || []).length ? note(r.paid_in_full ? '#f0fdf4' : '#eff6ff', r.paid_in_full ? '#bbf7d0' : '#bfdbfe', r.paid_in_full ? '#166534' : '#1e40af',
+            `<strong>${r.paid_in_full ? 'Paid in full' : `Part paid — ${this._prqAmountHtml(r, r.remaining, r.remaining_fx, { base: false })} still to pay`}</strong>${r.paid_by_name && r.paid_in_full ? ` · completed by ${this.escapeAttr(r.paid_by_name)}` : ''}
+             ${r.payments.map(p => `<div style="margin-top:4px">${p.status === 'void' ? '<s>' : ''}<a href="#" onclick="event.preventDefault();App.viewApPayment(${p.id})">${p.payment_number}</a> · ${this._apDate(p.payment_date)} · ${methodLabel[p.method] || p.method}${p.reference ? ` ${this.escapeAttr(p.reference)}` : ''}${p.bank_account_name ? ` · from ${this.escapeAttr(p.bank_account_name)}` : ''} · <strong>${p.currency ? `${p.currency} ${this._n2(p.amount_fx)}` : this.fmt(p.amount)}</strong>${p.status === 'void' ? '</s> <strong style="color:#dc2626">void</strong>' : ''}</div>`).join('')}`) : ''}
           <div class="two-col" style="font-size:13px;margin-bottom:14px">
             <div>
               <strong>Vendor:</strong> ${this.escapeAttr(r.supplier_name)} (${r.supplier_number})<br>
@@ -1218,50 +1220,301 @@ Object.assign(App, {
   },
 
   // Pays an approved request — the only place a vendor payment is recorded.
+  // Process Payment on an approved request: the bank account it was paid
+  // from (RetailPOS Books' accounts), the actual date, method and bank
+  // reference / cheque #, the amount (all or part of what's left) and how it's
+  // applied to the request's invoices, plus proof of payment. Review shows it
+  // all before it's posted; posting opens the payment for its advice.
   async showPayRequestForm(id) {
-    const r = await this.api('GET', `/payables/payment-requests/${id}`);
-    const explain = {
-      invoice: `Applied to ${r.lines.map(l => l.bill_number).join(', ')}.`,
-      quick: 'A bill is entered for each line and paid by this payment.',
-      advance: `Held as an advance on ${r.po_number} and applied to its bills as they're entered.`,
-    }[r.request_type];
+    let r, banks;
+    try {
+      [r, banks] = await Promise.all([this.api('GET', `/payables/payment-requests/${id}`), this.api('GET', '/payables/payment-requests/bank-accounts')]);
+    } catch (e) { this.alert(e.message, 'error'); return; }
+    const base = this._baseCurrency();
+    const cur = r.currency || base;
+    const fx = !!r.currency;
+    const esc = v => this.escapeAttr(v ?? '');
+    const money = (b, f) => fx ? `${cur} ${this._n2(f)}` : this.fmt(b);
+    const usable = banks.filter(b => b.currency === cur || b.currency === base);
+    const bankLabel = b => `${b.name}${b.bank_name ? ` — ${b.bank_name}` : ''}${b.last4 ? ` ••${b.last4}` : ''} · ${b.currency}`;
+    const lines = r.request_type === 'advance' ? [] : r.lines.filter(l => (fx ? l.remaining_fx : l.remaining) > 0.005);
+    const left = fx ? r.remaining_fx : r.remaining;
+    this._payCtx = { r, banks, fx, cur };
+    const linked = r.request_type === 'advance'
+      ? `Advance / COD on purchase order <strong>${esc(r.po_number)}</strong>. With no invoice yet, it's held on the vendor's account against that PO and applied to its invoice when that's entered.`
+      : r.request_type === 'quick'
+        ? 'A bill is entered for each line on the first payment, and this payment is applied to them.'
+        : `Invoices: ${r.lines.map(l => `<strong>${esc(l.bill_number)}</strong>${l.vendor_invoice_number ? ` (vendor inv ${esc(l.vendor_invoice_number)})` : ''}`).join(', ')}`;
     this.showModal(`
-      <div class="modal" style="max-width:520px">
-        <div class="modal-header"><span class="modal-title">Process Payment — ${r.request_number}</span><button class="modal-close">✕</button></div>
-        <div class="modal-body">
-          <p style="font-size:13px;margin-top:0"><strong>${this.escapeAttr(r.supplier_name)}</strong> · ${this._prqAmountHtml(r)}<br><span style="color:var(--text-muted)">${this.escapeAttr(explain)}</span></p>
-          ${r.currency ? `<div style="padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:12px;margin-bottom:10px">Paying <strong>${r.currency} ${this._n2(r.amount_fx)}</strong> to the supplier. Enter the rate the bank used — bills in ${r.currency} are cleared at their own rate either way; the difference is the exchange gain/loss.
-            <div class="form-group" style="margin:8px 0 0;max-width:240px"><label>Exchange Rate on Payment (${this._baseCurrency()} per ${r.currency}) *</label><input id="prp-rate" type="number" step="0.0001" min="0" value="${r.exchange_rate || ''}"></div></div>` : ''}
-          <div class="input-row">
-            <div class="form-group"><label>Payment Date *</label><input id="prp-date" type="date" value="${this._apToday()}"></div>
-            <div class="form-group"><label>Method *</label><select id="prp-method">${this._apMethods.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></div>
+      <div class="modal" style="max-width:640px">
+        <div class="modal-header"><span class="modal-title">Process Payment — ${esc(r.request_number)}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body" id="prp-form">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px 16px;font-size:13px;margin-bottom:12px">
+            <div><div style="color:var(--text-muted);font-size:11px">VENDOR</div><strong>${esc(r.supplier_name)}</strong></div>
+            <div><div style="color:var(--text-muted);font-size:11px">APPROVED AMOUNT</div><strong>${money(r.amount, r.amount_fx)}</strong></div>
+            <div><div style="color:var(--text-muted);font-size:11px">ALREADY PAID</div>${money(r.paid_amount, r.paid_amount_fx)}</div>
+            <div><div style="color:var(--text-muted);font-size:11px">LEFT TO PAY</div><strong>${money(r.remaining, r.remaining_fx)}</strong></div>
+            <div><div style="color:var(--text-muted);font-size:11px">SCHEDULED FOR</div>${r.scheduled_date ? this._apDate(r.scheduled_date) : '—'}</div>
           </div>
-          <div class="form-group"><label>Cheque / Reference #</label><input id="prp-ref"></div>
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">${linked}</div>
+          <div class="form-group"><label>Paid From (bank account) *</label>
+            ${usable.length
+              ? `<select id="prp-bank"><option value="">Choose the bank account…</option>${usable.map(b => `<option value="${b.id}" data-currency="${b.currency}">${esc(bankLabel(b))}</option>`).join('')}</select>`
+              : `<div style="font-size:13px;color:var(--danger)">No ${cur}${cur !== base ? ` or ${base}` : ''} bank accounts yet. They come from RetailPOS Books (Bank &amp; Reconciliation) on its next sync. A cash payment needs none.</div><input type="hidden" id="prp-bank" value="">`}
+          </div>
+          <div class="input-row">
+            <div class="form-group"><label>Actual Payment Date *</label><input id="prp-date" type="date" value="${this._apToday()}">${r.scheduled_date && r.scheduled_date !== this._apToday() ? `<div style="font-size:11px;color:var(--text-muted)">Scheduled for ${this._apDate(r.scheduled_date)}</div>` : ''}</div>
+            <div class="form-group"><label>Method *</label><select id="prp-method" onchange="App._payMethodChanged()">${this._apMethods.map(([v, l]) => `<option value="${v}" ${v === 'bank_transfer' ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+          </div>
+          <div class="form-group"><label id="prp-ref-label">Bank Transaction Reference *</label><input id="prp-ref"></div>
+          ${fx ? `<div class="form-group" style="max-width:260px"><label>Exchange Rate on Payment (${base} per ${cur}) *</label><input id="prp-rate" type="number" step="0.0001" min="0" value="${r.exchange_rate || ''}" oninput="App._payRecalc()"></div>` : ''}
+          ${r.request_type === 'advance'
+            ? `<div class="form-group" style="max-width:260px"><label>Amount Paid (${cur}) *</label><input id="prp-amount" type="number" step="0.01" min="0" value="${left}" oninput="App._payRecalc()"></div>`
+            : `<div style="font-weight:600;font-size:13px;margin:6px 0">Applied to</div>
+               <table style="width:100%;font-size:13px"><thead><tr style="color:var(--text-muted);font-size:12px"><th style="text-align:left">${r.request_type === 'quick' ? 'Line' : 'Invoice'}</th><th style="text-align:right">Left to pay</th><th style="text-align:right;width:150px">Pay now (${cur})</th></tr></thead>
+               <tbody>${lines.map(l => `<tr style="border-top:1px solid var(--border)">
+                 <td style="padding:6px 0">${esc(l.bill_number || l.description || '')}${l.vendor_invoice_number ? `<div style="font-size:11px;color:var(--text-muted)">Vendor inv ${esc(l.vendor_invoice_number)}</div>` : ''}</td>
+                 <td style="text-align:right">${money(l.remaining, l.remaining_fx)}</td>
+                 <td style="text-align:right"><input class="prp-alloc" data-line="${l.id}" data-max="${fx ? l.remaining_fx : l.remaining}" data-label="${esc(l.bill_number || l.description || '')}" type="number" step="0.01" min="0" value="${fx ? l.remaining_fx : l.remaining}" style="width:130px;text-align:right" oninput="App._payRecalc()"></td>
+               </tr>`).join('')}</tbody></table>`}
+          <div id="prp-total" style="text-align:right;font-size:15px;margin:10px 0"></div>
+          <div class="form-group"><label>Proof of Payment</label><input type="file" id="prp-files" multiple accept=".pdf,.jpg,.jpeg,.png,.gif,.webp"><div style="font-size:11px;color:var(--text-muted)">Bank confirmation or cheque copy, if you have it. It can be added later too.</div></div>
           <div class="form-group"><label>Notes</label><input id="prp-notes" placeholder="Defaults to the request number"></div>
         </div>
-        <div class="modal-footer">
+        <div class="modal-body" id="prp-review" hidden></div>
+        <div class="modal-footer" id="prp-form-footer">
           <button class="btn btn-secondary" onclick="App.viewPaymentRequest(${r.id})">Back</button>
-          <button class="btn btn-primary" id="prp-btn" onclick="App.payPaymentRequest(${r.id})">Record Payment of ${r.currency ? `${r.currency} ${this._n2(r.amount_fx)}` : this.fmt(r.amount)}</button>
+          <button class="btn btn-primary" onclick="App._payReview()">Review Payment</button>
+        </div>
+        <div class="modal-footer" id="prp-review-footer" hidden>
+          <button class="btn btn-secondary" onclick="App._payEdit()">Edit</button>
+          <button class="btn btn-primary" id="prp-btn" onclick="App.payPaymentRequest(${r.id})">Post Payment</button>
         </div>
       </div>`);
+    this._payMethodChanged();
+    this._payRecalc();
+  },
+
+  _payMethodChanged() {
+    const m = document.getElementById('prp-method')?.value;
+    const label = document.getElementById('prp-ref-label');
+    if (label) label.textContent = m === 'cheque' ? 'Cheque Number *' : m === 'bank_transfer' ? 'Bank Transaction Reference *' : 'Reference';
+  },
+
+  // The payment's amount (sum of what's applied, or the advance) and its
+  // base value at the rate entered.
+  _payAmounts() {
+    const c = this._payCtx;
+    const allocs = [...document.querySelectorAll('.prp-alloc')].map(i => ({ line_id: Number(i.dataset.line), amount: Math.round((parseFloat(i.value) || 0) * 100) / 100, max: Number(i.dataset.max), label: i.dataset.label }));
+    const amount = c.r.request_type === 'advance' ? Math.round((parseFloat(document.getElementById('prp-amount')?.value) || 0) * 100) / 100 : Math.round(allocs.reduce((t, a) => t + a.amount, 0) * 100) / 100;
+    const rate = c.fx ? parseFloat(document.getElementById('prp-rate')?.value) || 0 : 1;
+    return { allocs, amount, rate };
+  },
+  _payRecalc() {
+    const c = this._payCtx;
+    const { amount, rate } = this._payAmounts();
+    const el = document.getElementById('prp-total');
+    if (el) el.innerHTML = `Paying <strong>${c.fx ? `${c.cur} ${this._n2(amount)}` : this.fmt(amount)}</strong>${c.fx && rate ? `<div style="font-size:12px;color:var(--text-muted)">≈ ${this.fmt(amount * rate)} at ${rate}</div>` : ''}`;
+  },
+
+  _payValues() {
+    const c = this._payCtx;
+    const { allocs, amount, rate } = this._payAmounts();
+    const bankSel = document.getElementById('prp-bank');
+    const bank = c.banks.find(b => String(b.id) === String(bankSel?.value)) || null;
+    const v = {
+      bank, method: document.getElementById('prp-method').value, payment_date: document.getElementById('prp-date').value,
+      reference: document.getElementById('prp-ref').value.trim(), notes: document.getElementById('prp-notes').value.trim(),
+      amount, rate, allocs: allocs.filter(a => a.amount > 0), files: [...(document.getElementById('prp-files')?.files || [])],
+    };
+    const left = c.fx ? c.r.remaining_fx : c.r.remaining;
+    if (!v.bank && v.method !== 'cash') return { error: 'Choose the bank account the payment was made from' };
+    if (!v.payment_date) return { error: 'Enter the date the payment was made' };
+    if (['cheque', 'bank_transfer'].includes(v.method) && !v.reference) return { error: v.method === 'cheque' ? 'Enter the cheque number' : 'Enter the bank transaction reference' };
+    if (c.fx && !(rate > 0)) return { error: `Enter the ${c.cur} exchange rate used for this payment` };
+    if (!(amount > 0)) return { error: 'Enter the amount paid' };
+    if (amount - left > 0.005) return { error: `Only ${c.fx ? `${c.cur} ${this._n2(left)}` : this.fmt(left)} is left to pay` };
+    const over = allocs.find(a => a.amount - a.max > 0.005);
+    if (over) return { error: `Only ${this._n2(over.max)} is left to pay on ${over.label}` };
+    return v;
+  },
+
+  _payReview() {
+    const v = this._payValues();
+    if (v.error) { this.alert(v.error, 'warning'); return; }
+    const c = this._payCtx;
+    const esc = s => this.escapeAttr(s ?? '');
+    const amt = n => c.fx ? `${c.cur} ${this._n2(n)}` : this.fmt(n);
+    const method = Object.fromEntries(this._apMethods)[v.method] || v.method;
+    const full = Math.abs(v.amount - (c.fx ? c.r.remaining_fx : c.r.remaining)) <= 0.005;
+    const row = (k, val) => `<tr style="border-top:1px solid var(--border)"><td style="padding:7px 0;color:var(--text-muted);width:40%">${k}</td><td style="padding:7px 0">${val}</td></tr>`;
+    document.getElementById('prp-review').innerHTML = `
+      <p style="margin-top:0;font-size:13px">Check the payment before it's posted to the bank account in the ledger.</p>
+      <table style="width:100%;font-size:14px">
+        ${row('Vendor', `<strong>${esc(c.r.supplier_name)}</strong>`)}
+        ${row('Paid from', v.bank ? `<strong>${esc(v.bank.name)}</strong>${v.bank.bank_name ? ` — ${esc(v.bank.bank_name)}` : ''}${v.bank.last4 ? ` ••${esc(v.bank.last4)}` : ''} <span class="badge-pill badge-info" style="font-size:11px">${v.bank.currency}</span>` : 'Cash (no bank account)')}
+        ${row('Payment date', this._apDate(v.payment_date))}
+        ${row('Method', `${method}${v.reference ? ` · <strong>${esc(v.reference)}</strong>` : ''}`)}
+        ${row('Amount', `<strong style="font-size:16px">${amt(v.amount)}</strong>${c.fx ? ` <span style="color:var(--text-muted)">≈ ${this.fmt(v.amount * v.rate)} at ${v.rate}</span>` : ''}`)}
+        ${row('Applied to', c.r.request_type === 'advance'
+          ? `Held on ${esc(c.r.supplier_name)}'s account against <strong>${esc(c.r.po_number)}</strong> until its invoice is entered`
+          : v.allocs.map(a => `${esc(a.label)}: <strong>${amt(a.amount)}</strong>`).join('<br>'))}
+        ${row('Request', `${esc(c.r.request_number)} — ${full ? 'paid in full' : `part payment, ${amt((c.fx ? c.r.remaining_fx : c.r.remaining) - v.amount)} still to pay`}`)}
+        ${v.files.length ? row('Proof of payment', v.files.map(f => esc(f.name)).join(', ')) : ''}
+      </table>`;
+    for (const [id, show] of [['prp-form', false], ['prp-form-footer', false], ['prp-review', true], ['prp-review-footer', true]]) document.getElementById(id).hidden = !show;
+  },
+  _payEdit() {
+    for (const [id, show] of [['prp-form', true], ['prp-form-footer', true], ['prp-review', false], ['prp-review-footer', false]]) document.getElementById(id).hidden = !show;
   },
 
   async payPaymentRequest(id) {
+    const v = this._payValues();
+    if (v.error) { this._payEdit(); this.alert(v.error, 'warning'); return; }
+    const c = this._payCtx;
     const btn = document.getElementById('prp-btn');
     if (btn) btn.disabled = true;
+    let paid;
     try {
-      const r = await this.api('POST', `/payables/payment-requests/${id}/pay`, {
-        payment_date: document.getElementById('prp-date').value,
-        method: document.getElementById('prp-method').value,
-        reference: document.getElementById('prp-ref').value.trim(),
-        notes: document.getElementById('prp-notes').value.trim(),
-        exchange_rate: document.getElementById('prp-rate') ? parseFloat(document.getElementById('prp-rate').value) || null : undefined,
+      paid = await this.api('POST', `/payables/payment-requests/${id}/pay`, {
+        payment_date: v.payment_date, method: v.method, reference: v.reference, notes: v.notes,
+        bank_account_id: v.bank ? v.bank.id : null, amount: v.amount,
+        exchange_rate: c.fx ? v.rate : undefined,
+        allocations: c.r.request_type === 'advance' ? undefined : v.allocs.map(a => ({ line_id: a.line_id, amount: a.amount })),
       });
-      this._afterPrqChange(id, `Payment ${r.payment_number} recorded`);
     } catch (e) {
       if (btn) btn.disabled = false;
       this.alert(e.message, 'error');
+      return;
     }
+    let note = '';
+    if (v.files.length) {
+      try { await this._uploadApPaymentFiles(paid.new_payment_id, v.files); }
+      catch (e) { note = ` — but the proof of payment didn't upload (${e.message}); add it from the payment`; }
+    }
+    this.alert(`Payment ${paid.payment_number} posted${note}`, note ? 'warning' : 'success');
+    this._pollPayablesInbox();
+    if (this.section === 'payables') this.renderPayables();
+    this.viewApPayment(paid.new_payment_id);
+  },
+
+  async _uploadApPaymentFiles(paymentId, files) {
+    const fd = new FormData();
+    for (const f of files) fd.append('files', f);
+    const res = await fetch(`/api/payables/payments/${paymentId}/attachments`, { method: 'POST', body: fd });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || 'Upload failed'); }
+    return res.json();
+  },
+
+  // A vendor payment: where it went, what it paid, what's still on the
+  // vendor's account to apply (with Apply), proof of payment, and the
+  // payment advice (preview, PDF, email, history).
+  async viewApPayment(id) {
+    let p;
+    try { p = await this.api('GET', `/payables/payments/${id}`); } catch (e) { this.alert(e.message, 'error'); return; }
+    const esc = v => this.escapeAttr(v ?? '');
+    const fx = !!p.currency;
+    const amt = (b, f) => fx ? `${p.currency} ${this._n2(f)}` : this.fmt(b);
+    const method = { ...Object.fromEntries(this._apMethods), ...this._apMethodNames }[p.method] || p.method;
+    const canPay = this.can('payables_payments');
+    const posted = p.status === 'posted';
+    const unapplied = posted && p.unapplied > 0.005;
+    this.showModal(`
+      <div class="modal" style="max-width:720px">
+        <div class="modal-header"><span class="modal-title">Payment ${esc(p.payment_number)}</span>
+          <div style="display:flex;gap:8px;align-items:center"><span class="badge-pill ${posted ? 'badge-success' : 'badge-secondary'}">${posted ? 'Posted' : 'Void'}</span><button class="modal-close">✕</button></div></div>
+        <div class="modal-body">
+          ${!posted ? `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:10px 12px;margin-bottom:12px;font-size:13px;color:#991b1b"><strong>Voided</strong> ${esc(p.void_reason || '')}</div>` : ''}
+          <div class="two-col" style="font-size:13px;margin-bottom:12px">
+            <div>
+              <strong>Vendor:</strong> ${esc(p.supplier_name)} (${esc(p.supplier_number)})<br>
+              <strong>Paid from:</strong> ${p.bank_account_name ? `${esc(p.bank_account_name)} · ${esc(p.bank_currency)}` : p.method === 'cash' ? 'Cash' : '<span style="color:var(--text-muted)">not recorded (before bank accounts were added)</span>'}<br>
+              <strong>Payment date:</strong> ${this._apDate(p.payment_date)}<br>
+              <strong>Method:</strong> ${method}${p.reference ? ` · ${esc(p.reference)}` : ''}
+            </div>
+            <div>
+              <strong>Amount:</strong> <span class="fw-600">${amt(p.amount, p.amount_fx)}</span>${fx ? ` <span style="color:var(--text-muted)">≈ ${this.fmt(p.amount)} at ${p.exchange_rate}</span>` : ''}<br>
+              ${p.request_number ? `<strong>Request:</strong> <a href="#" onclick="event.preventDefault();App.viewPaymentRequest(${p.payment_request_id})">${esc(p.request_number)}</a><br>` : ''}
+              ${p.po_number ? `<strong>Purchase order:</strong> ${esc(p.po_number)}<br>` : ''}
+              <strong>Recorded by:</strong> ${esc(p.created_by_name || '—')} · ${this.fmtDateTime(p.created_at)}
+            </div>
+          </div>
+          <div style="font-weight:600;font-size:13px;margin-bottom:4px">Applied to</div>
+          <table style="width:100%;font-size:13px;margin-bottom:10px"><tbody>
+            ${p.allocations.length ? p.allocations.map(a => `<tr style="border-top:1px solid var(--border)"><td style="padding:5px 0"><a href="#" onclick="event.preventDefault();App.viewBill(${a.bill_id})">${esc(a.bill_number)}</a>${a.vendor_invoice_number ? ` · vendor inv ${esc(a.vendor_invoice_number)}` : ''}${a.bill_po_number ? ` · ${esc(a.bill_po_number)}` : ''}</td><td style="text-align:right" class="fw-600">${amt(a.amount, a.amount_fx)}</td></tr>`).join('')
+              : '<tr><td style="color:var(--text-muted);padding:5px 0">Not applied to any invoice yet</td></tr>'}
+          </tbody></table>
+          ${unapplied ? `<div style="border:1px solid #fde68a;background:#fffbeb;border-radius:6px;padding:10px 12px;margin-bottom:12px;font-size:13px">
+            <strong>${amt(p.unapplied, p.unapplied_fx)} available to apply</strong> on ${esc(p.supplier_name)}'s account${p.po_number ? ` (paid on ${esc(p.po_number)}, awaiting its invoice)` : ''}.
+            ${canPay && p.open_bills.length ? `<table style="width:100%;font-size:13px;margin-top:8px"><thead><tr style="color:var(--text-muted);font-size:12px"><th style="text-align:left">Open bill</th><th style="text-align:right">Owed</th><th style="text-align:right;width:140px">Apply (${this._baseCurrency()})</th></tr></thead><tbody>
+                ${p.open_bills.map(b => `<tr style="border-top:1px solid var(--border)"><td style="padding:5px 0">${esc(b.bill_number)}${b.vendor_invoice_number ? ` · inv ${esc(b.vendor_invoice_number)}` : ''}${b.po_number ? ` · ${esc(b.po_number)}` : ''}</td><td style="text-align:right">${this.fmt(b.balance)}</td>
+                  <td style="text-align:right"><input class="pay-apply" data-bill="${b.id}" type="number" step="0.01" min="0" max="${b.balance}" placeholder="0.00" style="width:120px;text-align:right"></td></tr>`).join('')}
+              </tbody></table>
+              <div style="text-align:right;margin-top:6px"><button class="btn btn-sm btn-primary" onclick="App._applyApPayment(${p.id})">Apply to Bills</button></div>
+              <div style="font-size:11px;color:var(--text-muted);margin-top:4px">Only the Payables records change: the money already left the bank when this payment was posted.</div>`
+              : canPay ? '<div style="font-size:12px;color:var(--text-muted);margin-top:4px">No open bills for this vendor yet. Enter the supplier invoice in Bills, then apply this payment to it.</div>' : ''}
+          </div>` : ''}
+          <div style="font-weight:600;font-size:13px;margin-bottom:4px">Proof of Payment</div>
+          <div style="font-size:13px;margin-bottom:6px">${p.attachments.length ? p.attachments.map(a => `<div style="display:flex;justify-content:space-between;border-top:1px solid var(--border);padding:4px 0">
+              <a href="/api/payables/payments/${p.id}/attachments/${a.id}/download" target="_blank">📎 ${esc(a.original_name)}</a>
+              <span style="font-size:11px;color:var(--text-muted)">${esc(a.uploaded_by_name || '')}${canPay ? ` <button class="btn btn-sm btn-outline" onclick="App._removeApPaymentFile(${p.id}, ${a.id})">Remove</button>` : ''}</span></div>`).join('') : '<span style="color:var(--text-muted)">None attached.</span>'}</div>
+          ${canPay ? `<div style="display:flex;gap:8px;align-items:center;margin-bottom:14px"><input type="file" id="pay-view-files" multiple accept=".pdf,.jpg,.jpeg,.png,.gif,.webp"><button class="btn btn-sm btn-outline" onclick="App._addApPaymentFiles(${p.id})">Upload</button></div>` : ''}
+          <div style="font-weight:600;font-size:13px;margin-bottom:4px">Payment Advice</div>
+          ${posted ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+            <button class="btn btn-sm btn-outline" onclick="App._printServerDocument('/api/email/payment-advice-preview/${p.id}', 'payment-advice', 'payment advice')">Preview</button>
+            <a class="btn btn-sm btn-outline" href="/api/email/payment-advice-pdf/${p.id}" target="_blank">Download PDF</a>
+            ${canPay ? `<button class="btn btn-sm btn-primary" onclick="App._showPaymentAdviceEmail(${p.id})">Email to Vendor</button>` : ''}
+          </div>` : ''}
+          <div id="pay-advice-email"></div>
+          <div style="font-size:12px">${p.advices.length ? p.advices.map(d => `<div style="border-top:1px solid var(--border);padding:4px 0">Sent to <strong>${esc(d.sent_to)}</strong>${d.cc ? ` (cc ${esc(d.cc)})` : ''} · ${this.fmtDateTime(d.sent_at)} by ${esc(d.sent_by_name || '—')}${d.has_copy ? ` · <a href="/api/payables/payments/${p.id}/advices/${d.id}/download" target="_blank">copy sent</a>` : ''}</div>`).join('') : '<span style="color:var(--text-muted)">Not emailed yet.</span>'}</div>
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">Close</button></div>
+      </div>`);
+    this._apPaymentView = p;
+  },
+
+  _showPaymentAdviceEmail(id) {
+    const p = this._apPaymentView;
+    const box = document.getElementById('pay-advice-email');
+    if (!box || !p) return;
+    box.innerHTML = `<div style="border:1px solid var(--border);border-radius:6px;padding:10px 12px;margin-bottom:10px">
+      <div class="form-group"><label>Vendor email *</label><input id="pa-to" value="${this.escapeAttr(p.supplier_email || '')}" placeholder="accounts@vendor.com">${p.supplier_email ? '' : '<div style="font-size:11px;color:var(--warning, #d97706)">No email on file for this vendor — enter one.</div>'}</div>
+      <div class="form-group"><label>CC</label><input id="pa-cc" placeholder="Optional, comma-separated"></div>
+      <div class="form-group"><label>Message</label><textarea id="pa-msg" rows="2" style="width:100%;resize:vertical" placeholder="Optional note above the attached PDF"></textarea></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-sm btn-secondary" onclick="document.getElementById('pay-advice-email').innerHTML=''">Cancel</button><button class="btn btn-sm btn-primary" id="pa-send" onclick="App._sendPaymentAdvice(${id})">Send Payment Advice</button></div>
+    </div>`;
+    document.getElementById('pa-to').focus();
+  },
+  async _sendPaymentAdvice(id) {
+    const to = document.getElementById('pa-to').value.trim();
+    if (!to) { this.alert("Enter the vendor's email address", 'warning'); return; }
+    const btn = document.getElementById('pa-send');
+    btn.disabled = true;
+    try {
+      const out = await this.api('POST', `/email/send-payment-advice/${id}`, { to, cc: document.getElementById('pa-cc').value.trim(), message: document.getElementById('pa-msg').value.trim() });
+      this.alert(out.message, 'success');
+      this.viewApPayment(id);
+    } catch (e) { btn.disabled = false; this.alert(e.message, 'error'); }
+  },
+
+  async _applyApPayment(id) {
+    const allocations = [...document.querySelectorAll('.pay-apply')].map(i => ({ bill_id: Number(i.dataset.bill), amount: parseFloat(i.value) || 0 })).filter(a => a.amount > 0);
+    if (!allocations.length) { this.alert('Enter an amount to apply to at least one bill', 'warning'); return; }
+    try {
+      await this.api('POST', `/payables/payments/${id}/apply`, { allocations });
+      this.alert('Payment applied', 'success');
+      if (this.section === 'payables') this.renderPayables();
+      this.viewApPayment(id);
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+  async _addApPaymentFiles(id) {
+    const files = [...(document.getElementById('pay-view-files')?.files || [])];
+    if (!files.length) { this.alert('Choose a file first', 'warning'); return; }
+    try { await this._uploadApPaymentFiles(id, files); this.viewApPayment(id); } catch (e) { this.alert(e.message, 'error'); }
+  },
+  async _removeApPaymentFile(id, attId) {
+    if (!confirm('Remove this proof of payment?')) return;
+    try { await this.api('DELETE', `/payables/payments/${id}/attachments/${attId}`); this.viewApPayment(id); } catch (e) { this.alert(e.message, 'error'); }
   },
 
   printPaymentRequest(id) {
@@ -1274,6 +1527,7 @@ Object.assign(App, {
       <div class="modal" style="max-width:760px">
         <div class="modal-header"><span class="modal-title">Statement — ${this.escapeAttr(st.supplier.name)}</span><button class="modal-close">✕</button></div>
         <div class="modal-body" style="padding:0">
+          ${st.available_to_apply > 0.005 ? `<div style="margin:12px;padding:10px 12px;border:1px solid #fde68a;background:#fffbeb;border-radius:6px;font-size:13px"><strong>${this.fmt(st.available_to_apply)} available to apply</strong> — paid to this vendor but not yet applied to an invoice (COD / advance payments awaiting their invoice). Open the payment in Payments to apply it.</div>` : ''}
           <table style="width:100%;border-collapse:collapse;font-size:13px">
             <thead><tr style="background:var(--bg-secondary,#f9fafb)">
               <th style="padding:8px 12px;text-align:left">Date</th><th style="padding:8px 12px;text-align:left">Document</th><th style="padding:8px 12px;text-align:left">Details</th>

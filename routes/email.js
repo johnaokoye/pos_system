@@ -1644,6 +1644,181 @@ router.get('/payment-request-preview/:id', requireAnyPermission('payables', 'pay
   } catch(e) { res.status(500).send(`<p>Error: ${esc(e.message)}</p>`); }
 });
 
+// ── Payment advice ─────────────────────────────────────────────────────
+// What a vendor is told about a payment (Payables → payment → Payment
+// Advice): when it was paid, how much and in what currency, the bank
+// reference, and the invoices it paid — or, for a COD / advance payment still
+// waiting for its invoice, the purchase order it's held against. One set of
+// figures (paymentAdviceFigures) feeds the HTML preview and the PDF.
+function paymentAdviceFigures(p) {
+  const fx = !!p.currency;
+  const money = (base, amtFx) => fx ? `${p.currency} ${num2(amtFx)}` : fmt(base);
+  const rows = (p.allocations || []).map(a => ({
+    invoice: a.vendor_invoice_number || a.bill_number,
+    ourRef: a.bill_number,
+    date: a.bill_date ? fmtDate(a.bill_date) : '',
+    po: a.bill_po_number || '',
+    amount: money(a.amount, a.amount_fx != null ? a.amount_fx : (Number(p.amount) > 0 ? a.amount * Number(p.amount_fx) / Number(p.amount) : 0)),
+  }));
+  const unapplied = p.status === 'posted' && Number(p.unapplied) > 0.005;
+  const held = unapplied ? {
+    label: p.po_number ? `Payment on purchase order ${p.po_number} — invoice to follow` : 'Payment on account — to be applied to your invoices',
+    amount: money(p.unapplied, p.unapplied_fx),
+  } : null;
+  return { fx, paid: fx ? `${p.currency} ${num2(p.amount_fx)}` : fmt(p.amount), currency: p.currency || null, rows, held };
+}
+
+function buildPaymentAdviceHtml(p, s) {
+  const f = paymentAdviceFigures(p);
+  const storeName = s.store_name || 'My Store';
+  const th = (label, align = 'left') => `<th style="padding:8px;text-align:${align};font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">${label}</th>`;
+  const td = (v, align = 'left', extra = '') => `<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:${align};${extra}">${v}</td>`;
+  const vendorAddr = [p.supplier_address, [p.supplier_city, p.supplier_state, p.supplier_zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  const rows = f.rows.map(r => `<tr>${td(esc(r.invoice))}${td(esc(r.ourRef), 'left', 'color:#666')}${td(esc(r.date))}${td(esc(r.po || '—'))}${td(r.amount, 'right', 'font-weight:600')}</tr>`).join('')
+    + (f.held ? `<tr>${td(esc(f.held.label), 'left', 'font-style:italic')}${td('')}${td('')}${td(esc(p.po_number || '—'))}${td(f.held.amount, 'right', 'font-weight:600')}</tr>` : '');
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Payment Advice ${esc(p.payment_number)}</title>
+${PRINT_PAGE_STYLE}
+</head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
+<table class="page-wrap" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
+<tr><td align="center">
+  <table class="page" width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+    <tr><td style="${BRAND_HEADER_STYLE}">
+      <div style="color:#fff;font-size:22px;font-weight:700">${esc(storeName)}</div>
+      ${s.store_address ? `<div style="color:#ffffff;font-size:12px;margin-top:4px">${esc(s.store_address)}</div>` : ''}
+      ${s.store_phone ? `<div style="color:#ffffff;font-size:12px">${esc(s.store_phone)}</div>` : ''}
+    </td></tr>
+    <tr><td style="padding:20px 24px">
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px"><tr>
+        <td style="vertical-align:top">
+          <div style="font-size:20px;font-weight:700;color:${BRAND.black}">PAYMENT ADVICE</div>
+          <div style="font-size:13px;color:#888;margin-top:2px">${esc(p.payment_number)}</div>
+          ${p.status === 'void' ? `<div style="display:inline-block;margin-top:6px;padding:3px 8px;border:2px solid #dc2626;color:#dc2626;font-size:12px;font-weight:700">VOID</div>` : ''}
+        </td>
+        <td style="vertical-align:top;text-align:right;font-size:13px;color:#444;line-height:1.6">
+          <div><strong>Payment Date:</strong> ${fmtDate(p.payment_date)}</div>
+          <div><strong>Method:</strong> ${AP_METHODS[p.method] || esc(p.method)}</div>
+          ${p.reference ? `<div><strong>${p.method === 'cheque' ? 'Cheque #' : 'Bank Reference'}:</strong> ${esc(p.reference)}</div>` : ''}
+          ${p.request_number ? `<div><strong>Our Ref:</strong> ${esc(p.request_number)}</div>` : ''}
+        </td>
+      </tr></table>
+      <div style="background:#f9fafb;border:1px solid #e8e8e8;border-radius:6px;padding:12px;margin-bottom:16px;font-size:13px;line-height:1.5">
+        <strong>Paid to:</strong><br>${esc(p.supplier_name)}${p.supplier_number ? ` <span style="color:#888">(${esc(p.supplier_number)})</span>` : ''}
+        ${vendorAddr ? `<br>${esc(vendorAddr)}` : ''}
+      </div>
+      <div style="font-size:16px;margin-bottom:14px">Amount paid: <strong>${f.paid}</strong>${f.currency ? ` <span style="font-size:12px;color:#666">(${esc(f.currency)})</span>` : ''}</div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px">
+        <thead><tr style="background:#f9fafb">${th('Your Invoice #')}${th('Our Ref')}${th('Invoice Date')}${th('PO #')}${th('Amount Paid', 'right')}</tr></thead>
+        <tbody>${rows || `<tr>${td('—')}${td('')}${td('')}${td('')}${td('')}</tr>`}</tbody>
+      </table>
+      <div style="text-align:right;margin-top:10px;font-size:16px;font-weight:700;color:${BRAND.black}">Total Paid: ${f.paid}</div>
+      <div style="margin-top:18px;font-size:12px;color:#666">Please contact us quoting ${esc(p.payment_number)} with any questions about this payment.</div>
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body>
+</html>`;
+}
+
+function paymentAdvicePdfModel(p, s) {
+  const f = paymentAdviceFigures(p);
+  const vendorAddr = [p.supplier_address, [p.supplier_city, p.supplier_state, p.supplier_zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  return {
+    store: pdfStore(s),
+    title: p.status === 'void' ? 'PAYMENT ADVICE - VOID' : 'PAYMENT ADVICE', number: p.payment_number,
+    meta: [['Payment Date', pdfDate(p.payment_date)], ['Method', AP_METHODS[p.method] || p.method], [p.method === 'cheque' ? 'Cheque #' : 'Bank Reference', p.reference], ['Our Ref', p.request_number], ['Currency', f.currency]],
+    party: { label: 'Paid To', lines: [p.supplier_name, vendorAddr], boldFirst: true },
+    tables: [{
+      columns: [{ label: 'Your Invoice #', width: 1.6 }, { label: 'Our Ref', width: 1.2 }, { label: 'Invoice Date', width: 1.2 }, { label: 'PO #', width: 1.2 }, { label: 'Amount Paid', width: 1.4, align: 'right' }],
+      rows: [
+        ...f.rows.map(r => ({ cells: [r.invoice, r.ourRef, r.date, r.po || '-', r.amount] })),
+        ...(f.held ? [{ cells: [f.held.label, '', '', p.po_number || '-', f.held.amount] }] : []),
+      ],
+    }],
+    totals: [{ label: 'TOTAL PAID', value: f.paid, style: 'grand' }],
+    notes: [`Please contact us quoting ${p.payment_number} with any questions about this payment.`],
+    signatures: [],
+  };
+}
+
+async function loadAdvicePayment(id) {
+  const { loadPayment } = require('./payables');
+  return loadPayment(id);
+}
+
+router.get('/payment-advice-preview/:id', requirePermission('payables'), async (req, res) => {
+  try {
+    const p = await loadAdvicePayment(req.params.id);
+    if (!p) return res.status(404).send('<p>Payment not found</p>');
+    res.setHeader('Content-Type', 'text/html');
+    res.setHeader('X-Pos-Document', 'payment-advice');
+    res.send(buildPaymentAdviceHtml(p, await getSettings()));
+  } catch(e) { res.status(500).send(`<p>Error: ${esc(e.message)}</p>`); }
+});
+
+router.get('/payment-advice-pdf/:id', requirePermission('payables'), async (req, res) => {
+  try {
+    const p = await loadAdvicePayment(req.params.id);
+    if (!p) return res.status(404).json({ error: 'Payment not found' });
+    const pdf = await renderDocumentPdf(paymentAdvicePdfModel(p, await getSettings()));
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `${req.query.inline ? 'inline' : 'attachment'}; filename="payment-advice-${p.payment_number}.pdf"`);
+    res.send(pdf);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Emails the advice as a PDF to the vendor (address confirmed by the sender),
+// keeps the PDF exactly as sent (uploads/payment-advices) and logs who it
+// went to and when (payment_advice_sends).
+router.post('/send-payment-advice/:id', requirePermission('payables_payments'), async (req, res) => {
+  const to = parseRecipients(req.body.to);
+  if (to.error) return res.status(400).json({ error: to.error });
+  if (!to.list.length) return res.status(400).json({ error: "Enter the vendor's email address" });
+  const cc = parseRecipients(req.body.cc);
+  if (cc.error) return res.status(400).json({ error: `CC: ${cc.error}` });
+  try {
+    const p = await loadAdvicePayment(req.params.id);
+    if (!p) return res.status(404).json({ error: 'Payment not found' });
+    if (p.status === 'void') return res.status(400).json({ error: 'This payment is void — there is no advice to send' });
+    const s = await getSettings();
+    const model = paymentAdvicePdfModel(p, s);
+    const pdf = await renderDocumentPdf(model);
+    const subject = String(req.body.subject || '').trim() || `Payment Advice ${p.payment_number} from ${s.store_name || 'Our Store'}`;
+    try {
+      const transporter = createTransporter(s);
+      const fromName = s.email_from_name || s.store_name || 'POS System';
+      const fromAddr = s.email_smtp_user || s.store_email || '';
+      await transporter.sendMail({
+        from: `"${fromName}" <${fromAddr}>`,
+        to: to.list,
+        ...(cc.list.length ? { cc: cc.list } : {}),
+        subject,
+        html: withMessage(buildPdfCoverHtml(model, s), req.body.message),
+        attachments: [{ filename: `payment-advice-${p.payment_number}.pdf`, content: pdf, contentType: 'application/pdf' }],
+      });
+    } catch (e) {
+      return res.status(500).json({ error: `Failed to send email: ${e.message}` });
+    }
+    const fs = require('fs');
+    const path = require('path');
+    const dir = path.join(__dirname, '../uploads/payment-advices');
+    let stored = null;
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      stored = `payment-advice-${p.id}-${Date.now()}.pdf`;
+      fs.writeFileSync(path.join(dir, stored), pdf);
+    } catch (e) { stored = null; }
+    await db.execute({
+      sql: 'INSERT INTO payment_advice_sends (payment_id, sent_to, cc, subject, stored_name, sent_by) VALUES (?,?,?,?,?,?)',
+      args: [p.id, to.list.join(', '), cc.list.join(', ') || null, subject, stored, req.employee?.id || null],
+    });
+    res.json({ success: true, message: `Payment advice sent to ${[...to.list, ...cc.list].join(', ')}` });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Contra statement (routes/contras.js): both sides of the offset — our
 // invoices to the customer and their bills to us — with each document's
 // balance before, the amount offset and what's left, plus who raised,

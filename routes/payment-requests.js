@@ -35,6 +35,7 @@ const REQ_SELECT = `SELECT r.*, s.name AS supplier_name, s.supplier_number, po.p
   sc.first_name || ' ' || sc.last_name AS scheduled_by_name,
   p.payment_number, p.payment_date, p.method AS payment_method, p.reference AS payment_reference, p.status AS payment_status,
   (SELECT COUNT(*) FROM payment_request_attachments a WHERE a.request_id = r.id) AS attachment_count,
+  (SELECT COALESCE(SUM(pp.amount), 0) FROM ap_payments pp WHERE pp.payment_request_id = r.id AND pp.status = 'posted') AS paid_total,
   (SELECT GROUP_CONCAT(COALESCE(b.bill_number, l.description), ', ') FROM payment_request_lines l
      LEFT JOIN ap_bills b ON b.id = l.bill_id WHERE l.request_id = r.id) AS summary
   FROM payment_requests r
@@ -69,6 +70,61 @@ async function loadRequest(id) {
     args: [r.id],
   });
   r.lines = lines.map(l => ({ ...l, bill_balance: l.bill_id ? round2(l.bill_balance) : null }));
+  await attachPaid(db, r);
+  return r;
+}
+
+// What's been paid on a request so far (its posted payments), per line and in
+// all — base and, for a foreign-currency request, in its currency — and
+// what's left: `remaining` / `remaining_fx`, and `paid_in_full`. Invoice and
+// quick lines are paid through allocations to their bill (a quick line gets
+// its bill on the first payment); an advance is paid as a whole. Also lists
+// the payments (`payments`).
+async function attachPaid(executor, r) {
+  const { rows: payments } = await executor.execute({
+    sql: `SELECT p.id, p.payment_number, p.payment_date, p.amount, p.amount_fx, p.currency, p.exchange_rate, p.method, p.reference, p.status,
+            p.bank_account_name, p.bank_currency, e.first_name || ' ' || e.last_name AS created_by_name
+          FROM ap_payments p LEFT JOIN employees e ON e.id = p.created_by
+          WHERE p.payment_request_id = ? ORDER BY p.payment_date, p.id`,
+    args: [r.id],
+  });
+  r.payments = payments;
+  const posted = payments.filter(p => p.status === 'posted');
+  const fx = !!r.currency;
+  // A quick request paid before its lines were linked to the bills they made
+  // is counted by its payments, like an advance.
+  const byPayments = r.request_type === 'advance' || (r.request_type === 'quick' && r.lines.every(l => !l.bill_id));
+  if (byPayments) {
+    r.paid_amount = round2(posted.reduce((t, p) => t + Number(p.amount), 0));
+    r.paid_amount_fx = fx ? round2(posted.reduce((t, p) => t + Number(p.amount_fx || 0), 0)) : null;
+    const done = fx ? r.paid_amount_fx >= Number(r.amount_fx || 0) - 0.005 : r.paid_amount >= Number(r.amount) - 0.005;
+    for (const l of r.lines) {
+      l.paid = done ? round2(l.amount) : 0;
+      l.paid_fx = fx ? (done ? round2(l.amount_fx) : 0) : null;
+      l.remaining = done ? 0 : round2(l.amount);
+      l.remaining_fx = fx ? (done ? 0 : round2(l.amount_fx)) : null;
+    }
+  } else {
+    const ids = posted.map(p => p.id);
+    const allocs = ids.length ? (await executor.execute({
+      sql: `SELECT bill_id, COALESCE(SUM(amount), 0) AS amount, COALESCE(SUM(amount_fx), 0) AS amount_fx FROM ap_payment_allocations
+            WHERE payment_id IN (${ids.map(() => '?').join(',')}) GROUP BY bill_id`,
+      args: ids,
+    })).rows : [];
+    const byBill = new Map(allocs.map(a => [Number(a.bill_id), a]));
+    for (const l of r.lines) {
+      const a = l.bill_id ? byBill.get(Number(l.bill_id)) : null;
+      l.paid = round2(a ? a.amount : 0);
+      l.paid_fx = fx ? round2(a ? a.amount_fx : 0) : null;
+      l.remaining = round2(Math.max(0, Number(l.amount) - l.paid));
+      l.remaining_fx = fx ? round2(Math.max(0, Number(l.amount_fx || 0) - l.paid_fx)) : null;
+    }
+    r.paid_amount = round2(r.lines.reduce((t, l) => t + l.paid, 0));
+    r.paid_amount_fx = fx ? round2(r.lines.reduce((t, l) => t + l.paid_fx, 0)) : null;
+  }
+  r.remaining = round2(Math.max(0, Number(r.amount) - r.paid_amount));
+  r.remaining_fx = fx ? round2(Math.max(0, Number(r.amount_fx || 0) - r.paid_amount_fx)) : null;
+  r.paid_in_full = fx ? r.remaining_fx <= 0.005 : r.remaining <= 0.005;
   return r;
 }
 
@@ -88,8 +144,11 @@ async function poAdvanceRoom(executor, poId, excludeRequestId = 0) {
              WHERE b.po_id = ? AND (p.po_id IS NULL OR p.po_id != ?)) AS v`,
     args: [poId, poId, poId],
   });
+  // A part-paid request only holds what's still unpaid on it — what it has
+  // paid is already in `paid` above.
   const { rows: [pending] } = await executor.execute({
-    sql: `SELECT COALESCE(SUM(amount), 0) AS v FROM payment_requests WHERE po_id = ? AND request_type = 'advance' AND status IN ${ACTIVE} AND id != ?`,
+    sql: `SELECT COALESCE(SUM(r.amount - (SELECT COALESCE(SUM(p.amount), 0) FROM ap_payments p WHERE p.payment_request_id = r.id AND p.status = 'posted')), 0) AS v
+          FROM payment_requests r WHERE r.po_id = ? AND r.request_type = 'advance' AND r.status IN ${ACTIVE} AND r.id != ?`,
     args: [poId, excludeRequestId],
   });
   const total = round2(Number(po.total) * rate);
@@ -107,10 +166,14 @@ async function billRoom(executor, billIds, excludeRequestId = 0) {
     sql: `SELECT b.id, b.bill_number, b.supplier_id, b.status, b.currency, b.exchange_rate, b.amount - ${PAID_SQL} AS balance,
             (SELECT COALESCE(SUM(l.amount), 0) FROM payment_request_lines l JOIN payment_requests r ON r.id = l.request_id
              WHERE l.bill_id = b.id AND r.status IN ${ACTIVE} AND r.id != ?)
+            -- a part-paid request only holds what's still unpaid on the bill
+            - (SELECT COALESCE(SUM(a.amount), 0) FROM ap_payment_allocations a JOIN ap_payments p ON p.id = a.payment_id AND p.status = 'posted'
+               JOIN payment_requests r ON r.id = p.payment_request_id
+             WHERE a.bill_id = b.id AND r.status IN ${ACTIVE} AND r.id != ?)
             + (SELECT COALESCE(SUM(cl.amount), 0) FROM contra_lines cl JOIN contras k ON k.id = cl.contra_id
              WHERE cl.side = 'ap' AND cl.bill_id = b.id AND k.status IN ('submitted', 'approved')) AS requested
           FROM ap_bills b WHERE b.id IN (${billIds.map(() => '?').join(',')})`,
-    args: [excludeRequestId, ...billIds],
+    args: [excludeRequestId, excludeRequestId, ...billIds],
   });
   return new Map(rows.map(b => [Number(b.id), { ...b, balance: round2(b.balance), requested: round2(b.requested) }]));
 }
@@ -281,6 +344,14 @@ router.get('/options', requirePermission('payables_requests'), async (req, res) 
 // notified through the inbox below. Needs purchasing_request_payment (or
 // payables_requests). Only for an approved or part-received PO.
 const canRequestFromPo = requireAnyPermission('purchasing_request_payment', 'payables_requests');
+
+// Paying bank accounts for the Process Payment screen.
+router.get('/bank-accounts', requirePermission('payables_payments'), async (req, res) => {
+  try {
+    const { rows } = await db.execute({ sql: 'SELECT * FROM ap_bank_accounts WHERE active = 1 ORDER BY currency, name', args: [] });
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 router.get('/for-po/:poId', requireAnyPermission('purchasing', 'payables', 'payables_approve'), async (req, res) => {
   try {
@@ -516,86 +587,177 @@ router.post('/:id/cancel', requirePermission('payables_requests'), async (req, r
 });
 
 // ── Paying an approved request ─────────────────────────────
-// Records the ap_payments row and applies it: to the requested bills
-// (invoice), to a bill created per line (quick — so the books still see a
-// bill for what was paid), or to the PO's bills as they come in (advance —
-// left unapplied until then).
+// Process Payment records an ap_payments row against a request: from a bank
+// account (RetailPOS Books' list, ap_bank_accounts — not needed for cash),
+// on the actual payment date, for all or part of what's left. Invoice and
+// quick lines are paid through allocations to their bills (a quick request
+// gets a bill per line on its first payment); an advance (COD / deposit on a
+// PO) is left unapplied on the vendor's account, linked to the PO and the
+// request, and applied to the PO's bills as they're entered — or by hand
+// (POST /payables/payments/:id/apply). The request turns Paid once its full
+// amount is paid; until then it stays Approved, part paid. posting_mode
+// 'payment' tells Books to post the whole payment to that bank once (Dr A/P /
+// Cr bank) — applying it to bills later posts nothing more.
+
+const NEEDS_REFERENCE = ['cheque', 'bank_transfer'];
+
 router.post('/:id/pay', requirePermission('payables_payments'), async (req, res) => {
   try {
     const { payment_date, method } = req.body;
     const reference = String(req.body.reference || '').trim() || null;
     const notes = String(req.body.notes || '').trim() || null;
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(payment_date || '')) return res.status(400).json({ error: 'Payment date is required' });
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(payment_date || '')) return res.status(400).json({ error: 'Enter the date the payment was made' });
     if (!PAYMENT_METHODS.includes(method)) return res.status(400).json({ error: 'Choose a payment method' });
-    const r = await loadRequest(req.params.id);
-    if (!r) return res.status(404).json({ error: 'Payment request not found' });
-    if (r.status !== 'approved') return res.status(400).json({ error: r.status === 'paid' ? 'This request has already been paid' : 'Only an approved request can be paid' });
+    if (NEEDS_REFERENCE.includes(method) && !reference) return res.status(400).json({ error: method === 'cheque' ? 'Enter the cheque number' : 'Enter the bank transaction reference' });
+    const r0 = await loadRequest(req.params.id);
+    if (!r0) return res.status(404).json({ error: 'Payment request not found' });
+    if (r0.status !== 'approved') return res.status(400).json({ error: r0.status === 'paid' ? 'This request has already been paid in full' : 'Only an approved request can be paid' });
+
     // Foreign-currency request: the rate on the day it's paid (defaults to the
-    // request's). Lines against a bill/PO in the same currency keep their
-    // booked-rate amounts — the gap to this rate is the realised FX
-    // gain/loss; everything else converts at this rate.
-    const fx = !!r.currency;
-    const payRate = fx ? (parseFloat(req.body.exchange_rate) > 0 ? parseFloat(req.body.exchange_rate) : Number(r.exchange_rate)) : null;
-    if (fx && !(payRate > 0)) return res.status(400).json({ error: `Enter the ${r.currency} exchange rate used for this payment` });
-    let poCurrency = null;
-    if (fx && r.request_type === 'advance') ({ rows: [{ currency: poCurrency } = {}] } = await db.execute({ sql: 'SELECT currency FROM purchase_orders WHERE id = ?', args: [r.po_id] }));
+    // request's). Lines against a bill/PO in the same currency are cleared at
+    // their booked rate — the gap to this rate is the realised FX gain/loss
+    // Books posts; everything else converts at this rate.
+    const fx = !!r0.currency;
+    const payRate = fx ? (parseFloat(req.body.exchange_rate) > 0 ? parseFloat(req.body.exchange_rate) : Number(r0.exchange_rate)) : null;
+    if (fx && !(payRate > 0)) return res.status(400).json({ error: `Enter the ${r0.currency} exchange rate used for this payment` });
+
+    // The bank account: any active one in the request's currency or the base
+    // currency (a foreign amount can be paid from a base account at the rate).
+    const base = String(await require('../lib/settings').getSetting('currency', 'USD')).toUpperCase();
+    let bank = null;
+    if (req.body.bank_account_id) {
+      ({ rows: [bank] } = await db.execute({ sql: 'SELECT * FROM ap_bank_accounts WHERE id = ? AND active = 1', args: [req.body.bank_account_id] }));
+      if (!bank) return res.status(400).json({ error: 'That bank account is no longer available — choose another' });
+      const payCurrency = r0.currency || base;
+      if (bank.currency !== payCurrency && bank.currency !== base) return res.status(400).json({ error: `${bank.name} is a ${bank.currency} account — choose a ${payCurrency}${payCurrency !== base ? ` or ${base}` : ''} account` });
+    } else if (method !== 'cash') {
+      return res.status(400).json({ error: 'Choose the bank account the payment was made from' });
+    }
+
+    // How much (in the request's currency) and, for invoice/quick, how it's
+    // split over the lines: { line_id, amount }. Defaults to all that's left.
+    const amountIn = req.body.amount == null || req.body.amount === '' ? null : round2(req.body.amount);
+    const allocIn = Array.isArray(req.body.allocations) ? req.body.allocations : null;
 
     const tx = await db.transaction('write');
     let committed = false;
     try {
-      // Claimed first, so two people paying the same request can't both succeed.
-      const claim = await tx.execute({ sql: "UPDATE payment_requests SET status = 'paid', paid_by = ?, paid_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'approved'", args: [req.employee?.id || null, r.id] });
-      if (!claim.rowsAffected) throw Object.assign(new Error('This request has already been paid'), { status: 400 });
-      const allocations = [];
-      // Base value of a line: booked-rate for same-currency bills/POs, else the payment rate.
-      const lineBase = (l, docCurrency) => (!fx ? round2(l.amount) : docCurrency === r.currency ? round2(l.amount) : round2(Number(l.amount_fx) * payRate));
-      let amount = 0;
-      if (r.request_type === 'invoice') {
+      // Read again inside the write transaction, so two people paying the
+      // same request can't both pay what's left.
+      const { rows: [cur] } = await tx.execute({ sql: 'SELECT status FROM payment_requests WHERE id = ?', args: [r0.id] });
+      if (cur.status !== 'approved') throw Object.assign(new Error(cur.status === 'paid' ? 'This request has already been paid in full' : 'Only an approved request can be paid'), { status: 400 });
+      const r = { ...r0, lines: r0.lines.map(l => ({ ...l })) };
+      await attachPaid(tx, r);
+      const left = fx ? r.remaining_fx : r.remaining;
+      if (!(left > 0.005)) throw Object.assign(new Error('This request has already been paid in full'), { status: 400 });
+      const amount = amountIn == null ? left : amountIn;
+      if (!(amount > 0)) throw Object.assign(new Error('Enter the amount paid'), { status: 400 });
+      if (amount - left > 0.005) throw Object.assign(new Error(`Only ${fx ? `${r.currency} ` : ''}${left.toFixed(2)} is left to pay on ${r.request_number}`), { status: 400 });
+
+      // A quick request's bills are entered on its first payment, one per
+      // line at the full line amount, so later payments clear them too.
+      if (r.request_type === 'quick' && r.lines.some(l => !l.bill_id)) {
         for (const l of r.lines) {
-          const { rows: [bill] } = await tx.execute({ sql: `SELECT b.*, ${PAID_SQL} AS paid FROM ap_bills b WHERE b.id = ?`, args: [l.bill_id] });
-          if (!bill || bill.status === 'void') throw Object.assign(new Error(`Bill ${l.bill_number || l.bill_id} is void — cancel this request and raise a new one`), { status: 400 });
-          const balance = round2(bill.amount - bill.paid);
-          const base = lineBase(l, bill.currency);
-          if (base - balance > 0.005) throw Object.assign(new Error(`Only ${balance.toFixed(2)} is still owed on bill ${bill.bill_number} — cancel this request and raise a new one`), { status: 400 });
-          allocations.push({ bill_id: bill.id, amount: base, amount_fx: fx ? round2(l.amount_fx) : null });
-        }
-        amount = round2(allocations.reduce((t, a) => t + a.amount, 0));
-      } else if (r.request_type === 'quick') {
-        for (const l of r.lines) {
-          const base = lineBase(l, null);
+          if (l.bill_id) continue;
+          const lineBase = fx ? round2(Number(l.amount_fx) * payRate) : round2(l.amount);
           const billId = await createBill(tx, {
-            supplier_id: r.supplier_id, bill_date: payment_date, due_date: payment_date, amount: base, tax_amount: 0,
+            supplier_id: r.supplier_id, bill_date: payment_date, due_date: payment_date, amount: lineBase, tax_amount: 0,
             description: l.description, source: 'payment_request', created_by: req.employee?.id,
             currency: fx ? r.currency : null, exchange_rate: fx ? payRate : null, amount_fx: fx ? l.amount_fx : null,
           });
-          allocations.push({ bill_id: billId, amount: base, amount_fx: fx ? round2(l.amount_fx) : null });
+          await tx.execute({ sql: 'UPDATE payment_request_lines SET bill_id = ? WHERE id = ?', args: [billId, l.id] });
+          l.bill_id = billId;
         }
-        amount = round2(allocations.reduce((t, a) => t + a.amount, 0));
-      } else {
-        amount = round2(r.lines.reduce((t, l) => t + lineBase(l, poCurrency), 0));
       }
-      const amount_fx = fx ? round2(r.lines.reduce((t, l) => t + Number(l.amount_fx || 0), 0)) : null;
+
+      const allocations = [];
+      let amountBase, amountFx = fx ? amount : null;
+      if (r.request_type === 'advance') {
+        // Same-currency PO advances keep the request's booked rate; all that's
+        // left clears exactly.
+        let poCurrency = null;
+        if (fx) ({ rows: [{ currency: poCurrency } = {}] } = await tx.execute({ sql: 'SELECT currency FROM purchase_orders WHERE id = ?', args: [r.po_id] }));
+        if (!fx) amountBase = amount;
+        else if (Math.abs(amount - left) <= 0.005 && poCurrency === r.currency) amountBase = r.remaining;
+        else amountBase = round2(amount * (poCurrency === r.currency && Number(r.amount_fx) > 0 ? Number(r.amount) / Number(r.amount_fx) : payRate));
+      } else {
+        // Split over the lines: as sent, or oldest line first up to what each has left.
+        const open = r.lines.filter(l => (fx ? l.remaining_fx : l.remaining) > 0.005);
+        let split;
+        if (allocIn) {
+          split = allocIn.map(a => ({ line: r.lines.find(l => Number(l.id) === Number(a.line_id)), amount: round2(a.amount) })).filter(a => a.amount > 0);
+          if (split.some(a => !a.line)) throw Object.assign(new Error('An allocation is for a line that isn\'t on this request'), { status: 400 });
+        } else {
+          let rest = amount;
+          split = [];
+          for (const l of open) {
+            const take = round2(Math.min(rest, fx ? l.remaining_fx : l.remaining));
+            if (take > 0) { split.push({ line: l, amount: take }); rest = round2(rest - take); }
+          }
+        }
+        const total = round2(split.reduce((t, a) => t + a.amount, 0));
+        if (Math.abs(total - amount) > 0.005) throw Object.assign(new Error(`The allocations come to ${total.toFixed(2)} but the payment is ${amount.toFixed(2)} — they have to match`), { status: 400 });
+        for (const a of split) {
+          const l = a.line;
+          const lineLeft = fx ? l.remaining_fx : l.remaining;
+          if (a.amount - lineLeft > 0.005) throw Object.assign(new Error(`Only ${lineLeft.toFixed(2)} is left to pay on ${l.bill_number || l.description || 'a line'}`), { status: 400 });
+          const { rows: [bill] } = await tx.execute({ sql: `SELECT b.*, ${PAID_SQL} AS paid FROM ap_bills b WHERE b.id = ?`, args: [l.bill_id] });
+          if (!bill || bill.status === 'void') throw Object.assign(new Error(`Bill ${l.bill_number || l.bill_id} is void — cancel this request and raise a new one`), { status: 400 });
+          // Base value: the bill's booked rate for a bill in the request's
+          // currency (all that's left on the line clears it exactly), else
+          // the payment rate.
+          let baseAmt;
+          if (!fx) baseAmt = a.amount;
+          else if (bill.currency === r.currency && Number(bill.exchange_rate) > 0) {
+            const billLeftBase = round2(bill.amount - bill.paid);
+            baseAmt = Math.abs(a.amount - lineLeft) <= 0.005 && Math.abs(lineLeft - round2(billLeftBase / Number(bill.exchange_rate))) <= 0.01
+              ? billLeftBase : round2(a.amount * Number(bill.exchange_rate));
+          } else baseAmt = round2(a.amount * payRate);
+          const balance = round2(bill.amount - bill.paid);
+          if (baseAmt - balance > 0.005) throw Object.assign(new Error(`Only ${balance.toFixed(2)} is still owed on bill ${bill.bill_number} — cancel this request and raise a new one`), { status: 400 });
+          allocations.push({ bill_id: bill.id, amount: baseAmt, amount_fx: fx ? a.amount : null });
+        }
+        amountBase = round2(allocations.reduce((t, a) => t + a.amount, 0));
+      }
+
       const payment_number = await nextNumber(tx, 'ap_payments', 'payment_number', 'APP-', 6);
       const result = await tx.execute({
-        sql: 'INSERT INTO ap_payments (payment_number, supplier_id, payment_date, amount, method, reference, notes, po_id, payment_request_id, created_by, currency, exchange_rate, amount_fx) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
-        args: [payment_number, r.supplier_id, payment_date, amount, method, reference, notes || r.request_number, r.request_type === 'advance' ? r.po_id : null, r.id, req.employee?.id || null,
-          fx ? r.currency : null, fx ? payRate : null, amount_fx],
+        sql: `INSERT INTO ap_payments (payment_number, supplier_id, payment_date, amount, method, reference, notes, po_id, payment_request_id, created_by, currency, exchange_rate, amount_fx,
+                bank_account_id, books_bank_account_id, bank_account_name, bank_currency, posting_mode)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'payment')`,
+        args: [payment_number, r.supplier_id, payment_date, amountBase, method, reference, notes || r.request_number, r.request_type === 'advance' ? r.po_id : null, r.id, req.employee?.id || null,
+          fx ? r.currency : null, fx ? payRate : null, amountFx,
+          bank ? bank.id : null, bank ? bank.books_id : null, bank ? bank.name : null, bank ? bank.currency : null],
       });
       const paymentId = Number(result.lastInsertRowid);
       for (const a of allocations) {
         await tx.execute({ sql: 'INSERT INTO ap_payment_allocations (payment_id, bill_id, amount, amount_fx) VALUES (?,?,?,?)', args: [paymentId, a.bill_id, a.amount, a.amount_fx ?? null] });
       }
       if (r.request_type === 'advance') await applyPoAdvances(tx, r.po_id);
-      await tx.execute({ sql: 'UPDATE payment_requests SET payment_id = ? WHERE id = ?', args: [paymentId, r.id] });
+      // Paid in full once nothing is left; payment_id points at the latest payment.
+      const paidOff = amount >= left - 0.005;
+      await tx.execute({
+        sql: `UPDATE payment_requests SET payment_id = ?${paidOff ? ", status = 'paid', paid_by = ?, paid_at = CURRENT_TIMESTAMP" : ''} WHERE id = ?`,
+        args: paidOff ? [paymentId, req.employee?.id || null, r.id] : [paymentId, r.id],
+      });
       await tx.commit();
       committed = true;
-      res.json({ ...(await loadRequest(r.id)), payment_number });
+      res.json({ ...(await loadRequest(r.id)), payment_number, new_payment_id: paymentId });
     } catch (e) {
       if (!committed) await tx.rollback().catch(() => {});
       res.status(e.status || 500).json({ error: e.message });
     }
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+// A voided payment from a request puts what it paid back to pay: a request
+// marked Paid goes back to Approved once its posted payments no longer cover
+// it. Called by POST /payables/payments/:id/void.
+async function reopenAfterVoid(executor, requestId) {
+  const r = await loadRequest(requestId);
+  if (!r || r.status !== 'paid' || r.paid_in_full) return;
+  await executor.execute({ sql: "UPDATE payment_requests SET status = 'approved', paid_by = NULL, paid_at = NULL WHERE id = ? AND status = 'paid'", args: [requestId] });
+}
 
 // ── Supporting documents ───────────────────────────────────
 // Same pattern as purchase request attachments: never served statically
@@ -691,3 +853,4 @@ router.delete('/:id/attachments/:aid', requirePermission('payables_requests'), a
 
 module.exports = router;
 module.exports.loadRequest = loadRequest;
+module.exports.reopenAfterVoid = reopenAfterVoid;

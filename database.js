@@ -1681,6 +1681,44 @@ async function _init() {
     // ap_payment_allocations (the allocations always sum to amount). Voiding
     // a payment keeps its allocations for the record but they stop counting
     // toward any bill's paid amount.
+    // Bank accounts vendors are paid from — RetailPOS Books' own list, sent
+    // here on every sync (PUT /api/payables/bank-accounts), so Process
+    // Payment can say which one paid and Books posts to it.
+    { sql: `CREATE TABLE IF NOT EXISTS ap_bank_accounts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      books_id INTEGER NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      bank_name TEXT,
+      last4 TEXT,
+      currency TEXT NOT NULL,
+      gl_code TEXT,
+      active INTEGER NOT NULL DEFAULT 1,
+      synced_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    // Proof of payment on a vendor payment (bank confirmation, cheque copy).
+    // Download-only (uploads/ap-payment-attachments is blocked statically).
+    { sql: `CREATE TABLE IF NOT EXISTS ap_payment_attachments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      payment_id INTEGER NOT NULL REFERENCES ap_payments(id),
+      original_name TEXT NOT NULL,
+      stored_name TEXT NOT NULL,
+      mime_type TEXT,
+      size INTEGER,
+      uploaded_by INTEGER REFERENCES employees(id),
+      uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    // Each payment advice emailed to a vendor: who to, when, by whom, and the
+    // PDF exactly as sent (uploads/payment-advices, download-only).
+    { sql: `CREATE TABLE IF NOT EXISTS payment_advice_sends (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      payment_id INTEGER NOT NULL REFERENCES ap_payments(id),
+      sent_to TEXT NOT NULL,
+      cc TEXT,
+      subject TEXT,
+      stored_name TEXT,
+      sent_by INTEGER REFERENCES employees(id),
+      sent_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS ap_payments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       payment_number TEXT UNIQUE NOT NULL,
@@ -2995,6 +3033,16 @@ async function _init() {
     'ALTER TABLE ap_payments ADD COLUMN exchange_rate REAL',
     'ALTER TABLE ap_payments ADD COLUMN amount_fx REAL',
     'ALTER TABLE ap_payment_allocations ADD COLUMN amount_fx REAL',
+    // Process Payment (2026-11-12): the bank account it was paid from (a
+    // RetailPOS Books bank account, ap_bank_accounts) and posting_mode
+    // 'payment' = Books posts the whole payment to that bank once, on the
+    // payment date (Dr A/P / Cr bank); applying it to bills, then or later,
+    // posts nothing more. NULL = older payments, posted per bill as before.
+    'ALTER TABLE ap_payments ADD COLUMN bank_account_id INTEGER REFERENCES ap_bank_accounts(id)',
+    'ALTER TABLE ap_payments ADD COLUMN books_bank_account_id INTEGER',
+    'ALTER TABLE ap_payments ADD COLUMN bank_account_name TEXT',
+    'ALTER TABLE ap_payments ADD COLUMN bank_currency TEXT',
+    'ALTER TABLE ap_payments ADD COLUMN posting_mode TEXT',
     'ALTER TABLE account_payments ADD COLUMN contra_id INTEGER REFERENCES contras(id)',
     // The customer account of a business that's also this supplier — the
     // link a contra (routes/contras.js) needs.
