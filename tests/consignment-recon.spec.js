@@ -83,7 +83,11 @@ test('month-end reconciliation: figures, counts, approval and lock, a later retu
 
   // Counts: one short at the main branch. Approval needs every line counted.
   expect(await attempt(page, 'POST', `/consignment/reconciliations/${last.id}/approve`, { signature: SIG })).toContain('physical count');
+  const otherLineId = lineOf(last, 'stock', other.id, item.id).id;
   let r = await api(page, 'PATCH', `/consignment/reconciliations/${last.id}/lines/${m.id}`, { physical_count: 3 });
+  // Lines keep their ids when the figures are recomputed (the screen saves by id).
+  expect(lineOf(r, 'stock', main.id, item.id).id).toBe(m.id);
+  expect(lineOf(r, 'stock', other.id, item.id).id).toBe(otherLineId);
   m = lineOf(r, 'stock', main.id, item.id);
   expect(m).toMatchObject({ discrepancy: -1, shortage_qty: 2 });
   r = await api(page, 'PATCH', `/consignment/reconciliations/${last.id}/lines/${lineOf(r, 'stock', other.id, item.id).id}`, { physical_count: 2 });
