@@ -10,7 +10,7 @@ Object.assign(App, {
   async renderConsignment(tab) {
     this._consTab = tab || this._consTab || 'agreements';
     const c = document.getElementById('content');
-    const tabs = [['agreements', 'Agreements'], ['orders', 'Orders'], ['grns', 'Goods Received (GRN)'], ['stock', 'Consignment Stock']];
+    const tabs = [['agreements', 'Agreements'], ['orders', 'Orders'], ['grns', 'Goods Received (GRN)'], ['stock', 'Consignment Stock'], ['recon', 'Month-End Reconciliation']];
     c.innerHTML = `
       <div class="page-header"><h2>Consignment</h2>
         <div style="display:flex;gap:8px">
@@ -29,6 +29,7 @@ Object.assign(App, {
       if (this._consTab === 'agreements') await this._consAgreementsTab();
       else if (this._consTab === 'orders') await this._consOrdersTab();
       else if (this._consTab === 'grns') await this._consGrnsTab();
+      else if (this._consTab === 'recon') await this._consReconTab();
       else await this._consStockTab();
     } catch (e) {
       const el = document.getElementById('cons-body');
@@ -338,6 +339,120 @@ Object.assign(App, {
       if (this.section === 'consignment') this.renderConsignment('grns');
       this.viewConsGrn(id);
     } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  // ── Month-end reconciliation ──
+  async _consReconTab() {
+    const [rows, agreements] = await Promise.all([this.api('GET', '/consignment/reconciliations'), this.api('GET', '/consignment/agreements')]);
+    const el = document.getElementById('cons-body');
+    if (!el) return;
+    const canPrep = this.can('consignment_receive') || this.can('consignment_finance');
+    const lastMonth = (() => { const d = new Date(this._storeDay(new Date()) + 'T00:00:00'); d.setDate(0); return d.toISOString().slice(0, 7); })();
+    el.innerHTML = `
+      ${canPrep ? `<div class="card" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+        <div class="form-group" style="margin:0"><label>Agreement</label><select id="crn-agr">${agreements.filter(a => ['approved', 'ended'].includes(a.status)).map(a => `<option value="${a.id}">${a.agreement_number} — ${this.escapeAttr(a.supplier_name)}</option>`).join('')}</select></div>
+        <div class="form-group" style="margin:0"><label>Month</label><input id="crn-month" type="month" value="${lastMonth}"></div>
+        <button class="btn btn-primary" onclick="App._consNewRecon()">Prepare Reconciliation</button></div>` : ''}
+      <div class="card"><div class="table-wrap"><table>
+        <thead><tr><th>Reconciliation #</th><th>Month</th><th>Agreement</th><th>Supplier</th><th style="text-align:right">Billable qty</th><th style="text-align:right">Billable value</th><th>Status</th></tr></thead>
+        <tbody>${rows.length ? rows.map(r => `<tr style="cursor:pointer" onclick="App.viewConsRecon(${r.id})"><td class="fw-600">${r.recon_number}</td><td>${r.period}</td><td>${r.agreement_number}</td><td>${this.escapeAttr(r.supplier_name)}</td>
+          <td style="text-align:right">${r.totals.billable_qty ?? 0}</td><td style="text-align:right">${this.fmt(r.totals.billable_value || 0)}</td>
+          <td><span class="badge-pill ${r.status === 'approved' ? 'badge-success' : 'badge-warning'}">${r.status === 'approved' ? 'Approved — locked' : 'Draft'}</span></td></tr>`).join('')
+          : '<tr><td colspan="7" class="empty-state">No reconciliations yet</td></tr>'}</tbody></table></div></div>`;
+  },
+  async _consNewRecon() {
+    try {
+      const r = await this.api('POST', '/consignment/reconciliations', { agreement_id: document.getElementById('crn-agr').value, period: document.getElementById('crn-month').value });
+      this.renderConsignment('recon');
+      this.viewConsRecon(r.id);
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  async viewConsRecon(id) {
+    let r;
+    try { r = await this.api('GET', `/consignment/reconciliations/${id}`); } catch (e) { this.alert(e.message, 'error'); return; }
+    const esc = x => this.escapeAttr(x ?? '');
+    const draft = r.status === 'draft';
+    const canPrep = draft && (this.can('consignment_receive') || this.can('consignment_finance'));
+    const fin = this.can('consignment_finance');
+    const n = v => (v == null ? '' : (Math.abs(v) < 0.0005 ? '0' : String(Math.round(v * 1000) / 1000)));
+    const stock = r.lines.filter(l => l.line_type === 'stock');
+    const transit = r.lines.filter(l => l.line_type === 'in_transit');
+    const t = r.totals || {};
+    const th = (x, right = true) => `<th style="text-align:${right ? 'right' : 'left'};white-space:nowrap">${x}</th>`;
+    this.showModal(`
+      <div class="modal" style="max-width:1200px;width:96vw">
+        <div class="modal-header"><span class="modal-title">${r.recon_number} — ${esc(r.supplier_name)} · ${r.agreement_number} · ${r.period}</span>
+          <div style="display:flex;gap:8px;align-items:center"><span class="badge-pill ${draft ? 'badge-warning' : 'badge-success'}">${draft ? 'Draft' : 'Approved — locked'}</span><button class="modal-close">✕</button></div></div>
+        <div class="modal-body" style="font-size:12px">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:12px;font-size:13px">
+            <div class="card" style="margin:0;padding:8px 10px"><div style="color:var(--text-muted);font-size:11px">POS-RECORDED SALES</div><strong>${n(t.pos_sales_qty)} · ${this.fmt(t.pos_sales_value || 0)}</strong>${t.layaway_qty ? `<div style="font-size:11px">+ layaways ${n(t.layaway_qty)} · ${this.fmt(t.layaway_value)}</div>` : ''}</div>
+            <div class="card" style="margin:0;padding:8px 10px"><div style="color:var(--text-muted);font-size:11px">RETURNS</div><strong>${n(t.returns_qty)} · ${this.fmt(t.returns_value || 0)}</strong>${t.prior_returns_qty ? `<div style="font-size:11px">+ of earlier months' sales ${n(t.prior_returns_qty)} · ${this.fmt(t.prior_returns_value)}</div>` : ''}</div>
+            <div class="card" style="margin:0;padding:8px 10px"><div style="color:var(--text-muted);font-size:11px">COUNT DISCREPANCIES</div><strong>${t.discrepancy_lines || 0} line${t.discrepancy_lines === 1 ? '' : 's'}</strong><div style="font-size:11px">shortage ${n(t.shortage_qty)} · damage ${n(t.damage_qty)}${t.uncounted_lines ? ` · <span style="color:var(--warning, #d97706)">${t.uncounted_lines} not counted</span>` : ''}</div></div>
+            <div class="card" style="margin:0;padding:8px 10px"><div style="color:var(--text-muted);font-size:11px">APPROVED BILLABLE</div><strong>${n(t.billable_qty)} · ${this.fmt(t.billable_value || 0)}</strong><div style="font-size:11px">incl. approved shortage ${n(t.approved_shortage_qty)} / damage ${n(t.approved_damage_qty)}</div></div>
+            ${t.in_transit ? `<div class="card" style="margin:0;padding:8px 10px"><div style="color:var(--text-muted);font-size:11px">IN TRANSIT AT CUT-OFF</div><strong>${n(t.in_transit)}</strong></div>` : ''}
+          </div>
+          <div style="font-weight:600;margin-bottom:4px">Stock by branch and item</div>
+          <div class="table-wrap"><table style="font-size:12px">
+            <thead><tr>${th('Item', false)}${th('Branch', false)}${th('Opening')}${th('Received')}${th('Transfers in')}${th('Transfers out')}${th('POS sales')}${th('Returns')}${th('Layaways')}${th('Shop use')}${th('Damage')}${th('Adjust.')}${th('Expected')}${th('Counted')}${th('Diff.')}</tr></thead>
+            <tbody>${stock.map(l => `<tr><td>${esc(l.product_name)}</td><td>${esc(l.branch_name)}</td>${['opening', 'receipts', 'transfers_in', 'transfers_out', 'sales', 'returns', 'layaways', 'shop_use', 'damaged', 'adjustments'].map(c => `<td style="text-align:right">${n(l[c])}</td>`).join('')}
+              <td style="text-align:right" class="fw-600">${n(l.expected_closing)}</td>
+              <td style="text-align:right">${canPrep ? `<input type="number" min="0" step="1" value="${l.physical_count ?? ''}" style="width:70px;text-align:right" onchange="App._consReconLine(${r.id}, ${l.id}, { physical_count: this.value })">` : n(l.physical_count)}</td>
+              <td style="text-align:right;${Math.abs(l.discrepancy) > 0.0005 ? 'color:var(--danger);font-weight:600' : ''}">${l.physical_count == null ? '' : n(l.discrepancy)}</td></tr>`).join('') || '<tr><td colspan="15" class="empty-state">No supplier stock movements this month</td></tr>'}</tbody></table></div>
+          ${transit.length ? `<div style="font-weight:600;margin:10px 0 4px">In transit at the cut-off (still the supplier's)</div>${transit.map(l => `<div>${esc(l.product_name)}: <strong>${n(l.in_transit)}</strong></div>`).join('')}` : ''}
+          <div style="font-weight:600;margin:12px 0 4px">Billing</div>
+          <div class="table-wrap"><table style="font-size:12px">
+            <thead><tr>${th('Item', false)}${th('Branch', false)}${th('POS sales')}${th('Layaways paid')}${th('Returns')}${th('Earlier months returned')}${th('Shop use')}${th('Shortage')}${th('Approved shortage')}${th('Damage')}${th('Approved damage')}${th('Billable qty')}${th('Billable value')}</tr></thead>
+            <tbody>${stock.map(l => `<tr><td>${esc(l.product_name)}</td><td>${esc(l.branch_name)}</td>
+              <td style="text-align:right">${n(l.pos_sales_qty)}<div style="color:var(--text-muted)">${this.fmt(l.pos_sales_value)}</div></td>
+              <td style="text-align:right">${n(l.layaway_qty)}</td>
+              <td style="text-align:right">${n(l.returns_qty)}<div style="color:var(--text-muted)">${this.fmt(l.returns_value)}</div></td>
+              <td style="text-align:right">${n(l.prior_returns_qty)}${l.prior_returns_qty ? `<div style="color:var(--text-muted)">${this.fmt(l.prior_returns_value)}</div>` : ''}</td>
+              <td style="text-align:right">${n(-l.shop_use)}</td>
+              <td style="text-align:right">${n(l.shortage_qty)}</td>
+              <td style="text-align:right">${draft && fin && r.shortage_responsibility === 'total_tools' && l.shortage_qty > 0 ? `<input type="number" min="0" max="${l.shortage_qty}" step="1" value="${l.approved_shortage_qty || ''}" style="width:60px;text-align:right" onchange="App._consReconLine(${r.id}, ${l.id}, { approved_shortage_qty: this.value })">` : n(l.approved_shortage_qty)}</td>
+              <td style="text-align:right">${n(l.damage_qty)}</td>
+              <td style="text-align:right">${draft && fin && r.damage_responsibility === 'total_tools' && l.damage_qty > 0 ? `<input type="number" min="0" max="${l.damage_qty}" step="1" value="${l.approved_damage_qty || ''}" style="width:60px;text-align:right" onchange="App._consReconLine(${r.id}, ${l.id}, { approved_damage_qty: this.value })">` : n(l.approved_damage_qty)}</td>
+              <td style="text-align:right" class="fw-600">${n(l.billable_qty)}</td><td style="text-align:right" class="fw-600">${this.fmt(l.billable_value)}</td></tr>`).join('')}</tbody></table></div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:6px">Shortages ${r.shortage_responsibility === 'total_tools' ? 'are' : "aren't"} and damage ${r.damage_responsibility === 'total_tools' ? 'is' : "isn't"} chargeable to Total Tools under this agreement. Sales and returns are at the cost saved on each sale; shop use, shortages and damage at the agreed cost on the last day of the month.</div>
+          ${r.log.length ? `<div style="font-weight:600;margin:12px 0 4px">History</div>${r.log.map(g => `<div>${this.fmtDateTime(g.created_at)} — ${esc(g.action.replace('_', ' '))} by ${esc(g.employee_name || '—')}${g.reason ? `: ${esc(g.reason)}` : ''}${g.finance_approver ? ` · Finance approval: ${esc(g.finance_approver)} (${esc(g.approval_reference)})` : ''}</div>`).join('')}` : ''}
+        </div>
+        <div class="modal-footer" style="flex-wrap:wrap;gap:8px">
+          ${canPrep ? `<button class="btn btn-outline" onclick="App._consReconAction(${r.id}, 'refresh')">Refresh Figures</button>` : ''}
+          ${draft && fin ? `<button class="btn btn-success" ${r.period_ended ? '' : 'disabled title="After the month has ended"'} onclick="App._consApproveRecon(${r.id})">Approve &amp; Lock</button>` : ''}
+          ${!draft && this.can('settings') ? `<button class="btn btn-danger" onclick="App._consReopenRecon(${r.id})">Reopen…</button>` : ''}
+          <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+        </div>
+      </div>`);
+  },
+  async _consReconLine(reconId, lineId, body) {
+    try { await this.api('PATCH', `/consignment/reconciliations/${reconId}/lines/${lineId}`, body); this.viewConsRecon(reconId); }
+    catch (e) { this.alert(e.message, 'error'); this.viewConsRecon(reconId); }
+  },
+  async _consReconAction(id, action) {
+    try { await this.api('POST', `/consignment/reconciliations/${id}/${action}`, {}); this.viewConsRecon(id); } catch (e) { this.alert(e.message, 'error'); }
+  },
+  _consApproveRecon(id) {
+    this._showApprovalDialog({
+      title: 'Approve Reconciliation',
+      intro: 'Approving locks this month. A later return or correction goes into the next open month; reopening needs an Administrator acting on documented Finance approval.',
+      approve: async (signature) => {
+        await this.api('POST', `/consignment/reconciliations/${id}/approve`, { signature });
+        this.alert('Reconciliation approved and locked', 'success');
+        if (this.section === 'consignment') this.renderConsignment('recon');
+        this.viewConsRecon(id);
+      },
+    });
+  },
+  async _consReopenRecon(id) {
+    const reason = prompt('Why is this month being reopened?');
+    if (!reason) return;
+    const approver = prompt('Who in Finance approved reopening it?');
+    if (!approver) return;
+    const reference = prompt('Approval reference (e.g. the email or memo it was approved in):');
+    if (!reference) return;
+    try { await this.api('POST', `/consignment/reconciliations/${id}/reopen`, { reason, finance_approver: approver, approval_reference: reference }); this.renderConsignment('recon'); this.viewConsRecon(id); }
+    catch (e) { this.alert(e.message, 'error'); }
   },
 
   // ── Stock ──

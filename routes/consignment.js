@@ -562,5 +562,194 @@ router.get('/lot-check', canView, async (req, res) => {
   } catch (e) { send(res, e); }
 });
 
+// ── Month-end reconciliation (lib/consignmentRecon.js) ─────
+// Prepared (and its physical counts entered) by Receiving / Warehouse or
+// Finance; chargeable shortages and damage approved, and the whole approved
+// and locked, by Finance (A9). A locked month is a snapshot: a later return
+// lands in the next open month (A3). Reopening: an Administrator, recording
+// the reason, the Finance approver and the approval reference.
+const { writeLines, periodBounds } = require('../lib/consignmentRecon');
+const canPrepare = requireAnyPermission('consignment_receive', 'consignment_finance');
+
+async function loadRecon(id) {
+  const { rows: [r] } = await db.execute({
+    sql: `SELECT r.*, a.agreement_number, a.shortage_responsibility, a.damage_responsibility, s.name AS supplier_name,
+            pe.first_name || ' ' || pe.last_name AS prepared_by_name, ae.first_name || ' ' || ae.last_name AS approved_by_name
+          FROM consignment_reconciliations r JOIN consignment_agreements a ON a.id = r.agreement_id JOIN suppliers s ON s.id = a.supplier_id
+          LEFT JOIN employees pe ON pe.id = r.prepared_by LEFT JOIN employees ae ON ae.id = r.approved_by WHERE r.id = ?`,
+    args: [id],
+  });
+  if (!r) return null;
+  r.totals = r.totals_json ? JSON.parse(r.totals_json) : {};
+  const { rows: lines } = await db.execute({
+    sql: `SELECT l.*, p.name AS product_name, p.sku, b.name AS branch_name FROM consignment_reconciliation_lines l JOIN products p ON p.id = l.product_id
+          LEFT JOIN branches b ON b.id = l.branch_id WHERE l.recon_id = ? ORDER BY l.line_type DESC, p.name, b.name`,
+    args: [r.id],
+  });
+  r.lines = lines;
+  const { rows: log } = await db.execute({ sql: `SELECT g.*, e.first_name || ' ' || e.last_name AS employee_name FROM consignment_reconciliation_log g LEFT JOIN employees e ON e.id = g.employee_id WHERE g.recon_id = ? ORDER BY g.id`, args: [r.id] });
+  r.log = log;
+  r.period_ended = periodBounds(r.period).last < storeToday();
+  return r;
+}
+const reconLog = (ex, reconId, action, employeeId, extra = {}) => ex.execute({
+  sql: 'INSERT INTO consignment_reconciliation_log (recon_id, action, reason, finance_approver, approval_reference, details, employee_id) VALUES (?,?,?,?,?,?,?)',
+  args: [reconId, action, extra.reason || null, extra.finance_approver || null, extra.approval_reference || null, extra.details ? JSON.stringify(extra.details) : null, employeeId || null],
+});
+
+router.get('/reconciliations', canView, async (req, res) => {
+  try {
+    const args = [];
+    let sql = `SELECT r.id, r.recon_number, r.period, r.status, r.approved_at, r.totals_json, a.agreement_number, s.name AS supplier_name
+               FROM consignment_reconciliations r JOIN consignment_agreements a ON a.id = r.agreement_id JOIN suppliers s ON s.id = a.supplier_id WHERE 1=1`;
+    if (req.query.agreement_id) { sql += ' AND r.agreement_id = ?'; args.push(req.query.agreement_id); }
+    sql += ' ORDER BY r.period DESC, r.id DESC LIMIT 500';
+    const { rows } = await db.execute({ sql, args });
+    res.json(rows.map(r => ({ ...r, totals: r.totals_json ? JSON.parse(r.totals_json) : {}, totals_json: undefined })));
+  } catch (e) { send(res, e); }
+});
+
+router.get('/reconciliations/:id', canView, async (req, res) => {
+  try {
+    const r = await loadRecon(req.params.id);
+    if (!r) return res.status(404).json({ error: 'Reconciliation not found' });
+    res.json(r);
+  } catch (e) { send(res, e); }
+});
+
+// { agreement_id, period: 'YYYY-MM' } — one per agreement per month.
+router.post('/reconciliations', canPrepare, async (req, res) => {
+  const tx = await db.transaction('write');
+  let committed = false;
+  try {
+    periodBounds(req.body.period);
+    const { rows: [a] } = await tx.execute({ sql: 'SELECT * FROM consignment_agreements WHERE id = ?', args: [req.body.agreement_id || 0] });
+    if (!a) throw err(400, 'Choose the agreement');
+    if (!['approved', 'ended'].includes(a.status)) throw err(400, `${a.agreement_number} isn't approved`);
+    const { rows: [dup] } = await tx.execute({ sql: 'SELECT recon_number FROM consignment_reconciliations WHERE agreement_id = ? AND period = ?', args: [a.id, req.body.period] });
+    if (dup) throw err(400, `${dup.recon_number} already covers ${a.agreement_number} for ${req.body.period}`);
+    const number = await nextNumber(tx, 'consignment_reconciliations', 'recon_number', 'CREC-', 6);
+    const r = await tx.execute({ sql: 'INSERT INTO consignment_reconciliations (recon_number, agreement_id, period, prepared_by) VALUES (?,?,?,?)', args: [number, a.id, req.body.period, req.employee?.id || null] });
+    const recon = { id: Number(r.lastInsertRowid), period: req.body.period };
+    await writeLines(tx, recon, a);
+    await reconLog(tx, recon.id, 'prepared', req.employee?.id);
+    await tx.commit();
+    committed = true;
+    res.status(201).json(await loadRecon(recon.id));
+  } catch (e) {
+    if (!committed) await tx.rollback().catch(() => {});
+    send(res, e);
+  }
+});
+
+async function draftRecon(ex, id) {
+  const { rows: [r] } = await ex.execute({ sql: 'SELECT * FROM consignment_reconciliations WHERE id = ?', args: [id] });
+  if (!r) throw err(404, 'Reconciliation not found');
+  if (r.status !== 'draft') throw err(400, `${r.recon_number} is approved and locked — an Administrator can reopen it on Finance's documented approval`);
+  const { rows: [a] } = await ex.execute({ sql: 'SELECT * FROM consignment_agreements WHERE id = ?', args: [r.agreement_id] });
+  return { r, a };
+}
+
+// Recomputes a draft from the records, keeping the counts and approvals entered.
+router.post('/reconciliations/:id/refresh', canPrepare, async (req, res) => {
+  const tx = await db.transaction('write');
+  let committed = false;
+  try {
+    const { r, a } = await draftRecon(tx, req.params.id);
+    await writeLines(tx, r, a);
+    await tx.commit();
+    committed = true;
+    res.json(await loadRecon(r.id));
+  } catch (e) {
+    if (!committed) await tx.rollback().catch(() => {});
+    send(res, e);
+  }
+});
+
+// A line's physical count (preparers), or its approved chargeable shortage /
+// damage (Finance — only where the agreement makes Total Tools responsible).
+router.patch('/reconciliations/:id/lines/:lineId', canPrepare, async (req, res) => {
+  const tx = await db.transaction('write');
+  let committed = false;
+  try {
+    const { r, a } = await draftRecon(tx, req.params.id);
+    const { rows: [l] } = await tx.execute({ sql: 'SELECT * FROM consignment_reconciliation_lines WHERE id = ? AND recon_id = ?', args: [req.params.lineId, r.id] });
+    if (!l) throw err(404, 'Line not found');
+    const sets = [];
+    const args = [];
+    const details = {};
+    if (req.body.physical_count !== undefined) {
+      if (l.line_type !== 'stock') throw err(400, 'Stock in transit is not counted');
+      const v = req.body.physical_count === null || req.body.physical_count === '' ? null : Number(req.body.physical_count);
+      if (v != null && !(v >= 0)) throw err(400, 'Enter the count (0 or more)');
+      sets.push('physical_count = ?'); args.push(v); details.physical_count = v;
+    }
+    for (const [field, resp, label] of [['approved_shortage_qty', 'shortage_responsibility', 'shortages'], ['approved_damage_qty', 'damage_responsibility', 'damage']]) {
+      if (req.body[field] === undefined) continue;
+      if (!can(req.employee?.permissions, 'consignment_finance')) throw err(403, 'Approving chargeable shortages or damage is for Finance');
+      const v = Number(req.body[field]) || 0;
+      if (v < 0) throw err(400, 'Enter 0 or more');
+      if (v > 0 && a[resp] !== 'total_tools') throw err(400, `Under ${a.agreement_number} the supplier bears ${label}, so none can be charged to Total Tools`);
+      sets.push(`${field} = ?`); args.push(v); details[field] = v;
+    }
+    if (!sets.length) throw err(400, 'Nothing to change');
+    await tx.execute({ sql: `UPDATE consignment_reconciliation_lines SET ${sets.join(', ')} WHERE id = ?`, args: [...args, l.id] });
+    await reconLog(tx, r.id, 'line_updated', req.employee?.id, { details: { line_id: l.id, ...details } });
+    await writeLines(tx, r, a); // recompute discrepancy, caps and billable figures
+    await tx.commit();
+    committed = true;
+    res.json(await loadRecon(r.id));
+  } catch (e) {
+    if (!committed) await tx.rollback().catch(() => {});
+    send(res, e);
+  }
+});
+
+// Finance approves the month — after it has ended and every line is
+// counted — and it locks. Recomputed one last time first.
+router.post('/reconciliations/:id/approve', requirePermission('consignment_finance'), async (req, res) => {
+  try {
+    const cur = await loadRecon(req.params.id);
+    if (!cur) return res.status(404).json({ error: 'Reconciliation not found' });
+    if (cur.status !== 'draft') return res.status(400).json({ error: `${cur.recon_number} is already approved` });
+    if (!cur.period_ended) return res.status(400).json({ error: `${cur.period} hasn't ended yet — approve it after the month-end cut-off` });
+    if (cur.lines.some(l => l.line_type === 'stock' && l.physical_count == null)) return res.status(400).json({ error: 'Enter the physical count for every line first' });
+    let sig;
+    try { sig = await resolveApprovalSignature(db, req.employee?.id, req.body.signature); }
+    catch (e) { return res.status(e.status || 500).json({ error: e.message, code: e.code }); }
+    const tx = await db.transaction('write');
+    let committed = false;
+    try {
+      const { r, a } = await draftRecon(tx, cur.id);
+      await writeLines(tx, r, a);
+      await tx.execute({ sql: "UPDATE consignment_reconciliations SET status = 'approved', approved_by = ?, approved_at = CURRENT_TIMESTAMP, approval_signature = ? WHERE id = ? AND status = 'draft'", args: [req.employee?.id || null, sig, r.id] });
+      await reconLog(tx, r.id, 'approved', req.employee?.id);
+      await tx.commit();
+      committed = true;
+    } catch (e) {
+      if (!committed) await tx.rollback().catch(() => {});
+      throw e;
+    }
+    res.json(await loadRecon(cur.id));
+  } catch (e) { send(res, e); }
+});
+
+// Reopening a locked month: an Administrator acting on Finance's documented
+// approval — reason, Finance approver and approval reference all required.
+router.post('/reconciliations/:id/reopen', requirePermission('settings'), async (req, res) => {
+  try {
+    const reason = String(req.body.reason || '').trim();
+    const approver = String(req.body.finance_approver || '').trim();
+    const reference = String(req.body.approval_reference || '').trim();
+    if (!reason || !approver || !reference) return res.status(400).json({ error: "Give the reason, the Finance approver and the approval reference (e.g. the email or memo)" });
+    const r = await loadRecon(req.params.id);
+    if (!r) return res.status(404).json({ error: 'Reconciliation not found' });
+    if (r.status !== 'approved') return res.status(400).json({ error: `${r.recon_number} isn't locked` });
+    await db.execute({ sql: "UPDATE consignment_reconciliations SET status = 'draft', approved_by = NULL, approved_at = NULL, approval_signature = NULL WHERE id = ?", args: [r.id] });
+    await reconLog(db, r.id, 'reopened', req.employee?.id, { reason, finance_approver: approver, approval_reference: reference });
+    res.json(await loadRecon(r.id));
+  } catch (e) { send(res, e); }
+});
+
 module.exports = router;
 module.exports.costOn = costOn;

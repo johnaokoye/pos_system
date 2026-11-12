@@ -1904,6 +1904,77 @@ async function _init() {
       issued_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE (issue_key, transaction_item_id)
     )` },
+    // Month-end consignment reconciliation (CREC-), one per agreement per
+    // month (Jamaica-time calendar month, A6). Draft lines are worked out from
+    // the stock receipt moves and sale/layaway/return allocations
+    // (lib/consignmentRecon.js); the physical count is entered and Finance
+    // approves chargeable shortages/damage (only where the agreement makes
+    // Total Tools responsible), then approves — which locks it. Reopening is
+    // an Administrator's, on documented Finance approval (log).
+    { sql: `CREATE TABLE IF NOT EXISTS consignment_reconciliations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      recon_number TEXT UNIQUE NOT NULL,
+      agreement_id INTEGER NOT NULL REFERENCES consignment_agreements(id),
+      period TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'draft',
+      prepared_by INTEGER REFERENCES employees(id),
+      prepared_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      refreshed_at DATETIME,
+      approved_by INTEGER REFERENCES employees(id),
+      approved_at DATETIME,
+      approval_signature TEXT,
+      totals_json TEXT,
+      notes TEXT,
+      UNIQUE (agreement_id, period)
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS consignment_reconciliation_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      recon_id INTEGER NOT NULL REFERENCES consignment_reconciliations(id),
+      line_type TEXT NOT NULL DEFAULT 'stock',
+      branch_id INTEGER REFERENCES branches(id),
+      product_id INTEGER NOT NULL REFERENCES products(id),
+      opening REAL NOT NULL DEFAULT 0,
+      receipts REAL NOT NULL DEFAULT 0,
+      transfers_in REAL NOT NULL DEFAULT 0,
+      transfers_out REAL NOT NULL DEFAULT 0,
+      sales REAL NOT NULL DEFAULT 0,
+      returns REAL NOT NULL DEFAULT 0,
+      layaways REAL NOT NULL DEFAULT 0,
+      shop_use REAL NOT NULL DEFAULT 0,
+      damaged REAL NOT NULL DEFAULT 0,
+      adjustments REAL NOT NULL DEFAULT 0,
+      expected_closing REAL NOT NULL DEFAULT 0,
+      physical_count REAL,
+      discrepancy REAL NOT NULL DEFAULT 0,
+      in_transit REAL NOT NULL DEFAULT 0,
+      pos_sales_qty REAL NOT NULL DEFAULT 0,
+      pos_sales_value REAL NOT NULL DEFAULT 0,
+      layaway_qty REAL NOT NULL DEFAULT 0,
+      layaway_value REAL NOT NULL DEFAULT 0,
+      returns_qty REAL NOT NULL DEFAULT 0,
+      returns_value REAL NOT NULL DEFAULT 0,
+      prior_returns_qty REAL NOT NULL DEFAULT 0,
+      prior_returns_value REAL NOT NULL DEFAULT 0,
+      shop_use_value REAL NOT NULL DEFAULT 0,
+      shortage_qty REAL NOT NULL DEFAULT 0,
+      damage_qty REAL NOT NULL DEFAULT 0,
+      approved_shortage_qty REAL NOT NULL DEFAULT 0,
+      approved_damage_qty REAL NOT NULL DEFAULT 0,
+      unit_cost_end REAL,
+      billable_qty REAL NOT NULL DEFAULT 0,
+      billable_value REAL NOT NULL DEFAULT 0
+    )` },
+    { sql: `CREATE TABLE IF NOT EXISTS consignment_reconciliation_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      recon_id INTEGER NOT NULL REFERENCES consignment_reconciliations(id),
+      action TEXT NOT NULL,
+      reason TEXT,
+      finance_approver TEXT,
+      approval_reference TEXT,
+      details TEXT,
+      employee_id INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     // Stock held at the sending branch for a transfer request raised by a
     // sale (decision A5): taken out of what can be sold until it's sent or
     // the request is cancelled.
