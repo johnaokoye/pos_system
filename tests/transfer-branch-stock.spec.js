@@ -45,3 +45,17 @@ test('an accepted quote sourcing from a branch without the item puts that part o
   expect(sources.find(s => s.branch_id === null).purchase_request_number).toBeTruthy();
   expect(await branchStock(page, other.id, p.id)).toBe(0);
 });
+
+test('a layaway at a branch with no stock record for the item is refused, and no stock appears there', async ({ page }) => {
+  const { main, other, p } = await setup(page);
+  const before = await api(page, 'GET', `/products/${p.id}`);
+  test.skip(!(before.stock_qty > 0), 'could not stock the test item at the main branch');
+  await api(page, 'PUT', `/products/${p.id}`, { ...before, is_layaway_eligible: 1 });
+  const s = `${Date.now()}`;
+  const customer = await api(page, 'POST', '/customers', { first_name: 'Lay', last_name: `Away${s}`, phone: `876${s.slice(-7)}` });
+  const msg = await attempt(page, 'POST', '/layaway/plans', { customer_id: customer.id, branch_id: other.id, employee_id: 1, items: [{ product_id: p.id, quantity: 2 }], payment_method: 'cash', amount_tendered: 100 });
+  expect(msg).toContain('Not enough stock');
+  expect(msg).toContain('0 available');
+  expect(await branchStock(page, other.id, p.id)).toBe(0);
+  expect((await api(page, 'GET', `/products/${p.id}`)).stock_qty).toBe(before.stock_qty);
+});

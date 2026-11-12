@@ -6,6 +6,7 @@ const { resolveUnit, lineName, parseQty, stockUnits } = require('../lib/units');
 const { syncBinQty } = require('../lib/binSync');
 const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
+const { branchStockQty } = require('../lib/branchStock');
 
 async function getSetting(key, fallback) {
   const { rows: [row] } = await db.execute({ sql: 'SELECT value FROM settings WHERE key = ?', args: [key] });
@@ -90,8 +91,8 @@ router.post('/plans', requirePermission('layaway_create'), async (req, res) => {
       try { unit = await resolveUnit(db, product, item.uom_id ?? item.sell_unit); } catch (e) { return res.status(400).json({ error: e.message }); }
       const qty = parseQty(item.quantity, unit.allow_decimal);
       if (Number.isNaN(qty)) return res.status(400).json({ error: `Enter a valid quantity for ${product.name}` });
-      const { rows: [bi] } = await db.execute({ sql: 'SELECT stock_qty FROM branch_inventory WHERE product_id = ? AND branch_id = ?', args: [product.id, branch_id] });
-      const availableQty = bi ? bi.stock_qty : product.stock_qty;
+      // No record at this branch = none there (lib/branchStock.js).
+      const availableQty = await branchStockQty(db, product, branch_id);
       if (availableQty < stockUnits(qty, unit.units_per)) {
         return res.status(400).json({ error: unit.units_per !== 1 ? `Not enough stock for ${qty} × ${unit.label} of ${product.name} — ${availableQty} in stock` : `Not enough stock for ${product.name} — ${availableQty} available` });
       }
