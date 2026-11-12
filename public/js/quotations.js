@@ -877,6 +877,15 @@ Object.assign(App, {
       : `due back ${this.fmtDate(a.next_due)}`;
   },
 
+  // "3 at Kingston, 1 at Ocho Rios" — what's free at the other branches
+  // (rental-availability's `elsewhere`), up to three.
+  _spElsewhereText(a) {
+    const list = (a && a.elsewhere) || [];
+    if (!list.length) return '';
+    const shown = list.slice(0, 3).map(b => `${b.available} at ${this.escapeAttr(b.branch_name)}`).join(', ');
+    return list.length > 3 ? `${shown} and ${list.length - 3} more branch${list.length - 3 === 1 ? '' : 'es'}` : shown;
+  },
+
   _spRentalOptionHtml(idx, p, a, avail) {
     const esc = v => this.escapeAttr(v == null ? '' : String(v));
     const rates = [['day', p.rental_rate], ['wk', p.rental_weekly_rate], ['mo', p.rental_monthly_rate], ['hr', p.rental_hourly_rate]]
@@ -884,10 +893,12 @@ Object.assign(App, {
     const details = [p.sku, p.model_number && `Model ${p.model_number}`, p.size, p.category_name,
       p.rental_classification === 'equipment' ? 'Equipment' : 'Tool', p.is_accessory ? 'Accessory' : null,
       !avail?.branchId && p.assigned_branch_name ? p.assigned_branch_name : null].filter(Boolean).map(esc).join(' · ');
-    let badge = '', stockLine = '', bookingLines = '';
+    let badge = '', stockLine = '', bookingLines = '', elsewhereLine = '';
     if (a) {
       const color = a.available > 0 ? 'var(--success)' : 'var(--danger)';
-      badge = `<span style="flex-shrink:0;font-weight:700;font-size:12px;color:${color};border:1px solid ${color};border-radius:10px;padding:1px 8px">${a.available} available</span>`;
+      badge = `<span style="flex-shrink:0;font-weight:700;font-size:12px;color:${color};border:1px solid ${color};border-radius:10px;padding:1px 8px">${a.available} available${avail.branchId ? ' here' : ''}</span>`;
+      const there = this._spElsewhereText(a);
+      if (there) elsewhereLine = `<div style="font-size:11px;margin-top:2px;color:${a.available > 0 ? 'var(--text-muted)' : 'var(--warning, #d97706)'}">${a.available > 0 ? 'Also free' : 'None free here · free elsewhere'}: ${there}</div>`;
       stockLine = [`${a.on_hand} on hand`, a.out ? `${a.out} on rental` : '', a.held ? `${a.held} held` : '', a.out_of_service ? `${a.out_of_service} out of service` : '']
         .filter(Boolean).join(' · ');
       const due = this._spDueText(a, avail.today);
@@ -905,6 +916,7 @@ Object.assign(App, {
         <div style="display:flex;align-items:center;gap:8px"><strong style="flex:1">${esc(p.name)}</strong>${badge}</div>
         <div style="font-size:11px;color:var(--text-muted)">${details}${details ? ' · ' : ''}${rates}</div>
         ${stockLine ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">${stockLine}</div>` : ''}
+        ${elsewhereLine}
         ${bookingLines ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px;padding-left:8px;border-left:2px solid var(--border)">${bookingLines}</div>` : ''}
       </div>`;
   },
@@ -965,8 +977,11 @@ Object.assign(App, {
     if (est.available != null && est.available < quantity) {
       // Can still be quoted — say when more come back.
       const avail = await this._spRentalAvailability();
-      const due = this._spDueText(avail && avail.byId.get(Number(product_id)), avail?.today);
+      const a = avail && avail.byId.get(Number(product_id));
+      const due = this._spDueText(a, avail?.today);
       if (due) availText += ` · ${due}`;
+      const there = this._spElsewhereText(a);
+      if (there) availText += ` · free elsewhere: ${there}`;
     }
     info.innerHTML = `${est.days} day${est.days === 1 ? '' : 's'}${rate_plan ? ` · ${this._ratePlanLabel(rate_plan).toLowerCase()}` : ''} · catalog rate ${this.fmt(est.fee)} for ${quantity} · ${availText}${planKept ? '' : ' · <span style="color:var(--warning, #d97706)">rate set back to Automatic — the period is too short for it</span>'}`;
     this.calcQuoteTotal();

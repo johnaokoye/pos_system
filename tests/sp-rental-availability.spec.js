@@ -47,3 +47,27 @@ test('rental item search shows availability and when held units are due back', a
   await expect(option).toContainText(`Held 1 for Special Project ${project.quote_number}`);
   await expect(option).toContainText('Dec 10, 2026');
 });
+
+test('an item with none free at the project branch says which other branches have it', async ({ page }) => {
+  const stamp = Date.now();
+  const [main, other] = (await api(page, 'GET', '/branches')).filter(b => b.active !== 0);
+  // Stocked only at the other branch.
+  const item = await api(page, 'POST', '/products', { sku: `SPEL-${stamp}`, name: `Elsewhere Saw ${stamp}`, is_rental: 1, rental_rate: 40, branch_id: other.id, stock_qty: 3 });
+
+  const here = (await api(page, 'GET', `/quotations/rental-availability?branch_id=${main.id}`)).items.find(i => i.product_id === item.id);
+  expect(here).toMatchObject({ on_hand: 0, available: 0 });
+  expect(here.elsewhere).toEqual([{ branch_id: other.id, branch_name: other.name, available: 3 }]);
+  const there = (await api(page, 'GET', `/quotations/rental-availability?branch_id=${other.id}`)).items.find(i => i.product_id === item.id);
+  expect(there).toMatchObject({ on_hand: 3, available: 3, elsewhere: [] });
+
+  await page.evaluate(() => App.showQuoteForm(null, 'special_project'));
+  await page.selectOption('#qt-branch', String(main.id));
+  await page.evaluate(() => App.addQuoteRentalItem());
+  await page.locator('[id^="qti-rprod-search-"]').last().fill(`SPEL-${stamp}`);
+  const option = page.locator('[id^="qti-rprod-dd-"] .nav-item', { hasText: `Elsewhere Saw ${stamp}` });
+  await expect(option).toContainText('0 available here');
+  await expect(option).toContainText(`None free here · free elsewhere: 3 at ${other.name}`);
+  // Picked, the line's note says so too.
+  await option.click();
+  await expect(page.locator('[id^="qti-rinfo-"]').last()).toContainText(`free elsewhere: 3 at ${other.name}`);
+});

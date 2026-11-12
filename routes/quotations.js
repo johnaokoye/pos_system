@@ -133,15 +133,18 @@ async function attachQuoteItemSources(items) {
 router.get('/rental-availability', requirePermission('special_projects'), async (req, res) => {
   try {
     const branchId = req.query.branch_id ? Number(req.query.branch_id) : null;
+    // Read for every branch, then split: the project's branch gives the
+    // figures, the others give `elsewhere` — what's free at each other branch
+    // (stock − on rental − held − out of service there), so an item with none
+    // here says where there is some.
     const [{ rows: products }, { rows: stock }, { rows: oos }, { rows: bookings }] = await Promise.all([
       db.execute({ sql: 'SELECT id, stock_qty FROM products WHERE is_rental = 1 AND active = 1', args: [] }),
-      branchId
-        ? db.execute({ sql: 'SELECT product_id, stock_qty FROM branch_inventory WHERE branch_id = ?', args: [branchId] })
-        : Promise.resolve({ rows: [] }),
+      db.execute({ sql: `SELECT bi.product_id, bi.branch_id, b.name AS branch_name, bi.stock_qty FROM branch_inventory bi JOIN branches b ON b.id = bi.branch_id
+                         JOIN products p ON p.id = bi.product_id AND p.is_rental = 1 AND p.active = 1 WHERE COALESCE(b.active, 1) = 1`, args: [] }),
       db.execute({
-        sql: `SELECT product_id, COALESCE(SUM(quantity), 0) AS qty FROM rental_out_of_service
-              WHERE returned_to_service_at IS NULL${branchId ? ' AND branch_id = ?' : ''} GROUP BY product_id`,
-        args: branchId ? [branchId] : [],
+        sql: `SELECT product_id, branch_id, COALESCE(SUM(quantity), 0) AS qty FROM rental_out_of_service
+              WHERE returned_to_service_at IS NULL GROUP BY product_id, branch_id`,
+        args: [],
       }),
       db.execute({
         sql: `SELECT rai.product_id, ra.id AS agreement_id, ra.agreement_number, ra.status, ra.branch_id, b.name AS branch_name,
@@ -153,38 +156,56 @@ router.get('/rental-availability', requirePermission('special_projects'), async 
               JOIN rental_agreements ra ON ra.id = rai.agreement_id
               LEFT JOIN branches b ON b.id = ra.branch_id
               LEFT JOIN quotations q ON q.id = ra.quotation_id
-              WHERE ra.status IN ('active', 'pending', 'awaiting_issue')${branchId ? ' AND ra.branch_id = ?' : ''}
+              WHERE ra.status IN ('active', 'pending', 'awaiting_issue')
               GROUP BY rai.product_id, ra.id
               HAVING SUM(rai.quantity - rai.quantity_returned) > 0
               ORDER BY ra.due_date, ra.id`,
-        args: branchId ? [branchId] : [],
+        args: [],
       }),
     ]);
-    const stockBy = new Map(stock.map(r => [r.product_id, Number(r.stock_qty) || 0]));
-    const oosBy = new Map(oos.map(r => [r.product_id, Number(r.qty) || 0]));
+    const key = (productId, b) => `${productId}:${b ?? ''}`;
+    const stockAt = new Map(), branchesOf = new Map();
+    for (const r of stock) {
+      stockAt.set(key(r.product_id, r.branch_id), Number(r.stock_qty) || 0);
+      const list = branchesOf.get(r.product_id) || [];
+      list.push({ branch_id: r.branch_id, branch_name: r.branch_name });
+      branchesOf.set(r.product_id, list);
+    }
+    const oosAt = new Map(), oosAll = new Map();
+    for (const r of oos) {
+      const n = Number(r.qty) || 0;
+      oosAt.set(key(r.product_id, r.branch_id), (oosAt.get(key(r.product_id, r.branch_id)) || 0) + n);
+      oosAll.set(r.product_id, (oosAll.get(r.product_id) || 0) + n);
+    }
     const bookingsBy = new Map();
     for (const b of bookings) {
       const list = bookingsBy.get(b.product_id) || [];
       const held = b.status === 'pending';
       list.push({
-        agreement_number: b.agreement_number, status: b.status, qty: Number(b.qty), branch_name: b.branch_name,
+        agreement_number: b.agreement_number, status: b.status, qty: Number(b.qty), branch_id: b.branch_id, branch_name: b.branch_name,
         kind: held ? 'held' : 'out', quote_number: b.quote_number || null,
         from: held ? (b.hold_start || null) : (b.checkout_date || null),
         due: held ? (b.hold_end || b.due_date) : b.due_date,
       });
       bookingsBy.set(b.product_id, list);
     }
+    const sumQty = (list, kind) => list.filter(b => b.kind === kind).reduce((t, b) => t + b.qty, 0);
     const items = products.map(p => {
-      const on_hand = branchId ? (stockBy.get(p.id) || 0) : (Number(p.stock_qty) || 0);
-      const list = bookingsBy.get(p.id) || [];
-      const out = list.filter(b => b.kind === 'out').reduce((t, b) => t + b.qty, 0);
-      const held = list.filter(b => b.kind === 'held').reduce((t, b) => t + b.qty, 0);
-      const out_of_service = oosBy.get(p.id) || 0;
+      const all = bookingsBy.get(p.id) || [];
+      const list = branchId ? all.filter(b => b.branch_id === branchId) : all;
+      const on_hand = branchId ? (stockAt.get(key(p.id, branchId)) || 0) : (Number(p.stock_qty) || 0);
+      const out = sumQty(list, 'out'), held = sumQty(list, 'held');
+      const out_of_service = branchId ? (oosAt.get(key(p.id, branchId)) || 0) : (oosAll.get(p.id) || 0);
       const nextOut = list.filter(b => b.kind === 'out').map(b => b.due).filter(Boolean).sort()[0] || null;
+      const elsewhere = !branchId ? [] : (branchesOf.get(p.id) || []).filter(b => b.branch_id !== branchId).map(b => {
+        const there = all.filter(x => x.branch_id === b.branch_id);
+        const available = Math.max(0, (stockAt.get(key(p.id, b.branch_id)) || 0) - sumQty(there, 'out') - sumQty(there, 'held') - (oosAt.get(key(p.id, b.branch_id)) || 0));
+        return { branch_id: b.branch_id, branch_name: b.branch_name, available };
+      }).filter(b => b.available > 0).sort((x, y) => y.available - x.available || x.branch_name.localeCompare(y.branch_name));
       return {
         product_id: p.id, on_hand, out, held, out_of_service,
         available: Math.max(0, on_hand - out - held - out_of_service),
-        next_due: nextOut, bookings: list,
+        next_due: nextOut, bookings: list.map(({ branch_id, ...b }) => b), elsewhere,
       };
     });
     res.json({ branch_id: branchId, today: storeToday(), items });
