@@ -1975,6 +1975,39 @@ async function _init() {
       employee_id INTEGER REFERENCES employees(id),
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // A work order's parts issued from stock (Issue from Stock): per item
+    // (not per part line — the parts list is rewritten when edited), from the
+    // WO's branch, recorded once (issue_key). Takes the stock off then.
+    { sql: `CREATE TABLE IF NOT EXISTS work_order_part_issues (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      work_order_id INTEGER NOT NULL REFERENCES work_orders(id),
+      product_id INTEGER NOT NULL REFERENCES products(id),
+      branch_id INTEGER REFERENCES branches(id),
+      qty REAL NOT NULL,
+      issue_key TEXT,
+      note TEXT,
+      issued_by INTEGER REFERENCES employees(id),
+      issued_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (work_order_id, issue_key)
+    )` },
+    // The stock receipts an issued part came from: supplier-owned only where
+    // the agreement allows work-order use, billable when issued (A4) at that
+    // day's agreed cost.
+    { sql: `CREATE TABLE IF NOT EXISTS work_order_lot_allocations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      issue_id INTEGER NOT NULL REFERENCES work_order_part_issues(id),
+      work_order_id INTEGER NOT NULL REFERENCES work_orders(id),
+      product_id INTEGER NOT NULL REFERENCES products(id),
+      branch_id INTEGER REFERENCES branches(id),
+      lot_id INTEGER REFERENCES stock_lots(id),
+      owner TEXT NOT NULL,
+      supplier_id INTEGER REFERENCES suppliers(id),
+      agreement_id INTEGER REFERENCES consignment_agreements(id),
+      qty REAL NOT NULL,
+      unit_cost REAL,
+      qualified_on TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     // Stock held at the sending branch for a transfer request raised by a
     // sale (decision A5): taken out of what can be sold until it's sent or
     // the request is cancelled.
@@ -3351,6 +3384,10 @@ async function _init() {
     'ALTER TABLE ap_payments ADD COLUMN posting_mode TEXT',
     // The condition goods came back in on a return (decision A3): good | damaged.
     "ALTER TABLE returns ADD COLUMN goods_condition TEXT DEFAULT 'good'",
+    // Work-order parts issued from stock, on the month-end reconciliation.
+    'ALTER TABLE consignment_reconciliation_lines ADD COLUMN work_orders REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE consignment_reconciliation_lines ADD COLUMN work_order_qty REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE consignment_reconciliation_lines ADD COLUMN work_order_value REAL NOT NULL DEFAULT 0',
     'ALTER TABLE account_payments ADD COLUMN contra_id INTEGER REFERENCES contras(id)',
     // The customer account of a business that's also this supplier — the
     // link a contra (routes/contras.js) needs.

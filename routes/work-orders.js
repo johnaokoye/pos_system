@@ -9,6 +9,10 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
+const { syncBinQty } = require('../lib/binSync');
+const { branchStockQty } = require('../lib/branchStock');
+const { takeFromLots, costOn } = require('../lib/stockLots');
+const { storeToday } = require('../lib/storeTime');
 
 // Statuses a WO can freely log a comment against via PATCH /:id/status without
 // going through a dedicated money-moving endpoint (assessment-paid,
@@ -132,7 +136,10 @@ router.get('/', requirePermission('work_orders'), async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-const WO_ITEMS_SELECT = `SELECT woi.*, pr.pr_number as purchase_request_number, pr.status as purchase_request_status
+// issued_qty: how much of this line's item has been issued from stock to the
+// job (work_order_part_issues are per item, so it's the item's total).
+const WO_ITEMS_SELECT = `SELECT woi.*, pr.pr_number as purchase_request_number, pr.status as purchase_request_status,
+    COALESCE((SELECT SUM(pi.qty) FROM work_order_part_issues pi WHERE pi.work_order_id = woi.work_order_id AND pi.product_id = woi.product_id), 0) AS issued_qty
   FROM work_order_items woi LEFT JOIN purchase_requests pr ON woi.purchase_request_id = pr.id WHERE woi.work_order_id = ?`;
 
 // Attaches each part's branch-sourcing breakdown (item.sources) — mirrors
@@ -317,6 +324,13 @@ router.patch('/:id/parts', requirePermission('wo_assign_parts'), async (req, res
       processedItems = await processWorkOrderItems(items || [], defaultTaxRate);
     } catch(e) { return res.status(400).json({ error: e.message }); }
 
+    // Parts already issued from stock can't be taken off the list.
+    const { rows: issuedRows } = await db.execute({ sql: 'SELECT pi.product_id, p.name, SUM(pi.qty) AS q FROM work_order_part_issues pi JOIN products p ON p.id = pi.product_id WHERE pi.work_order_id = ? GROUP BY pi.product_id', args: [req.params.id] });
+    for (const iss of issuedRows) {
+      const listed = processedItems.filter(i => Number(i.product_id) === Number(iss.product_id) && !i.is_customer_supplied).reduce((t, i) => t + Number(i.quantity || 0), 0);
+      if (listed + 0.0005 < Number(iss.q)) return res.status(400).json({ error: `${iss.q} of ${iss.name} has already been issued from stock to this job, so the parts list needs at least that many` });
+    }
+
     const tx = await db.transaction('write');
     let committed = false;
     try {
@@ -369,6 +383,68 @@ router.post('/:id/confirm-parts', requirePermission('wo_assign_parts'), async (r
     updated.items = await attachWorkOrderItemSources(items);
     res.json(updated);
   } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Issue from Stock: a part on the job taken out of the WO branch's stock —
+// { product_id, quantity, issue_key, note }. No more than is on the parts
+// list (less returned) and not yet issued, nor than the branch holds.
+// Recorded once per issue_key. Takes the stock off (branch, overall, bins,
+// stock movement 'wo_issue') and from the stock receipts, oldest first —
+// supplier-owned only where the agreement allows work-order use, billable
+// to that supplier from today at today's agreed cost (A4).
+router.post('/:id/parts/issue', requirePermission('wo_assign_parts'), async (req, res) => {
+  const tx = await db.transaction('write');
+  let committed = false;
+  try {
+    const fail = (status, msg) => Object.assign(new Error(msg), { status });
+    const { rows: [wo] } = await tx.execute({ sql: 'SELECT * FROM work_orders WHERE id = ?', args: [req.params.id] });
+    if (!wo) throw fail(404, 'Not found');
+    if (['complete', 'awaiting_pickup', 'picked_up', 'cancelled', 'not_worth_fixing'].includes(wo.status)) throw fail(400, `Parts can't be issued on a ${wo.status.replace(/_/g, ' ')} work order`);
+    if (!wo.branch_id) throw fail(400, 'This work order has no branch to issue stock from');
+    const productId = Number(req.body.product_id);
+    const qty = Math.round((Number(req.body.quantity) || 0) * 1000) / 1000;
+    if (!(qty > 0)) throw fail(400, 'Enter how many are being issued');
+    const key = String(req.body.issue_key || '').trim() || null;
+    if (key) {
+      const { rows: [dup] } = await tx.execute({ sql: 'SELECT id FROM work_order_part_issues WHERE work_order_id = ? AND issue_key = ?', args: [wo.id, key] });
+      if (dup) { await tx.rollback(); committed = true; return res.json({ duplicate: true, items: (await db.execute({ sql: WO_ITEMS_SELECT, args: [wo.id] })).rows }); }
+    }
+    const { rows: [line] } = await tx.execute({
+      sql: `SELECT p.name, p.cost, SUM(woi.quantity - COALESCE(woi.quantity_returned, 0)) AS listed,
+              COALESCE((SELECT SUM(pi.qty) FROM work_order_part_issues pi WHERE pi.work_order_id = ? AND pi.product_id = ?), 0) AS issued
+            FROM work_order_items woi JOIN products p ON p.id = woi.product_id
+            WHERE woi.work_order_id = ? AND woi.product_id = ? AND COALESCE(woi.is_customer_supplied, 0) = 0`,
+      args: [wo.id, productId, wo.id, productId],
+    });
+    if (!line || line.listed == null) throw fail(400, "That item isn't on this job's parts list");
+    const left = Math.round((Number(line.listed) - Number(line.issued)) * 1000) / 1000;
+    if (qty - left > 0.0005) throw fail(400, `Only ${Math.max(0, left)} more of ${line.name} can be issued to this job`);
+    const onHand = await branchStockQty(tx, { id: productId, stock_qty: 0 }, wo.branch_id);
+    if (qty - onHand > 0.0005) throw fail(400, `Only ${onHand} of ${line.name} is in stock at this branch`);
+
+    const r = await tx.execute({ sql: 'INSERT INTO work_order_part_issues (work_order_id, product_id, branch_id, qty, issue_key, note, issued_by) VALUES (?,?,?,?,?,?,?)',
+      args: [wo.id, productId, wo.branch_id, qty, key, String(req.body.note || '').trim() || null, req.employee?.id || null] });
+    const issueId = Number(r.lastInsertRowid);
+    await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty - ? WHERE id = ?', args: [qty, productId] });
+    await tx.execute({ sql: 'UPDATE branch_inventory SET stock_qty = stock_qty - ?, updated_at = CURRENT_TIMESTAMP WHERE product_id = ? AND branch_id = ?', args: [qty, productId, wo.branch_id] });
+    await syncBinQty(tx, productId, wo.branch_id, -qty);
+    await tx.execute({ sql: "INSERT INTO stock_movements (product_id, branch_id, quantity_change, type, reference, reason) VALUES (?,?,?,'wo_issue',?,?)", args: [productId, wo.branch_id, -qty, wo.wo_number, `Issued to work order ${wo.wo_number}`] });
+    const parts = await takeFromLots(tx, { product_id: productId, branch_id: wo.branch_id, qty, kind: 'work_order', reference: wo.wo_number, employee_id: req.employee?.id || null, use: 'work_order' });
+    const day = storeToday();
+    for (const p of parts) {
+      const cost = p.owner === 'consignment' ? ((await costOn(tx, p.agreement_id, productId, day))?.cost ?? p.unit_cost ?? null) : line.cost;
+      await tx.execute({
+        sql: 'INSERT INTO work_order_lot_allocations (issue_id, work_order_id, product_id, branch_id, lot_id, owner, supplier_id, agreement_id, qty, unit_cost, qualified_on) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+        args: [issueId, wo.id, productId, wo.branch_id, p.lot_id, p.owner, p.supplier_id, p.agreement_id, p.qty, cost, day],
+      });
+    }
+    await tx.commit();
+    committed = true;
+    res.json({ duplicate: false, issue_id: issueId, items: (await db.execute({ sql: WO_ITEMS_SELECT, args: [wo.id] })).rows });
+  } catch (e) {
+    if (!committed) await tx.rollback().catch(() => {});
+    res.status(e.status || 500).json({ error: e.message });
+  }
 });
 
 // Returns some/all of a catalog part's remaining quantity to stock instead of

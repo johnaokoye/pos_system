@@ -500,8 +500,8 @@ Object.assign(App, {
           ${canManageParts ? `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px">
             <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Parts</strong>
             <div id="wo-parts-list" style="margin-top:6px">
-              ${(wo.items||[]).length ? `<table class="table" style="font-size:12px"><thead><tr><th>Part</th><th>Qty</th><th>Total</th><th>Source</th><th></th></tr></thead><tbody>
-                ${wo.items.map(i => { const remaining = i.quantity - (i.quantity_returned||0); const canReturn = partsEditable && i.product_id && !i.is_customer_supplied && remaining > 0; return `<tr><td>${i.product_name}</td><td>${i.quantity}${i.quantity_returned>0?` <span style="color:var(--text-muted)">(${i.quantity_returned} returned)</span>`:''}</td><td>${this.fmt(i.total)}</td><td>${this._woPartStatusBadge(i)}</td><td>${canReturn ? `<button class="btn btn-sm btn-outline" onclick="App.showWOPartReturnModal(${wo.id},${i.id})">Return</button>` : ''}</td></tr>`; }).join('')}
+              ${(wo.items||[]).length ? `<table class="table" style="font-size:12px"><thead><tr><th>Part</th><th>Qty</th><th title="Taken out of this branch's stock for the job">Issued</th><th>Total</th><th>Source</th><th></th></tr></thead><tbody>
+                ${wo.items.map(i => { const remaining = i.quantity - (i.quantity_returned||0); const canReturn = partsEditable && i.product_id && !i.is_customer_supplied && remaining > 0; const toIssue = i.product_id && !i.is_customer_supplied ? Math.max(0, (wo.items.filter(x => x.product_id === i.product_id && !x.is_customer_supplied).reduce((t, x) => t + x.quantity - (x.quantity_returned || 0), 0)) - (i.issued_qty || 0)) : 0; const canIssue = partsEditable && toIssue > 0 && wo.branch_id; return `<tr><td>${i.product_name}</td><td>${i.quantity}${i.quantity_returned>0?` <span style="color:var(--text-muted)">(${i.quantity_returned} returned)</span>`:''}</td><td>${i.product_id && !i.is_customer_supplied ? (i.issued_qty || 0) : '—'}</td><td>${this.fmt(i.total)}</td><td>${this._woPartStatusBadge(i)}</td><td style="white-space:nowrap">${canIssue ? `<button class="btn btn-sm btn-primary" title="Take it out of this branch's stock for the job" onclick="App.issueWOPart(${wo.id},${i.product_id},${toIssue},'${this.escapeAttr(i.product_name).replace(/'/g, '&#39;')}')">Issue</button> ` : ''}${canReturn ? `<button class="btn btn-sm btn-outline" onclick="App.showWOPartReturnModal(${wo.id},${i.id})">Return</button>` : ''}</td></tr>`; }).join('')}
               </tbody></table>` : '<div style="color:var(--text-muted);font-size:12px">No parts assigned yet</div>'}
             </div>
             ${partsEditable ? `
@@ -996,6 +996,20 @@ Object.assign(App, {
   // machine and still resalable) — sends the remaining quantity back to
   // stock as a discounted "Used" sibling product and knocks it off this
   // line's charge on the work order.
+  // Issue from Stock: take a part on the job out of the branch's stock
+  // (recorded once — the key stops a double-click issuing it twice).
+  async issueWOPart(woId, productId, max, name) {
+    const raw = prompt(`Issue ${name} from stock to this job.\n\nHow many? (up to ${max})`, String(max));
+    if (raw == null) return;
+    const quantity = parseFloat(raw);
+    if (!(quantity > 0)) { this.alert('Enter how many are being issued', 'warning'); return; }
+    try {
+      await this.api('POST', `/work-orders/${woId}/parts/issue`, { product_id: productId, quantity, issue_key: `${woId}-${productId}-${Date.now()}` });
+      this.alert(`${quantity} × ${name} issued from stock`, 'success');
+      this.viewWorkOrder(woId);
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
   async showWOPartReturnModal(woId, itemId) {
     const wo = await this.api('GET', `/work-orders/${woId}`);
     const item = (wo.items||[]).find(i => i.id === itemId);
