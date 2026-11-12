@@ -386,7 +386,7 @@ Object.assign(App, {
         <td style="font-size:12px">${this.escapeAttr(r.employee_name || '—')}</td>
         <td style="font-size:12px">${this.escapeAttr(r.override_by_name || '—')}</td>
         <td style="font-size:12px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${this.escapeAttr(r.notes || '')}">${this.escapeAttr(r.notes || '—')}</td>
-        <td style="white-space:nowrap"><button class="btn btn-secondary btn-sm" onclick="App.viewReturn(${r.id})">View / Print</button></td>
+        <td style="white-space:nowrap"><button class="btn btn-secondary btn-sm" onclick="App.viewReturn(${r.id})">View / Print</button>${r.resolution === 'credit_note' && r.status !== 'cancelled' && this._canRefundCreditNote() ? ` <button class="btn btn-warning btn-sm" onclick="App.showCreditNoteRefund(${r.id})" title="The customer wants their money back instead of the credit note">Refund Instead</button>` : ''}</td>
       </tr>`).join('')}</tbody>
     </table>`;
   },
@@ -909,6 +909,84 @@ Object.assign(App, {
     });
   },
 
+  _canRefundCreditNote() {
+    return this.can('transactions_returns') && this.can('transactions_refund');
+  },
+
+  // Return → Refund Instead: a paid sale's return was settled by credit note
+  // but the customer took their money back. Removes the unused credit note and
+  // makes the return a refund on the drawer the money came out of
+  // (POST /transactions/returns/:id/credit-note-refund).
+  async showCreditNoteRefund(returnId) {
+    let info;
+    try { info = await this.api('GET', `/transactions/returns/${returnId}/credit-note-refund`); }
+    catch (e) { this.alert(e.message, 'error'); return; }
+    if (!info.allowed) { this.alert(info.error, 'warning'); return; }
+    const esc = v => this.escapeAttr(v ?? '');
+    const cn = info.credit_note;
+    const mine = this.currentDrawerSession?.id;
+    const drawerOptions = info.drawers.map(d => `<option value="${d.id}" ${d.id === mine ? 'selected' : ''}>${esc(d.drawer_name || 'Drawer')} — ${esc(d.employee_name || '')} (opened ${this.fmtDateTime(d.opened_at)})</option>`).join('');
+    const m = String(info.original_payment_method || '').toLowerCase();
+    const defMethod = ['credit_card', 'debit_card', 'card'].includes(m) ? 'card' : ['check', 'direct_deposit'].includes(m) ? m : 'cash';
+    document.getElementById('cnr-overlay')?.remove();
+    document.body.insertAdjacentHTML('beforeend', `<div style="position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:3000;display:flex;align-items:center;justify-content:center;padding:16px" id="cnr-overlay">
+      <div class="modal" style="max-width:500px;width:100%">
+        <div class="modal-header"><span class="modal-title">Refund Credit Note ${esc(cn.payment_number)}</span><button class="modal-close" onclick="document.getElementById('cnr-overlay').remove()">✕</button></div>
+        <div class="modal-body" style="font-size:13px">
+          <p style="margin-top:0">The customer is getting <strong>${this.fmt(cn.amount)}</strong> back instead of the credit note. ${esc(cn.payment_number)} comes off their account and the return becomes a refund.</p>
+          <div class="form-group">
+            <label>Refund paid by *</label>
+            <select id="cnr-method" style="width:260px" onchange="document.getElementById('cnr-drawer-wrap').style.display = this.value === 'cash' ? 'block' : 'none'">
+              ${[['cash', 'Cash from a drawer'], ['card', 'Card (back to the card)'], ['check', 'Cheque'], ['direct_deposit', 'Bank transfer / direct deposit']]
+                .map(([v, l]) => `<option value="${v}" ${v === defMethod ? 'selected' : ''}>${l}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group" id="cnr-drawer-wrap" style="display:${defMethod === 'cash' ? 'block' : 'none'}">
+            <label>Drawer the cash came out of *</label>
+            ${info.drawers.length
+              ? `<select id="cnr-drawer" style="width:100%">${mine && info.drawers.some(d => d.id === mine) ? '' : '<option value="">— Choose the drawer —</option>'}${drawerOptions}</select>
+                 <div style="font-size:11px;color:var(--text-muted);margin-top:4px">Its expected cash goes down by this amount, so the count balances.</div>`
+              : `<div style="color:var(--danger)">No cash drawer is open at this branch. A cash refund has to go on an open drawer.</div>`}
+          </div>
+          <div class="form-group">
+            <label>Reason *</label>
+            <textarea id="cnr-reason" rows="2" placeholder="e.g. Customer wanted cash back, not a credit note" style="width:100%;resize:vertical"></textarea>
+          </div>
+          <div class="form-group" style="margin-bottom:0">
+            <label>Manager Override PIN *</label>
+            <input type="password" id="cnr-pin" inputmode="numeric" autocomplete="off" placeholder="Manager enters their PIN" style="width:220px">
+          </div>
+          <p style="margin:12px 0 0;color:var(--text-muted)">This can't be undone.</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="document.getElementById('cnr-overlay').remove()">Cancel</button>
+          <button class="btn btn-danger" id="cnr-confirm">Refund ${this.fmt(cn.amount)}</button>
+        </div>
+      </div></div>`);
+    const btn = document.getElementById('cnr-confirm');
+    btn.addEventListener('click', async () => {
+      const refund_method = document.getElementById('cnr-method').value;
+      const drawer_session_id = refund_method === 'cash' ? parseInt(document.getElementById('cnr-drawer')?.value) || null : null;
+      const reason = document.getElementById('cnr-reason').value.trim();
+      const pinInput = document.getElementById('cnr-pin');
+      if (refund_method === 'cash' && !drawer_session_id) { this.alert('Choose the drawer the cash came out of', 'warning'); return; }
+      if (!reason) { this.alert('Enter the reason', 'warning'); document.getElementById('cnr-reason').focus(); return; }
+      if (!pinInput.value.trim()) { this.alert('A manager must enter their PIN to authorize this', 'warning'); pinInput.focus(); return; }
+      btn.disabled = true;
+      try {
+        const done = await this.api('POST', `/transactions/returns/${returnId}/credit-note-refund`, { refund_method, drawer_session_id, reason, override_pin: pinInput.value.trim() });
+        document.getElementById('cnr-overlay')?.remove();
+        this.alert(`${done.credit_note_number} removed — ${done.return_number} is now a refund of ${this.fmt(done.total)}`, 'success');
+        if (this.section === 'transactions' && document.getElementById('tx-view')?.value === 'returns') this.loadReturnsList();
+        this.showReturnReceipt(await this.api('GET', `/transactions/returns/${returnId}`));
+      } catch (e) {
+        btn.disabled = false;
+        if (/PIN/.test(e.message)) { pinInput.value = ''; pinInput.focus(); }
+        this.alert(e.message, 'error');
+      }
+    });
+  },
+
   // Hold Recall → a pending exchange: start a fresh ticket on its credit.
   async recallExchange(returnId) {
     try {
@@ -976,6 +1054,9 @@ Object.assign(App, {
             ${ret.converted_at ? `<div class="receipt-row"><span>Converted from exchange:</span><span>${this.fmtDateTime(ret.converted_at)}</span></div>
             <div class="receipt-row"><span style="flex-shrink:0">Conversion reason:</span><span style="text-align:right;white-space:pre-wrap;overflow-wrap:anywhere">${this.escapeAttr(ret.converted_reason)}</span></div>
             ${ret.converted_authorized_by ? `<div class="receipt-row"><span>Conversion authorized by:</span><span>${this.escapeAttr(ret.converted_authorized_by)}</span></div>` : ''}` : ''}
+            ${ret.cn_refunded_at ? `<div class="receipt-row"><span>Credit note refunded instead:</span><span>${this.escapeAttr(ret.cn_refunded_number)} · ${this.fmtDateTime(ret.cn_refunded_at)}</span></div>
+            <div class="receipt-row"><span style="flex-shrink:0">Refund reason:</span><span style="text-align:right;white-space:pre-wrap;overflow-wrap:anywhere">${this.escapeAttr(ret.cn_refunded_reason)}</span></div>
+            ${ret.cn_refunded_authorized_by ? `<div class="receipt-row"><span>Refund authorized by:</span><span>${this.escapeAttr(ret.cn_refunded_authorized_by)}</span></div>` : ''}` : ''}
             ${ret.notes ? `<div class="receipt-row"><span style="flex-shrink:0">Reason:</span><span style="text-align:right;white-space:pre-wrap;overflow-wrap:anywhere">${ret.notes}</span></div>` : ''}
             <hr>
             ${items.map(i => `<div class="receipt-row"><span>${i.sku ? `<span style="font-size:11px;color:#555">${i.sku}</span> ` : ''}${i.product_name}</span><span>${this.fmt(i.total)}</span></div>${i.quantity > 1 ? `<div style="color:#666;font-size:11px;padding-left:4px">${i.quantity} x ${this.fmt(i.unit_price)}</div>` : ''}`).join('')}
@@ -988,6 +1069,7 @@ Object.assign(App, {
         </div>
         <div class="modal-footer no-print">
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+          ${ret.resolution === 'credit_note' && ret.status !== 'cancelled' && this._canRefundCreditNote() ? `<button class="btn btn-warning" onclick="App.showCreditNoteRefund(${ret.id})" title="The customer wants their money back instead of the credit note">Refund Instead</button>` : ''}
           <button class="btn btn-secondary" onclick="App.emailReturnReceipt(${ret.id},'${(ret.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email</button>
           <button class="btn btn-primary" onclick="window.print()">🖨️ Print</button>
         </div>

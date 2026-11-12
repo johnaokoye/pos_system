@@ -336,6 +336,8 @@ function buildReturnReceiptHtml(ret, s) {
       ${ret.override_by_name ? docRow('Authorized By', ret.override_by_name) : ''}
       ${ret.converted_at ? docRow('Converted From Exchange', fmtDateTime(ret.converted_at)) : ''}
       ${ret.converted_at ? docRow('Conversion Reason', esc(ret.converted_reason)) : ''}
+      ${ret.cn_refunded_at ? docRow('Credit Note Refunded Instead', `${esc(ret.cn_refunded_number)} · ${fmtDateTime(ret.cn_refunded_at)}`) : ''}
+      ${ret.cn_refunded_at ? docRow('Refund Reason', esc(ret.cn_refunded_reason)) : ''}
       ${ret.converted_authorized_by ? docRow('Conversion Authorized By', esc(ret.converted_authorized_by)) : ''}
       ${ret.notes ? docRow('Reason', ret.notes) : ''}
       <div style="height:12px"></div>
@@ -1070,6 +1072,9 @@ router.post('/send-return-receipt/:id', requireAuth, async (req, res) => {
       (SELECT created_at FROM exchange_conversions ec WHERE ec.return_id = r.id) as converted_at,
       (SELECT reason FROM exchange_conversions ec WHERE ec.return_id = r.id) as converted_reason,
       (SELECT e2.first_name || ' ' || e2.last_name FROM exchange_conversions ec JOIN employees e2 ON e2.id = ec.override_by WHERE ec.return_id = r.id) as converted_authorized_by,
+      (SELECT created_at FROM credit_note_refunds cnr WHERE cnr.return_id = r.id) as cn_refunded_at,
+      (SELECT payment_number FROM credit_note_refunds cnr WHERE cnr.return_id = r.id) as cn_refunded_number,
+      (SELECT reason FROM credit_note_refunds cnr WHERE cnr.return_id = r.id) as cn_refunded_reason,
       c.first_name || ' ' || c.last_name as customer_name,
       e.first_name || ' ' || e.last_name as employee_name,
       oe.first_name || ' ' || oe.last_name as override_by_name,

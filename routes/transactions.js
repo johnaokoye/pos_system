@@ -374,6 +374,18 @@ router.get('/exchange-conversions', requirePermission('transactions'), async (re
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Credit-note returns refunded instead (credit_note_refunds) for RetailPOS
+// Books (orders:read): it books the refund once — Dr A/R / Cr cash if it had
+// posted the credit note, else the whole refund under the return's own key.
+router.get('/credit-note-refunds', requirePermission('transactions'), async (req, res) => {
+  try {
+    const { rows } = await db.execute({ sql: `SELECT cr.id, cr.return_id, r.return_number, r.created_at AS return_created_at, r.tax_amount AS return_tax,
+        cr.payment_id, cr.payment_number, cr.customer_id, cr.amount, cr.refund_method, cr.created_at, t.transaction_number AS original_transaction_number
+      FROM credit_note_refunds cr JOIN returns r ON r.id = cr.return_id LEFT JOIN transactions t ON t.id = r.original_transaction_id ORDER BY cr.id`, args: [] });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // The exchange credit a sale may use from source_return_id, or an error
 // message: the return must be an uncancelled exchange whose credit no other
 // sale has spent, for the same customer. Checked before the sale and again
@@ -1007,7 +1019,8 @@ router.get('/returns/:id', requireAuth, async (req, res) => {
       e.first_name || ' ' || e.last_name as employee_name,
       oe.first_name || ' ' || oe.last_name as override_by_name,
       b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone,
-      ec.created_at as converted_at, ec.reason as converted_reason, ca.first_name || ' ' || ca.last_name as converted_authorized_by
+      ec.created_at as converted_at, ec.reason as converted_reason, ca.first_name || ' ' || ca.last_name as converted_authorized_by,
+      cnr.created_at as cn_refunded_at, cnr.payment_number as cn_refunded_number, cnr.reason as cn_refunded_reason, cra.first_name || ' ' || cra.last_name as cn_refunded_authorized_by
       FROM returns r
       LEFT JOIN transactions t ON r.original_transaction_id = t.id
       LEFT JOIN customers c ON r.customer_id = c.id
@@ -1016,6 +1029,8 @@ router.get('/returns/:id', requireAuth, async (req, res) => {
       LEFT JOIN branches b ON r.branch_id = b.id
       LEFT JOIN exchange_conversions ec ON ec.return_id = r.id
       LEFT JOIN employees ca ON ca.id = ec.override_by
+      LEFT JOIN credit_note_refunds cnr ON cnr.return_id = r.id
+      LEFT JOIN employees cra ON cra.id = cnr.override_by
       WHERE r.id = ?`, args: [req.params.id] });
     if (!ret) return res.status(404).json({ error: 'Return not found' });
     const { rows: items } = await db.execute({ sql: 'SELECT * FROM return_items WHERE return_id = ?', args: [req.params.id] });
@@ -1198,6 +1213,102 @@ router.post('/returns/:id/convert', requirePermission('transactions_returns'), a
       throw e;
     }
     res.json({ id: ret.id, return_number: ret.return_number, resolution: to, total: amount });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Credit note → refund: a return on a PAID sale was settled by credit note
+// but the customer wanted their money back (and was handed it from the till).
+// The credit note is removed while it's still untouched — not applied to an
+// invoice, spent at the POS or ever reallocated — and the return becomes a
+// refund paid from a drawer, so that drawer expects the cash that went out.
+// A sale charged to the account can't be refunded (refundRefusal): its credit
+// note is the right answer. Returns { ret, sale, cn } or { error }.
+async function creditNoteRefundCheck(executor, returnId) {
+  const { rows: [ret] } = await executor.execute({ sql: 'SELECT * FROM returns WHERE id = ?', args: [returnId] });
+  if (!ret) return { error: 'Return not found', status: 404 };
+  if (ret.status === 'cancelled') return { error: 'This return was cancelled' };
+  if (ret.resolution !== 'credit_note') return { error: `${ret.return_number} wasn't settled by credit note` };
+  const { rows: [sale] } = await executor.execute({ sql: 'SELECT * FROM transactions WHERE id = ?', args: [ret.original_transaction_id] });
+  if (!sale || sale.status !== 'completed') return { error: "The original sale isn't a completed sale any more, so this credit note can't be refunded" };
+  const refused = await refundRefusal(sale);
+  if (refused) return { error: refused };
+  const { rows: cns } = await executor.execute({ sql: "SELECT * FROM account_payments WHERE return_id = ? AND payment_method = 'credit_note'", args: [ret.id] });
+  if (cns.length !== 1) return { error: `No credit note was found for ${ret.return_number}` };
+  const cn = cns[0];
+  const { rows: [u] } = await executor.execute({
+    sql: `SELECT (SELECT COUNT(*) FROM payment_allocations WHERE payment_id = ?) + (SELECT COUNT(*) FROM legacy_invoice_allocations WHERE payment_id = ?)
+            + (SELECT COUNT(*) FROM store_credit_uses WHERE payment_id = ?) + (SELECT COUNT(*) FROM payment_allocation_changes WHERE payment_id = ?) AS n`,
+    args: [cn.id, cn.id, cn.id, cn.id],
+  });
+  if (Number(u.n) > 0) return { error: `Credit note ${cn.payment_number} has already been used or applied to an invoice, so it can't be turned into a refund` };
+  return { ret, sale, cn };
+}
+
+// What the Refund Instead dialog needs: whether it's allowed, and the open
+// drawers at the return's branch (the cash may have come out of another
+// cashier's till).
+router.get('/returns/:id/credit-note-refund', requirePermission('transactions_returns'), async (req, res) => {
+  try {
+    const check = await creditNoteRefundCheck(db, req.params.id);
+    if (check.status === 404) return res.status(404).json({ error: check.error });
+    let drawers = [];
+    if (check.ret) {
+      ({ rows: drawers } = await db.execute({
+        sql: `SELECT ds.id, cd.name AS drawer_name, TRIM(COALESCE(e.first_name, '') || ' ' || COALESCE(e.last_name, '')) AS employee_name, ds.opened_at
+              FROM drawer_sessions ds LEFT JOIN cash_drawers cd ON cd.id = ds.drawer_id LEFT JOIN employees e ON e.id = ds.employee_id
+              WHERE ds.status = 'open' AND (ds.branch_id = ? OR ? IS NULL) ORDER BY cd.name, ds.opened_at`,
+        args: [check.ret.branch_id, check.ret.branch_id],
+      }));
+    }
+    res.json({
+      allowed: !check.error, error: check.error || null,
+      credit_note: check.cn ? { id: check.cn.id, payment_number: check.cn.payment_number, amount: check.cn.amount } : null,
+      original_payment_method: check.sale?.payment_method || null,
+      drawers,
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/returns/:id/credit-note-refund', requirePermission('transactions_returns'), async (req, res) => {
+  try {
+    if (!can(req.employee?.permissions, 'transactions_refund')) return res.status(403).json({ error: 'Missing permission: transactions_refund' });
+    const reason = String(req.body.reason || '').trim();
+    if (!reason) return res.status(400).json({ error: 'Enter the reason for refunding this credit note', code: 'reason_required' });
+    const authorizer = await returnAuthorizer(req.body.override_pin);
+    if (authorizer.error) return res.status(403).json({ error: authorizer.error, code: authorizer.code });
+    const check = await creditNoteRefundCheck(db, req.params.id);
+    if (check.error) return res.status(check.status || 400).json({ error: check.error });
+    const amount = Math.round(Number(check.cn.amount) * 100) / 100;
+    const paid = await refundTender({ method: req.body.refund_method, drawerSessionId: req.body.drawer_session_id, employeeId: req.employee?.id, amount });
+    if (paid.error) return res.status(400).json({ error: paid.error, code: paid.code });
+
+    const wtx = await db.transaction('write');
+    let committed = false;
+    try {
+      // Again inside the write transaction: a till may be spending this credit.
+      const again = await creditNoteRefundCheck(wtx, req.params.id);
+      if (again.error || again.cn.id !== check.cn.id) { await wtx.rollback(); committed = true; return res.status(400).json({ error: again.error || 'The credit note changed — try again' }); }
+      const { ret, cn } = again;
+      // Kept in deleted_documents too, so its CN- number is never reissued.
+      await wtx.execute({ sql: 'INSERT INTO deleted_documents (doc_table, doc_id, doc_number, snapshot, deleted_by) VALUES (?, ?, ?, ?, ?)',
+        args: ['account_payments', cn.id, cn.payment_number, JSON.stringify({ ...cn, refunded_instead: ret.return_number, reason }), req.employee?.id ?? null] });
+      await wtx.execute({ sql: 'DELETE FROM account_payments WHERE id = ?', args: [cn.id] });
+      await wtx.execute({ sql: 'UPDATE customers SET account_balance = account_balance + ? WHERE id = ?', args: [amount, cn.customer_id] });
+      await wtx.execute({ sql: "UPDATE returns SET resolution = 'refund', refund_method = ?, drawer_session_id = ?, refunded_at = CURRENT_TIMESTAMP WHERE id = ?",
+        args: [paid.method, paid.sessionId, ret.id] });
+      await wtx.execute({
+        sql: `INSERT INTO credit_note_refunds (return_id, payment_id, payment_number, customer_id, amount, refund_method, drawer_session_id, reason, employee_id, override_by)
+              VALUES (?,?,?,?,?,?,?,?,?,?)`,
+        args: [ret.id, cn.id, cn.payment_number, cn.customer_id, amount, paid.method, paid.sessionId, reason, req.employee?.id || null, authorizer.id],
+      });
+      await wtx.commit();
+      committed = true;
+    } catch (e) {
+      if (!committed) await wtx.rollback();
+      throw e;
+    }
+    try { await require('./customers').runCreditCheck(check.cn.customer_id); } catch (e) {}
+    res.json({ id: check.ret.id, return_number: check.ret.return_number, resolution: 'refund', credit_note_number: check.cn.payment_number, total: amount });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

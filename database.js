@@ -1393,6 +1393,25 @@ async function _init() {
       override_by INTEGER REFERENCES employees(id),
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // A credit-note return on a paid sale turned into a refund (the customer
+    // wanted their money back): the credit note (account_payments) is removed —
+    // snapshot in deleted_documents — and the return becomes a refund paid
+    // from a drawer. Books reads this (GET /transactions/credit-note-refunds)
+    // to book the refund once, whether or not it had posted the credit note.
+    { sql: `CREATE TABLE IF NOT EXISTS credit_note_refunds (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      return_id INTEGER NOT NULL UNIQUE REFERENCES returns(id),
+      payment_id INTEGER NOT NULL,
+      payment_number TEXT NOT NULL,
+      customer_id INTEGER REFERENCES customers(id),
+      amount REAL NOT NULL,
+      refund_method TEXT NOT NULL,
+      drawer_session_id INTEGER REFERENCES drawer_sessions(id),
+      reason TEXT NOT NULL,
+      employee_id INTEGER REFERENCES employees(id),
+      override_by INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS return_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       return_id INTEGER NOT NULL REFERENCES returns(id),
