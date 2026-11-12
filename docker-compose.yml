@@ -16,6 +16,10 @@ services:
       # tool like Portainer, which injects stack env vars into the compose
       # process rather than writing a literal .env file into the stack folder.
       TURSO_AUTH_TOKEN: ${TURSO_AUTH_TOKEN:-}
+      # Consignment (supplier-owned stock) is off unless the stack sets
+      # CONSIGNMENT_ENABLED=1 in its environment — on the test server first,
+      # production only once it's approved.
+      CONSIGNMENT_ENABLED: ${CONSIGNMENT_ENABLED:-0}
     volumes:
       - ./data:/app/data
       - ./uploads:/app/uploads
