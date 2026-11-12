@@ -128,6 +128,7 @@ Object.assign(App, {
       { key: 'quotations_create', label: 'Create Quotes' },
       { key: 'quotations_approve', label: 'Approve Quotes' },
       { key: 'quotations_convert', label: 'Convert to Invoice' },
+      { key: 'quotations_delete', label: 'Delete Quotes (not yet converted)' },
     ]},
     { key: 'sales_manager', label: 'Sales Manager', subs: [] },
     // Independent top-level permissions, not parent/sub — creating a

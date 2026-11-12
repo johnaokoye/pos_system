@@ -1249,6 +1249,84 @@ router.get('/:id/attachments/:aid/download', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Delete a quote (quotations_delete; a Special Project also needs
+// special_projects). Only while nothing has come of it: not converted (to a
+// POS hold/sale or a rental agreement), no live purchase request/PO line or
+// branch transfer raised from it, and no rental agreement beyond the pending
+// holds a Special Project approval makes — those are released. A JSON
+// snapshot goes in deleted_documents, which also keeps the number from being
+// reissued.
+router.delete('/:id', requirePermission('quotations_delete'), async (req, res) => {
+  try {
+    const { rows: [q] } = await db.execute({ sql: 'SELECT * FROM quotations WHERE id = ?', args: [req.params.id] });
+    if (!q) return res.status(404).json({ error: 'Quotation not found' });
+    if (q.quote_type === 'special_project' && !req.apiKey && !can(req.employee && req.employee.permissions, 'special_projects')) return res.status(403).json({ error: 'Missing permission: special_projects' });
+    if (q.status === 'converted' || q.converted_to_tx || q.converted_to_agreement_id) {
+      return res.status(400).json({ error: `${q.quote_number} has been converted, so it can't be deleted` });
+    }
+    const { rows: [pr] } = await db.execute({
+      sql: `SELECT pr.pr_number FROM purchase_requests pr WHERE pr.id IN (
+              SELECT qi.purchase_request_id FROM quotation_items qi WHERE qi.quote_id = ?
+              UNION SELECT pri.pr_id FROM purchase_request_items pri JOIN quotation_items qi ON qi.id = pri.quotation_item_id WHERE qi.quote_id = ?
+              UNION SELECT pri.pr_id FROM quotation_item_sources qis JOIN quotation_items qi ON qi.id = qis.quotation_item_id
+                JOIN purchase_request_items pri ON pri.id = qis.purchase_request_item_id WHERE qi.quote_id = ?) LIMIT 1`,
+      args: [q.id, q.id, q.id],
+    });
+    if (pr) return res.status(400).json({ error: `Purchase request ${pr.pr_number} was raised from ${q.quote_number} — delete or cancel it first` });
+    const { rows: [po] } = await db.execute({
+      sql: `SELECT po.po_number FROM purchase_order_items poi JOIN purchase_orders po ON po.id = poi.po_id JOIN quotation_items qi ON qi.id = poi.quotation_item_id
+            WHERE qi.quote_id = ? AND po.status != 'cancelled' LIMIT 1`,
+      args: [q.id],
+    });
+    if (po) return res.status(400).json({ error: `Purchase order ${po.po_number} has lines from ${q.quote_number} — delete or cancel it first` });
+    const { rows: [transfer] } = await db.execute({
+      sql: `SELECT transfer_number FROM branch_transfers WHERE status != 'cancelled' AND (quote_id = ?
+              OR id IN (SELECT qis.transfer_id FROM quotation_item_sources qis JOIN quotation_items qi ON qi.id = qis.quotation_item_id WHERE qi.quote_id = ?)) LIMIT 1`,
+      args: [q.id, q.id],
+    });
+    if (transfer) return res.status(400).json({ error: `Transfer ${transfer.transfer_number} was raised for ${q.quote_number} — cancel it first` });
+    const { rows: [agreement] } = await db.execute({ sql: "SELECT agreement_number FROM rental_agreements WHERE quotation_id = ? AND status NOT IN ('pending', 'cancelled') LIMIT 1", args: [q.id] });
+    if (agreement) return res.status(400).json({ error: `Rental agreement ${agreement.agreement_number} came from ${q.quote_number}, so it can't be deleted` });
+
+    const { rows: items } = await db.execute({ sql: 'SELECT * FROM quotation_items WHERE quote_id = ? ORDER BY id', args: [q.id] });
+    const { rows: atts } = await db.execute({ sql: 'SELECT * FROM quote_attachments WHERE quote_id = ?', args: [q.id] });
+    const tx = await db.transaction('write');
+    let committed = false;
+    try {
+      await tx.execute({ sql: 'INSERT INTO deleted_documents (doc_table, doc_id, doc_number, snapshot, deleted_by) VALUES (?, ?, ?, ?, ?)',
+        args: ['quotations', q.id, q.quote_number, JSON.stringify({ ...q, items, attachments: atts }), req.employee?.id ?? null] });
+      await releaseSpecialProjectRentals(tx, q.id, `Quotation ${q.quote_number} deleted`, req.employee && req.employee.id);
+      // Cancelled links go; their records stay.
+      await tx.execute({ sql: 'UPDATE rental_agreements SET quotation_id = NULL WHERE quotation_id = ?', args: [q.id] });
+      await tx.execute({ sql: 'UPDATE branch_transfers SET quote_id = NULL WHERE quote_id = ?', args: [q.id] });
+      await tx.execute({ sql: 'UPDATE crm_opportunities SET quote_id = NULL WHERE quote_id = ?', args: [q.id] });
+      await tx.execute({ sql: 'UPDATE purchase_order_items SET quotation_item_id = NULL WHERE quotation_item_id IN (SELECT id FROM quotation_items WHERE quote_id = ?)', args: [q.id] });
+      await tx.execute({ sql: 'UPDATE purchase_request_items SET quotation_item_id = NULL WHERE quotation_item_id IN (SELECT id FROM quotation_items WHERE quote_id = ?)', args: [q.id] });
+      await tx.execute({ sql: 'DELETE FROM quotation_item_sources WHERE quotation_item_id IN (SELECT id FROM quotation_items WHERE quote_id = ?)', args: [q.id] });
+      await tx.execute({ sql: 'DELETE FROM quote_attachments WHERE quote_id = ?', args: [q.id] });
+      // Accessory lines point at their parent line, so they go first.
+      await tx.execute({ sql: 'DELETE FROM quotation_items WHERE quote_id = ? AND parent_item_id IS NOT NULL', args: [q.id] });
+      await tx.execute({ sql: 'DELETE FROM quotation_items WHERE quote_id = ?', args: [q.id] });
+      await tx.execute({ sql: 'DELETE FROM quotations WHERE id = ?', args: [q.id] });
+      await tx.commit();
+      committed = true;
+    } catch (e) {
+      if (!committed) await tx.rollback();
+      throw e;
+    }
+    for (const a of atts) {
+      try {
+        if (a.stored_name.startsWith('https://')) {
+          const resourceType = (a.stored_name.match(/\/(image|raw|video)\/upload\//) || [])[1] || 'raw';
+          await cloudDestroy(a.stored_name, resourceType);
+        } else if (fs.existsSync(path.join(localUploadDir, a.stored_name))) fs.unlinkSync(path.join(localUploadDir, a.stored_name));
+      } catch (e) { /* orphaned file is harmless */ }
+    }
+    console.log(`[quotations] ${q.quote_number} deleted by employee ${req.employee?.id ?? 'api'}`);
+    res.json({ success: true, quote_number: q.quote_number });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.delete('/:id/attachments/:aid', async (req, res) => {
   try {
     if (!await quoteForAttachments(req, res, true)) return;

@@ -21,7 +21,7 @@ npx playwright test --headed           # run with browser visible
 npm run check:frontend                 # public/js rules: unique App member names, script tags, file shape
 ```
 
-Test files: `auth.spec.js`, `dashboard.spec.js`, `pos.spec.js`, `inventory.spec.js`, `api.spec.js`, `frontend.spec.js` (runs the public/js check; every screen renders without a script error), `special-projects.spec.js`, `sales-credit.spec.js`, `customer-salespeople.spec.js`, `inventory-view.spec.js`, `customer-merge.spec.js`, `exchange-convert.spec.js`, `hold-recall.spec.js`, `sku-kinds.spec.js`, `zero-stock.spec.js`, `legacy-credit.spec.js`, `sp-rental-availability.spec.js`, `ar-branch.spec.js`, `refund-drawer.spec.js`, `backups.spec.js`, `sale-transfer.spec.js`, `pr-resubmit.spec.js`, `items-returned.spec.js`, `credit-note-refund.spec.js`. Shared login helper is in `tests/fixtures.js`. The config auto-builds `/tmp/libasound.so.2` stub on systems without `libasound2` installed (WSL/headless Linux).
+Test files: `auth.spec.js`, `dashboard.spec.js`, `pos.spec.js`, `inventory.spec.js`, `api.spec.js`, `frontend.spec.js` (runs the public/js check; every screen renders without a script error), `special-projects.spec.js`, `sales-credit.spec.js`, `customer-salespeople.spec.js`, `inventory-view.spec.js`, `customer-merge.spec.js`, `exchange-convert.spec.js`, `hold-recall.spec.js`, `sku-kinds.spec.js`, `zero-stock.spec.js`, `legacy-credit.spec.js`, `sp-rental-availability.spec.js`, `ar-branch.spec.js`, `refund-drawer.spec.js`, `backups.spec.js`, `sale-transfer.spec.js`, `pr-resubmit.spec.js`, `items-returned.spec.js`, `credit-note-refund.spec.js`, `quote-delete.spec.js`. Shared login helper is in `tests/fixtures.js`. The config auto-builds `/tmp/libasound.so.2` stub on systems without `libasound2` installed (WSL/headless Linux).
 
 There is no linter configured.
 
@@ -136,7 +136,7 @@ The `security_groups.permissions` JSON blob uses these keys (all boolean). Modul
 - `purchase_requests` → `pr_create`, `pr_approve`, `pr_convert`, `pr_delete`
 - `purchasing` → `purchasing_create`, `purchasing_approve`, `purchasing_receive`, `purchasing_delete`, `purchasing_request_payment`
 - `transfers` → `transfers_create`, `transfers_approve`, `transfers_pickup`, `transfers_dropoff`, `transfers_quick`
-- `quotations` → `quotations_create`, `quotations_approve`, `quotations_convert`
+- `quotations` → `quotations_create`, `quotations_approve`, `quotations_convert`, `quotations_delete` (`DELETE /quotations/:id`, backfilled from `quotations_approve`; refused once converted or with a live PR/PO line/transfer/non-pending rental agreement from it; snapshot in `deleted_documents`)
 - `accounts` → `accounts_create`, `accounts_payments`, `accounts_writeoff`
 - `payables` → `payables_bills`, `payables_requests`, `payables_payments`, `payables_void`
 - `crm` → `crm_leads`, `crm_opportunities`

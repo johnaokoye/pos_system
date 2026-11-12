@@ -1867,6 +1867,9 @@ Object.assign(App, {
           ${(!isSpecialProject || this.can('special_projects')) && q.status!=='converted'&&q.status!=='declined'&&!(isSpecialProject && ['draft','pending_approval'].includes(q.status)) ? `
             <button class="btn btn-primary" onclick="App.closeModal();App.showConvertQuote(${q.id})">${isRental?'Convert to Rental':'Convert to Invoice'}</button>
           ` : ''}
+          ${q.status !== 'converted' && this.can('quotations_delete') && (!isSpecialProject || this.can('special_projects')) ? `
+            <button class="btn btn-danger" onclick="App.deleteQuote(${q.id},'${this.escapeAttr(q.quote_number)}',${isSpecialProject})" title="Delete this quote — only while nothing has been raised from it">Delete</button>
+          ` : ''}
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
@@ -1968,6 +1971,16 @@ Object.assign(App, {
       this.closeModal();
       this.alert(`Quotation ${status}`);
       this.renderQuotations();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async deleteQuote(id, number, isSpecialProject) {
+    if (!confirm(`Delete ${number}? It's removed for good, with its lines and attachments. This can't be undone.`)) return;
+    try {
+      await this.api('DELETE', `/quotations/${id}`);
+      this.closeModal();
+      this.alert(`${number} deleted`);
+      if (isSpecialProject || this.section === 'special-projects') this.renderSpecialProjects(); else this.renderQuotations();
     } catch(e) { this.alert(e.message, 'error'); }
   },
 

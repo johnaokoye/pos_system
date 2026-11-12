@@ -3752,6 +3752,8 @@ async function _init() {
       // with whoever can approve them.
       if (!('purchasing_delete' in perms)) { perms.purchasing_delete = can(perms, 'purchasing_approve'); changed = true; }
       if (!('pr_delete' in perms)) { perms.pr_delete = can(perms, 'pr_approve'); changed = true; }
+      // Deleting quotes (2026-11-12) starts with whoever can approve them.
+      if (!('quotations_delete' in perms)) { perms.quotations_delete = can(perms, 'quotations_approve'); changed = true; }
       // Requesting an (advance) payment from an approved PO (2026-11-02)
       // starts with whoever can create POs.
       if (!('purchasing_request_payment' in perms)) { perms.purchasing_request_payment = can(perms, 'purchasing_create'); changed = true; }
