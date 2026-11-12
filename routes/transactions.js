@@ -316,6 +316,10 @@ router.get('/collections', canCollections, async (req, res) => {
       const short = new Map(saleTransfers.shortfalls(r.lines, r.transfers).map(x => [x.id, x.short]));
       for (const l of r.lines) l.short = short.get(l.id) || 0;
       r.short = r.lines.some(l => l.short > 0);
+      // Handed over so far, still due, and what can go now (each handover recorded once).
+      const state = new Map((await saleTransfers.collectionState(db, r.id)).map(x => [x.id, x]));
+      for (const l of r.lines) Object.assign(l, (({ sold, issued, due, available_now }) => ({ sold, issued, due, available_now }))(state.get(l.id) || {}));
+      r.can_hand_over_now = r.lines.some(l => l.available_now > 0);
     }
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -338,9 +342,39 @@ router.patch('/:id/collected', canCollections, async (req, res) => {
     if (!t || t.status !== 'completed' || !t.collection_status) return res.status(400).json({ error: "That sale isn't waiting to be collected" });
     if (t.collection_status === 'collected') return res.status(400).json({ error: 'Already handed over' });
     if (await saleTransfers.refreshFulfillment(db, req.params.id) !== 'ready') return res.status(400).json({ error: "Not everything has arrived from the other branch yet — it can be handed over once the transfer is received here" });
-    await db.execute({ sql: "UPDATE transactions SET collection_status = 'collected', collected_at = CURRENT_TIMESTAMP, collected_by = ? WHERE id = ?", args: [req.employee?.id || null, req.params.id] });
+    // Everything still due, recorded as one handover.
+    const state = await saleTransfers.collectionState(db, req.params.id);
+    const items = state.filter(l => l.due > 0).map(l => ({ transaction_item_id: l.id, quantity: l.due }));
+    if (items.length) {
+      const tx = await db.transaction('write');
+      let committed = false;
+      try {
+        await saleTransfers.issueCollection(tx, { transactionId: Number(req.params.id), items, issueKey: req.body?.issue_key || null, employeeId: req.employee?.id || null });
+        await tx.commit();
+        committed = true;
+      } catch (e) { if (!committed) await tx.rollback().catch(() => {}); throw e; }
+    } else {
+      await db.execute({ sql: "UPDATE transactions SET collection_status = 'collected', collected_at = CURRENT_TIMESTAMP, collected_by = ? WHERE id = ?", args: [req.employee?.id || null, req.params.id] });
+    }
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
+// Part of a collect-later sale handed over now — what's here, while the rest
+// is still on its way: { items: [{ transaction_item_id, quantity }] } in stock
+// units, issue_key from the screen so a double-click records it once.
+router.post('/:id/collection-issues', canCollections, async (req, res) => {
+  const tx = await db.transaction('write');
+  let committed = false;
+  try {
+    const out = await saleTransfers.issueCollection(tx, { transactionId: Number(req.params.id), items: req.body.items, issueKey: req.body.issue_key || null, note: String(req.body.note || '').trim() || null, employeeId: req.employee?.id || null });
+    await tx.commit();
+    committed = true;
+    res.json(out);
+  } catch (e) {
+    if (!committed) await tx.rollback().catch(() => {});
+    res.status(e.status || 500).json({ error: e.message });
+  }
 });
 
 router.get('/pending-exchanges', requirePermission('pos'), async (req, res) => {

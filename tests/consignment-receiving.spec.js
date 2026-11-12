@@ -29,17 +29,18 @@ test('agreement → Finance approval → order → two GRNs → supplier-owned s
   const item = await api(page, 'POST', '/products', { name: `Consigned Drill ${s}`, sku: `CD${s}`, price: 250, cost: 120, tax_rate: 0, stock_qty: 0, active: 1 });
   await api(page, 'PATCH', `/products/${item.id}/stock`, { adjustment: 3, reason: 'owned stock', branch_id: 1 });
 
-  // Before tracking starts, a GRN can be entered but not approved.
+  // Starting tracking needs a typed confirmation; the owned stock on hand is
+  // then one opening receipt (or, if another spec started tracking first,
+  // this item's stock arrived after and has its own dated receipt).
   const status = await api(page, 'GET', '/consignment/status');
   if (!status.go_live) {
     expect(await attempt(page, 'POST', '/consignment/go-live', { confirm: 'yes' })).toContain('START');
     const started = await api(page, 'POST', '/consignment/go-live', { confirm: 'START' });
     expect(started.lots).toBeGreaterThan(0);
   }
-  // The owned stock on hand is one opening receipt.
   const opening = (await api(page, 'GET', `/consignment/lots?product_id=${item.id}&branch_id=1`));
   expect(opening).toHaveLength(1);
-  expect(opening[0]).toMatchObject({ owner: 'owned', source_type: 'opening', qty_on_hand: 3 });
+  expect(opening[0]).toMatchObject({ owner: 'owned', source_type: status.go_live ? 'adjustment' : 'opening', qty_on_hand: 3 });
 
   // Agreement: drafted and submitted; can't be approved before Finance sets the treatment, nor by its author.
   const agr = await api(page, 'POST', '/consignment/agreements', { supplier_id: supplier.id, start_date: '2026-11-01', ownership_terms: "Supplier's until sold", shortage_responsibility: 'total_tools', items: [{ product_id: item.id, cost: 150 }], submit: true });

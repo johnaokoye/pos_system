@@ -713,6 +713,10 @@ Object.assign(App, {
             <textarea id="ret-notes" rows="4" placeholder="Why is the customer returning it? e.g. Wrong size, damaged in box" style="font-size:13px;width:100%;resize:vertical;white-space:pre-wrap;overflow-wrap:anywhere"></textarea>
           </div>
           <div class="form-group" style="margin:12px 0 0">
+            <label style="font-size:13px;font-weight:600">Condition of the goods</label>
+            <select id="ret-condition" style="width:220px;margin-left:8px"><option value="good">Good — back on the shelf</option><option value="damaged">Damaged</option></select>
+          </div>
+          <div class="form-group" style="margin:12px 0 0">
             <label style="font-size:13px">Manager Override PIN *</label>
             <input type="password" id="ret-override-pin" inputmode="numeric" autocomplete="off" placeholder="Manager enters their PIN" style="width:220px" onkeydown="if(event.key==='Enter'){event.preventDefault();document.getElementById('ret-submit-btn')?.click()}">
             <div style="font-size:11px;color:var(--text-muted);margin-top:3px">Every return needs a manager's authorization — someone with <em>Authorize Return Override</em>. Recorded on the return.</div>
@@ -792,7 +796,7 @@ Object.assign(App, {
     if (btn) { btn.disabled = true; btn.textContent = 'Processing…'; }
     try {
       const ret = await this.api('POST', `/transactions/${txId}/return`, {
-        items, resolution, notes, employee_id: this.currentUser?.id || null, override_pin,
+        items, resolution, notes, employee_id: this.currentUser?.id || null, override_pin, goods_condition: document.getElementById('ret-condition')?.value || 'good',
         ...(resolution === 'refund' ? { refund_method: document.getElementById('ret-refund-method')?.value || '', drawer_session_id: this.currentDrawerSession?.id || null } : {}),
       });
       document.getElementById('return-overlay')?.remove();

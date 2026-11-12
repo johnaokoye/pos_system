@@ -520,6 +520,14 @@ router.get('/lots', requireAnyPermission('consignment', 'consignment_finance', '
 // and what's been returned of each.
 router.get('/allocations', requireAnyPermission('consignment', 'consignment_finance', 'transactions'), async (req, res) => {
   try {
+    if (req.query.plan_id) {
+      const { rows } = await db.execute({
+        sql: `SELECT la.*, s.name AS supplier_name, a.agreement_number FROM layaway_lot_allocations la LEFT JOIN suppliers s ON s.id = la.supplier_id
+              LEFT JOIN consignment_agreements a ON a.id = la.agreement_id WHERE la.plan_id = ? ORDER BY la.id`,
+        args: [req.query.plan_id],
+      });
+      return res.json(rows);
+    }
     if (!req.query.transaction_id) return res.status(400).json({ error: 'Give the transaction' });
     const { rows } = await db.execute({
       sql: `SELECT sa.*, s.name AS supplier_name, a.agreement_number, l.source_number AS lot_source_number, ti.product_name

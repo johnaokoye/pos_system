@@ -97,13 +97,15 @@ Object.assign(App, {
           <div style="display:flex;gap:6px;flex-wrap:wrap">
             ${r.collection_status !== 'collected' ? `<button class="btn btn-sm btn-outline" onclick="App._collContacted(${r.id})">${r.contacted_at ? 'Contacted again' : 'Customer contacted'}</button>` : ''}
             ${r.collection_status === 'ready' ? `<button class="btn btn-sm btn-success" onclick="App._collHandOver(${r.id}, '${esc(r.transaction_number)}')">Hand over</button>` : ''}
+            ${r.collection_status === 'awaiting_transfer' && r.can_hand_over_now ? `<button class="btn btn-sm btn-outline" onclick="App._collHandOverPart(${r.id})" title="Give the customer what's here now; the rest when it arrives">Hand over what's here</button>` : ''}
             ${r.short && this.can('transactions_returns') ? `<button class="btn btn-sm btn-danger" onclick="App._collShortRefund(${r.id})" title="Return what isn't coming — refund or credit note — so the rest can be handed over">Short — refund the rest</button>` : ''}
             <button class="btn btn-sm btn-secondary" onclick="App.viewTransaction(${r.id})">View sale</button>
           </div>
         </div>
-        <table style="margin:8px 0 0;font-size:12px"><thead><tr><th>Item</th><th style="text-align:right">Sold</th><th style="text-align:right">From other branch</th><th style="text-align:right">Arrived</th>${r.short ? '<th style="text-align:right">Short</th>' : ''}</tr></thead><tbody>
-          ${r.lines.filter(l => l.transfer_qty > 0).map(l => `<tr><td>${esc(l.product_name)}</td><td style="text-align:right">${l.quantity * (l.units_per || 1)}</td><td style="text-align:right">${l.transfer_qty}</td>
-            <td style="text-align:right;${l.transfer_received_qty >= l.transfer_qty ? 'color:var(--success);font-weight:600' : ''}">${l.transfer_received_qty}</td>${r.short ? `<td style="text-align:right;${l.short ? 'color:var(--danger);font-weight:600' : ''}">${l.short || ''}</td>` : ''}</tr>`).join('')}
+        <table style="margin:8px 0 0;font-size:12px"><thead><tr><th>Item</th><th style="text-align:right">Sold</th><th style="text-align:right">From other branch</th><th style="text-align:right">Arrived</th><th style="text-align:right">Handed over</th><th style="text-align:right">Still due</th>${r.short ? '<th style="text-align:right">Short</th>' : ''}</tr></thead><tbody>
+          ${r.lines.filter(l => l.transfer_qty > 0 || l.issued > 0).map(l => `<tr><td>${esc(l.product_name)}</td><td style="text-align:right">${l.quantity * (l.units_per || 1)}</td><td style="text-align:right">${l.transfer_qty}</td>
+            <td style="text-align:right;${l.transfer_received_qty >= l.transfer_qty ? 'color:var(--success);font-weight:600' : ''}">${l.transfer_received_qty}</td>
+            <td style="text-align:right">${l.issued || 0}</td><td style="text-align:right;font-weight:600">${l.due ?? ''}</td>${r.short ? `<td style="text-align:right;${l.short ? 'color:var(--danger);font-weight:600' : ''}">${l.short || ''}</td>` : ''}</tr>`).join('')}
         </tbody></table>
         <div style="font-size:12px;margin-top:6px">${r.transfers.map(t => `<div>Transfer <strong>${esc(t.transfer_number)}</strong> from ${esc(t.from_branch_name)}: ${esc(trfStatus[t.status] || t.status)}${t.items.some(i => i.sent < i.asked) && t.status !== 'requested' ? ' <span style="color:var(--danger)">— fewer sent than asked</span>' : ''}${t.status === 'cancelled' ? ' <span style="color:var(--danger)">— speak to the inventory team</span>' : ''}</div>`).join('')}</div>
         ${r.contacted_at ? `<div style="font-size:12px;color:var(--text-muted);margin-top:4px">Contacted ${this.fmtDateTime(r.contacted_at)}${r.contacted_by_name ? ` by ${esc(r.contacted_by_name)}` : ''}${r.contact_note ? ` — ${esc(r.contact_note)}` : ''}</div>` : ''}
@@ -130,6 +132,37 @@ Object.assign(App, {
       items: Object.fromEntries(shortLines.map(l => [l.id, l.short])),
       reason: `Short on transfer from ${from}: ${shortLines.map(l => `${l.short} × ${l.product_name}`).join(', ')} didn't come`,
     });
+  },
+
+  // Hand over what's here now: how many of each line (up to what's here),
+  // recorded once (issue key), the rest still due.
+  _collHandOverPart(id) {
+    const r = (this._collRows || []).find(x => x.id === id);
+    if (!r) return;
+    const esc = v => this.escapeAttr(v ?? '');
+    const key = `${id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    this.showModal(`
+      <div class="modal" style="max-width:520px">
+        <div class="modal-header"><span class="modal-title">Hand Over — ${esc(r.transaction_number)}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body" style="font-size:13px">
+          <p style="margin-top:0;color:var(--text-muted)">Give the customer what's here now. The rest stays due until it arrives.</p>
+          <table style="width:100%"><thead><tr style="color:var(--text-muted);font-size:12px"><th style="text-align:left">Item</th><th style="text-align:right">Still due</th><th style="text-align:right">Here now</th><th style="text-align:right;width:110px">Handing over</th></tr></thead>
+            <tbody>${r.lines.filter(l => l.due > 0).map(l => `<tr style="border-top:1px solid var(--border)"><td style="padding:5px 0">${esc(l.product_name)}</td><td style="text-align:right">${l.due}</td><td style="text-align:right">${l.available_now}</td>
+              <td style="text-align:right"><input class="coll-issue" data-line="${l.id}" type="number" min="0" max="${l.available_now}" step="1" value="${l.available_now}" ${l.available_now > 0 ? '' : 'disabled'} style="width:90px;text-align:right"></td></tr>`).join('')}</tbody></table>
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button><button class="btn btn-success" id="coll-issue-btn" onclick="App._collIssue(${r.id}, '${key}')">Record Handover</button></div>
+      </div>`);
+  },
+  async _collIssue(id, key) {
+    const items = [...document.querySelectorAll('.coll-issue')].map(i => ({ transaction_item_id: i.dataset.line, quantity: parseFloat(i.value) || 0 })).filter(i => i.quantity > 0);
+    const btn = document.getElementById('coll-issue-btn');
+    if (btn) btn.disabled = true;
+    try {
+      const out = await this.api('POST', `/transactions/${id}/collection-issues`, { items, issue_key: key });
+      this.closeModal();
+      this.alert(out.collected ? 'Handed over — the sale is fully collected' : 'Handover recorded — the rest is still due', 'success');
+      this._loadCollections(); this._pollCollections();
+    } catch (e) { if (btn) btn.disabled = false; this.alert(e.message, 'error'); }
   },
 
   async _collHandOver(id, number) {

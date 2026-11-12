@@ -1868,6 +1868,42 @@ async function _init() {
       received_qty REAL NOT NULL DEFAULT 0,
       returned_qty REAL NOT NULL DEFAULT 0
     )` },
+    // A layaway's stock receipts (decision A4): taken off when the layaway is
+    // made (the goods are set aside) but only billable to a supplier once it's
+    // paid off — qualified_on / unit_cost (agreed cost that day, A8) /
+    // transaction_id are set then. Cancelling puts them back (released_qty).
+    { sql: `CREATE TABLE IF NOT EXISTS layaway_lot_allocations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      plan_id INTEGER NOT NULL REFERENCES layaway_plans(id),
+      plan_item_id INTEGER NOT NULL REFERENCES layaway_plan_items(id),
+      product_id INTEGER NOT NULL REFERENCES products(id),
+      branch_id INTEGER REFERENCES branches(id),
+      lot_id INTEGER REFERENCES stock_lots(id),
+      owner TEXT NOT NULL,
+      supplier_id INTEGER REFERENCES suppliers(id),
+      agreement_id INTEGER REFERENCES consignment_agreements(id),
+      qty REAL NOT NULL,
+      released_qty REAL NOT NULL DEFAULT 0,
+      unit_cost REAL,
+      qualified_on TEXT,
+      transaction_id INTEGER REFERENCES transactions(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    // Each handover of a collect-later sale's goods to the customer (stock
+    // units per line), recorded once — issue_key (from the screen) stops a
+    // double-click recording it twice. The sale is collected when nothing is
+    // still due.
+    { sql: `CREATE TABLE IF NOT EXISTS collection_issues (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      transaction_id INTEGER NOT NULL REFERENCES transactions(id),
+      transaction_item_id INTEGER NOT NULL REFERENCES transaction_items(id),
+      qty REAL NOT NULL,
+      issue_key TEXT,
+      note TEXT,
+      issued_by INTEGER REFERENCES employees(id),
+      issued_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (issue_key, transaction_item_id)
+    )` },
     // Stock held at the sending branch for a transfer request raised by a
     // sale (decision A5): taken out of what can be sold until it's sent or
     // the request is cancelled.

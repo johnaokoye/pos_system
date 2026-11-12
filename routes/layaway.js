@@ -4,9 +4,10 @@ const { db } = require('../database');
 const { CUSTOMER_SALESPERSON_SQL } = require('../lib/salesCredit');
 const { resolveUnit, lineName, parseQty, stockUnits } = require('../lib/units');
 const { syncBinQty } = require('../lib/binSync');
-const { syncToBranch } = require('../lib/stockLots');
+const { takeFromLots, recordLayawayAllocation, qualifyLayaway, releaseLayawayItem } = require('../lib/stockLots');
 const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
+const { storeToday } = require('../lib/storeTime');
 const { branchStockQty } = require('../lib/branchStock');
 
 async function getSetting(key, fallback) {
@@ -130,13 +131,16 @@ router.post('/plans', requirePermission('layaway_create'), async (req, res) => {
       const planId = Number(planResult.lastInsertRowid);
 
       for (const line of lines) {
-        await tx.execute({ sql: `INSERT INTO layaway_plan_items (plan_id,product_id,product_name,sku,quantity,unit_price,tax_rate,line_total,base_unit_price,sell_unit,units_per,uom_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, args: [planId, line.product.id, lineName(line.product.name, line.unit), line.product.sku, line.quantity, line.unit_price, line.tax_rate, line.lineTotal, line.base_unit_price, line.unit.sell_unit, line.unit.units_per, line.unit.uom_id ?? null] });
+        const itemInsert = await tx.execute({ sql: `INSERT INTO layaway_plan_items (plan_id,product_id,product_name,sku,quantity,unit_price,tax_rate,line_total,base_unit_price,sell_unit,units_per,uom_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, args: [planId, line.product.id, lineName(line.product.name, line.unit), line.product.sku, line.quantity, line.unit_price, line.tax_rate, line.lineTotal, line.base_unit_price, line.unit.sell_unit, line.unit.units_per, line.unit.uom_id ?? null] });
 
         const singles = stockUnits(line.quantity, line.unit.units_per); // in stock units
         await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty - ? WHERE id = ?', args: [singles, line.product.id] });
         await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = MAX(0, stock_qty - ?), updated_at = CURRENT_TIMESTAMP`, args: [line.product.id, branch_id, Math.max(0, line.product.stock_qty - singles), line.product.min_stock, singles] });
         await syncBinQty(tx, line.product.id, branch_id, -singles);
-        await syncToBranch(tx, { product_id: line.product.id, branch_id, kind: 'layaway', employee_id: employee_id || null }); // stock receipts (lib/stockLots.js)
+        // Set aside for the customer from the oldest receipts (A1) — reserved,
+        // billable to a supplier only once it's paid off (A4).
+        const parts = await takeFromLots(tx, { product_id: line.product.id, branch_id, qty: singles, kind: 'layaway', reference: plan_number, employee_id: employee_id || null });
+        if (parts.length) await recordLayawayAllocation(tx, { plan_id: planId, plan_item_id: Number(itemInsert.lastInsertRowid), product_id: line.product.id, branch_id, parts });
       }
 
       await tx.execute({ sql: `INSERT INTO layaway_payments (plan_id,payment_number,employee_id,branch_id,amount,payment_method,transaction_id,is_deposit) VALUES (?,?,?,?,?,?,?,1)`, args: [planId, payment_number, employee_id || null, branch_id, tendered, payment_method || 'cash', depositTxId] });
@@ -190,6 +194,8 @@ router.patch('/plans/:id/payments', requirePermission('layaway_payments'), async
         const loyaltyPts = Math.floor(plan.total * 0.5);
         await tx.execute({ sql: 'UPDATE customers SET loyalty_points = loyalty_points + ?, total_spent = total_spent + ? WHERE id = ?', args: [loyaltyPts, plan.total, plan.customer_id] });
         await tx.execute({ sql: `UPDATE layaway_plans SET amount_paid = ?, status = 'completed', completed_at = CURRENT_TIMESTAMP, completion_transaction_id = ?, next_due_date = NULL WHERE id = ?`, args: [newAmountPaid, payTxId, plan.id] });
+        // Paid off: the sale qualifies — supplier-owned goods become billable now (A4).
+        await qualifyLayaway(tx, { plan_id: plan.id, transaction_id: payTxId, day: storeToday() });
       } else {
         const nextDue = addInterval(today, plan.payment_frequency);
         await tx.execute({ sql: `UPDATE layaway_plans SET amount_paid = ?, next_due_date = ? WHERE id = ?`, args: [newAmountPaid, nextDue, plan.id] });
@@ -238,7 +244,7 @@ router.patch('/plans/:id/cancel', requirePermission('layaway_cancel'), async (re
         if (plan.branch_id) {
           await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, plan.branch_id, singles, item.product_id, singles] });
           await syncBinQty(tx, item.product_id, plan.branch_id, singles);
-          await syncToBranch(tx, { product_id: item.product_id, branch_id: plan.branch_id, kind: 'layaway_cancelled' });
+          await releaseLayawayItem(tx, { plan_item_id: item.id, product_id: item.product_id, branch_id: plan.branch_id, qty: singles, reference: plan.plan_number, employee_id: employee_id || null });
         }
       }
 
