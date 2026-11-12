@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const router = express.Router();
 const { db } = require('../database');
 const { syncBinQty } = require('../lib/binSync');
+const { syncToBranch } = require('../lib/stockLots');
 const { updateFulfillmentStatus } = require('./transactions');
 const { requireAuth, requirePermission, requireAnyPermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
@@ -284,6 +285,7 @@ router.patch('/shipments/:id/ship', requireAnyPermission('shipping', 'transactio
             VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id=?), CURRENT_TIMESTAMP)
             ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty - ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, s.from_branch_id, -item.quantity, item.product_id, item.quantity] });
           await syncBinQty(tx, item.product_id, s.from_branch_id, -item.quantity);
+          await syncToBranch(tx, { product_id: item.product_id, branch_id: s.from_branch_id, kind: 'shipment' }); // stock receipts (lib/stockLots.js)
         }
       }
       await tx.execute({ sql: 'UPDATE shipments SET status=?, tracking_number=COALESCE(?,tracking_number), ship_date=COALESCE(?,ship_date), shipped_at=CURRENT_TIMESTAMP WHERE id=?', args: ['shipped', tracking_number || null, ship_date || null, req.params.id] });
@@ -332,6 +334,7 @@ router.patch('/shipments/:id/cancel', requireAnyPermission('shipping', 'transact
               VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id=?), CURRENT_TIMESTAMP)
               ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, s.from_branch_id, item.quantity, item.product_id, item.quantity] });
             await syncBinQty(tx, item.product_id, s.from_branch_id, item.quantity);
+            await syncToBranch(tx, { product_id: item.product_id, branch_id: s.from_branch_id, kind: 'shipment_cancelled' });
           }
         }
       }
@@ -748,6 +751,10 @@ router.patch('/cycle-counts/:id/commit', requirePermission('cycle-counts'), asyn
       // Batched: an initial count can put a variance on every line, and one
       // round trip per statement is slow against a remote database.
       for (const part of chunks(stmts)) await tx.batch(part);
+      // Stock receipts follow the count (lib/stockLots.js): a shortfall comes
+      // off Total Tools-owned stock first; any supplier-owned stock it reaches
+      // is logged as a count discrepancy for the month-end reconciliation.
+      if (session.branch_id) for (const item of varItems) if (item.product_id) await syncToBranch(tx, { product_id: item.product_id, branch_id: session.branch_id, kind: 'count', reference: session.session_number });
       await tx.commit();
       committed = true;
     } catch(e) {

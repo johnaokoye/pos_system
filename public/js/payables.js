@@ -376,6 +376,8 @@ Object.assign(App, {
     const el = document.getElementById('ap-tab-body');
     const f = this._apBillFilter || (this._apBillFilter = { status: 'unpaid', supplier_id: '', search: '' });
     if (!this._apSuppliers) this._apSuppliers = await this.api('GET', '/suppliers').catch(() => []);
+    // Left the screen while the vendors loaded — nothing to fill in.
+    if (!el || !el.isConnected) return;
     el.innerHTML = `
       <div class="card" style="margin-bottom:12px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
         <select id="ap-f-status" style="width:auto">

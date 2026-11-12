@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { syncBinQty } = require('../lib/binSync');
+const { syncToBranch } = require('../lib/stockLots');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -556,6 +557,7 @@ router.post('/import', requirePermission('inventory_import'), async (req, res) =
             args: [productId, branch_id, qty, minStk, qty, minStk],
           });
           await syncBinQty(db, productId, branch_id, qty - (existingBI?.stock_qty || 0));
+          await syncToBranch(db, { product_id: productId, branch_id, kind: 'import' }); // stock receipts (lib/stockLots.js)
         }
       } catch (e) {
         errors.push(`Row ${rowNum} (${sku}): ${e.message}`);
@@ -626,6 +628,7 @@ router.post('/bulk-assign-branch', requirePermission('inventory_edit'), async (r
         args: [p.id, branch_id, p.stock_qty || 0, p.min_stock || 5],
       });
       await syncBinQty(db, p.id, branch_id, p.stock_qty || 0);
+      await syncToBranch(db, { product_id: p.id, branch_id, kind: 'adjustment' });
     }
 
     res.json({ assigned: eligible.length });
@@ -1446,6 +1449,7 @@ router.put('/:id', async (req, res, next) => {
       });
       if (delta) {
         await syncBinQty(db, req.params.id, branchId, delta);
+        await syncToBranch(db, { product_id: Number(req.params.id), branch_id: branchId, kind: 'adjustment', employee_id: req.employee?.id || null });
         await db.execute({ sql: 'INSERT INTO stock_movements (product_id, branch_id, quantity_change, type, reason) VALUES (?, ?, ?, ?, ?)', args: [req.params.id, branchId, delta, 'adjustment', `Edited on product form${req.employee ? ' by ' + [req.employee.first_name, req.employee.last_name].filter(Boolean).join(' ') : ''}`] });
       }
     } else if (!svc && !rnt && stock_qty !== undefined) {
@@ -1503,6 +1507,7 @@ router.patch('/:id/stock', requirePermission('inventory_adjust'), async (req, re
         ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = ?, updated_at = CURRENT_TIMESTAMP`,
         args: [req.params.id, branch_id, newQty, existing ? existing.min_stock : product.min_stock, newQty] });
       await syncBinQty(db, req.params.id, branch_id, adj);
+      await syncToBranch(db, { product_id: Number(req.params.id), branch_id, kind: 'adjustment', reference: reason || null, employee_id: req.employee?.id || null });
       await db.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [adj, req.params.id] });
       await db.execute({ sql: 'INSERT INTO stock_movements (product_id, branch_id, quantity_change, type, reason) VALUES (?, ?, ?, ?, ?)', args: [req.params.id, branch_id, adj, 'adjustment', reason || null] });
       return res.json({ stock_qty: newQty, branch_id });

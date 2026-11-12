@@ -4,6 +4,7 @@ const { db } = require('../database');
 const { CUSTOMER_SALESPERSON_SQL } = require('../lib/salesCredit');
 const { resolveUnit, lineName, parseQty, stockUnits } = require('../lib/units');
 const { syncBinQty } = require('../lib/binSync');
+const { syncToBranch } = require('../lib/stockLots');
 const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { branchStockQty } = require('../lib/branchStock');
@@ -135,6 +136,7 @@ router.post('/plans', requirePermission('layaway_create'), async (req, res) => {
         await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty - ? WHERE id = ?', args: [singles, line.product.id] });
         await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = MAX(0, stock_qty - ?), updated_at = CURRENT_TIMESTAMP`, args: [line.product.id, branch_id, Math.max(0, line.product.stock_qty - singles), line.product.min_stock, singles] });
         await syncBinQty(tx, line.product.id, branch_id, -singles);
+        await syncToBranch(tx, { product_id: line.product.id, branch_id, kind: 'layaway', employee_id: employee_id || null }); // stock receipts (lib/stockLots.js)
       }
 
       await tx.execute({ sql: `INSERT INTO layaway_payments (plan_id,payment_number,employee_id,branch_id,amount,payment_method,transaction_id,is_deposit) VALUES (?,?,?,?,?,?,?,1)`, args: [planId, payment_number, employee_id || null, branch_id, tendered, payment_method || 'cash', depositTxId] });
@@ -236,6 +238,7 @@ router.patch('/plans/:id/cancel', requirePermission('layaway_cancel'), async (re
         if (plan.branch_id) {
           await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, plan.branch_id, singles, item.product_id, singles] });
           await syncBinQty(tx, item.product_id, plan.branch_id, singles);
+          await syncToBranch(tx, { product_id: item.product_id, branch_id: plan.branch_id, kind: 'layaway_cancelled' });
         }
       }
 

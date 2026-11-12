@@ -3,6 +3,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { resolvePurchaseUnit, lineName, stockUnits } = require('../lib/units');
 const { syncBinQty } = require('../lib/binSync');
+const { syncToBranch } = require('../lib/stockLots');
 const { addOwnedLot } = require('../lib/stockLots');
 const multer = require('multer');
 const path = require('path');
@@ -588,6 +589,7 @@ async function reverseReceivedLines(tx, po, lines, reference, reason) {
     if (po.branch_id) {
       await tx.execute({ sql: 'UPDATE branch_inventory SET stock_qty = stock_qty - ?, updated_at = CURRENT_TIMESTAMP WHERE product_id = ? AND branch_id = ?', args: [singles, item.product_id, po.branch_id] });
       await syncBinQty(tx, item.product_id, po.branch_id, -singles);
+      await syncToBranch(tx, { product_id: item.product_id, branch_id: po.branch_id, kind: 'receipt_reversed', reference: po.po_number }); // stock receipts (lib/stockLots.js)
     }
     await tx.execute({ sql: 'INSERT INTO stock_movements (product_id, branch_id, quantity_change, type, reference, reason) VALUES (?,?,?,?,?,?)', args: [item.product_id, po.branch_id || null, -singles, 'receipt_reversed', reference, reason] });
   }
@@ -776,6 +778,7 @@ router.post('/:id/items/:itemId/link-product', async (req, res) => {
         if (po.branch_id) {
           await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [productId, po.branch_id, qty, productId, qty] });
           await syncBinQty(tx, productId, po.branch_id, qty);
+          await syncToBranch(tx, { product_id: productId, branch_id: po.branch_id, kind: 'received', reference: po.po_number });
         }
       }
 
@@ -860,6 +863,7 @@ router.patch('/:id/damage', requirePermission('purchasing_receive'), async (req,
           if (po.branch_id) {
             await tx.execute({ sql: 'UPDATE branch_inventory SET stock_qty = MAX(0, stock_qty - ?), updated_at = CURRENT_TIMESTAMP WHERE product_id = ? AND branch_id = ?', args: [singles, item.product_id, po.branch_id] });
             await syncBinQty(tx, item.product_id, po.branch_id, -singles);
+            await syncToBranch(tx, { product_id: item.product_id, branch_id: po.branch_id, kind: 'damaged', reference: po.po_number });
           }
           await tx.execute({ sql: 'INSERT INTO stock_movements (product_id, branch_id, quantity_change, type, reference, reason) VALUES (?,?,?,?,?,?)', args: [item.product_id, po.branch_id || null, -singles, 'damaged', po.po_number, reason || 'Received damaged from supplier'] });
         }

@@ -6,6 +6,7 @@ const { customerSalesperson } = require('../lib/salesCredit');
 const { getWcSettings, wcRequest } = require('./woocommerce');
 const { syncBinQty } = require('../lib/binSync');
 const saleTransfers = require('../lib/saleTransfers');
+const { takeFromLots, recordSaleAllocation, returnSaleAllocation, releaseTransferReservations } = require('../lib/stockLots');
 const { requireAuth, requirePermission, requireAnyPermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { refreshStoreTz, storeToday } = require('../lib/storeTime');
@@ -917,6 +918,13 @@ router.post('/', requirePermission('pos'), async (req, res) => {
             await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = MAX(0, stock_qty - ?), updated_at = CURRENT_TIMESTAMP`, args: [product.id, branch_id, Math.max(0, product.stock_qty - quantity), product.min_stock, quantity] });
           }
           await syncBinQty(tx, product.id, branch_id, -quantity);
+          // Which stock receipts it came from — oldest first across Total
+          // Tools-owned and supplier-owned stock (lib/stockLots.js) — with
+          // the supplier, agreement and cost, once tracking has started.
+          if (!variation) {
+            const parts = await takeFromLots(tx, { product_id: product.id, branch_id, qty: quantity, kind: 'sale', reference: transaction_number, employee_id: employee_id || null });
+            if (parts.length) await recordSaleAllocation(tx, { transaction_id: txId, transaction_item_id: Number(lineInsert.lastInsertRowid), product_id: product.id, branch_id, parts, day: storeToday(), owned_cost: product.cost });
+          }
         }
       }
 
@@ -1315,6 +1323,8 @@ router.post('/returns/:id/credit-note-refund', requirePermission('transactions_r
 router.post('/:id/return', requirePermission('transactions_returns'), async (req, res) => {
   try {
     const { items, resolution, notes, employee_id } = req.body;
+    // The condition the goods came back in (decision A3): good, or damaged.
+    const goodsCondition = req.body.goods_condition === 'damaged' ? 'damaged' : 'good';
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items selected for return' });
     if (!['refund', 'replacement', 'credit_note'].includes(resolution)) return res.status(400).json({ error: 'Invalid resolution type' });
     // Every return needs a manager's override: the PIN of an active employee
@@ -1414,6 +1424,7 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
       const retResult = await retTx.execute({ sql: `INSERT INTO returns (return_number,original_transaction_id,customer_id,employee_id,branch_id,resolution,subtotal,tax_amount,total,notes,override_by) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, args: [return_number, tx.id, tx.customer_id, employee_id || tx.employee_id, tx.branch_id, resolution, returnSubtotal, returnTax, returnTotal, notes || null, overrideBy] });
       const retId = Number(retResult.lastInsertRowid);
       if (refundPaid) await retTx.execute({ sql: 'UPDATE returns SET refund_method = ?, drawer_session_id = ?, refunded_at = CURRENT_TIMESTAMP WHERE id = ?', args: [refundPaid.method, refundPaid.sessionId, retId] });
+      await retTx.execute({ sql: 'UPDATE returns SET goods_condition = ? WHERE id = ?', args: [goodsCondition, retId] });
 
       for (const { txItem, quantity, lineTotal, lineTax } of processedItems) {
         await retTx.execute({ sql: `INSERT INTO return_items (return_id,transaction_item_id,product_id,product_name,sku,quantity,unit_price,tax_amount,total) VALUES (?,?,?,?,?,?,?,?,?)`, args: [retId, txItem.id, txItem.product_id, txItem.product_name, txItem.sku, quantity, txItem.unit_price, lineTax, lineTotal] });
@@ -1431,6 +1442,9 @@ router.post('/:id/return', requirePermission('transactions_returns'), async (req
         if (tx.branch_id && branchRestock > 0) {
           await retTx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [txItem.product_id, tx.branch_id, branchRestock, txItem.product_id, branchRestock] });
           await syncBinQty(retTx, txItem.product_id, tx.branch_id, branchRestock);
+          // Back on the receipt it was sold from, credited to that supplier's
+          // settlement (decision A3), with the goods' condition.
+          await returnSaleAllocation(retTx, { transaction_item_id: txItem.id, product_id: txItem.product_id, branch_id: tx.branch_id, qty: branchRestock, kind: 'return', reference: return_number, return_id: retId, goods_condition: goodsCondition, employee_id: employee_id || null });
         }
       }
 
@@ -1505,7 +1519,9 @@ router.patch('/:id/void', requireAuth, async (req, res) => {
       await voidTxn.execute({ sql: "UPDATE transactions SET status='voided', voided_by=?, voided_at=CURRENT_TIMESTAMP, void_reason=? WHERE id=?", args: [authorizer.id, reason || null, req.params.id] });
       // Its transfer requests not sent yet aren't needed any more; one already
       // sent carries on (the goods are moving) and is just no longer owed.
+      const { rows: unsent } = await voidTxn.execute({ sql: "SELECT id FROM branch_transfers WHERE transaction_id = ? AND status = 'requested'", args: [req.params.id] });
       await voidTxn.execute({ sql: "UPDATE branch_transfers SET status = 'cancelled' WHERE transaction_id = ? AND status = 'requested'", args: [req.params.id] });
+      for (const t of unsent) await releaseTransferReservations(voidTxn, t.id);
       const { rows: items } = await voidTxn.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [req.params.id] });
       for (const item of items) {
         if (!item.product_id) continue; // delivery/comment lines carry no stock
@@ -1516,6 +1532,7 @@ router.patch('/:id/void', requireAuth, async (req, res) => {
         if (tx.branch_id && branchRestock > 0) {
           await voidTxn.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, tx.branch_id, branchRestock, item.product_id, branchRestock] });
           await syncBinQty(voidTxn, item.product_id, tx.branch_id, branchRestock);
+          await returnSaleAllocation(voidTxn, { transaction_item_id: item.id, product_id: item.product_id, branch_id: tx.branch_id, qty: branchRestock, kind: 'void', reference: tx.transaction_number, employee_id: authorizer.id });
         }
       }
       // Nothing is owed on a voided sale: goods still on their way arrive as

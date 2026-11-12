@@ -6,7 +6,7 @@ const { nextNumber } = require('../lib/nextNumber');
 const { syncBinQty } = require('../lib/binSync');
 const { resolveApprovalSignature } = require('../lib/signatures');
 const { storeToday } = require('../lib/storeTime');
-const { goLive, addLot, startTracking, lotsOnHand, round3, consignmentEnabled } = require('../lib/stockLots');
+const { goLive, addLot, startTracking, lotsOnHand, round3, consignmentEnabled, costOn } = require('../lib/stockLots');
 
 // Consignment — supplier-owned stock (mounted at /api/consignment).
 //   Agreement (CAG-): Purchasing drafts it (consignment_agreements) and
@@ -51,16 +51,6 @@ router.post('/go-live', requirePermission('settings'), async (req, res) => {
 });
 
 // ── Agreements ──────────────────────────────────────────────
-// The agreed cost in effect on `day` for an item on an agreement (A8).
-async function costOn(executor, agreementId, productId, day) {
-  const { rows: [r] } = await executor.execute({
-    sql: `SELECT c.cost, c.effective_from FROM consignment_agreement_costs c JOIN consignment_agreement_items i ON i.id = c.agreement_item_id
-          WHERE i.agreement_id = ? AND i.product_id = ? AND c.effective_from <= ? ORDER BY c.effective_from DESC, c.id DESC LIMIT 1`,
-    args: [agreementId, productId, day],
-  });
-  return r ? { cost: Number(r.cost), effective_from: r.effective_from } : null;
-}
-
 const AGREEMENT_SELECT = `SELECT a.*, s.name AS supplier_name, s.supplier_number,
   ce.first_name || ' ' || ce.last_name AS created_by_name, ae.first_name || ' ' || ae.last_name AS approved_by_name,
   fe.first_name || ' ' || fe.last_name AS finance_set_by_name, re.first_name || ' ' || re.last_name AS rejected_by_name,
@@ -133,9 +123,10 @@ async function validateAgreement(b) {
     if (!it.product_id) throw err(400, 'Each line needs an item');
     if (seen.has(Number(it.product_id))) throw err(400, 'An item is on the agreement twice');
     seen.add(Number(it.product_id));
-    const { rows: [p] } = await db.execute({ sql: 'SELECT id, name, is_rental, is_service, is_non_inventory FROM products WHERE id = ?', args: [it.product_id] });
+    const { rows: [p] } = await db.execute({ sql: 'SELECT id, name, is_rental, is_service, is_non_inventory, (SELECT COUNT(*) FROM product_variations v WHERE v.product_id = products.id AND v.active = 1) AS variations FROM products WHERE id = ?', args: [it.product_id] });
     if (!p) throw err(400, 'Item not found');
     if (p.is_rental || p.is_service || p.is_non_inventory) throw err(400, `${p.name} isn't a stocked retail item`);
+    if (Number(p.variations) > 0) throw err(400, `${p.name} has variations — consignment is tracked per item, so it can't go on an agreement`);
     if (!(Number(it.cost) >= 0) || it.cost === '' || it.cost == null) throw err(400, `Enter the agreed cost for ${p.name}`);
   }
   return items;
@@ -522,6 +513,44 @@ router.get('/stock', canView, async (req, res) => {
 router.get('/lots', requireAnyPermission('consignment', 'consignment_finance', 'inventory'), async (req, res) => {
   try {
     res.json(await lotsOnHand(db, { product_id: req.query.product_id || null, branch_id: req.query.branch_id || null }));
+  } catch (e) { send(res, e); }
+});
+
+// Which stock receipts a sale drew from — owner, supplier, agreement, cost —
+// and what's been returned of each.
+router.get('/allocations', requireAnyPermission('consignment', 'consignment_finance', 'transactions'), async (req, res) => {
+  try {
+    if (!req.query.transaction_id) return res.status(400).json({ error: 'Give the transaction' });
+    const { rows } = await db.execute({
+      sql: `SELECT sa.*, s.name AS supplier_name, a.agreement_number, l.source_number AS lot_source_number, ti.product_name
+            FROM sale_lot_allocations sa LEFT JOIN suppliers s ON s.id = sa.supplier_id LEFT JOIN consignment_agreements a ON a.id = sa.agreement_id
+            LEFT JOIN stock_lots l ON l.id = sa.lot_id JOIN transaction_items ti ON ti.id = sa.transaction_item_id
+            WHERE sa.transaction_id = ? ORDER BY sa.id`,
+      args: [req.query.transaction_id],
+    });
+    res.json(rows);
+  } catch (e) { send(res, e); }
+});
+
+// Safety check: every item and branch whose stock receipts don't add up to
+// its branch stock figure (should be none).
+router.get('/lot-check', canView, async (req, res) => {
+  try {
+    if (!(await goLive(db))) return res.json({ go_live: null, mismatches: [] });
+    const { rows } = await db.execute({
+      sql: `SELECT x.product_id, x.branch_id, p.name AS product_name, b.name AS branch_name, x.branch_qty, x.lots_qty FROM (
+              SELECT k.product_id, k.branch_id, COALESCE(bi.stock_qty, 0) AS branch_qty,
+                COALESCE((SELECT SUM(l.qty_on_hand) FROM stock_lots l WHERE l.product_id = k.product_id AND l.branch_id = k.branch_id), 0) AS lots_qty
+              FROM (SELECT product_id, branch_id FROM stock_lots
+                    UNION SELECT bi2.product_id, bi2.branch_id FROM branch_inventory bi2 JOIN products p2 ON p2.id = bi2.product_id
+                      WHERE bi2.stock_qty <> 0 AND COALESCE(p2.is_rental, 0) = 0 AND COALESCE(p2.is_service, 0) = 0 AND COALESCE(p2.is_non_inventory, 0) = 0
+                        AND NOT EXISTS (SELECT 1 FROM product_variations v WHERE v.product_id = p2.id AND v.active = 1)) k
+              LEFT JOIN branch_inventory bi ON bi.product_id = k.product_id AND bi.branch_id = k.branch_id
+            ) x JOIN products p ON p.id = x.product_id JOIN branches b ON b.id = x.branch_id
+            WHERE ABS(x.branch_qty - x.lots_qty) > 0.0005 AND x.branch_qty >= 0 ORDER BY p.name`,
+      args: [],
+    });
+    res.json({ go_live: await goLive(db), mismatches: rows });
   } catch (e) { send(res, e); }
 });
 

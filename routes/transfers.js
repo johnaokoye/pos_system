@@ -3,6 +3,7 @@ const { arrive: arriveForSale } = require('../lib/saleTransfers');
 const router = express.Router();
 const { db } = require('../database');
 const { createTransfer, deductTransferStock, addTransferStock } = require('../lib/transfers');
+const { receiveTransferLots, returnTransferLots, releaseTransferReservations } = require('../lib/stockLots');
 const { requirePermission, requireAnyPermission, requireAuth } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 
@@ -163,6 +164,7 @@ router.post('/quick', requirePermission('transfers_quick'), async (req, res) => 
       const { rows: lines } = await tx.execute({ sql: 'SELECT * FROM branch_transfer_items WHERE transfer_id = ?', args: [transferId] });
       for (const line of lines) {
         await addTransferStock(tx, to_branch_id, line.product_id, line.quantity_requested);
+        await receiveTransferLots(tx, { transfer_id: transferId, transfer_number, product_id: line.product_id, branch_id: to_branch_id, qty: line.quantity_requested, employee_id: employeeId });
         await tx.execute({ sql: 'UPDATE branch_transfer_items SET quantity_received = quantity_requested WHERE id = ?', args: [line.id] });
       }
       // Co-located branches: the person doing it carries and receives it.
@@ -209,7 +211,7 @@ router.patch('/:id/send', requirePermission('transfers_approve'), async (req, re
         if (qty > 0 && line.product_id) toSend.push({ product_id: line.product_id, quantity: qty });
       }
       if (!lines.some(l => Number(sentById.has(l.id) ? sentById.get(l.id) : l.quantity_requested) > 0)) throw new Error('Nothing to send — enter a quantity for at least one item, or cancel the request');
-      await deductTransferStock(tx, transfer.from_branch_id, toSend);
+      await deductTransferStock(tx, transfer.from_branch_id, toSend, { transferId: transfer.id, transferNumber: transfer.transfer_number, employeeId: req.employee?.id || null });
       await tx.execute({ sql: "UPDATE branch_transfers SET status = 'pending', sent_by = ?, sent_at = ? WHERE id = ?", args: [req.employee?.id || null, new Date().toISOString(), req.params.id] });
       await tx.commit();
     } catch(e) {
@@ -278,6 +280,8 @@ router.patch('/:id/receive', requirePermission('transfers_dropoff'), async (req,
 
         if (item.product_id) {
           await addTransferStock(tx, transfer.to_branch_id, item.product_id, actual);
+          // Receipts here with the owner, supplier and agreement they left with.
+          await receiveTransferLots(tx, { transfer_id: transfer.id, transfer_number: transfer.transfer_number, product_id: item.product_id, branch_id: transfer.to_branch_id, qty: actual, employee_id: req.employee?.id || null });
           // For a sale waiting on it: that much is the customer's, so it
           // comes straight back off this branch (lib/saleTransfers.js).
           await arriveForSale(tx, transfer, item.product_id, actual);
@@ -314,6 +318,7 @@ router.patch('/:id/cancel', requirePermission('transfers'), async (req, res) => 
     // A request that was never sent took no stock — nothing to put back.
     if (transfer.status === 'requested') {
       await db.execute({ sql: "UPDATE branch_transfers SET status = 'cancelled' WHERE id = ?", args: [req.params.id] });
+      await releaseTransferReservations(db, transfer.id); // any stock it held (A5)
       const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM branch_transfers WHERE id = ?', args: [req.params.id] });
       return res.json(row);
     }
@@ -326,6 +331,7 @@ router.patch('/:id/cancel', requirePermission('transfers'), async (req, res) => 
         const unreceived = item.quantity_requested - (item.quantity_received || 0);
         if (unreceived <= 0) continue;
         await addTransferStock(tx, transfer.from_branch_id, item.product_id, unreceived);
+        await returnTransferLots(tx, { transfer_id: transfer.id, transfer_number: transfer.transfer_number, product_id: item.product_id, branch_id: transfer.from_branch_id, qty: unreceived, employee_id: req.employee?.id || null });
       }
       await tx.execute({ sql: 'UPDATE branch_transfers SET status = ? WHERE id = ?', args: ['cancelled', req.params.id] });
       await tx.commit();

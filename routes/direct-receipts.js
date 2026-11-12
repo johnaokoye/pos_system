@@ -11,6 +11,7 @@ const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { resolvePurchaseUnit, lineName, parseQty, stockUnits } = require('../lib/units');
 const { syncBinQty } = require('../lib/binSync');
+const { syncToBranch } = require('../lib/stockLots');
 const { addOwnedLot } = require('../lib/stockLots');
 const { autoBills, createBill, dueDateFor, today, PAID_SQL, round2 } = require('../lib/payables');
 const { localTaxRate, defaultTaxOption, priceLine, poTotals } = require('../lib/poLines');
@@ -209,6 +210,7 @@ router.post('/:id/reverse', async (req, res) => {
         if (r.branch_id) {
           await tx.execute({ sql: 'UPDATE branch_inventory SET stock_qty = stock_qty - ?, updated_at = CURRENT_TIMESTAMP WHERE product_id = ? AND branch_id = ?', args: [units, i.product_id, r.branch_id] });
           await syncBinQty(tx, i.product_id, r.branch_id, -units);
+          await syncToBranch(tx, { product_id: i.product_id, branch_id: r.branch_id, kind: 'receipt_reversed', reference: r.receipt_number }); // stock receipts (lib/stockLots.js)
         }
         await tx.execute({ sql: 'INSERT INTO stock_movements (product_id, branch_id, quantity_change, type, reference, reason) VALUES (?,?,?,?,?,?)',
           args: [i.product_id, r.branch_id || null, -units, 'receipt_reversed', r.receipt_number, `Receipt reversed: ${reason}`] });

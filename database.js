@@ -1818,6 +1818,68 @@ async function _init() {
       created_by INTEGER REFERENCES employees(id),
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // Which stock receipts a sale line drew from (oldest receipt first, A1):
+    // owner, supplier, agreement, quantity (stock units) and the cost — the
+    // agreed cost in effect the day the sale qualified for supplier-owned
+    // stock (A8), the item's cost for owned. returned_qty grows as it's
+    // returned; returns and voids put stock back on the same receipt.
+    { sql: `CREATE TABLE IF NOT EXISTS sale_lot_allocations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      transaction_id INTEGER NOT NULL REFERENCES transactions(id),
+      transaction_item_id INTEGER NOT NULL REFERENCES transaction_items(id),
+      product_id INTEGER NOT NULL REFERENCES products(id),
+      branch_id INTEGER REFERENCES branches(id),
+      lot_id INTEGER REFERENCES stock_lots(id),
+      owner TEXT NOT NULL,
+      supplier_id INTEGER REFERENCES suppliers(id),
+      agreement_id INTEGER REFERENCES consignment_agreements(id),
+      qty REAL NOT NULL,
+      returned_qty REAL NOT NULL DEFAULT 0,
+      unit_cost REAL,
+      qualified_on TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    // Each return (or void) of an allocated sale quantity — the supplier's
+    // settlement is adjusted from these (A3), with the goods' condition.
+    { sql: `CREATE TABLE IF NOT EXISTS stock_lot_returns (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      allocation_id INTEGER NOT NULL REFERENCES sale_lot_allocations(id),
+      return_id INTEGER REFERENCES returns(id),
+      kind TEXT NOT NULL,
+      qty REAL NOT NULL,
+      goods_condition TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    // Which receipts a branch transfer took from the sending branch, so
+    // ownership travels with the goods: received_qty become receipts at the
+    // destination with the same owner/supplier/agreement; while sent and not
+    // received they're In Transit.
+    { sql: `CREATE TABLE IF NOT EXISTS transfer_lot_allocations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      transfer_id INTEGER NOT NULL REFERENCES branch_transfers(id),
+      product_id INTEGER NOT NULL REFERENCES products(id),
+      lot_id INTEGER REFERENCES stock_lots(id),
+      owner TEXT NOT NULL,
+      supplier_id INTEGER REFERENCES suppliers(id),
+      agreement_id INTEGER REFERENCES consignment_agreements(id),
+      unit_cost REAL,
+      received_at DATETIME,
+      qty REAL NOT NULL,
+      received_qty REAL NOT NULL DEFAULT 0,
+      returned_qty REAL NOT NULL DEFAULT 0
+    )` },
+    // Stock held at the sending branch for a transfer request raised by a
+    // sale (decision A5): taken out of what can be sold until it's sent or
+    // the request is cancelled.
+    { sql: `CREATE TABLE IF NOT EXISTS lot_reservations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      lot_id INTEGER NOT NULL REFERENCES stock_lots(id),
+      transfer_id INTEGER NOT NULL REFERENCES branch_transfers(id),
+      product_id INTEGER NOT NULL REFERENCES products(id),
+      qty REAL NOT NULL,
+      released_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     // Bank accounts vendors are paid from — RetailPOS Books' own list, sent
     // here on every sync (PUT /api/payables/bank-accounts), so Process
     // Payment can say which one paid and Books posts to it.
@@ -3180,6 +3242,8 @@ async function _init() {
     'ALTER TABLE ap_payments ADD COLUMN bank_account_name TEXT',
     'ALTER TABLE ap_payments ADD COLUMN bank_currency TEXT',
     'ALTER TABLE ap_payments ADD COLUMN posting_mode TEXT',
+    // The condition goods came back in on a return (decision A3): good | damaged.
+    "ALTER TABLE returns ADD COLUMN goods_condition TEXT DEFAULT 'good'",
     'ALTER TABLE account_payments ADD COLUMN contra_id INTEGER REFERENCES contras(id)',
     // The customer account of a business that's also this supplier — the
     // link a contra (routes/contras.js) needs.
@@ -4292,6 +4356,9 @@ async function _init() {
     'CREATE INDEX IF NOT EXISTS idx_quotation_items_quote_id ON quotation_items(quote_id)',
     'CREATE INDEX IF NOT EXISTS idx_stock_lots_item_branch ON stock_lots(product_id, branch_id, qty_on_hand)',
     'CREATE INDEX IF NOT EXISTS idx_stock_lot_moves_lot ON stock_lot_moves(lot_id)',
+    'CREATE INDEX IF NOT EXISTS idx_sale_lot_alloc_item ON sale_lot_allocations(transaction_item_id)',
+    'CREATE INDEX IF NOT EXISTS idx_transfer_lot_alloc ON transfer_lot_allocations(transfer_id)',
+    'CREATE INDEX IF NOT EXISTS idx_lot_reservations_transfer ON lot_reservations(transfer_id)',
     'CREATE INDEX IF NOT EXISTS idx_quotation_item_sources_quotation_item_id ON quotation_item_sources(quotation_item_id)',
     'CREATE INDEX IF NOT EXISTS idx_rental_agreements_customer_id ON rental_agreements(customer_id)',
     'CREATE INDEX IF NOT EXISTS idx_rental_agreements_status ON rental_agreements(status)',
