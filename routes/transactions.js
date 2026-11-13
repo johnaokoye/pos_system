@@ -1058,6 +1058,8 @@ router.get('/returns/:id', requireAuth, async (req, res) => {
   try {
     const { rows: [ret] } = await db.execute({ sql: `SELECT r.*, t.transaction_number as original_transaction_number,
       c.first_name || ' ' || c.last_name as customer_name, c.email as customer_email,
+      c.customer_number, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
+      (SELECT ap.payment_number FROM account_payments ap WHERE ap.return_id = r.id AND ap.payment_method = 'credit_note' ORDER BY ap.id LIMIT 1) as credit_note_number,
       e.first_name || ' ' || e.last_name as employee_name,
       oe.first_name || ' ' || oe.last_name as override_by_name,
       b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone,

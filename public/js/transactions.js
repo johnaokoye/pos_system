@@ -1032,6 +1032,7 @@ Object.assign(App, {
   },
 
   showReturnReceipt(ret) {
+    this._returnReceipt = ret;
     const items = ret.items || [];
     const storeName = this.settings.store_name || 'My Store';
     const resolutionLabel = { refund: 'Refund', credit_note: 'Credit Note', replacement: 'Replacement / Exchange' }[ret.resolution] || ret.resolution;
@@ -1075,9 +1076,91 @@ Object.assign(App, {
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
           ${ret.resolution === 'credit_note' && ret.status !== 'cancelled' && this._canRefundCreditNote() ? `<button class="btn btn-warning" onclick="App.showCreditNoteRefund(${ret.id})" title="The customer wants their money back instead of the credit note">Refund Instead</button>` : ''}
           <button class="btn btn-secondary" onclick="App.emailReturnReceipt(${ret.id},'${(ret.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email</button>
-          <button class="btn btn-primary" onclick="window.print()">🖨️ Print</button>
+          <button class="btn btn-secondary" onclick="window.print()" title="Narrow receipt for the receipt printer">🖨️ Normal</button>
+          <button class="btn btn-primary" onclick="App.printReturnReceiptLetter()" title="Full-page letter-size return / refund receipt">🖨️ Letter</button>
         </div>
       </div>`);
+  },
+
+  // Letter-size print of the return receipt open in the modal (refund,
+  // credit note or exchange) — same popup approach as printPaymentReceiptLetter,
+  // with the Bill To box, the items returned and signature lines.
+  printReturnReceiptLetter() {
+    const r = this._returnReceipt;
+    if (!r) return;
+    const win = window.open('', '_blank', 'width=850,height=1000');
+    if (!win) { this.alert('Your browser blocked the print popup — allow popups for this site and try again', 'warning'); return; }
+    const esc = v => this.escapeAttr(v ?? '');
+    const storeName = this.settings.store_name || 'My Store';
+    const addressLine = r.branch_address || this.settings.store_address || '';
+    const cityLine = r.branch_address ? `${r.branch_city ? ', ' + r.branch_city : ''}${r.branch_state ? ' ' + r.branch_state : ''}${r.branch_zip ? ' ' + r.branch_zip : ''}` : '';
+    const phoneLine = r.branch_phone || this.settings.store_phone || '';
+    const title = { refund: 'REFUND RECEIPT', credit_note: 'CREDIT NOTE', replacement: 'EXCHANGE RECEIPT' }[r.resolution] || 'RETURN RECEIPT';
+    const resolution = { refund: 'Refund', credit_note: 'Credit Note', replacement: 'Replacement / Exchange' }[r.resolution] || r.resolution;
+    const refundMethod = r.refund_method ? String(r.refund_method).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : '';
+    const td = 'padding:8px;border-bottom:1px solid #e8e8e8;vertical-align:top';
+    const qty = q => (Number.isInteger(Number(q)) ? Number(q) : Number(q).toFixed(3).replace(/0+$/, ''));
+    const totalLabel = r.resolution === 'refund' ? 'TOTAL REFUNDED' : r.resolution === 'credit_note' ? 'CREDIT ISSUED' : 'EXCHANGE CREDIT';
+    win.document.write(`<!DOCTYPE html><html><head><title>${title.charAt(0) + title.slice(1).toLowerCase()} – ${esc(r.return_number)}</title>
+    <style>
+      body{font-family:Arial,sans-serif;font-size:13px;margin:0;padding:48px;color:#111}
+      .header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px}
+      .store h1{font-size:20px;margin:0 0 2px}
+      .store div{font-size:12px;color:#555}
+      .doc-title{font-size:22px;font-weight:700;text-align:right;color:#b42318}
+      .meta{display:flex;flex-wrap:wrap;gap:12px 32px;margin-bottom:20px;font-size:12px}
+      .meta div{line-height:1.6}
+      .meta label{font-weight:bold;text-transform:uppercase;font-size:10px;color:#555;display:block}
+      table{width:100%;border-collapse:collapse}
+      th{background:#f0f0f0;text-align:left;padding:8px;font-size:11px;text-transform:uppercase;color:#555}
+      ${this._billToPrintCss}
+      .totals{width:320px;margin-left:auto;margin-top:16px;font-size:13px}
+      .totals tr td{padding:4px 0;border:none}
+      .totals .total-row td{border-top:2px solid #111;font-size:16px;font-weight:700;padding-top:8px}
+      .note{margin-top:14px;font-size:12px;border:1px solid #ddd;border-radius:6px;padding:8px 12px;line-height:1.5}
+      .footer{margin-top:32px;font-size:11px;color:#777;border-top:1px solid #ddd;padding-top:10px;text-align:center}
+      @page { size: letter; margin: 0.75in; }
+      @media print{body{padding:0}}
+    </style></head><body>
+    <div style="text-align:center;font-weight:700;font-size:20px;margin-bottom:16px">${esc(storeName)}</div>
+    <div class="header">
+      <div class="store">
+        ${this._printLogoTag(50)}
+        ${r.branch_name ? `<h1>${esc(r.branch_name)}</h1>` : ''}
+        ${addressLine ? `<div>${esc(addressLine)}${esc(cityLine)}</div>` : ''}
+        ${phoneLine ? `<div>${esc(phoneLine)}</div>` : ''}
+      </div>
+      <div class="doc-title">${title}</div>
+    </div>
+    ${this._billToPrintHtml(r, [['Return #', esc(r.return_number)], ['Date', this.fmtDateTime(r.created_at)], ['Original Sale', esc(r.original_transaction_number || '')],
+      ['Resolution', esc(resolution)], ['Refunded By', r.resolution === 'refund' ? esc(refundMethod) : ''], ['Credit Note #', r.credit_note_number ? esc(r.credit_note_number) : '']])}
+    <div class="meta">
+      ${r.employee_name ? `<div><label>Processed By</label>${esc(r.employee_name)}</div>` : ''}
+      ${r.override_by_name ? `<div><label>Authorized By</label>${esc(r.override_by_name)}</div>` : ''}
+      ${r.notes ? `<div style="flex-basis:100%"><label>Reason</label><span style="white-space:pre-wrap">${esc(r.notes)}</span></div>` : ''}
+    </div>
+    <table>
+      <thead><tr><th>Item</th><th style="text-align:right">Qty</th><th style="text-align:right">Unit Price</th><th style="text-align:right">GCT</th><th style="text-align:right">Amount</th></tr></thead>
+      <tbody>${(r.items || []).map(i => `<tr>
+        <td style="${td}"><div style="font-weight:600">${esc(i.product_name)}</div>${i.sku ? `<div style="font-size:11px;color:#555">${esc(i.sku)}</div>` : ''}</td>
+        <td style="${td};text-align:right">${qty(i.quantity)}</td>
+        <td style="${td};text-align:right">${this.fmt(i.unit_price)}</td>
+        <td style="${td};text-align:right">${this.fmt(i.tax_amount || 0)}</td>
+        <td style="${td};text-align:right">${this.fmt(i.total)}</td>
+      </tr>`).join('')}</tbody>
+    </table>
+    <table class="totals">
+      <tr><td>Subtotal</td><td style="text-align:right">${this.fmt(r.subtotal)}</td></tr>
+      <tr><td>GCT</td><td style="text-align:right">${this.fmt(r.tax_amount)}</td></tr>
+      <tr class="total-row"><td>${totalLabel}</td><td style="text-align:right">${this.fmt(r.total)}</td></tr>
+    </table>
+    ${r.converted_at ? `<div class="note"><strong>Converted from an exchange</strong> on ${this.fmtDateTime(r.converted_at)}${r.converted_authorized_by ? `, authorized by ${esc(r.converted_authorized_by)}` : ''}. Reason: ${esc(r.converted_reason)}</div>` : ''}
+    ${r.cn_refunded_at ? `<div class="note"><strong>Credit note refunded instead</strong> (${esc(r.cn_refunded_number)}) on ${this.fmtDateTime(r.cn_refunded_at)}${r.cn_refunded_authorized_by ? `, authorized by ${esc(r.cn_refunded_authorized_by)}` : ''}. Reason: ${esc(r.cn_refunded_reason)}</div>` : ''}
+    ${this._invoiceSignatureLinesHtml(false)}
+    <div class="footer">${this._receiptFooterHtml('Thank you!')}</div>
+    <script>window.onload=()=>{window.print()}<\/script>
+    </body></html>`);
+    win.document.close();
   },
 
   // Customer account payment receipt (GET /transactions/customer-payments/:id)
