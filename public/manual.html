@@ -146,6 +146,7 @@
       <a href="#transfers">Branch Transfers</a>
       <a href="#warehouse">Warehouse Management</a>
       <a href="#shop-use">Shop Use</a>
+      <a href="#consignment">Consignment</a>
     </div>
     <div class="toc-group">
       <div class="toc-group-label">Customers &amp; Money</div>
@@ -834,6 +835,70 @@
       <p>Every submission, amendment, approval decision, issue, posting, return, reversal, cancellation and reconciliation action, plus changes to rules and account mappings, is kept with the user, date and time. A request's own trail and approval history are at the bottom of the request.</p>
     </section>
 
+    <section class="module" id="consignment">
+      <h2 class="module">Consignment <span class="tag">consignment</span> <span class="tag">consignment_finance</span></h2>
+      <p class="module-intro">Stock a supplier owns and keeps on our shelves until it's sold. It's received, sold, counted and paid for through its own process, and isn't part of Total Tools' inventory value while the supplier owns it. Open it from <strong>Purchasing → Consignment</strong>.</p>
+      <div class="callout warn"><strong>Only where it's switched on</strong>Consignment works only on a server started with <code>CONSIGNMENT_ENABLED=1</code> (in the Docker stack's environment). Elsewhere the screen shows <em>"Consignment is still being built and tested"</em> and no supplier stock can go on hand.</div>
+
+      <h3>Who does what</h3>
+      <ul>
+        <li><strong>Purchasing</strong> (<span class="perm-pill">consignment_agreements</span>) — drafts agreements and raises consignment orders.</li>
+        <li><strong>Receiving / Warehouse</strong> — enters deliveries against an order (<span class="perm-pill">consignment_receive</span>) and approves them onto the shelf (<span class="perm-pill">consignment_grn_approve</span>); enters the month-end counts.</li>
+        <li><strong>Finance</strong> (<span class="perm-pill">consignment_finance</span>, its own checkbox) — sets each agreement's revenue and output GCT treatment and approves it, approves chargeable shortages and damage, approves and locks each month, and resolves differences on supplier invoices. Never on an agreement they drafted.</li>
+        <li><strong>Accounts Payable</strong> (<span class="perm-pill">payables_bills</span>) — enters the supplier's invoice against the settlement and accepts it into an A/P bill; payment goes through a payment request as usual. A/P staff without consignment access see only the <em>Settlements</em> tab.</li>
+        <li><strong>Administrator</strong> (<span class="perm-pill">settings</span>) — starts tracking, records supplier stock found on hand, and reopens a locked month on Finance's documented approval.</li>
+      </ul>
+
+      <h3>Agreements</h3>
+      <p><strong>+ New Agreement</strong>: the supplier, start (and optional end) date, the items with their <strong>agreed cost</strong> (what we pay the supplier per unit sold), ownership terms, payment terms, who bears <strong>shortages</strong> and <strong>damage</strong> (the supplier or Total Tools), and whether the stock may be used on <strong>work orders</strong> or for <strong>shop use</strong>. Submit it to Finance, who set the <strong>revenue treatment</strong> (principal or agent) and <strong>output GCT treatment</strong>, then approve and sign it. A new agreed cost takes effect from a date you choose; each sale is billed at the cost in effect on the day it qualifies, and a later return uses that same cost. <strong>End</strong> stops new orders.</p>
+
+      <h3>Orders and goods received</h3>
+      <p><strong>+ New Order</strong> against an approved agreement, for a branch (the Distribution Centre is the Warehouse branch). When the delivery arrives, Receiving enters a <strong>GRN</strong> with the supplier's delivery note number and the quantities — part deliveries are fine, each its own GRN. Approving the GRN puts the stock on hand at that branch as the supplier's. Until then nothing changes.</p>
+
+      <h3>Starting tracking</h3>
+      <p>Done once by an Administrator, on <strong>Consignment Stock → Start Consignment Tracking</strong>. From that moment every unit on hand has an owner and a receipt date:</p>
+      <ul>
+        <li>First list any stock already on the shelf that belongs to a supplier — the agreement, item, branch and quantity. The agreement must be approved first. Those units become that supplier's.</li>
+        <li>Everything else becomes one <strong>Total Tools-owned</strong> receipt dated that day, so it sells before any consignment stock received afterwards.</li>
+        <li>Type START to confirm. It can't be undone.</li>
+      </ul>
+      <p>If supplier stock turns up later that was counted as ours, an Administrator uses <strong>+ Record supplier-owned stock</strong>: the agreement, item, branch, quantity and the reason. Those units move to the supplier, dated when tracking started. Stock figures don't change. <strong>Supplier stock found on hand</strong> lists every such entry.</p>
+
+      <h3>Selling and other stock movements</h3>
+      <ul>
+        <li><strong>Oldest receipt first.</strong> A sale takes the oldest receipt at that branch, ours or a supplier's, and records which supplier and agreement each unit came from and the agreed cost that day. The till works exactly as before.</li>
+        <li><strong>Returns and voids</strong> go back on the receipt they came from, so the right supplier's figures are adjusted. The return asks for the goods' condition (good or damaged).</li>
+        <li><strong>Branch transfers</strong> carry ownership: what arrives is still the supplier's. Goods on the truck at month-end are <em>In Transit</em>.</li>
+        <li><strong>Sell now, collect later</strong> from another branch reserves the units there straight away; they become the customer's — and billable — when they arrive.</li>
+        <li><strong>Layaways</strong> set the goods aside but are billable only once paid off; cancelling puts them back.</li>
+        <li><strong>Work orders</strong> (Issue from Stock) and <strong>Shop Use</strong> use supplier stock only where the agreement allows it, and it's billable when issued.</li>
+        <li>Stock adjustments, counts and damage that reduce supplier stock show on the month-end reconciliation as shortages or damage.</li>
+      </ul>
+      <p><strong>Consignment Stock</strong> lists what each supplier owns on hand, by branch, at the agreed cost — kept apart from our inventory value.</p>
+
+      <h3>Month-end reconciliation</h3>
+      <p>One per agreement per month (calendar month, Jamaica time). <strong>Month-End Reconciliation → New</strong> works out, by branch and item: opening stock, received, transfers in and out, sold, returned, layaways, work orders, shop use, damage and adjustments, giving the <strong>expected</strong> closing stock. Enter the <strong>physical count</strong> on each line; the difference shows beside it. Stock in transit at the cut-off is shown on its own and still belongs to the supplier.</p>
+      <p>The billing side keeps three things apart: <strong>POS-recorded sales</strong> (at the cost saved on each sale), <strong>count discrepancies</strong>, and <strong>approved billable</strong> quantities. Shortages or damage are only charged to Total Tools where the agreement says Total Tools bears them, and only the quantity Finance approves. <strong>Refresh Figures</strong> recalculates a draft, keeping the counts entered.</p>
+      <p>Once the month has ended and every line is counted, Finance clicks <strong>Approve &amp; Lock</strong>. The month is then fixed: a later return of one of its sales is credited in the next month, shown separately with the original sale it relates to. <strong>Reopen</strong> is for an Administrator, with the reason, the Finance approver and the approval reference; it isn't possible while the month's settlement is on an A/P bill (void the bill first).</p>
+
+      <h3>Settlements and the supplier's invoice</h3>
+      <p>Approving a month makes its <strong>settlement statement</strong> (CST-): per item, what was sold, layaways paid off, work-order parts, returns, shop use and approved shortages/damage, the billable quantity at the agreed cost, and the GCT we'd expect. Returns of earlier months' sales are listed as adjustments naming the return, the original sale and its month. <strong>Print Statement</strong> gives the copy for the supplier.</p>
+      <ol>
+        <li><strong>Enter the invoice</strong> (A/P): open the settlement, enter the supplier's invoice number, date, their TRN, tick <em>Valid supplier tax invoice</em> if it is one, and each line as the invoice shows it (the form starts with the settlement's figures). <strong>Match Invoice</strong> compares every line on quantity, cost, GCT and total.</li>
+        <li><strong>Differences go to Finance</strong>: each flagged line is either <em>Correct settlement</em> (the settlement was wrong and takes the invoice's figures; the original is kept) or <em>Approve to variance</em> (the difference is posted to Consignment Variance). Both need a reason. Nothing goes to variance on its own.</li>
+        <li><strong>Accept — Create A/P Bill</strong> (A/P) once every difference is resolved. GCT is only accepted with a valid tax invoice and the supplier's TRN. The bill is then paid through a <a href="#payables">payment request</a> like any other; its amounts can't be edited, and voiding it sends the invoice back to be accepted again.</li>
+      </ol>
+      <p>The same invoice number can't be entered twice for a supplier, here or as an ordinary bill. If the supplier sends a corrected invoice, <strong>Reject Invoice</strong> with the reason and enter the new one. A month where the supplier owes us (returns larger than sales) is settled with their credit note: <strong>+ Supplier Credit Note</strong> on the settlement (see <a href="#payables">Accounts Payable</a>).</p>
+
+      <h3>What RetailPOS Books posts</h3>
+      <ul>
+        <li>Each sale, paid-off layaway or work-order part from supplier stock: Dr Consignment Cost of Sales, Cr Accrued Consignment Obligation, at the agreed cost. A return reverses it.</li>
+        <li>At month-end approval: approved chargeable shortages/damage (Dr Shortages and Damage Chargeable) and shop use (Dr Inventory), against the obligation.</li>
+        <li>The accepted invoice's bill: Dr Accrued Consignment Obligation, Dr or Cr Consignment Variance, Dr GCT Recoverable, Cr Accounts Payable. Payment then posts as usual.</li>
+      </ul>
+      <p>Books needs its four <strong>Consignment Accounts</strong> set in its Settings; until then these entries wait, with a message saying which account is missing. <strong>Books Postings</strong> on the Consignment screen shows each entry and whether Books has posted it. Books' API key needs the <em>Consignment Postings — Read</em> and <em>Acknowledge</em> permissions (Settings → API Keys).</p>
+    </section>
+
     <section class="module" id="customers">
       <h2 class="module">Customers <span class="tag">customers</span></h2>
       <p class="module-intro">Customer profiles, purchase history, and account status.</p>
@@ -1164,6 +1229,8 @@
         <tr><td>shipping</td><td>shipping_create, shipping_carriers</td></tr>
         <tr><td>cycle-counts</td><td>cyclecounts_create, cyclecounts_approve</td></tr>
         <tr><td>shop_use</td><td>shop_use_request (raise requests), shop_use_issue (issue, returns, tool register), shop_use_finance (account mapping, postings, reversals, reconciliation), shop_use_routing (approval rules &amp; limits), shop_use_reports (dashboards &amp; reports)</td></tr>
+        <tr><td>consignment</td><td>consignment_agreements (agreements and orders), consignment_receive (enter deliveries, month-end counts), consignment_grn_approve (approve deliveries onto the shelf)</td></tr>
+        <tr><td>consignment_finance</td><td>(none — agreement treatment and approval, chargeable shortages/damage, month approval, invoice differences; a separate permission, never your own agreement)</td></tr>
         <tr><td>shop_use_approve</td><td>(none — approve Shop Use requests within your rules; a separate permission, never your own request)</td></tr>
         <tr><td>branches</td><td>branches_add, branches_edit, branches_delete</td></tr>
         <tr><td>security</td><td>security_manage, security_assign</td></tr>
