@@ -111,10 +111,78 @@ Object.assign(App, {
     const row = document.createElement('div');
     row.className = 'ca-item';
     row.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:6px';
-    row.innerHTML = `<select class="ca-prod" data-searchable style="flex:1;min-width:0"><option value="">Choose item…</option>${(this._consProducts || []).map(p => `<option value="${p.id}" ${Number(it.product_id) === p.id ? 'selected' : ''}>${this.escapeAttr(p.name)}${p.sku ? ` (${this.escapeAttr(p.sku)})` : ''}</option>`).join('')}</select>
+    // + / "+ Add “…”" on the item picker creates the product right here
+    // (_consNewProduct) for someone who may add inventory.
+    const addAttr = this.can('inventory_add') ? ' data-add="App._consNewProduct"' : '';
+    row.innerHTML = `<select class="ca-prod" data-searchable${addAttr} onchange="App._consProductPicked(this)" style="flex:1;min-width:0"><option value="">Choose item…</option>${(this._consProducts || []).map(p => `<option value="${p.id}" ${Number(it.product_id) === p.id ? 'selected' : ''}>${this.escapeAttr(p.name)}${p.sku ? ` (${this.escapeAttr(p.sku)})` : ''}</option>`).join('')}</select>
       <input class="ca-cost" type="number" step="0.01" min="0" placeholder="Agreed cost" value="${it.current_cost ?? it.cost ?? ''}" style="width:130px">
       <button class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">✕</button>`;
     box.appendChild(row);
+  },
+
+  // A new item's agreed cost comes from the cost typed when creating it.
+  _consProductPicked(sel) {
+    const cost = sel.closest('.ca-item')?.querySelector('.ca-cost');
+    const agreed = (this._consNewCosts || {})[sel.value];
+    if (cost && !cost.value && agreed != null) cost.value = agreed;
+  },
+
+  // data-add hook for the item picker: a small product form over the
+  // agreement, prefilled with the typed name. Resolves { value, text } once
+  // created (the picker selects it) or null if cancelled. Stock starts at 0
+  // — consigned stock comes in through a consignment order's receiving.
+  async _consNewProduct(name) {
+    const categories = await this.api('GET', '/categories');
+    const esc = x => this.escapeAttr(x ?? '');
+    const overlay = this.showSecondaryModal(`
+      <div class="modal">
+        <div class="modal-header"><span class="modal-title">New Product</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div class="input-row">
+            <div class="form-group"><label>SKU *</label><input id="cnp-sku"></div>
+            <div class="form-group"><label>Barcode</label><input id="cnp-barcode"></div>
+          </div>
+          <div class="form-group"><label>Name *</label><input id="cnp-name" value="${esc(name)}"></div>
+          <div class="form-group"><label>Category</label><select id="cnp-cat"><option value="">— None —</option>${categories.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div>
+          <div class="input-row-3">
+            <div class="form-group"><label>Selling price</label><input type="number" id="cnp-price" min="0" step="0.01" value="0"></div>
+            <div class="form-group"><label>Agreed cost</label><input type="number" id="cnp-cost" min="0" step="0.01" placeholder="Per stock unit"></div>
+            <div class="form-group"><label>Tax Rate %</label><input type="number" id="cnp-tax" min="0" step="0.1" value="${this.settings?.tax_rate ?? 8.5}"></div>
+          </div>
+          <div style="font-size:11px;color:var(--text-muted)">Stock starts at 0 — it comes in when a consignment order is received.</div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="cnp-cancel">Cancel</button>
+          <button class="btn btn-primary" id="cnp-save">Create & Add</button>
+        </div>
+      </div>`);
+    document.getElementById(name ? 'cnp-sku' : 'cnp-name')?.focus();
+    return new Promise(resolve => {
+      const done = v => { overlay.remove(); resolve(v); };
+      overlay.querySelector('.modal-close').addEventListener('click', () => resolve(null));
+      overlay.querySelector('#cnp-cancel').addEventListener('click', () => done(null));
+      overlay.querySelector('#cnp-save').addEventListener('click', async e => {
+        const val = i => document.getElementById(i).value.trim();
+        const data = {
+          sku: val('cnp-sku'), barcode: val('cnp-barcode') || null, name: val('cnp-name'), category_id: val('cnp-cat') || null,
+          price: parseFloat(val('cnp-price')) || 0, cost: parseFloat(val('cnp-cost')) || 0, tax_rate: parseFloat(val('cnp-tax')) || 0,
+          stock_qty: 0, supplier_id: document.getElementById('ca-supplier')?.value || null,
+        };
+        if (!data.sku) return this.alert('SKU is required', 'error');
+        if (!data.name) return this.alert('Name is required', 'error');
+        e.target.disabled = true;
+        try {
+          const p = await this.api('POST', '/products', data);
+          (this._consProducts ||= []).push(p);
+          if (val('cnp-cost') !== '') (this._consNewCosts ||= {})[p.id] = val('cnp-cost');
+          const text = `${p.name}${p.sku ? ` (${p.sku})` : ''}`;
+          // The other item rows can pick it too.
+          document.querySelectorAll('#ca-items .ca-prod').forEach(sel => { if (![...sel.options].some(o => o.value === String(p.id))) sel.add(new Option(text, p.id)); });
+          this.alert(`Product "${p.name}" created`);
+          done({ value: p.id, text });
+        } catch (err) { e.target.disabled = false; this.alert(err.message, 'error'); }
+      });
+    });
   },
 
   async _consSaveAgreement(id, submit) {
