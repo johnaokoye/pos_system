@@ -139,7 +139,7 @@ Object.assign(App, {
           </div>
           <div class="card" style="margin-top:16px">
             <div class="card-header"><span class="card-title">Cloudinary (Image &amp; File Storage)</span></div>
-            <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">When configured, product images and PO attachments are stored in Cloudinary instead of the local filesystem. Required for Vercel deployments.</p>
+            <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">When configured, product images and PO attachments are stored in Cloudinary instead of the local filesystem.</p>
             <div class="form-group"><label>Cloud Name</label><input id="cld-cloud-name" placeholder="your-cloud-name" value="${s.cloudinary_cloud_name||''}"></div>
             <div class="input-row">
               <div class="form-group"><label>API Key</label><input id="cld-api-key" placeholder="123456789012345" value="${s.cloudinary_api_key||''}"></div>

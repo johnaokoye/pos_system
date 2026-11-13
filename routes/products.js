@@ -1599,8 +1599,7 @@ router.post('/:id/image', requireImagePermission, upload.single('image'), async 
 // its matching product. Matching is case-insensitive against the same
 // sanitizeSkuForFilename() slug the upload route above writes, so "abc/123"
 // (SKU) matches a file named "abc_123.jpg" or "ABC_123.PNG". Runs the file
-// through Cloudinary when configured — same as a normal upload — so a scan
-// on a Vercel deployment doesn't leave the image on ephemeral local disk.
+// through Cloudinary when configured — same as a normal upload.
 router.post('/images/scan-folder', requirePermission('inventory_scan_images'), async (req, res) => {
   try {
     const dir = path.join(__dirname, '../uploads/products');

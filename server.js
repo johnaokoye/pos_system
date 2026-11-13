@@ -29,8 +29,8 @@ process.on('uncaughtException', (err) => {
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Needed so req.secure reflects X-Forwarded-Proto from a reverse proxy (Vercel,
-// or a self-hosted TLS-terminating proxy) — the session cookie's Secure flag
+// Needed so req.secure reflects X-Forwarded-Proto from a TLS-terminating
+// reverse proxy in front of the app — the session cookie's Secure flag
 // depends on this being accurate (see lib/sessionAuth.js's setSessionCookie).
 app.set('trust proxy', true);
 
@@ -178,84 +178,79 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-if (!process.env.VERCEL) {
-  app.listen(PORT, () => {
-    console.log(`\n  POS System running at http://localhost:${PORT}\n`);
-  });
+app.listen(PORT, () => {
+  console.log(`\n  POS System running at http://localhost:${PORT}\n`);
+});
 
-  // Scheduled database backups (Settings → Backups, lib/backups.js) —
-  // checked every minute; a no-op unless the schedule is on and due.
-  setInterval(async () => {
-    try {
-      await ensureReady();
-      await require('./lib/backups').tick();
-    } catch (e) { console.error('[backup] scheduler:', e.message); }
-  }, 60000);
+// Scheduled database backups (Settings → Backups, lib/backups.js) —
+// checked every minute; a no-op unless the schedule is on and due.
+setInterval(async () => {
+  try {
+    await ensureReady();
+    await require('./lib/backups').tick();
+  } catch (e) { console.error('[backup] scheduler:', e.message); }
+}, 60000);
 
-  // WooCommerce auto-sync — check every 60 s, fire when interval has elapsed
-  setInterval(async () => {
-    try {
-      await ensureReady();
-      const { rows: [iRow] } = await db.execute({ sql: "SELECT value FROM settings WHERE key='woo_sync_interval'", args: [] });
-      const mins = parseInt(iRow?.value || '0');
-      if (!mins) return;
-      const { rows: [lRow] } = await db.execute({ sql: "SELECT value FROM settings WHERE key='woo_last_auto_sync'", args: [] });
-      const last = lRow?.value ? new Date(lRow.value) : new Date(0);
-      if ((Date.now() - last.getTime()) / 60000 >= mins) {
-        wooSyncAll().catch(() => {});
-      }
-    } catch (e) {}
-  }, 60000);
+// WooCommerce auto-sync — check every 60 s, fire when interval has elapsed
+setInterval(async () => {
+  try {
+    await ensureReady();
+    const { rows: [iRow] } = await db.execute({ sql: "SELECT value FROM settings WHERE key='woo_sync_interval'", args: [] });
+    const mins = parseInt(iRow?.value || '0');
+    if (!mins) return;
+    const { rows: [lRow] } = await db.execute({ sql: "SELECT value FROM settings WHERE key='woo_last_auto_sync'", args: [] });
+    const last = lRow?.value ? new Date(lRow.value) : new Date(0);
+    if ((Date.now() - last.getTime()) / 60000 >= mins) {
+      wooSyncAll().catch(() => {});
+    }
+  } catch (e) {}
+}, 60000);
 
-  // Rental overdue detection — "overdue" is only ever computed live at read
-  // time (see rental_agreements' display_status in routes/rentals.js), so
-  // this is the one place that turns "due_date has passed" into a one-time
-  // CRM activity per rental, guarded by overdue_notified_at so it only
-  // fires once per rental. Not time-critical, checked every 30 minutes.
-  setInterval(async () => {
-    try {
-      await ensureReady();
-      const { rows: overdue } = await db.execute({
-        sql: "SELECT * FROM rental_agreements WHERE status='active' AND due_date < date('now') AND overdue_notified_at IS NULL",
-        args: [],
-      });
-      for (const agreement of overdue) {
-        try {
-          await db.execute({ sql: 'UPDATE rental_agreements SET overdue_notified_at = CURRENT_TIMESTAMP WHERE id = ?', args: [agreement.id] });
-          // completed:false + a past due_date makes this surface in the CRM
-          // Activities tab's existing Overdue bucket automatically, no new
-          // frontend code needed (public/js/crm.js's renderCrmActivities).
-          await logActivity({
-            customerId: agreement.customer_id, employeeId: agreement.employee_id,
-            type: 'rental', subject: `Rental ${agreement.agreement_number} is overdue (due ${agreement.due_date})`,
-            dueDate: agreement.due_date, completed: false,
-          });
-        } catch(e) {}
-      }
-    } catch (e) {}
-  }, 30 * 60000);
+// Rental overdue detection — "overdue" is only ever computed live at read
+// time (see rental_agreements' display_status in routes/rentals.js), so
+// this is the one place that turns "due_date has passed" into a one-time
+// CRM activity per rental, guarded by overdue_notified_at so it only
+// fires once per rental. Not time-critical, checked every 30 minutes.
+setInterval(async () => {
+  try {
+    await ensureReady();
+    const { rows: overdue } = await db.execute({
+      sql: "SELECT * FROM rental_agreements WHERE status='active' AND due_date < date('now') AND overdue_notified_at IS NULL",
+      args: [],
+    });
+    for (const agreement of overdue) {
+      try {
+        await db.execute({ sql: 'UPDATE rental_agreements SET overdue_notified_at = CURRENT_TIMESTAMP WHERE id = ?', args: [agreement.id] });
+        // completed:false + a past due_date makes this surface in the CRM
+        // Activities tab's existing Overdue bucket automatically, no new
+        // frontend code needed (public/js/crm.js's renderCrmActivities).
+        await logActivity({
+          customerId: agreement.customer_id, employeeId: agreement.employee_id,
+          type: 'rental', subject: `Rental ${agreement.agreement_number} is overdue (due ${agreement.due_date})`,
+          dueDate: agreement.due_date, completed: false,
+        });
+      } catch(e) {}
+    }
+  } catch (e) {}
+}, 30 * 60000);
 
-  // Missed-pickup auto-pause — pickup_required rentals are due down to the
-  // hour (due_date + checkout time-of-day, see lib/rentals.js's
-  // dueDateTime), not just the day, so this runs far more often than the
-  // day-granularity overdue check above. Checked every 5 minutes.
-  setInterval(async () => {
-    try {
-      await ensureReady();
-      await rentalsRouter.checkMissedPickups();
-    } catch (e) {}
-  }, 5 * 60000);
+// Missed-pickup auto-pause — pickup_required rentals are due down to the
+// hour (due_date + checkout time-of-day, see lib/rentals.js's
+// dueDateTime), not just the day, so this runs far more often than the
+// day-granularity overdue check above. Checked every 5 minutes.
+setInterval(async () => {
+  try {
+    await ensureReady();
+    await rentalsRouter.checkMissedPickups();
+  } catch (e) {}
+}, 5 * 60000);
 
-  // Scheduled rental stops/resumptions (operator / negotiated stops) — the
-  // pause records use the booked times regardless of when this notices them;
-  // running every minute just keeps the Paused status on screen current.
-  setInterval(async () => {
-    try {
-      await ensureReady();
-      await rentalsRouter.runScheduledPauses();
-    } catch (e) {}
-  }, 60000);
-}
-
-// Vercel serverless export
-module.exports = app;
+// Scheduled rental stops/resumptions (operator / negotiated stops) — the
+// pause records use the booked times regardless of when this notices them;
+// running every minute just keeps the Paused status on screen current.
+setInterval(async () => {
+  try {
+    await ensureReady();
+    await rentalsRouter.runScheduledPauses();
+  } catch (e) {}
+}, 60000);

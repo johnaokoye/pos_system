@@ -1,9 +1,5 @@
 const { createClient } = require('@libsql/client');
 
-if (process.env.VERCEL && !process.env.TURSO_DATABASE_URL) {
-  throw new Error('TURSO_DATABASE_URL is not set. Add it in Vercel project → Settings → Environment Variables.');
-}
-
 // A restore staged from Settings → Database Backups swaps the database file
 // in now, before it's opened (lib/restore.js).
 require('./lib/restore').applyPendingRestore();
