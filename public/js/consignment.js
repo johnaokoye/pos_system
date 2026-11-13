@@ -471,9 +471,10 @@ Object.assign(App, {
     const el = document.getElementById('cons-body');
     if (!el) return;
     el.innerHTML = `
-      ${data.go_live ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Stock receipts tracked since ${this.fmtDateTime(data.go_live)}. Supplier-owned stock is not part of Total Tools' inventory value.</div>`
+      ${data.go_live ? `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px"><div style="font-size:12px;color:var(--text-muted);flex:1">Stock receipts tracked since ${this.fmtDateTime(data.go_live)}. Supplier-owned stock is not part of Total Tools' inventory value.</div>
+          <button class="btn btn-sm btn-outline" onclick="App.showConsOpeningLog()">Supplier stock found on hand</button>${this.can('settings') ? '<button class="btn btn-sm btn-outline" onclick="App.showConsOpeningStock()">+ Record supplier-owned stock</button>' : ''}</div>`
         : `<div class="card" style="border-color:var(--warning, #d97706);margin-bottom:12px"><strong>Consignment tracking hasn't started.</strong>
-            <div style="font-size:13px;margin:4px 0 8px">Starting it records all stock on hand now as one Total Tools-owned receipt dated today, so it sells before any consignment stock received later. Consignment GRNs can be approved after that. It can't be undone.</div>
+            <div style="font-size:13px;margin:4px 0 8px">Starting it records the stock on hand now: anything you list as already belonging to a supplier becomes theirs, and the rest one Total Tools-owned receipt dated today, so it sells before any consignment stock received later. Consignment GRNs can be approved after that. It can't be undone.</div>
             ${this.can('settings') ? '<button class="btn btn-sm btn-primary" onclick="App._consGoLive()">Start Consignment Tracking</button>' : '<span style="font-size:12px;color:var(--text-muted)">An Administrator starts it.</span>'}</div>`}
       <div class="card"><div class="table-wrap"><table>
         <thead><tr><th>Supplier</th><th>Agreement</th><th>Branch</th><th>Item</th><th style="text-align:right">On hand</th><th style="text-align:right">Reserved</th><th style="text-align:right">Agreed cost</th><th style="text-align:right">Value at cost</th><th>Oldest receipt</th></tr></thead>
@@ -484,12 +485,77 @@ Object.assign(App, {
         ${data.rows.length ? `<tfoot><tr><td colspan="7" style="text-align:right" class="fw-600">Total at agreed cost</td><td style="text-align:right" class="fw-600">${this.fmt(data.total_value)}</td><td></td></tr></tfoot>` : ''}
       </table></div></div>`;
   },
-  async _consGoLive() {
-    const typed = prompt('This records all stock on hand now as one Total Tools-owned receipt dated today. It cannot be undone.\n\nType START to confirm:');
-    if (typed == null) return;
+  // Start Consignment Tracking: supplier-owned stock already on hand is
+  // listed first; everything else becomes one Total Tools-owned receipt.
+  // After go-live the same list records supplier stock found later.
+  async _consGoLive() { return this._consOpeningForm(false); },
+  async showConsOpeningStock() { return this._consOpeningForm(true); },
+  async showConsOpeningLog() {
+    let rows;
+    try { rows = await this.api('GET', '/consignment/opening-stock'); } catch (e) { this.alert(e.message, 'error'); return; }
+    this.showModal(`<div class="modal" style="max-width:860px"><div class="modal-header"><span class="modal-title">Supplier Stock Found On Hand</span><button class="modal-close">✕</button></div>
+      <div class="modal-body"><div class="table-wrap"><table style="font-size:13px"><thead><tr><th>When</th><th>Supplier</th><th>Agreement</th><th>Item</th><th>Branch</th><th style="text-align:right">Qty</th><th>Recorded</th></tr></thead>
+      <tbody>${rows.length ? rows.map(r => `<tr><td>${this.fmtDateTime(r.entered_at)}</td><td>${this.escapeAttr(r.supplier_name || '')}</td><td>${r.agreement_number}</td><td>${this.escapeAttr(r.product_name)}</td><td>${this.escapeAttr(r.branch_name)}</td>
+        <td style="text-align:right">${r.qty}</td><td>${r.mode === 'go_live' ? 'When tracking started' : `Later: ${this.escapeAttr(r.note || '')}`}<div style="font-size:11px;color:var(--text-muted)">${this.escapeAttr(r.entered_by_name || '')}</div></td></tr>`).join('')
+        : '<tr><td colspan="7" class="empty-state">None — all stock on hand when tracking started was Total Tools\'</td></tr>'}</tbody></table></div></div>
+      <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">Close</button></div></div>`);
+  },
+
+  async _consOpeningForm(after) {
+    let data;
+    try { data = await this.api('GET', '/consignment/opening-candidates'); } catch (e) { this.alert(e.message, 'error'); return; }
+    this._consOpeningCands = data.rows;
+    this._consOpeningAfter = after;
+    this.showModal(`
+      <div class="modal" style="max-width:760px">
+        <div class="modal-header"><span class="modal-title">${after ? 'Record Supplier-Owned Stock Found On Hand' : 'Start Consignment Tracking'}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body" style="font-size:13px">
+          ${after
+            ? '<p style="margin-top:0">For units that were recorded as Total Tools\' stock when tracking started but really belong to a supplier. They move to the supplier\'s ownership, dated when tracking started, and the reason is kept. The stock figures don\'t change.</p>'
+            : '<p style="margin-top:0">Everything on hand is recorded as of now. First list any stock on hand that already belongs to a supplier under an approved agreement — it becomes that supplier\'s. All the rest becomes one Total Tools-owned receipt dated today, so it sells before consignment stock received later. This is done once and can\'t be undone.</p>'}
+          <div style="font-weight:600;margin:10px 0 6px">Supplier-owned stock on hand</div>
+          ${data.rows.length ? `<div id="cons-open-lines" style="display:grid;gap:6px"></div>
+            ${after ? '' : '<button class="btn btn-sm btn-outline" style="margin-top:6px" onclick="App._consOpeningAddLine()">+ Add line</button>'}`
+            : `<p style="color:var(--text-muted)">No stock on hand is on an approved agreement, so there's nothing to list${after ? '' : ' — everything will be Total Tools-owned'}. An agreement has to be approved before its stock can be recorded here.</p>`}
+          ${after ? '<div class="form-group" style="margin-top:10px"><label>Reason *</label><input id="cons-open-note" placeholder="e.g. delivery note CPT-DN-4101 shows these were left on consignment"></div>'
+            : `<div class="form-group" style="margin-top:12px"><label>Type START to confirm</label><input id="cons-open-confirm" autocomplete="off" style="max-width:160px"></div>`}
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App._consOpeningSave()">${after ? 'Record' : 'Start Tracking'}</button></div>
+      </div>`);
+    if (data.rows.length) this._consOpeningAddLine();
+  },
+
+  _consOpeningAddLine() {
+    const box = document.getElementById('cons-open-lines');
+    if (!box) return;
+    const row = document.createElement('div');
+    row.className = 'cons-open-line';
+    row.style.cssText = 'display:flex;gap:6px;align-items:center;flex-wrap:wrap';
+    row.innerHTML = `<select class="cons-open-pick" style="flex:1;min-width:260px"><option value="">— Agreement · item · branch —</option>${this._consOpeningCands.map((c, i) =>
+      `<option value="${i}">${this.escapeAttr(c.supplier_name)} ${c.agreement_number} · ${this.escapeAttr(c.product_name)} · ${this.escapeAttr(c.branch_name)} (${Number(c.available)} ${this._consOpeningAfter ? "Total Tools'" : 'on hand'})</option>`).join('')}</select>
+      <input class="cons-open-qty" type="number" min="0" step="any" placeholder="Qty" style="width:90px">
+      ${this._consOpeningAfter ? '' : '<button class="btn btn-sm btn-outline" title="Remove" onclick="this.parentElement.remove()">✕</button>'}`;
+    box.appendChild(row);
+  },
+
+  async _consOpeningSave() {
+    const lines = [...document.querySelectorAll('.cons-open-line')].map(r => {
+      const c = this._consOpeningCands[r.querySelector('.cons-open-pick').value];
+      const qty = Number(r.querySelector('.cons-open-qty').value) || 0;
+      return c && qty ? { agreement_id: c.agreement_id, product_id: c.product_id, branch_id: c.branch_id, qty } : null;
+    }).filter(Boolean);
     try {
-      const out = await this.api('POST', '/consignment/go-live', { confirm: typed.trim() });
-      this.alert(`Consignment tracking started — ${out.lots} stock records dated today`, 'success');
+      if (this._consOpeningAfter) {
+        if (!lines.length) { this.alert('Choose the agreement, item and branch and enter the quantity', 'warning'); return; }
+        await this.api('POST', '/consignment/opening-stock', { ...lines[0], note: document.getElementById('cons-open-note').value });
+        this.closeModal();
+        this.alert('Recorded as the supplier\'s stock', 'success');
+      } else {
+        const out = await this.api('POST', '/consignment/go-live', { confirm: document.getElementById('cons-open-confirm').value.trim(), opening: lines });
+        this.closeModal();
+        this.alert(`Consignment tracking started — ${out.supplier_owned ? `${out.supplier_owned} supplier-owned line${out.supplier_owned === 1 ? '' : 's'}, the rest` : 'all stock'} recorded as Total Tools-owned`, 'success');
+      }
       this.renderConsignment('stock');
     } catch (e) { this.alert(e.message, 'error'); }
   },

@@ -6,7 +6,7 @@ const { nextNumber } = require('../lib/nextNumber');
 const { syncBinQty } = require('../lib/binSync');
 const { resolveApprovalSignature } = require('../lib/signatures');
 const { storeToday } = require('../lib/storeTime');
-const { goLive, addLot, startTracking, lotsOnHand, round3, consignmentEnabled, costOn } = require('../lib/stockLots');
+const { goLive, addLot, startTracking, reclassifyToConsignment, lotsOnHand, round3, consignmentEnabled, costOn } = require('../lib/stockLots');
 const settlement = require('../lib/consignmentSettlement');
 
 // Consignment — supplier-owned stock (mounted at /api/consignment).
@@ -41,10 +41,58 @@ router.post('/go-live', requirePermission('settings'), async (req, res) => {
   const tx = await db.transaction('write');
   let committed = false;
   try {
-    const out = await startTracking(tx, req.employee?.id || null);
+    const out = await startTracking(tx, req.employee?.id || null, req.body.opening || []);
     await tx.commit();
     committed = true;
     res.json(out);
+  } catch (e) {
+    if (!committed) await tx.rollback().catch(() => {});
+    send(res, e);
+  }
+});
+
+// Supplier-owned stock already on hand: what could be entered — each item on
+// an approved agreement, at each branch holding it, with how much there is
+// (before go-live: the branch's stock; after: its Total Tools-owned units not
+// reserved). For the Start screen and "Record supplier-owned stock".
+router.get('/opening-candidates', requirePermission('settings'), async (req, res) => {
+  try {
+    const live = await goLive(db);
+    const { rows } = await db.execute({
+      sql: `SELECT a.id AS agreement_id, a.agreement_number, s.name AS supplier_name, i.product_id, p.name AS product_name, p.sku, bi.branch_id, b.name AS branch_name,
+              ${live ? `(SELECT COALESCE(SUM(l.qty_on_hand - COALESCE(l.qty_reserved, 0)), 0) FROM stock_lots l WHERE l.product_id = i.product_id AND l.branch_id = bi.branch_id AND l.owner = 'owned')` : 'bi.stock_qty'} AS available
+            FROM consignment_agreements a JOIN suppliers s ON s.id = a.supplier_id JOIN consignment_agreement_items i ON i.agreement_id = a.id AND i.active = 1
+            JOIN products p ON p.id = i.product_id JOIN branch_inventory bi ON bi.product_id = i.product_id AND bi.stock_qty > 0 JOIN branches b ON b.id = bi.branch_id AND b.active != 0
+            WHERE a.status = 'approved' ORDER BY s.name, a.agreement_number, p.name, b.name`,
+      args: [],
+    });
+    res.json({ go_live: live, rows: rows.filter(r => Number(r.available) > 0) });
+  } catch (e) { send(res, e); }
+});
+
+// Entries of supplier-owned stock found on hand (at go-live and after).
+router.get('/opening-stock', canView, async (req, res) => {
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT o.*, a.agreement_number, s.name AS supplier_name, p.name AS product_name, b.name AS branch_name, e.first_name || ' ' || e.last_name AS entered_by_name
+            FROM consignment_opening_stock o JOIN consignment_agreements a ON a.id = o.agreement_id LEFT JOIN suppliers s ON s.id = o.supplier_id
+            JOIN products p ON p.id = o.product_id JOIN branches b ON b.id = o.branch_id LEFT JOIN employees e ON e.id = o.entered_by ORDER BY o.id DESC`,
+      args: [],
+    });
+    res.json(rows);
+  } catch (e) { send(res, e); }
+});
+
+// After go-live: units recorded as Total Tools' that are really a supplier's.
+// Administrator only; { agreement_id, product_id, branch_id, qty, note }.
+router.post('/opening-stock', requirePermission('settings'), async (req, res) => {
+  const tx = await db.transaction('write');
+  let committed = false;
+  try {
+    const out = await reclassifyToConsignment(tx, req.body || {}, req.body?.note, req.employee?.id || null);
+    await tx.commit();
+    committed = true;
+    res.status(201).json(out);
   } catch (e) {
     if (!committed) await tx.rollback().catch(() => {});
     send(res, e);

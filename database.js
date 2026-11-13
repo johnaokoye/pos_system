@@ -1975,6 +1975,24 @@ async function _init() {
       employee_id INTEGER REFERENCES employees(id),
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // Supplier-owned stock that was already on hand when consignment tracking
+    // started (mode 'go_live', entered on the Start screen) or found after it
+    // ('after_go_live', moved off Total Tools-owned receipts with a reason).
+    // lot_id is the supplier-owned receipt it became.
+    { sql: `CREATE TABLE IF NOT EXISTS consignment_opening_stock (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agreement_id INTEGER NOT NULL REFERENCES consignment_agreements(id),
+      supplier_id INTEGER REFERENCES suppliers(id),
+      product_id INTEGER NOT NULL REFERENCES products(id),
+      branch_id INTEGER NOT NULL REFERENCES branches(id),
+      qty REAL NOT NULL,
+      unit_cost REAL,
+      lot_id INTEGER REFERENCES stock_lots(id),
+      mode TEXT NOT NULL,
+      note TEXT,
+      entered_by INTEGER REFERENCES employees(id),
+      entered_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     // Settlement statement (CST-) from an approved month-end reconciliation:
     // what's owed to the supplier per item — sales, layaways paid off, work
     // order parts, returns (earlier months' ones listed as referenced
