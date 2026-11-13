@@ -1346,32 +1346,31 @@ Object.assign(App, {
     this._checkAutoPromos();
   },
 
-  applyDiscount() {
+  async applyDiscount() {
     if (this.appliedDiscountCard) { this.alert(`This customer already has a ${(this.appliedDiscountCard.label || 'Discount Card').toLowerCase()} applied — remove the customer to use a manual discount instead.`, 'error'); return; }
     let val = parseFloat(document.getElementById('discount-input')?.value) || 0;
-    const maxPct = parseFloat(this.settings.max_discount_pct) || 0;
     // A percentage is of the ticket (after line discounts) and is kept as a
     // percentage, so the amount follows the ticket as it changes.
-    if (document.getElementById('discount-type')?.value === 'percent') {
-      let pct = Math.min(100, Math.max(0, val));
-      if (maxPct > 0 && pct > maxPct) {
-        pct = maxPct;
-        document.getElementById('discount-input').value = String(pct);
-        this.alert(`Discount capped at ${maxPct}%`, 'warning');
-      }
+    const pct = document.getElementById('discount-type')?.value === 'percent' ? Math.min(100, Math.max(0, val)) : null;
+    // Past the store's Maximum Discount (measured against the ticket after
+    // line discounts, as checkout does) a manager authorizes it with their
+    // PIN, like a line discount; cancelling leaves the discount as it was.
+    const amount = pct != null ? parseFloat((this._ticketNet() * pct / 100).toFixed(2)) : val;
+    if (amount > 0 && this._ticketDiscountOverLimit(amount)) {
+      const maxPct = parseFloat(this.settings.max_discount_pct);
+      const shown = pct != null ? `${pct}%` : `${this.fmt(amount)} (${(amount / (this._ticketNet() || 1) * 100).toFixed(2)}%)`;
+      const approver = await this._askTicketDiscountOverride(`A ${shown} ticket discount exceeds the ${maxPct}% store limit — enter a manager PIN to override.`);
+      if (!approver) return;
+      this._ticketDiscountOverride = approver;
+      this.alert(`${shown} ticket discount applied — authorised by ${approver.name}`, 'success');
+    } else {
+      this._ticketDiscountOverride = null;
+    }
+    if (pct != null) {
       this._manualTicketDiscountPct = pct > 0 ? pct : null;
       val = this._manualPctDiscount();
     } else {
       this._manualTicketDiscountPct = null;
-    }
-    if (!this._manualTicketDiscountPct && maxPct > 0 && val > 0) {
-      const subtotal = this.cart.reduce((s, i) => s + i.price * i.quantity, 0);
-      const maxAllowed = parseFloat((subtotal * maxPct / 100).toFixed(2));
-      if (val > maxAllowed) {
-        val = maxAllowed;
-        document.getElementById('discount-input').value = val.toFixed(2);
-        this.alert(`Discount capped at ${maxPct}% (${this.fmt(maxAllowed)})`, 'warning');
-      }
     }
     this.cartDiscount = val;
     this._manualTicketDiscount = val > 0;
@@ -1382,8 +1381,68 @@ Object.assign(App, {
       const pd = document.getElementById('promo-display');
       if (pd) { pd.style.display = 'none'; pd.innerHTML = ''; }
     }
-    document.getElementById('discount-display').textContent = val > 0 ? `-${this.fmt(val)}${this._manualTicketDiscountPct ? ` (${this._manualTicketDiscountPct}%)` : ''}` : '';
+    const dd = document.getElementById('discount-display');
+    if (dd) dd.textContent = val > 0 ? `-${this.fmt(val)}${this._manualTicketDiscountPct ? ` (${this._manualTicketDiscountPct}%)` : ''}${this._ticketDiscountOverride ? ` · approved by ${this._ticketDiscountOverride.name}` : ''}` : '';
     if (val > 0) this.renderCart(); else this._checkAutoPromos();
+  },
+
+  // The ticket after line discounts — what the store's Maximum Discount on a
+  // Ticket Discount is measured against (POST /transactions does the same).
+  _ticketNet() {
+    return this.cart.reduce((s, i) => s + this._cartLineNet(i), 0);
+  },
+
+  _ticketDiscountOverLimit(amount) {
+    const maxPct = parseFloat(this.settings.max_discount_pct) || 0;
+    return maxPct > 0 && amount > this._ticketNet() * maxPct / 100 + 0.005;
+  },
+
+  // Manager PIN for a Ticket Discount past the store limit
+  // (pos_discount_override). Resolves { id, name } or null if cancelled.
+  _askTicketDiscountOverride(message) {
+    return new Promise(resolve => {
+      let settled = false;
+      const finish = v => { if (settled) return; settled = true; overlay.remove(); resolve(v); };
+      // Over the Ticket Discount box (secondary), which stays open under it.
+      const overlay = this.showSecondaryModal(`
+        <div class="modal" style="max-width:420px">
+          <div class="modal-header"><span class="modal-title">Manager Override</span><button class="modal-close">✕</button></div>
+          <div class="modal-body">
+            <p id="tdo-msg" style="font-size:13px;margin:0 0 10px;color:var(--danger)">${this.escapeAttr(message)}</p>
+            <div class="form-group"><label>Manager PIN</label><input id="tdo-pin" type="password" inputmode="numeric" autocomplete="off"></div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-secondary" id="tdo-cancel">Cancel</button>
+            <button class="btn btn-primary" id="tdo-ok">Authorize</button>
+          </div>
+        </div>`);
+      const pinEl = document.getElementById('tdo-pin');
+      const submit = () => {
+        const pin = pinEl.value;
+        if (!pin) { document.getElementById('tdo-msg').textContent = 'PIN is required to override the store limit.'; return; }
+        this.api('POST', '/employees/validate-pin', { pin, permission: 'pos_discount_override' })
+          .then(r => finish({ id: r.id, name: r.name }))
+          .catch(e => { document.getElementById('tdo-msg').textContent = e.message; pinEl.value = ''; pinEl.focus(); });
+      };
+      document.getElementById('tdo-ok').addEventListener('click', submit);
+      document.getElementById('tdo-cancel').addEventListener('click', () => finish(null));
+      overlay.querySelector('.modal-close')?.addEventListener('click', () => finish(null));
+      pinEl.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+      pinEl.focus();
+    });
+  },
+
+  // At payment: a manual Ticket Discount that has gone past the limit since
+  // it was applied (a "$" amount after items came off) still needs a manager.
+  // Promotions, discount cards, a quote's discount and return credit don't.
+  async _ticketDiscountApproved() {
+    if (!this._manualTicketDiscount || !(this.cartDiscount > 0) || this._ticketDiscountOverride || this._activeQuoteId || this._returnCredit || this.appliedDiscountCard) return true;
+    if (!this._ticketDiscountOverLimit(this.cartDiscount)) return true;
+    const pct = (this.cartDiscount / (this._ticketNet() || 1) * 100).toFixed(2);
+    const approver = await this._askTicketDiscountOverride(`The ${this.fmt(this.cartDiscount)} (${pct}%) ticket discount exceeds the ${parseFloat(this.settings.max_discount_pct)}% store limit — enter a manager PIN to override, or change the discount.`);
+    if (!approver) return false;
+    this._ticketDiscountOverride = approver;
+    return true;
   },
 
   // Dollar amount of a percentage Ticket Discount on the ticket as it is now
@@ -1464,7 +1523,7 @@ Object.assign(App, {
     if (this.appliedDiscountCard) return { discount_source: 'card' };
     if (this.appliedPromoCode) return { discount_source: 'promo_code', promotion_code: this.appliedPromoCode.code, promotion_name: this.appliedPromoCode.promo_name };
     if (this.autoAppliedPromo && !this._manualTicketDiscount) return { discount_source: 'auto_promo', promotion_name: this.autoAppliedPromo.name };
-    return { discount_source: 'manual', ticket_discount_percent: this._manualTicketDiscountPct || null };
+    return { discount_source: 'manual', ticket_discount_percent: this._manualTicketDiscountPct || null, discount_override_employee_id: this._ticketDiscountOverride?.id || null };
   },
 
   // Hold Recall: the customer's discount card / category discount wins (as it
@@ -1476,6 +1535,7 @@ Object.assign(App, {
     this.autoAppliedPromo = null;
     this._availablePromos = [];
     this._manualTicketDiscount = false; this._manualTicketDiscountPct = null;
+    this._ticketDiscountOverride = null;
     this.cartDiscount = 0;
     this.appliedDiscountCard = customer ? this._customerDiscountCard(customer) : null;
     const amount = parseFloat(held.discount_amount || 0);
@@ -1499,6 +1559,8 @@ Object.assign(App, {
       }
     }
     if (source === 'manual') {
+      // The manager's approval of a discount past the limit comes back too.
+      this._ticketDiscountOverride = amount > 0 && held.discount_override_by ? { id: held.discount_override_by, name: held.discount_override_name } : null;
       this._manualTicketDiscount = amount > 0;
       this._manualTicketDiscountPct = amount > 0 && held.ticket_discount_percent > 0 ? held.ticket_discount_percent : null;
       this.cartDiscount = this._manualTicketDiscountPct ? this._manualPctDiscount() : amount;
@@ -1643,6 +1705,7 @@ Object.assign(App, {
     this._salespersonReminderDone = false;
     this._bundleSeen = new Set(); this._closeBundleUpsell();
     this._ticketPoNumber = null;
+    this._ticketDiscountOverride = null;
     this.cart = []; this.cartCustomer = null; this.cartDiscount = 0; this._storeCreditApplied = 0; this._cashBackApplied = 0; this.appliedPromoCode = null; this.autoAppliedPromo = null; this._availablePromos = []; this._returnCredit = null; this._activeQuoteId = null; this._ticketCreatedBy = null; this._ticketSalesperson = null; this.appliedDiscountCard = null; this._manualTaxExempt = null; this._manualTicketDiscount = false; this._manualTicketDiscountPct = null;
     this.renderCart();
     const aqBar = document.getElementById('active-quote-bar');
@@ -2046,6 +2109,7 @@ Object.assign(App, {
     if (!this.cart.length) { this.alert('Cart is empty', 'warning'); return; }
     if (this._posQItemBlocksSale()) return;
     if (!await this._salespersonReminder()) return;
+    if (!await this._ticketDiscountApproved()) return;
 
     if (method === 'credit') {
       if (!this.cartCustomer) { this.alert('Please select a customer to use charge account', 'error'); return; }
@@ -2121,6 +2185,7 @@ Object.assign(App, {
         // from the client.
         items: this.cart.map(i => ({ product_id: i.product_id, variation_id: i.variation_id||null, serial_number: i.serial_number||null, uom_id: i.uom_id ?? null, sell_unit: i.sell_unit || null, quantity: i.quantity, discount_percent: i.discountPercent||0, discount_fixed: i.discountFixed||0, discount_override_employee_id: i.discountOverrideEmployeeId||null, ...(i.transfer_from_branch_id ? { transfer_from_branch_id: i.transfer_from_branch_id, transfer_qty: i.transfer_qty } : {}), ...(i.product_id ? {} : { product_name: i.name, unit_price: i.price, tax_rate: i.tax_rate||0, is_comment: i.is_comment ? 1 : 0, is_delivery: i.is_delivery ? 1 : 0, is_q_item: i.is_q_item ? 1 : 0 }) })),
         discount_amount: discount,
+        discount_override_employee_id: this._manualTicketDiscount ? (this._ticketDiscountOverride?.id || null) : null,
         promotion_code: this.appliedDiscountCard ? (this.appliedDiscountCard.card_number || null) : (this.appliedPromoCode?.code || null),
         promotion_name: this.appliedDiscountCard ? `${this.appliedDiscountCard.type_name} ${this.appliedDiscountCard.label || 'Discount Card'}` : (this.appliedPromoCode?.promo_name || this.autoAppliedPromo?.name || null),
         payment_method: method,

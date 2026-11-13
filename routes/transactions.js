@@ -8,6 +8,16 @@ const { syncBinQty } = require('../lib/binSync');
 const saleTransfers = require('../lib/saleTransfers');
 const { takeFromLots, recordSaleAllocation, returnSaleAllocation, releaseTransferReservations } = require('../lib/stockLots');
 const { requireAuth, requirePermission, requireAnyPermission, can } = require('../lib/permissions');
+
+// Whoever authorizes a line or Ticket Discount past the store limit needs
+// pos_discount_override set on their group itself — a standalone key, as
+// POST /employees/validate-pin (the PIN the POS asks for) and returns_override
+// check it. Not can(): that falls back to the `pos` module when the key is
+// absent, which would let any cashier's id authorize an override.
+function canOverrideDiscount(employeeRow) {
+  if (!employeeRow) return false;
+  try { return JSON.parse(employeeRow.permissions || '{}').pos_discount_override === true; } catch { return false; }
+}
 const { nextNumber } = require('../lib/nextNumber');
 const { refreshStoreTz, storeToday } = require('../lib/storeTime');
 const { blockedMessage, creditLimitError } = require('../lib/creditBlock');
@@ -128,8 +138,8 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
     let committed = false;
     try {
       const result = await txn.execute({
-        sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,created_by,salesperson_id,branch_id,subtotal,tax_amount,discount_amount,total,payment_method,status,notes,amount_tendered,change_amount,promotion_code,promotion_name,discount_source,ticket_discount_percent,po_number) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?)`,
-        args: [hold_number, customer_id || null, employee_id || 1, created_by || employee_id || 1, salespersonId, branch_id || null, subtotal, tax_amount, disc, total, 'hold', 'hold', notes || null, promotion_code || null, promotion_name || null, disc > 0 ? discountSource : null, disc > 0 ? ticketPct : null, String(req.body.po_number || '').trim() || null]
+        sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,created_by,salesperson_id,branch_id,subtotal,tax_amount,discount_amount,total,payment_method,status,notes,amount_tendered,change_amount,promotion_code,promotion_name,discount_source,ticket_discount_percent,po_number,discount_override_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?,?)`,
+        args: [hold_number, customer_id || null, employee_id || 1, created_by || employee_id || 1, salespersonId, branch_id || null, subtotal, tax_amount, disc, total, 'hold', 'hold', notes || null, promotion_code || null, promotion_name || null, disc > 0 ? discountSource : null, disc > 0 ? ticketPct : null, String(req.body.po_number || '').trim() || null, disc > 0 && discountSource === 'manual' ? (Number(req.body.discount_override_employee_id) || null) : null]
       });
       const txId = Number(result.lastInsertRowid);
       for (const [i, item] of items.entries()) {
@@ -207,7 +217,7 @@ const requireTransactionsList = (req, res, next) => req.query.status === 'hold'
 
 router.get('/', requireTransactionsList, async (req, res) => {
   try {
-    const { start, end, customer_id, customer_name, status, branch_id, payment_method, transaction_number, source, fulfillment_status, employee_id, credited_id, limit = 100 } = req.query;
+    const { start, end, customer_id, customer_name, status, branch_id, payment_method, transaction_number, source, fulfillment_status, employee_id, credited_id, discounted, limit = 100 } = req.query;
     let sql = `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name,
       ${CREDITED_SQL} as credited_id, ce.first_name || ' ' || ce.last_name as credited_name,
       ra.agreement_number as rental_agreement_number, q.quote_number as source_quote_number,
@@ -215,7 +225,10 @@ router.get('/', requireTransactionsList, async (req, res) => {
       wo.wo_number as work_order_number,
       CASE WHEN wo.assessment_transaction_id = t.id THEN 'assessment' WHEN wo.deposit_transaction_id = t.id THEN 'deposit' WHEN wo.final_transaction_id = t.id THEN 'final' END as wo_role,
       (SELECT COUNT(*) FROM returns rt WHERE rt.original_transaction_id = t.id) as return_count,
-      rce.first_name || ' ' || rce.last_name as recalled_by_name
+      rce.first_name || ' ' || rce.last_name as recalled_by_name,
+      (SELECT COALESCE(SUM(ti.discount_amount), 0) FROM transaction_items ti WHERE ti.transaction_id = t.id) as line_discount,
+      (SELECT COALESCE(MAX(ti.discount_percent), 0) FROM transaction_items ti WHERE ti.transaction_id = t.id AND ti.discount_amount > 0) as max_line_discount_pct,
+      (SELECT GROUP_CONCAT(DISTINCT oe.first_name || ' ' || oe.last_name) FROM employees oe WHERE oe.id = t.discount_override_by OR oe.id IN (SELECT ti.discount_override_by FROM transaction_items ti WHERE ti.transaction_id = t.id)) as discount_approved_by
       FROM transactions t LEFT JOIN customers c ON t.customer_id = c.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN branches b ON t.branch_id = b.id
       LEFT JOIN employees ce ON ce.id = ${CREDITED_SQL}
       LEFT JOIN employees rce ON rce.id = t.recalled_by
@@ -235,6 +248,13 @@ router.get('/', requireTransactionsList, async (req, res) => {
     if (fulfillment_status) { sql += ' AND t.fulfillment_status = ?'; params.push(fulfillment_status); }
     if (employee_id) { sql += ' AND t.employee_id = ?'; params.push(Number(employee_id)); }
     if (credited_id) { sql += ` AND ${CREDITED_SQL} = ?`; params.push(Number(credited_id)); }
+    // discounted=1: a line or ticket discount (an exchange's return credit
+    // also sits in discount_amount, but it isn't a discount — see
+    // lib/ticketDiscount.js). discounted=approved: a line discount past the
+    // store limit that a manager authorized (discount_override_by on the
+    // line, or on the sale for a Ticket Discount).
+    if (discounted === 'approved') { sql += ' AND (t.discount_override_by IS NOT NULL OR EXISTS (SELECT 1 FROM transaction_items ti WHERE ti.transaction_id = t.id AND ti.discount_override_by IS NOT NULL))'; }
+    else if (discounted) { sql += ` AND ((t.source_return_id IS NULL AND t.discount_amount > 0) OR EXISTS (SELECT 1 FROM transaction_items ti WHERE ti.transaction_id = t.id AND ti.discount_amount > 0))`; }
     if (source === 'online') { sql += " AND t.source IN ('online','woocommerce')"; }
     else if (source) { sql += ' AND t.source = ?'; params.push(source); }
     // A salesperson-flagged employee only ever sees their own sales here,
@@ -245,6 +265,25 @@ router.get('/', requireTransactionsList, async (req, res) => {
     sql += ' ORDER BY t.created_at DESC LIMIT ?';
     params.push(parseInt(limit));
     const { rows } = await db.execute({ sql, args: params });
+    // Discount summary for the list: line + ticket discounts, as a % of the
+    // goods before any discount (subtotal is after line discounts). One
+    // decimal, so cent rounding (20% of $25.98 = $5.20) still reads 20%.
+    for (const r of rows) {
+      const line = Number(r.line_discount) || 0;
+      const ticket = r.source_return_id ? 0 : Number(r.discount_amount) || 0;
+      const total = Math.round((line + ticket) * 100) / 100;
+      const gross = (Number(r.subtotal) || 0) + line;
+      r.ticket_discount = ticket;
+      r.total_discount = total;
+      r.discount_pct = total > 0 && gross > 0 ? Math.round(total / gross * 1000) / 10 : 0;
+      // The store's Maximum Discount caps each line and the ticket discount
+      // separately, so the Transactions screen flags on these, not the total.
+      // A ticket discount is measured against the ticket after line
+      // discounts (subtotal), as checkout enforces it.
+      const sub = Number(r.subtotal) || 0;
+      r.ticket_discount_pct = ticket > 0 && sub > 0 ? Math.round(ticket / sub * 1000) / 10 : 0;
+      r.max_line_discount_pct = Math.round((Number(r.max_line_discount_pct) || 0) * 10) / 10;
+    }
     res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -525,7 +564,7 @@ router.get('/customer-payments/:id', requireAnyPermission('transactions', 'pos_r
 // returns flow, online orders), not just the Transactions detail view.
 router.get('/:id', requireAuth, async (req, res) => {
   try {
-    const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, c.phone as customer_phone, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip, e.first_name || ' ' || e.last_name as employee_name, cbe.first_name || ' ' || cbe.last_name as created_by_name, spe.first_name || ' ' || spe.last_name as salesperson_name, ${CREDITED_SQL} as credited_id, ce.first_name || ' ' || ce.last_name as credited_name, b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone, q.id as source_quote_id, q.quote_number as source_quote_number, q.valid_until as source_quote_valid_until, qe.first_name || ' ' || qe.last_name as quote_created_by, r.return_number as source_return_number, sh.carrier as shipment_carrier, sh.tracking_number as shipment_tracking_number, sh.status as shipment_status, sh.ship_date as shipment_ship_date, sh.estimated_delivery as shipment_estimated_delivery,
+    const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, c.phone as customer_phone, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip, e.first_name || ' ' || e.last_name as employee_name, cbe.first_name || ' ' || cbe.last_name as created_by_name, spe.first_name || ' ' || spe.last_name as salesperson_name, (SELECT doe.first_name || ' ' || doe.last_name FROM employees doe WHERE doe.id = t.discount_override_by) as discount_override_name, ${CREDITED_SQL} as credited_id, ce.first_name || ' ' || ce.last_name as credited_name, b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone, q.id as source_quote_id, q.quote_number as source_quote_number, q.valid_until as source_quote_valid_until, qe.first_name || ' ' || qe.last_name as quote_created_by, r.return_number as source_return_number, sh.carrier as shipment_carrier, sh.tracking_number as shipment_tracking_number, sh.status as shipment_status, sh.ship_date as shipment_ship_date, sh.estimated_delivery as shipment_estimated_delivery,
       ve.first_name || ' ' || ve.last_name as voided_by_name,
       ra.id as rental_agreement_id, ra.agreement_number as rental_agreement_number, ra.status as rental_status, ra.quotation_id as rental_quotation_id,
       ra.checkout_datetime as rental_checkout_datetime, ra.due_date as rental_due_date, ra.returned_at as rental_returned_at,
@@ -793,7 +832,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
           }
           const { rows: [overrider] } = await db.execute({ sql: 'SELECT sg.permissions FROM employees e LEFT JOIN security_groups sg ON e.security_group_id = sg.id WHERE e.id = ? AND e.active = 1', args: [item.discount_override_employee_id] });
           let authorized = false;
-          try { authorized = overrider && can(JSON.parse(overrider.permissions || '{}'), 'pos_discount_override'); } catch { authorized = false; }
+          authorized = canOverrideDiscount(overrider);
           if (!authorized) throw new Error(`The employee authorizing the discount override on ${product.name} doesn't have override privileges`);
           discountOverrideBy = item.discount_override_employee_id;
         }
@@ -837,6 +876,25 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       const { error, ret } = await exchangeCreditError(db, source_return_id, customer_id);
       if (error) return res.status(400).json({ error });
       disc = Math.min(disc, parseFloat(ret.total));
+    }
+    // A manual Ticket Discount past the store's Maximum Discount needs a
+    // manager override, like a line discount (pos_discount_override). It's
+    // measured against the ticket after line discounts. Not a discount set up
+    // elsewhere: a promotion / discount card (promotion_name), a quote's
+    // Discount (quote_id), an exchange's return credit, or an online order's
+    // coupon (API key — there's no cashier or manager at the till).
+    let ticketDiscountOverrideBy = null;
+    if (disc > 0 && maxLineDiscountPercent > 0 && !source_return_id && !promotion_name && !quote_id && !req.apiKey) {
+      const ticketPct = subtotal > 0 ? disc / subtotal * 100 : 100;
+      if (disc > subtotal * maxLineDiscountPercent / 100 + 0.005) {
+        const overrideId = Number(req.body.discount_override_employee_id) || null;
+        if (!overrideId) return res.status(400).json({ code: 'ticket_discount_override_required', error: `A ${ticketPct.toFixed(2).replace(/\.?0+$/, '')}% ticket discount (${disc.toFixed(2)}) exceeds the store limit of ${maxLineDiscountPercent}% — manager override required` });
+        const { rows: [overrider] } = await db.execute({ sql: 'SELECT sg.permissions FROM employees e LEFT JOIN security_groups sg ON e.security_group_id = sg.id WHERE e.id = ? AND e.active = 1', args: [overrideId] });
+        let authorized = false;
+        authorized = canOverrideDiscount(overrider);
+        if (!authorized) return res.status(400).json({ code: 'ticket_discount_override_required', error: "The employee authorizing the ticket discount override doesn't have override privileges" });
+        ticketDiscountOverrideBy = overrideId;
+      }
     }
     const storeCredit = parseFloat(store_credit_applied || 0);
     // Store credit can't be more than the customer's credit balance (old
@@ -909,7 +967,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         throw Object.assign(new Error('This held ticket is no longer on hold — it may already have been completed at another till. Check Transactions before taking payment again.'), { status: 409, holdGone: true });
       }
       const txSource = req.apiKey ? 'online' : 'pos';
-      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,created_by,salesperson_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,promotion_code,promotion_name,total,payment_method,amount_tendered,change_amount,is_credit,notes,source_return_id,store_credit_applied,cash_back_applied,tax_exempt,tax_exemption_number,approval_code,source,discount_pre_tax,po_number) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id || null, employee_id || 1, createdBy, salespersonId, branch_id || null, drawer_session_id || null, subtotal, tax_amount, disc, promotion_code || null, promotion_name || null, total, method, tendered, change > 0 ? change : 0, isCredit ? 1 : 0, notes || null, source_return_id || null, storeCredit > 0 ? storeCredit : 0, cashBack > 0 ? cashBack : 0, isTaxExempt, tax_exemption_number || null, finalApprovalCode, txSource, discountPreTax, poNumber] });
+      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,created_by,salesperson_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,promotion_code,promotion_name,total,payment_method,amount_tendered,change_amount,is_credit,notes,source_return_id,store_credit_applied,cash_back_applied,tax_exempt,tax_exemption_number,approval_code,source,discount_pre_tax,po_number,discount_override_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id || null, employee_id || 1, createdBy, salespersonId, branch_id || null, drawer_session_id || null, subtotal, tax_amount, disc, promotion_code || null, promotion_name || null, total, method, tendered, change > 0 ? change : 0, isCredit ? 1 : 0, notes || null, source_return_id || null, storeCredit > 0 ? storeCredit : 0, cashBack > 0 ? cashBack : 0, isTaxExempt, tax_exemption_number || null, finalApprovalCode, txSource, discountPreTax, poNumber, ticketDiscountOverrideBy] });
       const txId = Number(txResult.lastInsertRowid);
 
       const paymentLegs = tenderLegs || [{ payment_method: method, amount: total, approval_code: finalApprovalCode }];

@@ -43,6 +43,11 @@ Object.assign(App, {
             <option value="online">Online Orders</option>
             <option value="pos">In-Store (POS)</option>
           </select>
+          <select id="tx-discounted" style="width:175px" title="Sales with a line or ticket discount">
+            <option value="">Any Discount</option>
+            <option value="1">Discounted Only</option>
+            <option value="approved">Manager-Approved Only</option>
+          </select>
           <input type="text" id="tx-number" placeholder="Tx # search…" style="width:150px">
           <input type="text" id="tx-customer" placeholder="Customer name…" style="width:160px">
           ${spManager ? `<select id="tx-cashier" style="width:160px" title="Who rang the sale up">
@@ -201,7 +206,7 @@ Object.assign(App, {
           </div>
           <table style="margin-bottom:12px">
             <thead><tr><th>Item</th><th>SKU</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
-            <tbody>${(tx.items||[]).map(i=>i.is_comment ? `<tr><td colspan="5" style="font-style:italic;white-space:pre-wrap;color:var(--text-muted)"><span class="badge-pill badge-info" style="font-size:10px;font-style:normal">C</span> ${this.escapeAttr(i.product_name)}</td></tr>` : `<tr><td>${i.product_name}</td><td style="font-family:monospace;font-size:12px">${i.sku||''}</td><td style="text-align:center">${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}</tbody>
+            <tbody>${(tx.items||[]).map(i=>i.is_comment ? `<tr><td colspan="5" style="font-style:italic;white-space:pre-wrap;color:var(--text-muted)"><span class="badge-pill badge-info" style="font-size:10px;font-style:normal">C</span> ${this.escapeAttr(i.product_name)}</td></tr>` : `<tr><td>${i.product_name}${i.discount_amount > 0 ? `<div style="font-size:11px;color:${this._txLineOverLimit(i) ? 'var(--danger);font-weight:600' : 'var(--success)'}">${this._txLineOverLimit(i) ? '⚠ ' : ''}Discount -${this.fmt(i.discount_amount)} (${+Number(i.discount_percent || 0).toFixed(2)}%)${this._txLineOverLimit(i) ? ` · over ${parseFloat(this.settings.max_discount_pct)}% limit` : ''}${i.discount_override_name ? ` · approved by ${this.escapeAttr(i.discount_override_name)}` : ''}</div>` : ''}</td><td style="font-family:monospace;font-size:12px">${i.sku||''}</td><td style="text-align:center">${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}</tbody>
           </table>
           <div style="text-align:right;border-top:1px solid var(--border);padding-top:10px">
             <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span>Subtotal</span><span>${this.fmt(tx.subtotal)}</span></div>
@@ -408,7 +413,7 @@ Object.assign(App, {
         <button class="btn btn-primary btn-sm" id="tx-bulk-btn" disabled onclick="App.showChangeSalespersonModal([...App._txSelected])">Change Salesperson…</button>
         ${txs.length >= (this._txLimit || 100) ? `<span style="color:var(--text-muted);font-size:12px">Showing the latest ${txs.length} — narrow the dates to see more</span>` : ''}
       </div>` : ''}<table>
-      <thead><tr>${pick ? `<th style="width:28px"><input type="checkbox" title="Select all" onchange="App._txSelectAll(this.checked)" style="width:auto;margin:0"></th>` : ''}<th>Tx #</th><th>Date/Time</th><th>Customer</th><th>Branch</th><th>Type</th><th>Subtotal</th><th>Tax</th><th>Total</th><th>Method</th><th>Salesperson</th><th>Status</th><th>Actions</th></tr></thead>
+      <thead><tr>${pick ? `<th style="width:28px"><input type="checkbox" title="Select all" onchange="App._txSelectAll(this.checked)" style="width:auto;margin:0"></th>` : ''}<th>Tx #</th><th>Date/Time</th><th>Customer</th><th>Branch</th><th>Type</th><th>Subtotal</th><th>Discount</th><th>Approved By</th><th>Tax</th><th>Total</th><th>Method</th><th>Salesperson</th><th>Status</th><th>Actions</th></tr></thead>
       <tbody>${txs.map(tx => `<tr>
         ${pick ? `<td>${pickable(tx) ? `<input type="checkbox" class="tx-pick" value="${tx.id}" onchange="App._txToggle(${tx.id}, this.checked)" style="width:auto;margin:0">` : ''}</td>` : ''}
         <td class="fw-600" style="font-family:monospace">${tx.transaction_number}${(tx.source==='online'||tx.source==='woocommerce')?'<br><span style="font-size:10px;background:#6366f1;color:#fff;border-radius:3px;padding:1px 5px;font-family:sans-serif;font-weight:500;letter-spacing:.3px">ONLINE</span>':''}</td>
@@ -419,6 +424,7 @@ Object.assign(App, {
           : tx.work_order_number ? `<span class="badge-pill badge-info" title="${tx.work_order_number} (${tx.wo_role})">Work Order</span>`
           : `<span class="badge-pill badge-secondary">Retail</span>`}</td>
         <td>${this.fmt(tx.subtotal)}</td>
+        ${this._txDiscountCells(tx)}
         <td style="color:var(--text-muted)">${this.fmt(tx.tax_amount)}</td>
         <td class="fw-600">${this.fmt(tx.total)}</td>
         <td><span class="badge-pill badge-info">${tx.payment_method.replace(/_/g, ' ')}</span></td>
@@ -430,6 +436,33 @@ Object.assign(App, {
         </td>
       </tr>`).join('')}</tbody>
     </table>`;
+  },
+
+  // Discount + Approved By cells on the Sales list (fields from
+  // GET /transactions). A manager approves only a line discount past the
+  // store limit; anything within it, and promotions/cards, need no approval.
+  _txDiscountCells(tx) {
+    const esc = x => this.escapeAttr(x ?? '');
+    if (!(tx.total_discount > 0)) return '<td style="color:var(--text-muted)">—</td><td style="color:var(--text-muted)">—</td>';
+    const line = tx.line_discount > 0, ticket = tx.ticket_discount > 0;
+    const kind = [line ? 'Line' : '', ticket ? (tx.promotion_name || 'Ticket') : ''].filter(Boolean).join(' + ');
+    const breakdown = [line ? `Line discounts ${this.fmt(tx.line_discount)}` : '', ticket ? `${tx.promotion_name || 'Ticket discount'} ${this.fmt(tx.ticket_discount)}` : ''].filter(Boolean).join(' · ');
+    const approved = tx.discount_approved_by
+      ? `<span class="fw-600">${esc(tx.discount_approved_by)}</span>`
+      : `<span style="color:var(--text-muted)" title="Within the store's discount limit${tx.employee_name ? ` — given by ${esc(tx.employee_name)}` : ''}">${!line && tx.promotion_name ? 'Promotion' : 'Within limit'}</span>`;
+    // Red when a line or the ticket discount went past the store's Maximum
+    // Discount (settings.max_discount_pct; 0 = no limit).
+    const max = parseFloat(this.settings?.max_discount_pct) || 0;
+    const overBy = max > 0 ? [tx.max_line_discount_pct > max ? `a line discount of ${tx.max_line_discount_pct}%` : '', tx.ticket_discount_pct > max ? `a ticket discount of ${tx.ticket_discount_pct}%` : ''].filter(Boolean) : [];
+    const over = overBy.length > 0;
+    const title = over ? `Above the store's ${max}% discount limit: ${overBy.join(' and ')} · ${breakdown}` : breakdown;
+    return `<td class="${over ? 'tx-disc-over' : ''}" style="color:${over ? 'var(--danger)' : 'var(--success)'};white-space:nowrap${over ? ';background:rgba(239,68,68,.08);font-weight:600' : ''}" title="${esc(title)}">${over ? '⚠ ' : ''}-${this.fmt(tx.total_discount)}<div style="font-size:11px;color:${over ? 'var(--danger)' : 'var(--text-muted)'}">${tx.discount_pct}% · ${esc(kind)}${over ? ` · over ${max}% limit` : ''}</div></td>
+        <td style="font-size:12px">${approved}</td>`;
+  },
+
+  _txLineOverLimit(i) {
+    const max = parseFloat(this.settings?.max_discount_pct) || 0;
+    return max > 0 && i.discount_amount > 0 && Math.round((Number(i.discount_percent) || 0) * 10) / 10 > max;
   },
 
   async loadTransactions() {
@@ -446,6 +479,8 @@ Object.assign(App, {
     if (branch) url += `&branch_id=${branch}`;
     if (status) url += `&status=${status}`;
     if (source) url += `&source=${encodeURIComponent(source)}`;
+    const discounted = document.getElementById('tx-discounted')?.value;
+    if (discounted) url += `&discounted=${encodeURIComponent(discounted)}`;
     if (txNumber) url += `&transaction_number=${encodeURIComponent(txNumber)}`;
     if (customerName) url += `&customer_name=${encodeURIComponent(customerName)}`;
     const cashier = document.getElementById('tx-cashier')?.value;
@@ -579,12 +614,12 @@ Object.assign(App, {
           </div>` : ''}
           <table style="margin-bottom:12px">
             <thead><tr><th>Item</th><th>SKU</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
-            <tbody>${tx.items.map(i => i.is_comment ? `<tr><td colspan="5" style="font-style:italic;white-space:pre-wrap;color:var(--text-muted)"><span class="badge-pill badge-info" style="font-size:10px;font-style:normal">C</span> ${this.escapeAttr(i.product_name)}</td></tr>` : `<tr><td>${i.product_name}</td><td style="font-family:monospace;font-size:12px">${i.sku||''}</td><td style="text-align:center">${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}</tbody>
+            <tbody>${tx.items.map(i => i.is_comment ? `<tr><td colspan="5" style="font-style:italic;white-space:pre-wrap;color:var(--text-muted)"><span class="badge-pill badge-info" style="font-size:10px;font-style:normal">C</span> ${this.escapeAttr(i.product_name)}</td></tr>` : `<tr><td>${i.product_name}${i.discount_amount > 0 ? `<div style="font-size:11px;color:${this._txLineOverLimit(i) ? 'var(--danger);font-weight:600' : 'var(--success)'}">${this._txLineOverLimit(i) ? '⚠ ' : ''}Discount -${this.fmt(i.discount_amount)} (${+Number(i.discount_percent || 0).toFixed(2)}%)${this._txLineOverLimit(i) ? ` · over ${parseFloat(this.settings.max_discount_pct)}% limit` : ''}${i.discount_override_name ? ` · approved by ${this.escapeAttr(i.discount_override_name)}` : ''}</div>` : ''}</td><td style="font-family:monospace;font-size:12px">${i.sku||''}</td><td style="text-align:center">${i.quantity}</td><td>${this.fmt(i.unit_price)}</td><td class="fw-600">${this.fmt(i.total)}</td></tr>`).join('')}</tbody>
           </table>
           <div style="text-align:right;border-top:1px solid var(--border);padding-top:10px">
             <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span>Subtotal</span><span>${this.fmt(tx.subtotal)}</span></div>
             <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span>Tax</span><span>${this.fmt(tx.tax_amount)}</span></div>
-            ${tx.discount_amount > 0 ? `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;color:var(--success)"><span>${tx.source_return_number ? `↩ Return Credit <span style="font-family:monospace;font-size:11px;color:var(--text-muted)">${tx.source_return_number}</span>` : `Discount${tx.promotion_code ? ` <span style="font-family:monospace;font-size:11px;background:var(--bg);padding:1px 5px;border-radius:4px;color:var(--text-muted)">${tx.promotion_code}</span>` : ''}${tx.promotion_name ? ` <span style="color:var(--text-muted);font-size:11px">— ${tx.promotion_name}</span>` : ''}`}</span><span>-${this.fmt(tx.discount_amount)}</span></div>` : ''}
+            ${tx.discount_amount > 0 ? `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;color:var(--success)"><span>${tx.source_return_number ? `↩ Return Credit <span style="font-family:monospace;font-size:11px;color:var(--text-muted)">${tx.source_return_number}</span>` : `Discount${tx.promotion_code ? ` <span style="font-family:monospace;font-size:11px;background:var(--bg);padding:1px 5px;border-radius:4px;color:var(--text-muted)">${tx.promotion_code}</span>` : ''}${tx.promotion_name ? ` <span style="color:var(--text-muted);font-size:11px">— ${tx.promotion_name}</span>` : ''}${tx.discount_override_name ? ` <span style="font-size:11px;color:var(--danger)">· over limit, approved by ${this.escapeAttr(tx.discount_override_name)}</span>` : ''}`}</span><span>-${this.fmt(tx.discount_amount)}</span></div>` : ''}
             ${tx.store_credit_applied > 0 ? `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;color:#2e7d32"><span>💳 Available Credit Applied</span><span>-${this.fmt(tx.store_credit_applied)}</span></div>` : ''}
             ${tx.cash_back_applied > 0 ? `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;color:#2e7d32"><span>🎁 Cash Back Applied</span><span>-${this.fmt(tx.cash_back_applied)}</span></div>` : ''}
             <div style="display:flex;justify-content:space-between;font-size:16px;font-weight:700;margin-top:6px"><span>TOTAL</span><span>${this.fmt(tx.total)}</span></div>

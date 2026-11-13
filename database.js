@@ -3483,6 +3483,11 @@ async function _init() {
     'ALTER TABLE transactions ADD COLUMN ticket_discount_percent REAL',
     // Manager who authorized a return with their PIN (returns_override).
     'ALTER TABLE returns ADD COLUMN override_by INTEGER REFERENCES employees(id)',
+    // Manager who authorized a manual Ticket Discount past the store's
+    // Maximum Discount (pos_discount_override) — the ticket-level twin of
+    // transaction_items.discount_override_by. Also kept on a hold so Hold
+    // Recall doesn't need a second PIN; checkout re-validates it.
+    'ALTER TABLE transactions ADD COLUMN discount_override_by INTEGER REFERENCES employees(id)',
     // Transfer requests (routes/transfers.js): a branch asks, the inventory
     // team sets what's actually sent and sends it. quantity_asked keeps the
     // branch's original ask; quantity_requested becomes the sent quantity
@@ -4268,6 +4273,11 @@ async function _init() {
       if (!('user-sessions' in perms)) { perms['user-sessions'] = can(perms, 'security'); changed = true; }
       if (!('sessions_logout' in perms)) { perms.sessions_logout = can(perms, 'security_manage'); changed = true; }
       if (!('assessment' in perms)) { perms.assessment = can(perms, 'employees'); changed = true; }
+      // Override Discount Limit (manager PIN for a line or Ticket Discount
+      // past the store's Maximum Discount): Administrator and Manager. The
+      // older backfill further up runs before the first-run group seed, so a
+      // brand-new DB only gets it here.
+      if (!('pos_discount_override' in perms)) { perms.pos_discount_override = g.name === 'Administrator' || g.name === 'Manager'; changed = true; }
       // Accounts Payable is new (no earlier key gated it). It starts out with
       // full-access groups (those that manage Security Groups and Settings)
       // plus any group named for payables — e.g. an existing "Accounts
