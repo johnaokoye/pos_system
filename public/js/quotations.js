@@ -432,6 +432,7 @@ Object.assign(App, {
     this._quoteBranches = branches;
     this._quoteStockCache = {};
     this._editingQuoteId = editId || null;
+    this._quoteFromPosCart = false;
     this._rentalQuoteProducts = [];
     this._rentalQuoteLineIdx = 0;
     this._spRentalProducts = null;
@@ -1564,6 +1565,7 @@ Object.assign(App, {
         } else {
           await this.api('POST', '/quotations', payload);
           this.alert('Rental quotation created');
+          await this._posQuoteSaved();
         }
         this.closeModal();
         this.renderQuotations();
@@ -1677,6 +1679,7 @@ Object.assign(App, {
       } else {
         await this.api('POST', '/quotations', payload);
         this.alert(isSpecialProject ? 'Quotation saved as draft' : 'Quotation created');
+        await this._posQuoteSaved();
       }
       this.closeModal();
       if (isSpecialProject) this.renderSpecialProjects(); else this.renderQuotations();

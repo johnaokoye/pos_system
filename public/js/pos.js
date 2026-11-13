@@ -833,6 +833,8 @@ Object.assign(App, {
   // then prefills it from the current ticket instead of leaving it blank.
   async posCreateQuoteFromCart() {
     await this.showQuoteForm();
+    // saveQuote clears the ticket once this quote is created (_posQuoteSaved).
+    this._quoteFromPosCart = true;
     if (this.cartCustomer?.id) this._selectCustomerPicker('qt-cust', this.cartCustomer.id);
     if (this.posBranch?.id) { const el = document.getElementById('qt-branch'); if (el) el.value = this.posBranch.id; }
     if (this.cart.length) {
@@ -884,7 +886,9 @@ Object.assign(App, {
 
   async _quoteSwitchToSpecialProject() {
     const snap = this._quoteFormSnapshot();
+    const fromPosCart = this._quoteFromPosCart;
     await this.showQuoteForm(null, 'special_project');
+    this._quoteFromPosCart = fromPosCart;
     if (snap.customer_id) this._selectCustomerPicker('qt-cust', snap.customer_id);
     if (snap.branch_id) { const el = document.getElementById('qt-branch'); if (el) { el.value = snap.branch_id; el.onchange?.(); } }
     const notesEl = document.getElementById('qt-notes'); if (notesEl) notesEl.value = snap.notes;
@@ -904,6 +908,16 @@ Object.assign(App, {
     // so the most useful carry-over is the first item as the tag label.
     const labelEl = document.getElementById('wo-item-label');
     if (labelEl && snap.items[0]?.product_name) labelEl.value = snap.items[0].product_name;
+  },
+
+  // A quote created from the ticket (Create Quote) now holds its lines, so
+  // clear the screen for the next ticket — dropping a recalled hold too,
+  // as turning a ticket into a layaway does. Edits never reach here.
+  async _posQuoteSaved() {
+    if (!this._quoteFromPosCart) return;
+    this._quoteFromPosCart = false;
+    await this._dropRecalledHold();
+    this.clearCart();
   },
 
   // "Create Layaway" grid button — opens the normal (unchanged) layaway
