@@ -847,7 +847,8 @@
         <li><strong>Receiving / Warehouse</strong> — enters deliveries against an order (<span class="perm-pill">consignment_receive</span>) and approves them onto the shelf (<span class="perm-pill">consignment_grn_approve</span>); enters the month-end counts.</li>
         <li><strong>Finance</strong> (<span class="perm-pill">consignment_finance</span>, its own checkbox) — sets each agreement's revenue and output GCT treatment and approves it, approves chargeable shortages and damage, approves and locks each month, and resolves differences on supplier invoices. Never on an agreement they drafted.</li>
         <li><strong>Accounts Payable</strong> (<span class="perm-pill">payables_bills</span>) — enters the supplier's invoice against the settlement and accepts it into an A/P bill; payment goes through a payment request as usual. A/P staff without consignment access see only the <em>Settlements</em> tab.</li>
-        <li><strong>Administrator</strong> (<span class="perm-pill">settings</span>) — starts tracking, records supplier stock found on hand, and reopens a locked month on Finance's documented approval.</li>
+        <li><strong>Starting tracking</strong> (<span class="perm-pill">consignment_go_live</span>) and <strong>recording supplier stock found on hand</strong> (<span class="perm-pill">consignment_opening_record</span>) — each its own checkbox under Consignment, off until an Administrator ticks it for a group.</li>
+        <li><strong>Administrator</strong> (<span class="perm-pill">settings</span>) — reopens a locked month on Finance's documented approval.</li>
       </ul>
 
       <h3>Agreements</h3>
@@ -857,13 +858,13 @@
       <p><strong>+ New Order</strong> against an approved agreement, for a branch (the Distribution Centre is the Warehouse branch). When the delivery arrives, Receiving enters a <strong>GRN</strong> with the supplier's delivery note number and the quantities — part deliveries are fine, each its own GRN. Approving the GRN puts the stock on hand at that branch as the supplier's. Until then nothing changes.</p>
 
       <h3>Starting tracking</h3>
-      <p>Done once by an Administrator, on <strong>Consignment Stock → Start Consignment Tracking</strong>. From that moment every unit on hand has an owner and a receipt date:</p>
+      <p>Done once, on <strong>Consignment Stock → Start Consignment Tracking</strong>, by someone with <span class="perm-pill">consignment_go_live</span>. From that moment every unit on hand has an owner and a receipt date:</p>
       <ul>
         <li>First list any stock already on the shelf that belongs to a supplier — the agreement, item, branch and quantity. The agreement must be approved first. Those units become that supplier's.</li>
         <li>Everything else becomes one <strong>Total Tools-owned</strong> receipt dated that day, so it sells before any consignment stock received afterwards.</li>
         <li>Type START to confirm. It can't be undone.</li>
       </ul>
-      <p>If supplier stock turns up later that was counted as ours, an Administrator uses <strong>+ Record supplier-owned stock</strong>: the agreement, item, branch, quantity and the reason. Those units move to the supplier, dated when tracking started. Stock figures don't change. <strong>Supplier stock found on hand</strong> lists every such entry.</p>
+      <p>If supplier stock turns up later that was counted as ours, someone with <span class="perm-pill">consignment_opening_record</span> uses <strong>+ Record supplier-owned stock</strong>: the agreement, item, branch, quantity and the reason. Those units move to the supplier, dated when tracking started. Stock figures don't change. <strong>Supplier stock found on hand</strong> lists every such entry.</p>
 
       <h3>Selling and other stock movements</h3>
       <ul>

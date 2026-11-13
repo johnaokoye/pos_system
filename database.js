@@ -4274,6 +4274,13 @@ async function _init() {
       // older backfill further up runs before the first-run group seed, so a
       // brand-new DB only gets it here.
       if (!('pos_discount_override' in perms)) { perms.pos_discount_override = g.name === 'Administrator' || g.name === 'Manager'; changed = true; }
+      // Starting consignment tracking and recording supplier-owned stock found
+      // on hand used to need Settings; they're Consignment sub-permissions now,
+      // off for every group until ticked in Security Groups (2026-11-13) — set
+      // explicitly, since an absent sub-key falls back to the `consignment`
+      // module (can()).
+      if (!('consignment_go_live' in perms)) { perms.consignment_go_live = false; changed = true; }
+      if (!('consignment_opening_record' in perms)) { perms.consignment_opening_record = false; changed = true; }
       // Accounts Payable is new (no earlier key gated it). It starts out with
       // full-access groups (those that manage Security Groups and Settings)
       // plus any group named for payables — e.g. an existing "Accounts

@@ -35,8 +35,8 @@ router.get('/status', canView, async (req, res) => {
 });
 
 // Starts tracking stock receipts: everything on hand becomes one opening
-// owned receipt dated now (decision A1 follow-up). Administrator only.
-router.post('/go-live', requirePermission('settings'), async (req, res) => {
+// owned receipt dated now (decision A1 follow-up). Needs consignment_go_live.
+router.post('/go-live', requirePermission('consignment_go_live'), async (req, res) => {
   if (String(req.body.confirm || '') !== 'START') return res.status(400).json({ error: 'Type START to confirm' });
   const tx = await db.transaction('write');
   let committed = false;
@@ -55,7 +55,7 @@ router.post('/go-live', requirePermission('settings'), async (req, res) => {
 // an approved agreement, at each branch holding it, with how much there is
 // (before go-live: the branch's stock; after: its Total Tools-owned units not
 // reserved). For the Start screen and "Record supplier-owned stock".
-router.get('/opening-candidates', requirePermission('settings'), async (req, res) => {
+router.get('/opening-candidates', requireAnyPermission('consignment_go_live', 'consignment_opening_record'), async (req, res) => {
   try {
     const live = await goLive(db);
     const { rows } = await db.execute({
@@ -84,8 +84,8 @@ router.get('/opening-stock', canView, async (req, res) => {
 });
 
 // After go-live: units recorded as Total Tools' that are really a supplier's.
-// Administrator only; { agreement_id, product_id, branch_id, qty, note }.
-router.post('/opening-stock', requirePermission('settings'), async (req, res) => {
+// Needs consignment_opening_record; { agreement_id, product_id, branch_id, qty, note }.
+router.post('/opening-stock', requirePermission('consignment_opening_record'), async (req, res) => {
   const tx = await db.transaction('write');
   let committed = false;
   try {

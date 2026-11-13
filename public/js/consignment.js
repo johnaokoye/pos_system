@@ -540,10 +540,10 @@ Object.assign(App, {
     if (!el) return;
     el.innerHTML = `
       ${data.go_live ? `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px"><div style="font-size:12px;color:var(--text-muted);flex:1">Stock receipts tracked since ${this.fmtDateTime(data.go_live)}. Supplier-owned stock is not part of Total Tools' inventory value.</div>
-          <button class="btn btn-sm btn-outline" onclick="App.showConsOpeningLog()">Supplier stock found on hand</button>${this.can('settings') ? '<button class="btn btn-sm btn-outline" onclick="App.showConsOpeningStock()">+ Record supplier-owned stock</button>' : ''}</div>`
+          <button class="btn btn-sm btn-outline" onclick="App.showConsOpeningLog()">Supplier stock found on hand</button>${this.can('consignment_opening_record') ? '<button class="btn btn-sm btn-outline" onclick="App.showConsOpeningStock()">+ Record supplier-owned stock</button>' : ''}</div>`
         : `<div class="card" style="border-color:var(--warning, #d97706);margin-bottom:12px"><strong>Consignment tracking hasn't started.</strong>
             <div style="font-size:13px;margin:4px 0 8px">Starting it records the stock on hand now: anything you list as already belonging to a supplier becomes theirs, and the rest one Total Tools-owned receipt dated today, so it sells before any consignment stock received later. Consignment GRNs can be approved after that. It can't be undone.</div>
-            ${this.can('settings') ? '<button class="btn btn-sm btn-primary" onclick="App._consGoLive()">Start Consignment Tracking</button>' : '<span style="font-size:12px;color:var(--text-muted)">An Administrator starts it.</span>'}</div>`}
+            ${this.can('consignment_go_live') ? '<button class="btn btn-sm btn-primary" onclick="App._consGoLive()">Start Consignment Tracking</button>' : '<span style="font-size:12px;color:var(--text-muted)">Started by someone with the Start Consignment Tracking permission.</span>'}</div>`}
       <div class="card"><div class="table-wrap"><table>
         <thead><tr><th>Supplier</th><th>Agreement</th><th>Branch</th><th>Item</th><th style="text-align:right">On hand</th><th style="text-align:right">Reserved</th><th style="text-align:right">Agreed cost</th><th style="text-align:right">Value at cost</th><th>Oldest receipt</th></tr></thead>
         <tbody>${data.rows.length ? data.rows.map(r => `<tr><td>${this.escapeAttr(r.supplier_name)}</td><td>${r.agreement_number}</td><td>${this.escapeAttr(r.branch_name)}</td><td>${this.escapeAttr(r.product_name)}</td>

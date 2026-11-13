@@ -121,6 +121,8 @@ Object.assign(App, {
       { key: 'consignment_agreements', label: 'Agreements & Orders (create, edit, submit)' },
       { key: 'consignment_receive', label: 'Receive Consignment Stock (enter a GRN against the delivery note)' },
       { key: 'consignment_grn_approve', label: 'Approve Consignment GRNs (puts the stock on hand)' },
+      { key: 'consignment_go_live', label: 'Start Consignment Tracking (one-time; enters supplier stock already on hand)' },
+      { key: 'consignment_opening_record', label: 'Record Supplier-Owned Stock found on hand (after tracking starts)' },
     ]},
     { key: 'transfers', label: 'Branch Transfers', subs: [
       { key: 'transfers_create', label: 'Create Transfers' },
