@@ -1395,10 +1395,18 @@ Object.assign(App, {
     this._manualTicketDiscount = val > 0;
     if (!(val > 0)) this._manualTicketDiscountPct = null;
     if (val > 0) {
-      // A manual discount replaces an automatic promotion.
+      // A manual discount replaces an automatic promotion or a promo code —
+      // a ticket carries one discount, and a code left underneath would be
+      // what Hold saves and what Recall re-applies.
       this.autoAppliedPromo = null;
+      this.appliedPromoCode = null;
+      this._lapsedPromoCode = null;
       const pd = document.getElementById('promo-display');
       if (pd) { pd.style.display = 'none'; pd.innerHTML = ''; }
+      const pi = document.getElementById('promo-code-input');
+      if (pi) pi.value = '';
+      const rb = document.getElementById('remove-promo-btn');
+      if (rb) rb.style.display = 'none';
     }
     const dd = document.getElementById('discount-display');
     if (dd) dd.textContent = val > 0 ? `-${this.fmt(val)}${this._manualTicketDiscountPct ? ` (${this._manualTicketDiscountPct}%)` : ''}${this._ticketDiscountOverride ? ` · approved by ${this._ticketDiscountOverride.name}` : ''}` : '';
@@ -1494,7 +1502,7 @@ Object.assign(App, {
   },
 
   removePromoCode() {
-    this.appliedPromoCode = null;
+    this.appliedPromoCode = null; this._lapsedPromoCode = null;
     this.cartDiscount = 0;
     const pi = document.getElementById('promo-code-input');
     if (pi) pi.value = '';
@@ -1550,7 +1558,7 @@ Object.assign(App, {
   // discount comes back as the same amount, and automatic promotions are
   // re-checked. A hold from before discount_source existed keeps its amount.
   async _restoreHeldTicketDiscount(held, customer) {
-    this.appliedPromoCode = null;
+    this.appliedPromoCode = null; this._lapsedPromoCode = null;
     this.autoAppliedPromo = null;
     this._availablePromos = [];
     this._manualTicketDiscount = false; this._manualTicketDiscountPct = null;
@@ -1594,7 +1602,40 @@ Object.assign(App, {
     // stays the ticket's discount whatever goes on the replacement ticket.
     if (this._returnCredit) { this.cartDiscount = this._returnCredit.amount; this.renderCart(); return; }
     if (this.appliedDiscountCard) { this._updateDiscountCardUI(); this.renderCart(); return; }
-    if (this.appliedPromoCode) { this.renderCart(); return; }
+    // A promo code is re-checked against the ticket as it is now: its amount
+    // follows the ticket, and a bundle code only gives its price while the
+    // set is complete. One that stops applying comes off (and the automatic
+    // promotions are checked instead); it goes back on by itself if the
+    // ticket qualifies again, e.g. a bundle piece removed and added back.
+    const code = this.appliedPromoCode?.code || this._lapsedPromoCode;
+    if (code && this.cart.length) {
+      const subtotal = this.cart.reduce((s, i) => s + i.price * i.quantity, 0);
+      const cart_items = this.cart.map(i => ({ product_id: i.product_id, category_id: i.category_id, price: i.price, quantity: i.quantity, discount_percent: this._cartLineDiscountPct(i) }));
+      this.renderCart();
+      let result = null, reason = null;
+      try { result = await this.api('POST', '/promotions/validate-code', { code, subtotal, cart_items }); } catch (e) { reason = e.message; }
+      if (seq !== this._autoPromoSeq) return;
+      if (result) {
+        if (this._lapsedPromoCode) this.alert(`Promo code ${code} applies again — ${result.promo_name}: -${this.fmt(result.discount_amount)}`, 'success');
+        this.appliedPromoCode = result;
+        this._lapsedPromoCode = null;
+        this.autoAppliedPromo = null;
+        this._availablePromos = [];
+        this.cartDiscount = result.discount_amount;
+        const pd = document.getElementById('promo-display');
+        if (pd) { pd.textContent = `✓ ${result.promo_name}: -${this.fmt(result.discount_amount)}`; pd.style.display = 'block'; }
+        this.renderCart();
+        return;
+      }
+      if (this.appliedPromoCode) {
+        this.alert(`Promo code ${code} no longer applies to this ticket — ${reason}`, 'warning');
+        this.appliedPromoCode = null;
+        this._lapsedPromoCode = code;
+        this.cartDiscount = 0;
+        const pd = document.getElementById('promo-display');
+        if (pd) { pd.style.display = 'none'; pd.textContent = ''; }
+      }
+    }
     // A manual Ticket Discount stays as entered when the ticket changes —
     // automatic promotions don't overwrite it (clear it to let them apply).
     if (this._manualTicketDiscount && this.cartDiscount > 0 && this.cart.length) {
@@ -1725,7 +1766,7 @@ Object.assign(App, {
     this._bundleSeen = new Set(); this._closeBundleUpsell();
     this._ticketPoNumber = null;
     this._ticketDiscountOverride = null;
-    this.cart = []; this.cartCustomer = null; this.cartDiscount = 0; this._storeCreditApplied = 0; this._cashBackApplied = 0; this.appliedPromoCode = null; this.autoAppliedPromo = null; this._availablePromos = []; this._returnCredit = null; this._activeQuoteId = null; this._ticketCreatedBy = null; this._ticketSalesperson = null; this.appliedDiscountCard = null; this._manualTaxExempt = null; this._manualTicketDiscount = false; this._manualTicketDiscountPct = null;
+    this.cart = []; this.cartCustomer = null; this.cartDiscount = 0; this._storeCreditApplied = 0; this._cashBackApplied = 0; this.appliedPromoCode = null; this._lapsedPromoCode = null; this.autoAppliedPromo = null; this._availablePromos = []; this._returnCredit = null; this._activeQuoteId = null; this._ticketCreatedBy = null; this._ticketSalesperson = null; this.appliedDiscountCard = null; this._manualTaxExempt = null; this._manualTicketDiscount = false; this._manualTicketDiscountPct = null;
     this.renderCart();
     const aqBar = document.getElementById('active-quote-bar');
     if (aqBar) aqBar.style.display = 'none';
@@ -2321,6 +2362,8 @@ Object.assign(App, {
         items: cartItems,
         discount_amount: this.cartDiscount || 0,
         po_number: this._ticketPoNumber || null,
+        tax_exempt: this.isCartTaxExempt() ? 1 : 0,
+        tax_exemption_number: this.isCartTaxExempt() ? this.cartTaxExemptionNumber() : null,
         ...this._ticketDiscountSource(),
       });
       const customerName = this.cartCustomer ? `${this.cartCustomer.first_name} ${this.cartCustomer.last_name}` : 'Walk-in Customer';
@@ -2484,7 +2527,10 @@ Object.assign(App, {
         // charged on this line, from its own stored tax_amount over its
         // total less its discount share, instead of silently dropping to 0% tax.
         const taxedBase = item.total - heldShares[idx];
-        const derivedTaxRate = taxedBase > 0 ? parseFloat((item.tax_amount / taxedBase * 100).toFixed(4)) : 0;
+        // A tax-exempt hold charged none, so such a line takes the store rate
+        // (the exemption still keeps it off this ticket).
+        const derivedTaxRate = held.tax_exempt ? (parseFloat(this.settings?.tax_rate) || 0)
+          : taxedBase > 0 ? parseFloat((item.tax_amount / taxedBase * 100).toFixed(4)) : 0;
         return {
           product_id: item.product_id,
           variation_id: item.variation_id || null,
@@ -2515,6 +2561,9 @@ Object.assign(App, {
       this._cashBackApplied = 0;
       this._returnCredit = null;
       const customer = held.customer_id ? await this.api('GET', `/customers/${held.customer_id}`) : null;
+      // Held tax-exempt: an exempt customer brings that back by themselves;
+      // otherwise it was the Tax Exempt button, so put that back.
+      this._manualTaxExempt = held.tax_exempt && !customer?.tax_exempt ? { number: held.tax_exemption_number || null } : null;
       await this._restoreHeldTicketDiscount(held, customer);
       // A hold created by converting a quotation carries that link through
       // (via the existing quotations.converted_to_tx join on GET /transactions/:id)
@@ -2712,7 +2761,7 @@ Object.assign(App, {
       this.cartDiscount = parseFloat(quote.discount_amount || 0);
       this._storeCreditApplied = 0;
       this._cashBackApplied = 0;
-      this.appliedPromoCode = null;
+      this.appliedPromoCode = null; this._lapsedPromoCode = null;
       this._returnCredit = null;
       this._activeQuoteId = quote.id;
       // The quote's salesperson started this sale (credit and receipt).
@@ -3344,7 +3393,7 @@ Object.assign(App, {
       // specific assignment and wins if the customer somehow has both.
       this.appliedDiscountCard = this._customerDiscountCard(c);
       if (this.appliedDiscountCard) {
-        this.appliedPromoCode = null;
+        this.appliedPromoCode = null; this._lapsedPromoCode = null;
         this.autoAppliedPromo = null;
         this._availablePromos = [];
         this._manualTicketDiscount = false; this._manualTicketDiscountPct = null;

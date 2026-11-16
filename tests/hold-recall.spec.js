@@ -115,4 +115,58 @@ test.describe('Hold Recall', () => {
     // Declined: nothing charged, ticket still on screen.
     await expect(page.locator('.pos-ticket-row').first()).toBeVisible();
   });
+  test('a tax-exempt ticket is held without tax and comes back exempt', async ({ page }) => {
+    await openPos(page);
+    const p = await product(page);
+    await page.evaluate(id => App.addToCart(id, App._unitChoices(App.allProducts.find(x => x.id === id))[0]), p.id);
+    await page.evaluate(() => { App._manualTaxExempt = { number: 'EX-HOLD' }; App.renderCart(); });
+    await page.evaluate(() => App.holdOrder());
+    await expect.poll(() => page.evaluate(() => App.cart.length)).toBe(0);
+    const held = (await api(page, 'GET', '/transactions?status=hold&limit=500')).sort((a, b) => b.id - a.id)[0];
+    const row = await api(page, 'GET', `/transactions/${held.id}`);
+    expect(row.tax_exempt).toBe(1);
+    expect(row.tax_exemption_number).toBe('EX-HOLD');
+    expect(row.tax_amount).toBe(0);
+
+    await page.evaluate(id => App.loadHeldOrder(id), held.id);
+    await expect.poll(() => page.evaluate(() => App.cart.length)).toBe(1);
+    expect(await page.evaluate(() => [App.isCartTaxExempt(), App.cartTaxExemptionNumber()])).toEqual([true, 'EX-HOLD']);
+    await page.evaluate(() => App.clearCart());
+  });
+
+  test('a ticket discount replaces a bundle code; a bundle code comes off and back on as its pieces do', async ({ page }) => {
+    await openPos(page);
+    const [a, b] = await page.evaluate(() => App.allProducts.filter(p => !p.is_rental && !p.has_variations && p.stock_qty > 20 && p.price > 5 && p.product_type !== 'service' && !App._unitChoices(p).some(c => !c.isBase)).slice(0, 2).map(p => ({ id: p.id, price: p.price })));
+    const code = `BND${stamp()}`;
+    const { id: promoId } = await api(page, 'POST', '/promotions', { name: `Pair ${code}`, type: 'bundle', bundle_pricing: 'percent', value: 10, active: true, bundle_items: [{ product_id: a.id, quantity: 1 }, { product_id: b.id, quantity: 1 }] });
+    await api(page, 'POST', `/promotions/${promoId}/codes`, { code });
+    const add = id => page.evaluate(id => App.addToCart(id, App._unitChoices(App.allProducts.find(x => x.id === id))[0]), id);
+    await add(a.id); await add(b.id);
+    await page.evaluate(() => App._closeBundleUpsell());
+    await page.evaluate(() => App.showTicketDiscountModal());
+    await page.fill('#promo-code-input', code);
+    await page.evaluate(() => App.applyPromoCode());
+    await expect.poll(() => page.evaluate(() => App.appliedPromoCode?.code)).toBe(code);
+
+    // Removing a piece takes the code's discount off; adding it back restores it.
+    await page.evaluate(() => App.closeModal());
+    await page.evaluate(() => App.removeFromCart(1));
+    await expect.poll(() => page.evaluate(() => [App.appliedPromoCode, App.cartDiscount])).toEqual([null, 0]);
+    await add(b.id);
+    await expect.poll(() => page.evaluate(() => App.appliedPromoCode?.code)).toBe(code);
+    expect(await page.evaluate(() => App.cartDiscount)).toBeGreaterThan(0);
+
+    // A Ticket Discount replaces the code, so Hold keeps it (not the code).
+    await page.evaluate(() => App.showTicketDiscountModal());
+    await page.fill('#discount-input', '1');
+    await page.evaluate(() => App.applyDiscount());
+    expect(await page.evaluate(() => [App.appliedPromoCode, App.cartDiscount])).toEqual([null, 1]);
+    await page.evaluate(() => App.closeModal());
+    await page.evaluate(() => App.holdOrder());
+    await expect.poll(() => page.evaluate(() => App.cart.length)).toBe(0);
+    const held = (await api(page, 'GET', '/transactions?status=hold&limit=500')).sort((x, y) => y.id - x.id)[0];
+    const row = await api(page, 'GET', `/transactions/${held.id}`);
+    expect([row.discount_source, row.discount_amount, row.promotion_code]).toEqual(['manual', 1, null]);
+    await api(page, 'DELETE', `/promotions/${promoId}`);
+  });
 });

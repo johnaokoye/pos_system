@@ -129,7 +129,11 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
     const lineDisc = lineGross.map((g, i) => lineFixed[i] ? parseFloat(lineFixed[i].toFixed(2)) : parseFloat((g * linePct[i] / 100).toFixed(2)));
     const lineTotals = lineGross.map((g, i) => parseFloat((g - lineDisc[i]).toFixed(2)));
     const { discount: disc, shares } = allocateTicketDiscount(lineTotals, discount_amount);
-    const lineTaxes = items.map((item, i) => parseFloat(((lineTotals[i] - shares[i]) * (parseFloat(item.tax_rate) || 0) / 100).toFixed(2)));
+    // A tax-exempt ticket (the POS Tax Exempt button, or an exempt customer)
+    // is held without tax and comes back exempt on recall.
+    const taxExempt = req.body.tax_exempt ? 1 : 0;
+    const taxExemptionNumber = taxExempt ? (String(req.body.tax_exemption_number || '').trim() || null) : null;
+    const lineTaxes = items.map((item, i) => taxExempt ? 0 : parseFloat(((lineTotals[i] - shares[i]) * (parseFloat(item.tax_rate) || 0) / 100).toFixed(2)));
     const subtotal = parseFloat(lineTotals.reduce((s, t) => s + t, 0).toFixed(2));
     const tax_amount = parseFloat(lineTaxes.reduce((s, t) => s + t, 0).toFixed(2));
     const total = parseFloat((subtotal - disc + tax_amount).toFixed(2));
@@ -138,8 +142,8 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
     let committed = false;
     try {
       const result = await txn.execute({
-        sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,created_by,salesperson_id,branch_id,subtotal,tax_amount,discount_amount,total,payment_method,status,notes,amount_tendered,change_amount,promotion_code,promotion_name,discount_source,ticket_discount_percent,po_number,discount_override_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?,?)`,
-        args: [hold_number, customer_id || null, employee_id || 1, created_by || employee_id || 1, salespersonId, branch_id || null, subtotal, tax_amount, disc, total, 'hold', 'hold', notes || null, promotion_code || null, promotion_name || null, disc > 0 ? discountSource : null, disc > 0 ? ticketPct : null, String(req.body.po_number || '').trim() || null, disc > 0 && discountSource === 'manual' ? (Number(req.body.discount_override_employee_id) || null) : null]
+        sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,created_by,salesperson_id,branch_id,subtotal,tax_amount,discount_amount,total,payment_method,status,notes,amount_tendered,change_amount,promotion_code,promotion_name,discount_source,ticket_discount_percent,po_number,discount_override_by,tax_exempt,tax_exemption_number) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?,?,?,?)`,
+        args: [hold_number, customer_id || null, employee_id || 1, created_by || employee_id || 1, salespersonId, branch_id || null, subtotal, tax_amount, disc, total, 'hold', 'hold', notes || null, promotion_code || null, promotion_name || null, disc > 0 ? discountSource : null, disc > 0 ? ticketPct : null, String(req.body.po_number || '').trim() || null, disc > 0 && discountSource === 'manual' ? (Number(req.body.discount_override_employee_id) || null) : null, taxExempt, taxExemptionNumber]
       });
       const txId = Number(result.lastInsertRowid);
       for (const [i, item] of items.entries()) {
