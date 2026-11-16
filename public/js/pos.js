@@ -1157,7 +1157,14 @@ Object.assign(App, {
       this._bundleCache[productId] = { at: Date.now(), data: bundles };
     }
     if (this.section !== 'pos') return;
-    const offer = (bundles || []).filter(b => !this._bundleSeen.has(b.id) && this._bundleMissing(b).some(m => m.missing > 0));
+    // A bundle still missing pieces is offered; one that needs a code is
+    // shown again once complete, until its code is applied, since it
+    // doesn't price itself. Each is shown once per ticket in each state.
+    const offer = (bundles || []).map(b => {
+      const done = this._bundleSets(b) > 0 && this._bundleMissing(b).every(m => !m.have);
+      return { ...b, _key: done ? `done:${b.id}` : b.id, _done: done };
+    }).filter(b => !this._bundleSeen.has(b._key)
+      && (!b._done || (b.needs_code && this.appliedPromoCode?.promotion_id !== b.id)));
     if (!offer.length) return;
     this._showBundleUpsell(offer, productId);
   },
@@ -1165,14 +1172,25 @@ Object.assign(App, {
   // Each component with how many the ticket has toward one more set, counted
   // the way checkout counts them (computeBundleDiscount in lib/promotions.js:
   // line quantity, lines with their own discount don't count).
-  _bundleMissing(b) {
+  _bundleHave() {
     const have = {};
     for (const i of this.cart) {
       if (!i.product_id || i.is_q_item || i.serial_number || this._cartLineDiscountPct(i) > 0) continue;
       have[i.product_id] = (have[i.product_id] || 0) + (Number(i.quantity) || 0);
     }
+    return have;
+  },
+
+  // Complete sets of the bundle on the ticket.
+  _bundleSets(b) {
+    const have = this._bundleHave();
+    return Math.min(...b.components.map(c => Math.floor((have[c.product_id] || 0) / c.quantity)));
+  },
+
+  _bundleMissing(b) {
+    const have = this._bundleHave();
     // Sets already complete stay complete; offer the next one only if this item started it.
-    const sets = Math.min(...b.components.map(c => Math.floor((have[c.product_id] || 0) / c.quantity)));
+    const sets = this._bundleSets(b);
     return b.components.map(c => {
       const toward = (have[c.product_id] || 0) - sets * c.quantity;
       return { ...c, have: Math.max(0, Math.min(c.quantity, toward)), missing: Math.max(0, c.quantity - Math.max(0, toward)) };
@@ -1190,11 +1208,11 @@ Object.assign(App, {
     card.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:8px">
         <div><div style="font-size:12px;font-weight:700;color:var(--primary);text-transform:uppercase;letter-spacing:.04em">🎁 Bundle offer</div>
-          <div style="font-size:13px;color:var(--text-muted)">${this.escapeAttr(trigger?.name || 'This item')} is part of ${bundles.length > 1 ? `${bundles.length} bundles` : 'a bundle'} — suggest it to the customer</div></div>
+          <div style="font-size:13px;color:var(--text-muted)">${bundles.every(b => b._done) ? 'The ticket has a complete bundle' : `${this.escapeAttr(trigger?.name || 'This item')} is part of ${bundles.length > 1 ? `${bundles.length} bundles` : 'a bundle'} — suggest it to the customer`}</div></div>
         <button class="btn btn-sm btn-outline" title="Close" onclick="App._dismissBundleUpsell()">✕</button>
       </div>
       ${bundles.map((b, bi) => {
-        const lines = this._bundleMissing(b);
+        const lines = b._done ? b.components.map(c => ({ ...c, have: c.quantity, missing: 0 })) : this._bundleMissing(b);
         const missing = lines.filter(l => l.missing > 0);
         const extra = missing.reduce((s, l) => s + l.missing * l.price, 0);
         const deal = b.bundle_pricing === 'price' ? `Bundle price <strong>${this.fmt(b.set_price)}</strong>` : `<strong>${b.value}% off</strong> the set`;
@@ -1211,9 +1229,10 @@ Object.assign(App, {
           </table>
           ${b.min_purchase > 0 ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px">Applies on tickets of ${this.fmt(b.min_purchase)} or more.</div>` : ''}
           ${b.end_date ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">Ends ${this.fmtDate(b.end_date)}.</div>` : ''}
-          <div style="display:flex;gap:8px;margin-top:10px">
+          ${b.needs_code ? `<div style="font-size:12px;margin-top:6px;padding:6px 8px;border-radius:6px;background:var(--bg);font-weight:600">${b._done ? 'All items are on the ticket — enter' : 'Needs'} the bundle's promo code at Ticket Discount${b._done ? ' to get the bundle price' : ''}.</div>` : ''}
+          ${missing.length ? `<div style="display:flex;gap:8px;margin-top:10px">
             <button class="btn btn-sm btn-success" style="flex:1" onclick="App._addBundleRest(${bi})">Add the rest${extra > 0 ? ` (+${this.fmt(extra)} before saving)` : ''}</button>
-          </div>
+          </div>` : ''}
         </div>`;
       }).join('')}
       <div style="text-align:right;margin-top:10px"><button class="btn btn-sm btn-secondary" onclick="App._dismissBundleUpsell()">No thanks</button></div>`;
@@ -1240,7 +1259,7 @@ Object.assign(App, {
 
   // No thanks / ✕: don't offer these bundles again on this ticket.
   _dismissBundleUpsell() {
-    for (const b of this._bundleOffer || []) (this._bundleSeen ||= new Set()).add(b.id);
+    for (const b of this._bundleOffer || []) (this._bundleSeen ||= new Set()).add(b._key ?? b.id);
     this._closeBundleUpsell();
   },
 
@@ -1260,11 +1279,11 @@ Object.assign(App, {
         if (this._cartStockUnits(p.id) === before) skipped.push(l.name);
       }
     } finally { this._bundleAdding = false; }
-    (this._bundleSeen ||= new Set()).add(b.id);
+    (this._bundleSeen ||= new Set()).add(b.id).add(`done:${b.id}`);
     this._closeBundleUpsell();
     this.renderCart();
     if (skipped.length) this.alert(`Add ${skipped.join(', ')} yourself — ${skipped.length > 1 ? 'they need' : 'it needs'} a variant, serial number or more stock`, 'warning');
-    else this.alert(`${b.name} added — the bundle discount applies at checkout`);
+    else this.alert(b.needs_code ? `${b.name} added — enter the bundle's promo code at Ticket Discount for the bundle price` : `${b.name} added — the bundle discount applies at checkout`);
     setTimeout(() => document.getElementById('pos-item-input')?.focus(), 0);
   },
 

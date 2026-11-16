@@ -322,17 +322,22 @@ router.get('/discount-eligibility/:productId', requirePermission('pos'), async (
 });
 
 // Bundles a product is part of, for the POS upsell pop-up (a cashier adds one
-// piece → "this is part of a bundle"). Only bundles that apply at checkout on
-// their own: active, inside their dates/times/recurrence, and needing no code
-// (code promos never auto-apply). Each comes with its components (name, price,
-// stock) and the regular price of one set, so the POS can show the saving.
+// piece → "this is part of a bundle"): active and inside their
+// dates/times/recurrence. A bundle with promo codes is offered while one of
+// its codes can still be used, marked needs_code (it only applies once a code
+// is entered at Ticket Discount); the code itself is never sent. Each comes
+// with its components (name, price, stock) and the regular price of one set,
+// so the POS can show the saving.
 router.get('/bundles-for/:productId', requirePermission('pos'), async (req, res) => {
   try {
     const { rows } = await db.execute({
-      sql: `SELECT p.* FROM promotions p
+      sql: `SELECT p.*, EXISTS (SELECT 1 FROM promotion_codes c WHERE c.promotion_id = p.id) AS needs_code
+            FROM promotions p
             WHERE p.active = 1 AND p.type = 'bundle'
               AND EXISTS (SELECT 1 FROM promotion_bundle_items bi WHERE bi.promotion_id = p.id AND bi.product_id = ?)
-              AND NOT EXISTS (SELECT 1 FROM promotion_codes c WHERE c.promotion_id = p.id)`,
+              AND (NOT EXISTS (SELECT 1 FROM promotion_codes c WHERE c.promotion_id = p.id)
+                   OR EXISTS (SELECT 1 FROM promotion_codes c WHERE c.promotion_id = p.id AND c.active = 1
+                                AND (c.usage_limit IS NULL OR c.times_used < c.usage_limit)))`,
       args: [req.params.productId],
     });
     const promos = rows.filter(p => promoTimingStatus(p).active);
@@ -359,7 +364,7 @@ router.get('/bundles-for/:productId', requirePermission('pos'), async (req, res)
       out.push({
         id: p.id, name: p.name, description: p.description, bundle_pricing: p.bundle_pricing || 'percent',
         value: Number(p.value) || 0, bundle_price: p.bundle_price != null ? Number(p.bundle_price) : null,
-        min_purchase: Number(p.min_purchase) || 0, end_date: p.end_date || null,
+        min_purchase: Number(p.min_purchase) || 0, end_date: p.end_date || null, needs_code: !!Number(p.needs_code),
         regular_price: regular, set_price: setPrice, saving: Math.max(0, Math.round((regular - setPrice) * 100) / 100),
         components,
       });
