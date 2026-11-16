@@ -809,6 +809,7 @@ ${print ? PRINT_PAGE_STYLE : ''}
           <div><strong>Date:</strong> ${fmtDate(q.created_at)}</div>
           ${q.valid_until ? `<div><strong>Valid Until:</strong> ${fmtDate(String(q.valid_until).slice(0, 10))}</div>` : ''}
           ${q.branch_name ? `<div><strong>Branch:</strong> ${q.branch_name}</div>` : ''}
+          ${q.created_by_name ? `<div><strong>Prepared By:</strong> ${esc(q.created_by_name)}</div>` : ''}
         </div>
       </div>
       ${q.customer_name ? `<div style="background:#f9fafb;border:1px solid #e8e8e8;border-radius:6px;padding:12px;margin-bottom:16px;font-size:13px">
@@ -943,7 +944,7 @@ ${print ? PRINT_PAGE_STYLE : ''}
           <td style="vertical-align:top;text-align:right;font-size:13px;color:#444">
             <div><strong>Date:</strong> ${fmtDate(q.created_at)}</div>
             ${q.branch_name ? `<div><strong>Branch:</strong> ${q.branch_name}</div>` : ''}
-            ${q.employee_name ? `<div><strong>Prepared By:</strong> ${q.employee_name}</div>` : ''}
+            ${q.created_by_name ? `<div><strong>Prepared By:</strong> ${esc(q.created_by_name)}</div>` : ''}
           </td>
         </tr>
       </table>
@@ -1285,11 +1286,13 @@ async function loadQuoteForDocument(id) {
     c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
     b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone,
     e.first_name || ' ' || e.last_name as employee_name,
+    ce.first_name || ' ' || ce.last_name as created_by_name,
     ae.first_name || ' ' || ae.last_name as approved_by_name
     FROM quotations q
     LEFT JOIN customers c ON q.customer_id = c.id
     LEFT JOIN branches b ON q.branch_id = b.id
     LEFT JOIN employees e ON q.employee_id = e.id
+    LEFT JOIN employees ce ON ce.id = COALESCE(q.original_employee_id, q.employee_id)
     LEFT JOIN employees ae ON q.approved_by = ae.id
     WHERE q.id = ?`, args: [id] });
   if (!q) return null;
@@ -2722,7 +2725,7 @@ function quotePdfModel(q, s) {
   return {
     store: pdfStore(s, q),
     title: 'QUOTATION', number: q.quote_number,
-    meta: [['Date', pdfDate(q.created_at)], ['Valid Until', q.valid_until ? pdfDate(String(q.valid_until).slice(0, 10)) : ''], ['Branch', q.branch_name]],
+    meta: [['Date', pdfDate(q.created_at)], ['Valid Until', q.valid_until ? pdfDate(String(q.valid_until).slice(0, 10)) : ''], ['Branch', q.branch_name], ['Prepared By', q.created_by_name || '']],
     party: { label: 'Bill To', lines: [q.customer_name, q.customer_phone, q.customer_email] },
     tables: [{ mainCol: 1, columns, rows: (q.items || []).map(i => i.is_comment ? commentRowPdf(i.product_name, cols, 1) : i.serial_number ? commentRowPdf(`Serial: ${i.serial_number}`, cols, 1) : ({
       cells: cells(i),
@@ -2797,7 +2800,7 @@ function rentalQuotePdfModel(q, s) {
   return {
     store: pdfStore(s, q),
     title: 'RENTAL QUOTATION', number: q.quote_number,
-    meta: [['Date', pdfDate(q.created_at)], ['Branch', q.branch_name], ['Prepared By', q.employee_name]],
+    meta: [['Date', pdfDate(q.created_at)], ['Branch', q.branch_name], ['Prepared By', q.created_by_name]],
     party: { label: 'Customer', lines: [q.customer_name ? `${q.customer_name}${q.customer_number ? ` (${q.customer_number})` : ''}` : '', customerAddr, q.customer_phone, q.customer_email] },
     info: period ? [['Rental Period', `${utc(period.start)} - ${utc(period.due)} (${period.days} day${period.days === 1 ? '' : 's'})`], ['Return Due', utc(period.due)]] : [],
     tables: [

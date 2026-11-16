@@ -788,7 +788,7 @@ router.post('/', async (req, res) => {
         (quote_number,customer_id,employee_id,original_employee_id,branch_id,subtotal,tax_amount,discount_amount,total,notes,valid_until,quote_type,due_date,
          delivery_required,delivery_cost,delivery_address,pickup_required,pickup_cost,operator_required,operator_fee,pickup_address,rate_plan,po_number)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        args: [quote_number, customer_id||null, employee_id||null, employee_id||null, branch_id||null, subtotal, tax_amount, disc, total, notes||null, retailValidUntil||null, isRental ? 'rental' : (isSpecialProject ? 'special_project' : 'retail'), isRental ? due_date : null,
+        args: [quote_number, customer_id||null, employee_id||req.employee?.id||null, employee_id||req.employee?.id||null, branch_id||null, subtotal, tax_amount, disc, total, notes||null, retailValidUntil||null, isRental ? 'rental' : (isSpecialProject ? 'special_project' : 'retail'), isRental ? due_date : null,
           isRental && delivery_required ? 1 : 0, isRental && delivery_required ? parseFloat(delivery_cost||0) : 0, isRental && delivery_required ? (delivery_address||null) : null,
           isRental && pickup_required ? 1 : 0, isRental && pickup_required ? parseFloat(pickup_cost||0) : 0,
           isRental && operator_required ? 1 : 0, isRental && operator_required ? parseFloat(operator_fee||0) : 0,
