@@ -764,8 +764,9 @@ function spQuoteRowHtml(i) {
 // /quote-preview/:id (Print Quotation on retail and Special Project quotes).
 function buildQuoteHtml(q, s, { print = false } = {}) {
   const storeName = s.store_name || 'My Store';
-  const storeAddr = s.store_address || '';
-  const storePhone = s.store_phone || '';
+  // The quote's branch address and phone, like an invoice; the company's
+  // (Settings) when the branch has none.
+  const { address: storeAddr, phone: storePhone } = pdfStore(s, q);
   const footer = footerHtml(s);
   const isSP = q.quote_type === 'special_project';
   const totals = quoteDocTotals(q);
@@ -870,8 +871,9 @@ function rentalQuotePeriod(q) {
 // page — used by GET /quote-preview/:id (Print on the quote view).
 function buildRentalQuoteHtml(q, s, { print = false } = {}) {
   const storeName = s.store_name || 'My Store';
-  const storeAddr = s.store_address || '';
-  const storePhone = s.store_phone || '';
+  // The quote's branch address and phone, like an invoice; the company's
+  // (Settings) when the branch has none.
+  const { address: storeAddr, phone: storePhone } = pdfStore(s, q);
   const footer = footerHtml(s);
   const sum = rentalQuoteSummary(q);
   const period = q.due_date ? rentalQuotePeriod(q) : null;
@@ -1281,7 +1283,8 @@ async function loadQuoteForDocument(id) {
   const { rows: [q] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name,
     c.customer_number, c.customer_type, c.email as customer_email, c.phone as customer_phone,
     c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
-    b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name,
+    b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone,
+    e.first_name || ' ' || e.last_name as employee_name,
     ae.first_name || ' ' || ae.last_name as approved_by_name
     FROM quotations q
     LEFT JOIN customers c ON q.customer_id = c.id
@@ -2717,7 +2720,7 @@ function quotePdfModel(q, s) {
     ? [i.sku || '', i.product_name, num2(i.quantity), i.sell_unit || '', rentPeriodLabel(i), fmt(i.unit_price), fmt(i.is_temp_item ? lineExtended(i) : i.total)]
     : [i.sku || '', i.product_name, i.quantity, fmt(i.unit_price), fmt(i.total)];
   return {
-    store: pdfStore(s),
+    store: pdfStore(s, q),
     title: 'QUOTATION', number: q.quote_number,
     meta: [['Date', pdfDate(q.created_at)], ['Valid Until', q.valid_until ? pdfDate(String(q.valid_until).slice(0, 10)) : ''], ['Branch', q.branch_name]],
     party: { label: 'Bill To', lines: [q.customer_name, q.customer_phone, q.customer_email] },
@@ -2792,7 +2795,7 @@ function rentalQuotePdfModel(q, s) {
     q.operator_required ? { cells: ['Operator', fmt(sum.operator)], sub: 'Trained operator provided to run the equipment' } : null,
   ].filter(Boolean);
   return {
-    store: pdfStore(s),
+    store: pdfStore(s, q),
     title: 'RENTAL QUOTATION', number: q.quote_number,
     meta: [['Date', pdfDate(q.created_at)], ['Branch', q.branch_name], ['Prepared By', q.employee_name]],
     party: { label: 'Customer', lines: [q.customer_name ? `${q.customer_name}${q.customer_number ? ` (${q.customer_number})` : ''}` : '', customerAddr, q.customer_phone, q.customer_email] },
