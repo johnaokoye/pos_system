@@ -235,26 +235,39 @@ Object.assign(App, {
     const dust = (x, y) => `<g class="dust">${[0, .35, .7].map(d => `<circle cx="${x}" cy="${y}" r="5" fill="rgba(210,190,160,.8)" style="animation-delay:${d}s"/>`).join('')}</g>`;
     const beam = (x, y) => `<path class="beam" d="M${x} ${y}l46 -9v20z" fill="rgba(255,241,150,.32)"/><circle cx="${x}" cy="${y}" r="2.4" fill="#FFF59D"/>`;
     const Y = '#F9A825', Y2 = '#FBC02D', DK = '#37474F', GL = '#B3E5FC';
+    // The company logo (Settings → company_logo_url) on a white panel on each
+    // vehicle's side, else the store name. Far-lane vehicles are drawn
+    // mirrored, so their panel is flipped back to read the right way.
+    const logoUrl = this.settings?.company_logo_url;
+    const logoSrc = logoUrl ? this.escapeAttr(/^https?:\/\//.test(logoUrl) ? logoUrl : `${location.origin}${logoUrl}`) : '';
+    const storeName = this.escapeAttr(this.settings?.store_name || '');
+    const logo = (x, y, w, h, flip = false, rot = '') => {
+      if (!logoSrc && !storeName) return '';
+      const inner = logoSrc
+        ? `<image href="${logoSrc}" x="${x + 1.5}" y="${y + 1.2}" width="${w - 3}" height="${h - 2.4}" preserveAspectRatio="xMidYMid meet"/>`
+        : `<text x="${x + w / 2}" y="${y + h / 2}" text-anchor="middle" dominant-baseline="central" font-family="Arial,sans-serif" font-weight="700" font-size="${Math.min(h * .55, w / Math.max(4, storeName.length) * 1.7)}" fill="#263238">${storeName}</text>`;
+      return `<g class="logo"${flip || rot ? ` transform="${rot}${flip ? ` translate(${2 * x + w} 0) scale(-1 1)` : ''}"` : ''}><rect x="${x}" y="${y}" width="${w}" height="${h}" rx="2.5" fill="#fff" opacity=".93"/>${inner}</g>`;
+    };
     const dump = `<svg viewBox="0 0 140 70">${dust(10, 58)}<g class="body">
-      <path d="M6 20h78l-4 28H10z" fill="${Y}" stroke="#E65100" stroke-width="1.5"/><path d="M20 22v24M36 22v24M52 22v24M68 22v24" stroke="#F57F17" stroke-width="1.5"/>
+      <path d="M6 20h78l-4 28H10z" fill="${Y}" stroke="#E65100" stroke-width="1.5"/><path d="M14 22v24M76 22v24" stroke="#F57F17" stroke-width="1.5"/>${logo(18, 24, 54, 20)}
       <rect x="4" y="46" width="122" height="7" rx="2" fill="${DK}"/>
       <path d="M86 48V24h22l14 15v9z" fill="${Y2}" stroke="#E65100" stroke-width="1.5"/><path d="M92 28h14l9 10H92z" fill="${GL}"/>${beam(122, 43)}</g>
       ${wheel(24, 56, 10)}${wheel(48, 56, 10)}${wheel(108, 56, 10)}</svg>`;
     const excavator = `<svg viewBox="0 0 150 80">${dust(8, 70)}${track(8, 60, 84, 16)}<g class="body">
-      <rect x="16" y="40" width="62" height="20" rx="3" fill="${Y}"/><rect x="10" y="44" width="12" height="14" rx="2" fill="${DK}"/>
+      <rect x="16" y="40" width="62" height="20" rx="3" fill="${Y}"/><rect x="10" y="44" width="12" height="14" rx="2" fill="${DK}"/>${logo(24, 44, 46, 13)}
       <rect x="48" y="20" width="24" height="22" rx="3" fill="${Y2}"/><rect x="53" y="24" width="15" height="12" rx="2" fill="${GL}"/>
       <g class="arm" style="transform-origin:74px 44px"><path d="M74 44L110 16" stroke="${Y}" stroke-width="9" stroke-linecap="round"/><path d="M110 16L130 46" stroke="${Y2}" stroke-width="7" stroke-linecap="round"/>
         <path d="M124 42h16l-3 14h-12z" fill="#455A64"/></g>${beam(78, 50)}</g></svg>`;
     const dozer = `<svg viewBox="0 0 130 70">${dust(10, 60)}${track(12, 50, 74, 16)}<g class="body">
-      <rect x="18" y="32" width="62" height="20" rx="3" fill="${Y}"/><path d="M30 32V12h28v20" fill="none" stroke="${DK}" stroke-width="3"/><rect x="33" y="15" width="22" height="15" fill="${GL}" opacity=".85"/>
+      <rect x="18" y="32" width="62" height="20" rx="3" fill="${Y}"/><path d="M30 32V12h28v20" fill="none" stroke="${DK}" stroke-width="3"/><rect x="33" y="15" width="22" height="15" fill="${GL}" opacity=".85"/>${logo(22, 35, 54, 14)}
       <path d="M80 44l18 -4" stroke="${DK}" stroke-width="4"/><path d="M98 24q8 16 0 40h8V24z" fill="#FFB300" stroke="#E65100" stroke-width="1.5"/>${beam(81, 38)}</g></svg>`;
     const mixer = `<svg viewBox="0 0 150 72"><g class="body"><rect x="6" y="48" width="132" height="7" rx="2" fill="${DK}"/>
-      <g transform="rotate(-12 64 32)"><ellipse cx="64" cy="32" rx="38" ry="18" fill="#ECEFF1" stroke="#90A4AE" stroke-width="1.5"/><ellipse class="drum" cx="64" cy="32" rx="30" ry="12" fill="none" stroke="#FB8C00" stroke-width="5" stroke-dasharray="10 10"/></g>
+      <g transform="rotate(-12 64 32)"><ellipse cx="64" cy="32" rx="38" ry="18" fill="#ECEFF1" stroke="#90A4AE" stroke-width="1.5"/><ellipse class="drum" cx="64" cy="32" rx="30" ry="12" fill="none" stroke="#FB8C00" stroke-width="5" stroke-dasharray="10 10"/></g>${logo(42, 24, 44, 15, true, 'rotate(-12 64 32)')}
       <path d="M106 50V24h20l12 14v12z" fill="#1E88E5" stroke="#0D47A1" stroke-width="1.5"/><path d="M111 28h14l8 10h-22z" fill="${GL}"/>${beam(137, 44)}</g>
       ${wheel(26, 58, 10)}${wheel(50, 58, 10)}${wheel(122, 58, 10)}</svg>`;
     const flatbed = `<svg viewBox="0 0 150 72"><g class="body"><rect x="4" y="44" width="104" height="6" fill="#8D6E63"/>
       ${[0, 1, 2].map(i => `<rect x="10" y="${30 - i * 0}" width="90" height="7" rx="3.5" fill="#B0BEC5" transform="translate(0 ${-i * 7 + 6})"/>`).join('')}
-      <rect x="4" y="48" width="134" height="6" rx="2" fill="${DK}"/><path d="M108 50V22h18l12 14v14z" fill="#E53935" stroke="#B71C1C" stroke-width="1.5"/><path d="M113 26h12l8 10h-20z" fill="${GL}"/>${beam(137, 44)}</g>
+      <rect x="4" y="48" width="134" height="6" rx="2" fill="${DK}"/><path d="M108 50V22h18l12 14v14z" fill="#E53935" stroke="#B71C1C" stroke-width="1.5"/><path d="M113 26h12l8 10h-20z" fill="${GL}"/>${logo(110, 37, 22, 10, true)}${beam(137, 44)}</g>
       ${wheel(22, 58, 9)}${wheel(44, 58, 9)}${wheel(122, 58, 9)}</svg>`;
     const near = [[dump, 0], [excavator, -11], [dozer, -22]];
     const far = [[mixer, -6], [flatbed, -28]];
