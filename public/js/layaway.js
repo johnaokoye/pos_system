@@ -71,7 +71,7 @@ Object.assign(App, {
     // Reset on every open — posCreateLayawayFromCart() sets this true right
     // after this call returns, for that one attempt only.
     this._layawayFromPOSCart = false;
-    const branches = this.currentUser.branches || [];
+    const branches = this._posBranches(); // never a warehouse
     const defaultBranch = branches.find(b => b.is_default) || branches[0] || null;
     const products = await this.api('GET', `/products?is_layaway_eligible=1&active=1${defaultBranch ? '&branch_id='+defaultBranch.id : ''}`);
     this._layawayProducts = products;

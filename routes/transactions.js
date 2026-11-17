@@ -6,6 +6,7 @@ const { customerSalesperson } = require('../lib/salesCredit');
 const { getWcSettings, wcRequest } = require('./woocommerce');
 const { syncBinQty } = require('../lib/binSync');
 const saleTransfers = require('../lib/saleTransfers');
+const { warehouseSaleError } = require('../lib/branchStock');
 const { takeFromLots, recordSaleAllocation, returnSaleAllocation, releaseTransferReservations } = require('../lib/stockLots');
 const { requireAuth, requirePermission, requireAnyPermission, can } = require('../lib/permissions');
 
@@ -108,6 +109,7 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
   try {
     const { customer_id, employee_id, created_by, branch_id, items, discount_amount, notes, promotion_code, promotion_name } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in cart' });
+    if (!req.apiKey) { const whErr = await warehouseSaleError(db, branch_id); if (whErr) return res.status(400).json({ error: whErr }); }
     if (!req.apiKey && items.some(i => i.is_q_item && !i.product_id) && !can(req.employee?.permissions, 'pos_q_item')) {
       return res.status(403).json({ error: 'Missing permission: pos_q_item (Q items)' });
     }
@@ -666,6 +668,8 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       const { rows: [setting] } = await db.execute({ sql: "SELECT value FROM settings WHERE key='woo_sync_branch_id'", args: [] });
       if (setting?.value) branch_id = setting.value;
     }
+    // Online orders may be filled from a warehouse (woo_sync_branch_id); till sales never are.
+    if (!req.apiKey) { const whErr = await warehouseSaleError(db, branch_id); if (whErr) return res.status(400).json({ error: whErr }); }
 
     const transaction_number = await nextNumber(db, 'transactions', 'transaction_number', 'TXN-', 6);
 

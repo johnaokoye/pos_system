@@ -914,7 +914,7 @@ Object.assign(App, {
     if (this.currentDrawerSession) return;
     if (!this.can('drawers')) { this._posHasDrawers = false; this.renderPOSBranchBar(); return; }
 
-    const branches = this.currentUser.branches || [];
+    const branches = this._posBranches(); // no till at a warehouse
     const isMultiBranch = this.currentUser.permissions?.multi_branch_access && branches.length > 1;
     const defaultBranch = branches.find(b => b.is_default) || branches[0];
 
@@ -1035,7 +1035,7 @@ Object.assign(App, {
     const float = parseFloat(document.getElementById('pos-drawer-float')?.value) || 0;
     const errEl = document.getElementById('pos-drawer-err');
     const branchEl = document.getElementById('pos-drawer-branch');
-    const branches = this.currentUser.branches || [];
+    const branches = this._posBranches();
     const branchId = branchEl
       ? parseInt(branchEl.value)
       : (this.posBranch || branches.find(b => b.is_default) || branches[0])?.id;

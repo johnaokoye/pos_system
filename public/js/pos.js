@@ -1,10 +1,17 @@
 // POS screen: ticket, cart, Receive Payment, tax exemption, bundle upsell, checkout, receipts.
 Object.assign(App, {
   // ─── POS ──────────────────────────────────────────────────
+  // Branches the till can sell at: never a warehouse (branches.is_warehouse) —
+  // warehouse stock is sold from a store with Get from here, which raises a
+  // transfer. POST /transactions, /hold and /layaway/plans refuse a warehouse too.
+  _posBranches() {
+    return (this.currentUser?.branches || []).filter(b => !Number(b.is_warehouse));
+  },
+
   renderPOSBranchBar() {
     const bar = document.getElementById('pos-branch-bar');
     if (!bar) return;
-    const branches = this.currentUser.branches || [];
+    const branches = this._posBranches();
     const isMulti = this.currentUser.permissions?.multi_branch_access && branches.length > 1;
     const inner = isMulti
       ? `<select id="pos-branch-select" onchange="App.switchPOSBranch(+this.value)" style="border:none;background:transparent;font-weight:600;font-size:14px;color:var(--brand-black);cursor:pointer;outline:none;max-width:260px">
@@ -36,7 +43,7 @@ Object.assign(App, {
       this.renderPOSBranchBar();
       return;
     }
-    const branch = this.currentUser.branches.find(b => b.id === branchId);
+    const branch = this._posBranches().find(b => b.id === branchId);
     if (!branch) return;
     this.posBranch = branch;
     this.allProducts = await this.api('GET', `/products?active=1&for_sale=1&branch_id=${branchId}`);
@@ -62,10 +69,16 @@ Object.assign(App, {
     // passed in immediately. This is also what makes the branch-scoped price
     // tier and per-branch stock actually show up in the grid, neither of
     // which worked before this was wired through.
-    const branches = this.currentUser.branches || [];
+    const branches = this._posBranches();
     const defaultBranch = branches.find(b => b.is_default) || branches[0] || null;
     if (!this.posBranch || !branches.find(b => b.id === this.posBranch.id)) {
       this.posBranch = defaultBranch;
+    }
+    // Only a warehouse to work at: nothing to sell from here.
+    if (!branches.length && (this.currentUser?.branches || []).length) {
+      document.getElementById('content').innerHTML = `<div class="empty-state" style="padding:60px 20px"><p style="font-size:16px;font-weight:600">Sales aren't made at a warehouse</p>
+        <p style="color:var(--text-muted)">Your branch is a warehouse. Items are sold from a store, which gets warehouse stock with “Get from here”.</p></div>`;
+      return;
     }
     const branchParam = this.posBranch?.id ? `&branch_id=${this.posBranch.id}` : '';
 

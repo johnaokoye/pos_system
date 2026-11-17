@@ -8,7 +8,7 @@ const { takeFromLots, recordLayawayAllocation, qualifyLayaway, releaseLayawayIte
 const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { storeToday } = require('../lib/storeTime');
-const { branchStockQty } = require('../lib/branchStock');
+const { branchStockQty, warehouseSaleError } = require('../lib/branchStock');
 
 async function getSetting(key, fallback) {
   const { rows: [row] } = await db.execute({ sql: 'SELECT value FROM settings WHERE key = ?', args: [key] });
@@ -73,6 +73,8 @@ router.post('/plans', requirePermission('layaway_create'), async (req, res) => {
     const { customer_id, branch_id, employee_id, items, payment_method, amount_tendered, drawer_session_id, payment_frequency, notes } = req.body;
     if (!customer_id) return res.status(400).json({ error: 'A customer is required' });
     if (!branch_id) return res.status(400).json({ error: 'A branch/location is required' });
+    const whErr = await warehouseSaleError(db, branch_id);
+    if (whErr) return res.status(400).json({ error: whErr });
     if (!items || !items.length) return res.status(400).json({ error: 'At least one item is required' });
     const frequency = ['weekly', 'biweekly', 'monthly'].includes(payment_frequency) ? payment_frequency : 'monthly';
 
