@@ -1180,6 +1180,20 @@ async function _init() {
       prev_cost REAL,
       new_cost REAL
     )` },
+    // Supplier invoices recorded on a PO whose goods were received before
+    // receipts were logged (no po_receipts row to carry them). Receipts
+    // logged since carry their own invoice # on po_receipts.
+    { sql: `CREATE TABLE IF NOT EXISTS po_invoices (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      po_id INTEGER NOT NULL REFERENCES purchase_orders(id),
+      vendor_invoice_number TEXT NOT NULL,
+      invoice_date TEXT,
+      received_date TEXT,
+      created_by INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_by INTEGER REFERENCES employees(id),
+      updated_at DATETIME
+    )` },
     // Cost / selling price changes made while receiving a PO (the vendor
     // dropped the price after the PO went out, or the shelf price moves with
     // it). One row per line per change; receipt_id ties it to the receipt.
@@ -3567,6 +3581,9 @@ async function _init() {
     'ALTER TABLE po_receipts ADD COLUMN received_date TEXT',
     'ALTER TABLE po_receipts ADD COLUMN vendor_invoice_number TEXT',
     'ALTER TABLE po_receipts ADD COLUMN invoice_date TEXT',
+    // Who last filled in / changed those details after the receipt (PATCH /purchase-orders/:id/receipts/:rid/details).
+    'ALTER TABLE po_receipts ADD COLUMN details_updated_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE po_receipts ADD COLUMN details_updated_at DATETIME',
     'ALTER TABLE ap_payments ADD COLUMN tax_amount REAL',
     'ALTER TABLE ap_payments ADD COLUMN credit_account TEXT',
     'ALTER TABLE ap_payments ADD COLUMN consignment_settlement_id INTEGER REFERENCES consignment_settlements(id)',
@@ -4731,6 +4748,7 @@ async function _init() {
     'CREATE INDEX IF NOT EXISTS idx_ap_bills_supplier_id ON ap_bills(supplier_id)',
     'CREATE INDEX IF NOT EXISTS idx_ap_bills_po_id ON ap_bills(po_id)',
     'CREATE INDEX IF NOT EXISTS idx_po_receipts_po_id ON po_receipts(po_id)',
+    'CREATE INDEX IF NOT EXISTS idx_po_invoices_po_id ON po_invoices(po_id)',
     'CREATE INDEX IF NOT EXISTS idx_po_receipt_items_receipt_id ON po_receipt_items(receipt_id)',
     'CREATE INDEX IF NOT EXISTS idx_direct_receipts_supplier_id ON direct_receipts(supplier_id)',
     'CREATE INDEX IF NOT EXISTS idx_po_receipt_price_changes_po_id ON po_receipt_price_changes(po_id)',

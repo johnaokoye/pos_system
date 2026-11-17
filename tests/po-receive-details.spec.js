@@ -66,4 +66,48 @@ test('PO receiving records the date received and the supplier invoice', async ({
   expect(listed[0].invoice_numbers).toBe(`INV-${s}, INV2-${s}`);
   await page.evaluate(() => App.showSection('purchasing'));
   await expect(page.locator('#po-list tr', { hasText: po.po_number })).toContainText(`INV-${s}, INV2-${s}`);
+
+  // An older receipt with no invoice: filled in afterwards from the PO view.
+  const po2 = await api(page, 'POST', '/purchase-orders', { supplier_id: supplier.id, branch_id: 1, items: [{ product_id: product.id, quantity: 4, unit_cost: 40 }] });
+  await api(page, 'PATCH', `/purchase-orders/${po2.id}/status`, { status: 'sent' });
+  await login(page, approver);
+  await api(page, 'PATCH', `/purchase-orders/${po2.id}/approve`, { signature: SIG });
+  await login(page, 'admin', '123456');
+  const item2 = (await api(page, 'GET', `/purchase-orders/${po2.id}`)).items[0].id;
+  await api(page, 'PATCH', `/purchase-orders/${po2.id}/receive`, { items: [{ item_id: item2, quantity_received: 4 }] });
+  let rc = (await api(page, 'GET', `/purchase-orders/${po2.id}`)).receipts[0];
+  expect(rc.vendor_invoice_number).toBeNull();
+  expect(await attempt(page, 'PATCH', `/purchase-orders/${po2.id}/receipts/${rc.id}/details`, { received_date: '2999-01-01' })).toMatch(/future/);
+
+  await page.evaluate(id => App.viewPO(id), po2.id);
+  await page.click('button:has-text("Add Invoice")');
+  await page.fill('#rcd-date', '2026-11-03');
+  await page.fill('#rcd-invoice', `OLD-${s}`);
+  await page.fill('#rcd-invoice-date', '2026-11-02');
+  await page.click('.modal button:has-text("Save")');
+  await expect(page.locator('text=Invoice details updated')).toBeVisible();
+  rc = (await api(page, 'GET', `/purchase-orders/${po2.id}`)).receipts[0];
+  expect(rc).toMatchObject({ received_date: '2026-11-03', vendor_invoice_number: `OLD-${s}`, invoice_date: '2026-11-02' });
+  bill = await api(page, 'GET', `/payables/bills/${rc.bill_id}`);
+  expect(bill).toMatchObject({ vendor_invoice_number: `OLD-${s}`, bill_date: '2026-11-02' });
+  expect((await api(page, 'GET', `/purchase-orders?q=OLD-${s}`)).map(p => p.id)).toEqual([po2.id]);
+
+  // A PO received before receipts were logged has no receipt to carry the
+  // invoice: it's recorded on the PO itself.
+  expect(await attempt(page, 'POST', `/purchase-orders/${po2.id}/invoices`, { vendor_invoice_number: 'X' })).toMatch(/logged receipt/);
+  const legacy = (await api(page, 'GET', '/purchase-orders?q=LEGACY-PO-1'))[0];
+  await page.evaluate(id => App.viewPO(id), legacy.id);
+  await page.click('button:has-text("+ Add Invoice")');
+  await page.fill('#poi-invoice', `LEG-${s}`);
+  await page.fill('#poi-invoice-date', '2026-02-27');
+  await page.click('.modal button:has-text("Save")');
+  await expect(page.locator(`text=LEG-${s}`)).toBeVisible();
+  let lp = await api(page, 'GET', `/purchase-orders/${legacy.id}`);
+  expect(lp.invoices[0]).toMatchObject({ vendor_invoice_number: `LEG-${s}`, invoice_date: '2026-02-27', received_date: '2026-03-01' });
+  expect((await api(page, 'GET', `/purchase-orders?q=LEG-${s}`))[0]).toMatchObject({ id: legacy.id, invoice_numbers: `LEG-${s}` });
+  await api(page, 'PUT', `/purchase-orders/${legacy.id}/invoices/${lp.invoices[0].id}`, { vendor_invoice_number: `LEG2-${s}` });
+  lp = await api(page, 'GET', `/purchase-orders/${legacy.id}`);
+  expect(lp.invoices[0]).toMatchObject({ vendor_invoice_number: `LEG2-${s}`, invoice_date: null });
+  await api(page, 'DELETE', `/purchase-orders/${legacy.id}/invoices/${lp.invoices[0].id}`);
+  expect((await api(page, 'GET', `/purchase-orders/${legacy.id}`)).invoices).toEqual([]);
 });

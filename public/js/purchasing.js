@@ -1733,7 +1733,7 @@ Object.assign(App, {
             </div>
           </div>
 
-          ${(po.receipts || []).length || po.items.some(i => i.quantity_unlogged > 0) ? `
+          ${(po.receipts || []).length || po.items.some(i => i.quantity_unlogged > 0) || (po.invoices || []).length ? `
           <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:14px">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
               <span style="font-weight:700;font-size:14px">Receipts</span>
@@ -1744,12 +1744,29 @@ Object.assign(App, {
                 <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
                   <div style="font-size:13px"><span class="fw-600">${r.receipt_number}</span> · ${r.received_date ? `Received ${this.fmtDate(r.received_date)}` : this.fmtDateTime(r.received_at)}${r.received_by_name ? ` · ${this.escapeAttr(r.received_by_name)}` : ''}${r.vendor_invoice_number ? ` · Inv ${this.escapeAttr(r.vendor_invoice_number)}${r.invoice_date ? ` (${this.fmtDate(r.invoice_date)})` : ''}` : ''}${r.bill_number ? ` · A/P ${r.bill_number}${r.bill_status === 'void' ? ' (void)' : ''}` : ''}
                     ${r.status === 'reversed' ? `<span class="badge-pill badge-danger" style="font-size:10px">Reversed</span>` : ''}</div>
+                  <div style="display:flex;gap:6px">
+                  ${r.status === 'received' && this.can('purchasing_receive') ? `<button class="btn btn-sm btn-outline" title="Date received and supplier invoice" onclick="App.showPOReceiptDetails(${po.id}, ${r.id})">✎ ${r.vendor_invoice_number ? 'Invoice' : 'Add Invoice'}</button>` : ''}
                   ${r.status === 'received' && ['received','partial'].includes(po.status) && this.can('purchasing_receive') ? `<button class="btn btn-sm btn-danger" onclick="App.showReversePOReceipt(${po.id}, ${r.id})">↩ Reverse</button>` : ''}
+                  </div>
                 </div>
                 <div style="font-size:12px;color:var(--text-muted);margin-top:3px">${r.items.map(i => `${this.escapeAttr(i.product_name)} × ${i.quantity}`).join(' · ')}</div>
                 ${(r.price_changes || []).length ? `<div style="font-size:12px;margin-top:3px">${r.price_changes.map(c => `<div>💲 ${this.escapeAttr(c.product_name)}: ${c.new_unit_cost != null ? `cost ${this._fmtPO(c.old_unit_cost, po)} → <strong>${this._fmtPO(c.new_unit_cost, po)}</strong>` : ''}${c.new_unit_cost != null && c.new_price != null ? ' · ' : ''}${c.new_price != null ? `price ${c.old_price != null ? this.fmt(c.old_price) : '—'} → <strong>${this.fmt(c.new_price)}</strong>` : ''}${c.changed_by_name ? ` <span style="color:var(--text-muted)">(${this.escapeAttr(c.changed_by_name)})</span>` : ''}</div>`).join('')}</div>` : ''}
+                ${r.details_updated_at ? `<div style="font-size:11px;color:var(--text-muted);margin-top:3px">Invoice details updated ${this.fmtDateTime(r.details_updated_at)}${r.details_updated_by_name ? ` by ${this.escapeAttr(r.details_updated_by_name)}` : ''}</div>` : ''}
                 ${r.status === 'reversed' ? `<div style="font-size:12px;color:var(--text-muted);margin-top:3px">Reversed ${this.fmtDateTime(r.reversed_at)}${r.reversed_by_name ? ` by ${this.escapeAttr(r.reversed_by_name)}` : ''} — ${this.escapeAttr(r.reverse_reason)}</div>` : ''}
               </div>`).join('')}
+            ${po.items.some(i => i.quantity_unlogged > 0) || (po.invoices || []).length ? `
+              <div style="padding:8px 10px;border:1px dashed var(--border);border-radius:6px;margin-bottom:6px">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+                  <div style="font-size:13px"><span class="fw-600">Supplier invoices</span> <span style="font-size:12px;color:var(--text-muted)">— goods received before receipts were logged</span></div>
+                  ${this.can('purchasing_receive') && po.items.some(i => i.quantity_unlogged > 0) ? `<button class="btn btn-sm btn-outline" onclick="App.showPOInvoiceForm(${po.id})">+ Add Invoice</button>` : ''}
+                </div>
+                ${(po.invoices || []).length ? (po.invoices || []).map(v => `
+                  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:13px;margin-top:6px">
+                    <div>Inv <span class="fw-600">${this.escapeAttr(v.vendor_invoice_number)}</span>${v.invoice_date ? ` · dated ${this.fmtDate(v.invoice_date)}` : ''}${v.received_date ? ` · received ${this.fmtDate(v.received_date)}` : ''}
+                      <span style="font-size:11px;color:var(--text-muted)">· ${v.updated_at ? `updated ${this.fmtDateTime(v.updated_at)}${v.updated_by_name ? ` by ${this.escapeAttr(v.updated_by_name)}` : ''}` : `added ${this.fmtDateTime(v.created_at)}${v.created_by_name ? ` by ${this.escapeAttr(v.created_by_name)}` : ''}`}</span></div>
+                    ${this.can('purchasing_receive') ? `<div style="display:flex;gap:6px"><button class="btn btn-sm btn-outline" onclick="App.showPOInvoiceForm(${po.id}, ${v.id})">✎</button><button class="btn btn-sm btn-danger" onclick="App.deletePOInvoice(${po.id}, ${v.id})">✕</button></div>` : ''}
+                  </div>`).join('') : '<div style="font-size:12px;color:var(--text-muted);margin-top:4px">None recorded yet.</div>'}
+              </div>` : ''}
           </div>` : ''}
 
           <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:14px">
@@ -2772,6 +2789,95 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
 
   // Reverse one logged receipt (its A/P bill is voided with it), or — for
   // goods received before receipts were logged — per-line quantities.
+  // Fill in / correct a receipt's date received and supplier invoice after the
+  // fact (PATCH /purchase-orders/:id/receipts/:rid/details).
+  async showPOReceiptDetails(poId, receiptId) {
+    const po = await this.api('GET', `/purchase-orders/${poId}`);
+    const r = (po.receipts || []).find(x => x.id === receiptId);
+    if (!r) return this.alert('Receipt not found', 'error');
+    const today = this._storeDay(new Date());
+    const received = r.received_date || this._storeDay(r.received_at);
+    this.showSecondaryModal(`
+      <div class="modal" style="max-width:520px">
+        <div class="modal-header"><span class="modal-title">Receipt Invoice — ${r.receipt_number}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">${this.escapeAttr(po.po_number)} · ${r.items.map(i => `${this.escapeAttr(i.product_name)} × ${i.quantity}`).join(' · ')}</p>
+          <div class="form-group"><label>Date received *</label><input id="rcd-date" type="date" value="${received}" max="${today}"></div>
+          <div class="form-group"><label>Supplier invoice #</label><input id="rcd-invoice" type="text" maxlength="60" value="${this.escapeAttr(r.vendor_invoice_number || '')}" placeholder="e.g. INV-55102"></div>
+          <div class="form-group"><label>Invoice date</label><input id="rcd-invoice-date" type="date" value="${r.invoice_date || ''}" max="${today}"></div>
+          ${r.bill_number ? `<p style="font-size:12px;color:var(--text-muted);margin:0">A/P bill ${this.escapeAttr(r.bill_number)}${r.bill_status === 'void' ? ' is void and won\'t change.' : ' takes the invoice #, and — if nothing has been paid on it — is re-dated to the invoice date (or the date received), with its due date from the vendor\'s terms.'}</p>` : ''}
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeSecondaryModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.savePOReceiptDetails(${poId}, ${receiptId})">Save</button>
+        </div>
+      </div>`);
+  },
+
+  async savePOReceiptDetails(poId, receiptId) {
+    const today = this._storeDay(new Date());
+    const received_date = document.getElementById('rcd-date')?.value || '';
+    const vendor_invoice_number = document.getElementById('rcd-invoice')?.value.trim() || null;
+    const invoice_date = document.getElementById('rcd-invoice-date')?.value || null;
+    if (!received_date) return this.alert('Enter the date the items were received', 'error');
+    if (received_date > today || (invoice_date && invoice_date > today)) return this.alert("Dates can't be in the future", 'error');
+    try {
+      const r = await this.api('PATCH', `/purchase-orders/${poId}/receipts/${receiptId}/details`, { received_date, vendor_invoice_number, invoice_date });
+      this.closeSecondaryModal();
+      this.alert(r.bill_paid ? 'Saved — the A/P bill has payments, so only its invoice # was updated' : 'Receipt invoice details saved');
+      this.viewPO(poId);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // Supplier invoice on a PO received before receipts were logged (po_invoices).
+  async showPOInvoiceForm(poId, invoiceId) {
+    const po = await this.api('GET', `/purchase-orders/${poId}`);
+    const v = invoiceId ? (po.invoices || []).find(x => x.id === invoiceId) : null;
+    const today = this._storeDay(new Date());
+    const received = v ? (v.received_date || '') : (po.received_at ? this._storeDay(po.received_at) : '');
+    this.showSecondaryModal(`
+      <div class="modal" style="max-width:480px">
+        <div class="modal-header"><span class="modal-title">${v ? 'Edit' : 'Add'} Supplier Invoice — ${this.escapeAttr(po.po_number)}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div class="form-group"><label>Supplier invoice # *</label><input id="poi-invoice" type="text" maxlength="60" value="${this.escapeAttr(v?.vendor_invoice_number || '')}" placeholder="e.g. INV-55102"></div>
+          <div class="form-group"><label>Invoice date</label><input id="poi-invoice-date" type="date" value="${v?.invoice_date || ''}" max="${today}"></div>
+          <div class="form-group"><label>Date received</label><input id="poi-date" type="date" value="${received}" max="${today}"></div>
+          <p style="font-size:12px;color:var(--text-muted);margin:0">For the record only — stock and A/P aren't changed. If there's an A/P bill for these goods, put the invoice # on it in Accounts Payable too.</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeSecondaryModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.savePOInvoice(${poId}, ${invoiceId || 'null'})">Save</button>
+        </div>
+      </div>`);
+    setTimeout(() => document.getElementById('poi-invoice')?.focus(), 50);
+  },
+
+  async savePOInvoice(poId, invoiceId) {
+    const today = this._storeDay(new Date());
+    const vendor_invoice_number = document.getElementById('poi-invoice')?.value.trim() || '';
+    const invoice_date = document.getElementById('poi-invoice-date')?.value || null;
+    const received_date = document.getElementById('poi-date')?.value || null;
+    if (!vendor_invoice_number) return this.alert('Enter the supplier invoice #', 'error');
+    if ((invoice_date && invoice_date > today) || (received_date && received_date > today)) return this.alert("Dates can't be in the future", 'error');
+    try {
+      const body = { vendor_invoice_number, invoice_date, received_date };
+      if (invoiceId) await this.api('PUT', `/purchase-orders/${poId}/invoices/${invoiceId}`, body);
+      else await this.api('POST', `/purchase-orders/${poId}/invoices`, body);
+      this.closeSecondaryModal();
+      this.alert('Supplier invoice saved');
+      this.viewPO(poId);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async deletePOInvoice(poId, invoiceId) {
+    if (!confirm('Remove this supplier invoice from the PO?')) return;
+    try {
+      await this.api('DELETE', `/purchase-orders/${poId}/invoices/${invoiceId}`);
+      this.alert('Supplier invoice removed');
+      this.viewPO(poId);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
   showReversePOReceipt(poId, receiptId) {
     this.showSecondaryModal(`
       <div class="modal" style="max-width:520px">

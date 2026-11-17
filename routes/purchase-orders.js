@@ -92,6 +92,7 @@ router.get('/', async (req, res) => {
           SELECT r.vendor_invoice_number AS inv, MIN(r.id) AS ord FROM po_receipts r WHERE r.po_id = po.id AND r.status = 'received' AND r.vendor_invoice_number IS NOT NULL AND r.vendor_invoice_number != '' GROUP BY r.vendor_invoice_number
           UNION SELECT ab.vendor_invoice_number, 1000000000 + MIN(ab.id) FROM ap_bills ab WHERE ab.po_id = po.id AND ab.status != 'void' AND ab.vendor_invoice_number IS NOT NULL AND ab.vendor_invoice_number != ''
             AND NOT EXISTS (SELECT 1 FROM po_receipts r2 WHERE r2.po_id = po.id AND r2.status = 'received' AND r2.vendor_invoice_number = ab.vendor_invoice_number) GROUP BY ab.vendor_invoice_number
+          UNION SELECT pi.vendor_invoice_number, 2000000000 + MIN(pi.id) FROM po_invoices pi WHERE pi.po_id = po.id GROUP BY pi.vendor_invoice_number
           ORDER BY ord)) AS invoice_numbers
       FROM purchase_orders po LEFT JOIN suppliers s ON po.supplier_id = s.id LEFT JOIN branches b ON po.branch_id = b.id LEFT JOIN employees e ON po.employee_id = e.id WHERE 1=1`;
     const params = [];
@@ -107,8 +108,9 @@ router.get('/', async (req, res) => {
       sql += ` AND (po.po_number LIKE ? OR s.name LIKE ? OR po.vendor_order_number LIKE ? OR po.notes LIKE ? OR po.internal_notes LIKE ?
         OR EXISTS (SELECT 1 FROM purchase_order_items poi WHERE poi.po_id = po.id AND (poi.product_name LIKE ? OR poi.sku LIKE ?))
         OR EXISTS (SELECT 1 FROM po_receipts r WHERE r.po_id = po.id AND r.status = 'received' AND r.vendor_invoice_number LIKE ?)
-        OR EXISTS (SELECT 1 FROM ap_bills ab WHERE ab.po_id = po.id AND ab.status != 'void' AND ab.vendor_invoice_number LIKE ?))`;
-      params.push(like, like, like, like, like, like, like, like, like);
+        OR EXISTS (SELECT 1 FROM ap_bills ab WHERE ab.po_id = po.id AND ab.status != 'void' AND ab.vendor_invoice_number LIKE ?)
+        OR EXISTS (SELECT 1 FROM po_invoices pi WHERE pi.po_id = po.id AND pi.vendor_invoice_number LIKE ?))`;
+      params.push(like, like, like, like, like, like, like, like, like, like);
     }
     sql += ' ORDER BY po.created_at DESC LIMIT ?';
     params.push(parseInt(limit));
@@ -126,6 +128,8 @@ router.get('/:id', async (req, res) => {
     for (const i of items) i.quantity_unlogged = unlogged[i.id] || 0;
     po.items = items;
     po.receipts = await poReceipts(po.id);
+    po.invoices = (await db.execute({ sql: `SELECT pi.*, ec.first_name || ' ' || ec.last_name AS created_by_name, eu.first_name || ' ' || eu.last_name AS updated_by_name
+        FROM po_invoices pi LEFT JOIN employees ec ON ec.id = pi.created_by LEFT JOIN employees eu ON eu.id = pi.updated_by WHERE pi.po_id = ? ORDER BY pi.id`, args: [po.id] })).rows;
     res.json(po);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -575,6 +579,105 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Receipt details after the fact ─────────────────────────
+// Fill in or correct a receipt's date received and supplier invoice # / date
+// (older receipts were logged without them). The receipt's A/P bill takes the
+// invoice #, and — while nothing has been paid on it — the new bill date
+// (invoice date, else date received) with its due date from the vendor's terms.
+router.patch('/:id/receipts/:rid/details', requirePermission('purchasing_receive'), async (req, res) => {
+  try {
+    const isDay = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
+    const todayDay = today();
+    const { rows: [receipt] } = await db.execute({ sql: 'SELECT * FROM po_receipts WHERE id = ? AND po_id = ?', args: [req.params.rid, req.params.id] });
+    if (!receipt) return res.status(404).json({ error: 'Receipt not found' });
+    if (receipt.status !== 'received') return res.status(400).json({ error: 'This receipt was reversed' });
+    const receivedDate = req.body.received_date ? String(req.body.received_date) : null;
+    if (!receivedDate || !isDay(receivedDate)) return res.status(400).json({ error: 'Enter a valid date received' });
+    if (receivedDate > todayDay) return res.status(400).json({ error: "The date received can't be in the future" });
+    const vendorInvoice = String(req.body.vendor_invoice_number || '').trim().slice(0, 60) || null;
+    const invoiceDate = req.body.invoice_date ? String(req.body.invoice_date) : null;
+    if (invoiceDate && !isDay(invoiceDate)) return res.status(400).json({ error: 'Enter a valid invoice date' });
+    if (invoiceDate && invoiceDate > todayDay) return res.status(400).json({ error: "The invoice date can't be in the future" });
+
+    let billDateChanged = false, billPaid = false;
+    const tx = await db.transaction('write');
+    try {
+      await tx.execute({ sql: 'UPDATE po_receipts SET received_date = ?, vendor_invoice_number = ?, invoice_date = ?, details_updated_by = ?, details_updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        args: [receivedDate, vendorInvoice, invoiceDate, req.employee?.id || null, receipt.id] });
+      if (receipt.bill_id) {
+        const { rows: [bill] } = await tx.execute({ sql: `SELECT b.*, ${PAID_SQL} AS paid FROM ap_bills b WHERE b.id = ?`, args: [receipt.bill_id] });
+        if (bill && bill.status !== 'void') {
+          billPaid = Number(bill.paid) > 0.005;
+          const billDate = invoiceDate || receivedDate;
+          if (!billPaid && billDate !== bill.bill_date) {
+            const { rows: [sup] } = await tx.execute({ sql: 'SELECT payment_terms FROM suppliers WHERE id = ?', args: [bill.supplier_id] });
+            await tx.execute({ sql: 'UPDATE ap_bills SET vendor_invoice_number = ?, bill_date = ?, due_date = ? WHERE id = ?', args: [vendorInvoice, billDate, dueDateFor(sup?.payment_terms, billDate), bill.id] });
+            billDateChanged = true;
+          } else {
+            await tx.execute({ sql: 'UPDATE ap_bills SET vendor_invoice_number = ? WHERE id = ?', args: [vendorInvoice, bill.id] });
+          }
+        }
+      }
+      await tx.commit();
+    } catch (e) {
+      await tx.rollback();
+      return res.status(400).json({ error: e.message });
+    }
+    const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM po_receipts WHERE id = ?', args: [receipt.id] });
+    res.json({ ...updated, bill_date_changed: billDateChanged, bill_paid: billPaid });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Supplier invoices on POs received before receipts were logged ─────
+// Those goods have no po_receipts row to carry an invoice #, so it's recorded
+// on the PO itself (po_invoices). No stock or A/P effect.
+function poInvoiceFields(body) {
+  const isDay = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
+  const todayDay = today();
+  const vendor_invoice_number = String(body.vendor_invoice_number || '').trim().slice(0, 60);
+  if (!vendor_invoice_number) throw new Error('Enter the supplier invoice #');
+  const invoice_date = body.invoice_date ? String(body.invoice_date) : null;
+  const received_date = body.received_date ? String(body.received_date) : null;
+  for (const [v, label] of [[invoice_date, 'invoice date'], [received_date, 'date received']]) {
+    if (v && !isDay(v)) throw new Error(`Enter a valid ${label}`);
+    if (v && v > todayDay) throw new Error(`The ${label} can't be in the future`);
+  }
+  return { vendor_invoice_number, invoice_date, received_date };
+}
+
+router.post('/:id/invoices', requirePermission('purchasing_receive'), async (req, res) => {
+  try {
+    const { rows: [po] } = await db.execute({ sql: 'SELECT id FROM purchase_orders WHERE id = ?', args: [req.params.id] });
+    if (!po) return res.status(404).json({ error: 'Not found' });
+    const unlogged = await unloggedReceived(db, po.id);
+    if (!Object.values(unlogged).some(q => q > 0)) return res.status(400).json({ error: "Everything on this PO was received with a logged receipt — add the invoice on that receipt instead" });
+    let f;
+    try { f = poInvoiceFields(req.body); } catch (e) { return res.status(400).json({ error: e.message }); }
+    const r = await db.execute({ sql: 'INSERT INTO po_invoices (po_id, vendor_invoice_number, invoice_date, received_date, created_by) VALUES (?,?,?,?,?)',
+      args: [po.id, f.vendor_invoice_number, f.invoice_date, f.received_date, req.employee?.id || null] });
+    res.json({ id: Number(r.lastInsertRowid), po_id: po.id, ...f });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.put('/:id/invoices/:iid', requirePermission('purchasing_receive'), async (req, res) => {
+  try {
+    let f;
+    try { f = poInvoiceFields(req.body); } catch (e) { return res.status(400).json({ error: e.message }); }
+    const r = await db.execute({ sql: 'UPDATE po_invoices SET vendor_invoice_number = ?, invoice_date = ?, received_date = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND po_id = ?',
+      args: [f.vendor_invoice_number, f.invoice_date, f.received_date, req.employee?.id || null, req.params.iid, req.params.id] });
+    if (!r.rowsAffected) return res.status(404).json({ error: 'Invoice not found' });
+    res.json({ id: Number(req.params.iid), ...f });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/:id/invoices/:iid', requirePermission('purchasing_receive'), async (req, res) => {
+  try {
+    const r = await db.execute({ sql: 'DELETE FROM po_invoices WHERE id = ? AND po_id = ?', args: [req.params.iid, req.params.id] });
+    if (!r.rowsAffected) return res.status(404).json({ error: 'Invoice not found' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── Reversing receipts ──────────────────────────────────────
 // Takes received goods back off: stock out of the PO's branch, the line's
 // received count down, and the PO/PR status back to partial/approved so it
@@ -637,10 +740,12 @@ async function loadReversiblePO(id) {
 async function poReceipts(poId) {
   const { rows: receipts } = await db.execute({
     sql: `SELECT r.*, er.first_name || ' ' || er.last_name AS received_by_name, ev.first_name || ' ' || ev.last_name AS reversed_by_name,
+            ed.first_name || ' ' || ed.last_name AS details_updated_by_name,
             b.bill_number, b.status AS bill_status
           FROM po_receipts r
           LEFT JOIN employees er ON er.id = r.received_by
           LEFT JOIN employees ev ON ev.id = r.reversed_by
+          LEFT JOIN employees ed ON ed.id = r.details_updated_by
           LEFT JOIN ap_bills b ON b.id = r.bill_id
           WHERE r.po_id = ? ORDER BY r.id`,
     args: [poId],

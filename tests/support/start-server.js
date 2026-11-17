@@ -29,5 +29,10 @@ const { ensureReady, db } = require('../../database');
   // database has none at any branch, and POS shows everything out of stock.
   await db.execute(`INSERT OR IGNORE INTO branch_inventory (product_id, branch_id, stock_qty, min_stock)
     SELECT p.id, 1, p.stock_qty, p.min_stock FROM products p WHERE p.stock_qty > 0`);
+  // A PO received before receipts were logged (quantity_received, no
+  // po_receipts row) — tests/po-receive-details.spec.js records its supplier
+  // invoice. No product on the line, so no stock is involved.
+  const legacyPo = await db.execute("INSERT INTO purchase_orders (po_number, branch_id, status, subtotal, total, received_at) VALUES ('LEGACY-PO-1', 1, 'received', 50, 50, '2026-03-01T15:00:00Z')");
+  await db.execute({ sql: "INSERT INTO purchase_order_items (po_id, product_name, quantity_ordered, quantity_received, unit_cost, total) VALUES (?, 'Legacy line', 2, 2, 25, 50)", args: [Number(legacyPo.lastInsertRowid)] });
   require('../../server');
 })().catch(e => { console.error(e); process.exit(1); });
