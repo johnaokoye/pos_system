@@ -410,6 +410,59 @@ function buildPaymentReceiptHtml(p, s) {
 </html>`;
 }
 
+// A cash customer's credit left on account (customerCredits in
+// routes/customers.js): each credit note, what was used and on which sale,
+// and what's left — the emailed twin of App._printCustomerCredits.
+function buildCreditStatementHtml(c, data, s) {
+  const storeName = s.store_name || 'My Store';
+  const td = 'padding:6px 8px;border-bottom:1px solid #f0f0f0;vertical-align:top';
+  const notes = data.notes.filter(n => n.remaining > 0.005).concat(data.notes.filter(n => !(n.remaining > 0.005)));
+  const issued = notes.reduce((t, n) => t + Number(n.amount), 0);
+  const left = notes.reduce((t, n) => t + Number(n.remaining), 0);
+  const kind = n => n.return_id ? 'Return' : n.entered_in_pos ? 'Old system' : 'RetailPOS Books';
+  const rows = notes.map(n => {
+    const oldNo = n.return_id ? '' : String(n.reference || '').replace(/^Legacy CN /, '');
+    return `<tr>
+      <td style="${td}"><strong>${esc(n.payment_number)}</strong><br><span style="color:#888;font-size:11px">${fmtDate(n.legacy_credit_date || n.created_at)} · ${kind(n)}${oldNo ? ` · Old # ${esc(oldNo)}` : ''}</span>
+        ${(n.spent || []).map(u => `<br><span style="color:#888;font-size:11px">${fmt(u.amount)} used on ${esc(u.transaction_number)}, ${fmtDate(u.created_at)}</span>`).join('')}</td>
+      <td style="${td};text-align:right">${fmt(n.amount)}</td>
+      <td style="${td};text-align:right;font-weight:600">${n.remaining > 0.005 ? fmt(n.remaining) : 'Used'}</td>
+    </tr>`;
+  }).join('');
+  const name = `${c.first_name || ''} ${c.last_name || ''}`.trim();
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Credit Statement ${esc(name)}</title></head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
+<tr><td align="center">
+  <table width="520" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+    ${docHeader(storeName, null, s.store_address || '', s.store_phone, 'Credit Statement', `As of ${fmtDate(new Date())}`)}
+    <tr><td style="padding:0 24px 20px">
+      ${docRow('Customer', esc(name))}
+      ${c.customer_number ? docRow('Account #', esc(c.customer_number)) : ''}
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin:14px 0;border:2px solid #16a34a;border-radius:8px">
+        <tr><td style="padding:12px 14px;font-size:12px;color:#555;font-weight:700;text-transform:uppercase">Credit available<br><span style="font-weight:400;text-transform:none">Can be used on purchases at any of our branches</span></td>
+        <td style="padding:12px 14px;text-align:right;font-size:22px;font-weight:700;color:#16a34a">${fmt(data.available)}</td></tr>
+      </table>
+      ${rows ? `<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px">
+        <thead><tr style="background:#f9fafb"><th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Credit Note</th><th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Amount</th><th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Left</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>` : ''}
+      <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-top:12px">
+        <tr><td style="padding:3px 0">Total credit issued</td><td style="text-align:right">${fmt(issued)}</td></tr>
+        <tr><td style="padding:3px 0">Used</td><td style="text-align:right">${fmt(issued - left)}</td></tr>
+        <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
+        <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">CREDIT AVAILABLE</td><td style="font-size:16px;font-weight:700;color:#16a34a;text-align:right">${fmt(data.available)}</td></tr>
+      </table>
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body>
+</html>`;
+}
+
 function buildCancellationReceiptHtml(agreement, s) {
   const storeName = s.store_name || 'My Store';
   const wasBilled = agreement.checkout_transaction_number != null;
@@ -1105,6 +1158,35 @@ router.post('/send-return-receipt/:id', requireAuth, async (req, res) => {
         html: buildReturnReceiptHtml(ret, s),
       });
       res.json({ success: true, message: `Return receipt sent to ${to}` });
+    } catch (e) {
+      res.status(500).json({ error: `Failed to send email: ${e.message}` });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Email a cash customer's Credit Statement (the Available Credit box's Email).
+router.post('/send-credit-statement/:id', requireAuth, async (req, res) => {
+  const to = String(req.body.to || '').trim();
+  if (!to) return res.status(400).json({ error: 'Recipient email is required' });
+  try {
+    const { customerCredits } = require('./customers');
+    const { rows: [c] } = await db.execute({ sql: 'SELECT id, first_name, last_name, customer_number FROM customers WHERE id = ?', args: [req.params.id] });
+    const data = c && await customerCredits(c.id);
+    if (!data) return res.status(404).json({ error: 'Customer not found' });
+    if (data.is_credit_account) return res.status(400).json({ error: 'Credit accounts get a statement from Accounts, not a credit statement' });
+    if (!data.notes.length) return res.status(400).json({ error: 'This customer has no credit notes' });
+    const s = await getSettings();
+    try {
+      const transporter = createTransporter(s);
+      const fromName = s.email_from_name || s.store_name || 'POS System';
+      const fromAddr = s.email_smtp_user || s.store_email || '';
+      await transporter.sendMail({
+        from: `"${fromName}" <${fromAddr}>`,
+        to,
+        subject: `Credit Statement from ${s.store_name || 'Our Store'} — ${fmt(data.available)} available`,
+        html: buildCreditStatementHtml(c, data, s),
+      });
+      res.json({ success: true, message: `Credit statement sent to ${to}` });
     } catch (e) {
       res.status(500).json({ error: `Failed to send email: ${e.message}` });
     }

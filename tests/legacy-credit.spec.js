@@ -53,4 +53,16 @@ test('the credit left on the account prints as a Credit Statement', async ({ pag
   await expect(popup.locator('.avail .amt')).toHaveText('$200.00');
   await expect(popup.locator('body')).toContainText(`Old # PCN-${stamp}`);
   await expect(popup.locator('body')).toContainText(`$100.00 used on ${sale.transaction_number}`);
+  await popup.close();
+
+  // Email: its own box over History, the customer's email filled in; the
+  // test server has no SMTP, so the send reaches the mail step and stops there.
+  await api(page, 'PUT', `/customers/${c.id}`, { ...(await api(page, 'GET', `/customers/${c.id}`)), email: `pc${stamp}@example.com` });
+  await page.locator('#cust-credits').getByRole('button', { name: /Email/ }).click();
+  await expect(page.locator('#cse-to')).toHaveValue(`pc${stamp}@example.com`);
+  await page.click('#cse-send');
+  await expect(page.locator('text=SMTP not configured')).toBeVisible();
+  await expect(page.locator('#cust-credits')).toBeVisible();
+  const noNotes = await api(page, 'POST', '/customers', { first_name: 'No', last_name: `Notes ${stamp}`, phone: `873${String(stamp).slice(-7)}`, customer_type: 'cash' });
+  expect(await page.evaluate(id => App.api('POST', `/email/send-credit-statement/${id}`, { to: 'a@b.com' }).catch(e => e.message), noNotes.id)).toContain('no credit notes');
 });

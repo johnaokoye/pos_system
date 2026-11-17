@@ -1477,6 +1477,7 @@ router.delete('/:id/address-proof', requirePermission('customers_edit'), async (
 
 module.exports = router;
 module.exports.runCreditCheck = runCreditCheck;
+module.exports.customerCredits = customerCredits;
 module.exports.findDuplicateCustomers = findDuplicateCustomers;
 module.exports.isHardDuplicate = isHardDuplicate;
 module.exports.hardDuplicateError = hardDuplicateError;

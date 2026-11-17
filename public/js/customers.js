@@ -1178,7 +1178,8 @@ Object.assign(App, {
             <div style="font-weight:700;font-size:20px;color:${data.available > 0 ? 'var(--success)' : 'var(--text)'}">${this.fmt(data.available)}</div>
             <div style="font-size:12px;color:var(--text-muted)">${data.available > 0 ? 'Offered as Available Credit when this customer is on a POS ticket' : 'No credit on the account'}</div>
           </div>
-          ${data.notes.length ? `<button class="btn btn-sm btn-secondary" onclick="App._printCustomerCredits(${customerId})" title="Letter-size statement of the credit on this account">🖨️ Print</button>` : ''}
+          ${data.notes.length ? `<button class="btn btn-sm btn-secondary" onclick="App._printCustomerCredits(${customerId})" title="Letter-size statement of the credit on this account">🖨️ Print</button>
+          <button class="btn btn-sm btn-secondary" onclick="App._emailCustomerCredits(${customerId})" title="Email the credit statement to the customer">✉️ Email</button>` : ''}
           ${canAdd ? `<button class="btn btn-sm btn-primary" onclick="App._showLegacyCreditForm(${customerId})">+ Add Old Credit Note</button>` : ''}
         </div>
         ${data.notes.length ? `<table style="margin:0"><thead><tr><th>Credit Note</th><th>Old #</th><th>Dated</th><th style="text-align:right">Amount</th><th style="text-align:right">Left</th>${canVoid ? '<th></th>' : ''}</tr></thead><tbody>
@@ -1268,6 +1269,31 @@ Object.assign(App, {
     <script>window.onload=()=>{window.print()}<\/script>
     </body></html>`);
     win.document.close();
+  },
+
+  // Email the Credit Statement (POST /email/send-credit-statement/:id). Its own
+  // overlay, so the customer's History window stays open behind it.
+  async _emailCustomerCredits(customerId) {
+    let email = '';
+    try { email = (await this.api('GET', `/customers/${customerId}`)).email || ''; } catch (e) {}
+    document.getElementById('cse-overlay')?.remove();
+    document.body.insertAdjacentHTML('beforeend', `<div style="position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:3000;display:flex;align-items:center;justify-content:center;padding:16px" id="cse-overlay">
+      <div class="modal" style="max-width:400px;width:100%">
+        <div class="modal-header"><span class="modal-title">Email Credit Statement</span><button class="modal-close" onclick="document.getElementById('cse-overlay').remove()">✕</button></div>
+        <div class="modal-body"><div class="form-group"><label>Recipient Email *</label><input type="email" id="cse-to" value="${this.escapeAttr(email)}" placeholder="customer@example.com"></div></div>
+        <div class="modal-footer"><button class="btn btn-secondary" onclick="document.getElementById('cse-overlay').remove()">Cancel</button><button class="btn btn-primary" id="cse-send">Send</button></div>
+      </div></div>`);
+    document.getElementById('cse-send').addEventListener('click', async () => {
+      const to = document.getElementById('cse-to').value.trim();
+      if (!to || !to.includes('@')) { this.alert('Please enter a valid email address', 'error'); return; }
+      const btn = document.getElementById('cse-send');
+      btn.disabled = true; btn.textContent = 'Sending…';
+      try {
+        await this.api('POST', `/email/send-credit-statement/${customerId}`, { to });
+        document.getElementById('cse-overlay')?.remove();
+        this.alert(`Credit statement sent to ${to}`, 'success');
+      } catch (e) { btn.disabled = false; btn.textContent = 'Send'; this.alert(e.message, 'error'); }
+    });
   },
 
   _showLegacyCreditForm(customerId) {
