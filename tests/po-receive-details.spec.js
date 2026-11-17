@@ -59,4 +59,11 @@ test('PO receiving records the date received and the supplier invoice', async ({
   expect(r).toMatchObject({ received_date: '2026-11-12', vendor_invoice_number: `INV2-${s}`, invoice_date: null });
   bill = await api(page, 'GET', `/payables/bills/${r.bill_id}`);
   expect(bill).toMatchObject({ vendor_invoice_number: `INV2-${s}`, bill_date: '2026-11-12' });
+
+  // The PO list shows the invoice #s and finds the PO by one.
+  const listed = (await api(page, 'GET', `/purchase-orders?q=INV2-${s}`));
+  expect(listed.map(p => p.id)).toEqual([po.id]);
+  expect(listed[0].invoice_numbers).toBe(`INV-${s}, INV2-${s}`);
+  await page.evaluate(() => App.showSection('purchasing'));
+  await expect(page.locator('#po-list tr', { hasText: po.po_number })).toContainText(`INV-${s}, INV2-${s}`);
 });

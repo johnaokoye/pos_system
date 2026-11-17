@@ -40,7 +40,7 @@ Object.assign(App, {
         </div>
         <div class="card" style="margin-bottom:12px;padding:12px 16px">
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            <input id="pof-q" type="search" value="${this.escapeAttr(f.q || '')}" placeholder="Search PO #, supplier, vendor order #, item or SKU…" style="flex:1;min-width:220px" oninput="App._poFilterChanged(true)">
+            <input id="pof-q" type="search" value="${this.escapeAttr(f.q || '')}" placeholder="Search PO #, supplier, vendor order #, invoice #, item or SKU…" style="flex:1;min-width:220px" oninput="App._poFilterChanged(true)">
             <select id="pof-status" style="width:150px" onchange="App._poFilterChanged()">
               ${opt('', 'All statuses', f.status)}${opt('draft', 'Draft', f.status)}${opt('sent', 'Awaiting approval', f.status)}${opt('approved', 'Approved', f.status)}${opt('partial', 'Partially received', f.status)}${opt('received', 'Received', f.status)}${opt('cancelled', 'Cancelled', f.status)}
             </select>
@@ -252,12 +252,13 @@ Object.assign(App, {
     el.innerHTML = `
       <div class="table-wrap">
         <table>
-          <thead><tr><th>PO #</th><th>Supplier</th><th>Branch</th><th>Expected</th><th>Total</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+          <thead><tr><th>PO #</th><th>Supplier</th><th>Supplier Invoice #</th><th>Branch</th><th>Expected</th><th>Total</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
           <tbody>
             ${orders.length ? orders.map(po => `
               <tr>
                 <td class="fw-600">${po.po_number}${po.vendor_order_number ? `<div style="font-size:11px;font-weight:400;color:var(--text-muted)">Vendor # ${this.escapeAttr(po.vendor_order_number)}</div>` : ''}${this._internalNotesSnippet(po.internal_notes)}</td>
                 <td>${this.escapeAttr(po.supplier_name || '-')}</td>
+                <td>${po.invoice_numbers ? this.escapeAttr(po.invoice_numbers) : '<span style="color:var(--text-muted)">-</span>'}</td>
                 <td>${po.branch_name || '-'}</td>
                 <td>${po.expected_date ? this.fmtDate(po.expected_date) : '-'}</td>
                 <td class="fw-600">${this._fmtPO(po.total, po)}</td>
@@ -268,7 +269,7 @@ Object.assign(App, {
                   ${po.status==='sent' && this.can('purchasing_approve') ? `<button class="btn btn-sm btn-primary" onclick="App.showApprovePOModal(${po.id})">Approve</button>` : ''}
                   ${(po.status==='approved'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-sm btn-success" onclick="App.showReceivePO(${po.id})">Receive</button>` : ''}
                 </td>
-              </tr>`).join('') : `<tr><td colspan="8" class="empty-state">${filtered ? 'No purchase orders match these filters' : 'No purchase orders yet'}</td></tr>`}
+              </tr>`).join('') : `<tr><td colspan="9" class="empty-state">${filtered ? 'No purchase orders match these filters' : 'No purchase orders yet'}</td></tr>`}
           </tbody>
         </table>
       </div>

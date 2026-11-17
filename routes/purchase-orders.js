@@ -85,7 +85,15 @@ const upload = multer({
 router.get('/', async (req, res) => {
   try {
     const { status, supplier_id, branch_id, start, end, q, limit = 100 } = req.query;
-    let sql = `SELECT po.*, s.name as supplier_name, b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name FROM purchase_orders po LEFT JOIN suppliers s ON po.supplier_id = s.id LEFT JOIN branches b ON po.branch_id = b.id LEFT JOIN employees e ON po.employee_id = e.id WHERE 1=1`;
+    // The supplier's invoice #s against the PO: from its live receipts and any
+    // A/P bills entered for it.
+    let sql = `SELECT po.*, s.name as supplier_name, b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name,
+        (SELECT GROUP_CONCAT(inv, ', ') FROM (
+          SELECT r.vendor_invoice_number AS inv, MIN(r.id) AS ord FROM po_receipts r WHERE r.po_id = po.id AND r.status = 'received' AND r.vendor_invoice_number IS NOT NULL AND r.vendor_invoice_number != '' GROUP BY r.vendor_invoice_number
+          UNION SELECT ab.vendor_invoice_number, 1000000000 + MIN(ab.id) FROM ap_bills ab WHERE ab.po_id = po.id AND ab.status != 'void' AND ab.vendor_invoice_number IS NOT NULL AND ab.vendor_invoice_number != ''
+            AND NOT EXISTS (SELECT 1 FROM po_receipts r2 WHERE r2.po_id = po.id AND r2.status = 'received' AND r2.vendor_invoice_number = ab.vendor_invoice_number) GROUP BY ab.vendor_invoice_number
+          ORDER BY ord)) AS invoice_numbers
+      FROM purchase_orders po LEFT JOIN suppliers s ON po.supplier_id = s.id LEFT JOIN branches b ON po.branch_id = b.id LEFT JOIN employees e ON po.employee_id = e.id WHERE 1=1`;
     const params = [];
     if (status) { sql += ' AND po.status = ?'; params.push(status); }
     if (supplier_id) { sql += ' AND po.supplier_id = ?'; params.push(supplier_id); }
@@ -97,8 +105,10 @@ router.get('/', async (req, res) => {
     if (q && String(q).trim()) {
       const like = `%${String(q).trim()}%`;
       sql += ` AND (po.po_number LIKE ? OR s.name LIKE ? OR po.vendor_order_number LIKE ? OR po.notes LIKE ? OR po.internal_notes LIKE ?
-        OR EXISTS (SELECT 1 FROM purchase_order_items poi WHERE poi.po_id = po.id AND (poi.product_name LIKE ? OR poi.sku LIKE ?)))`;
-      params.push(like, like, like, like, like, like, like);
+        OR EXISTS (SELECT 1 FROM purchase_order_items poi WHERE poi.po_id = po.id AND (poi.product_name LIKE ? OR poi.sku LIKE ?))
+        OR EXISTS (SELECT 1 FROM po_receipts r WHERE r.po_id = po.id AND r.status = 'received' AND r.vendor_invoice_number LIKE ?)
+        OR EXISTS (SELECT 1 FROM ap_bills ab WHERE ab.po_id = po.id AND ab.status != 'void' AND ab.vendor_invoice_number LIKE ?))`;
+      params.push(like, like, like, like, like, like, like, like, like);
     }
     sql += ' ORDER BY po.created_at DESC LIMIT ?';
     params.push(parseInt(limit));
