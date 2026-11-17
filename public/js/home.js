@@ -114,7 +114,9 @@ Object.assign(App, {
       <div class="home-wrap">
         <div class="home-sky" id="home-sky">
           <div class="home-stars" id="home-stars"></div>
+          <div class="home-flyers" id="home-flyers-far"></div>
           <div class="home-clouds" id="home-clouds"></div>
+          <div class="home-flyers" id="home-flyers-near"></div>
           <div class="home-land">${this._homeLandscape()}</div>
           <div class="home-precip" id="home-precip"></div>
           <div class="home-greet" id="home-greet"></div>
@@ -181,6 +183,7 @@ Object.assign(App, {
       requestAnimationFrame(sweep);
     };
     requestAnimationFrame(sweep);
+    this._homeStartFlyers();
     clearInterval(this._homeTimer);
     tick();
     this._homeTimer = setInterval(tick, 1000);
@@ -267,6 +270,78 @@ Object.assign(App, {
       </svg>
       ${far.map(([v, d]) => `<div class="home-veh far" style="animation-delay:${d}s">${v}</div>`).join('')}
       ${near.map(([v, d]) => `<div class="home-veh near" style="animation-delay:${d}s">${v}</div>`).join('')}`;
+  },
+
+  // Birds and planes crossing the sky now and then, each at a random
+  // distance: far ones small, faint and slow, behind the clouds; near ones
+  // bigger and quicker, in front. No birds at night or in a storm.
+  _homeStartFlyers() {
+    clearTimeout(this._homeFlyerTimer);
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+    const loop = () => {
+      if (this.section !== 'home' || !document.getElementById('home-sky')) { this._homeFlyerTimer = null; return; }
+      this._homeSpawnFlyer();
+      this._homeFlyerTimer = setTimeout(loop, 2500 + Math.random() * 8000);
+    };
+    this._homeFlyerTimer = setTimeout(loop, 600);
+  },
+
+  _homeSpawnFlyer(kind) {
+    const sky = document.getElementById('home-sky');
+    const far = document.getElementById('home-flyers-far'), near = document.getElementById('home-flyers-near');
+    if (!sky || !far || !near || far.childElementCount + near.childElementCount >= 6) return null;
+    const night = sky.classList.contains('night'), storm = sky.classList.contains('storm');
+    const birdsOk = !night && !storm;
+    if (!kind) {
+      const r = Math.random();
+      kind = birdsOk && r < .25 ? 'flock' : birdsOk && r < .5 ? 'bird' : r < .7 ? 'airliner' : r < .85 ? 'jet' : storm ? 'airliner' : 'prop';
+    }
+    const d = kind === 'jet' ? .05 + Math.random() * .2 : Math.random(); // 0 = far away, 1 = close
+    const W = sky.clientWidth, H = sky.clientHeight;
+    const { svg, w, h, speed } = this._homeFlyerSvg(kind, night, d);
+    const scale = .3 + d * .9;
+    const el = document.createElement('div');
+    el.className = `home-flyer ${kind}`;
+    el.style.cssText = `width:${w * scale}px;height:${h * scale}px;top:${H * (.03 + Math.random() * .38)}px;opacity:${(.4 + d * .6).toFixed(2)};${d < .45 ? `filter:blur(${((.45 - d) * 1.6).toFixed(2)}px)` : ''}`;
+    const dir = Math.random() < .5 ? 1 : -1;
+    el.innerHTML = `<div class="fx" style="${dir < 0 ? 'transform:scaleX(-1)' : ''}">${svg}</div>`;
+    (d < .45 ? far : near).appendChild(el);
+    const span = W + w * scale * 2, from = dir > 0 ? -w * scale - 10 : W + 10, to = from + dir * span;
+    const climb = (Math.random() - .5) * 60 * (.3 + d);
+    const anim = el.animate([{ transform: `translate(${from}px, 0)` }, { transform: `translate(${to}px, ${climb}px)` }], { duration: span / speed * 1000, easing: 'linear' });
+    anim.onfinish = () => el.remove();
+    return el;
+  },
+
+  // Facing right; flipped by the caller to fly left. speed is px/s at d (0–1).
+  _homeFlyerSvg(kind, night, d) {
+    const bird = (x, y, delay) => `<path class="wing" style="animation-delay:-${delay}s" d="M${x} ${y + 6}q6-7 12 0q6-7 12 0" fill="none" stroke="${night ? '#1b1f2a' : '#263238'}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>`;
+    const body = night ? '#7b8794' : '#f5f7fa', tail = ['#c62828', '#1565c0', '#2e7d32', '#ef6c00'][Math.floor(Math.random() * 4)];
+    const lights = (x1, y1, x2, y2) => `<circle class="strobe" cx="${x1}" cy="${y1}" r="1.6" fill="#fff"/><circle class="beacon" cx="${x2}" cy="${y2}" r="1.5" fill="#ff1744"/>`;
+    if (kind === 'bird') return { w: 26, h: 14, speed: 35 + d * 110, svg: `<svg viewBox="0 0 26 14">${bird(1, 1, Math.random())}</svg>` };
+    if (kind === 'flock') {
+      const n = 3 + Math.floor(Math.random() * 5);
+      const pts = Array.from({ length: n }, (_, i) => { const k = Math.ceil(i / 2); return [64 - k * 14, 26 + (i % 2 ? -1 : 1) * k * 7]; });
+      return { w: 92, h: 66, speed: 30 + d * 90, svg: `<svg viewBox="0 0 92 66">${pts.map(([x, y]) => bird(x, y - 6, Math.random())).join('')}</svg>` };
+    }
+    if (kind === 'airliner') return { w: 120, h: 38, speed: 40 + d * 150, svg: `<svg viewBox="0 0 120 38">
+      <path d="M10 15L4 2h10l12 13z" fill="${tail}"/>
+      <path d="M6 19l-4 3h16l2-3z" fill="#b0bec5"/>
+      <path d="M8 20q-4-4 4-5h88q16 0 18 5q-2 5-18 5H12q-8-1-4-5z" fill="${body}"/>
+      <path d="M52 22L40 34h8l24-12z" fill="#b0bec5"/><rect x="45" y="26" width="12" height="5" rx="2.5" fill="#90a4ae"/>
+      ${Array.from({ length: 17 }, (_, i) => `<rect x="${30 + i * 4}" y="17.6" width="1.8" height="1.8" rx=".5" fill="${night ? '#ffe082' : '#546e7a'}"/>`).join('')}
+      <path d="M108 17q5 0 7 2h-7z" fill="#37474f"/>${lights(5, 3, 62, 25.5)}</svg>` };
+    if (kind === 'prop') return { w: 70, h: 30, speed: 30 + d * 90, svg: `<svg viewBox="0 0 70 30">
+      <path d="M6 15L3 4h7l8 8z" fill="${tail}"/>
+      <path d="M6 15q2-4 14-4h32q8 0 10 4q-2 4-10 4H20q-12 0-14-4z" fill="${body}"/>
+      <rect x="26" y="8" width="22" height="3" rx="1.5" fill="${tail}"/>
+      <path d="M42 12h8q4 0 5 3H42z" fill="${night ? '#ffe082' : '#4fc3f7'}" opacity=".85"/>
+      <path d="M40 19l-2 6M48 19l2 6" stroke="#455a64" stroke-width="1.2"/><circle cx="38" cy="26" r="1.6" fill="#263238"/><circle cx="50" cy="26" r="1.6" fill="#263238"/>
+      <rect class="prop" x="62.5" y="6" width="2" height="18" rx="1" fill="#455a64"/>${lights(4, 4, 30, 9)}</svg>` };
+    return { w: 60, h: 14, speed: 18 + d * 40, svg: `<span class="trail"></span><svg viewBox="0 0 60 14">
+      <path d="M3 5L1 0h5l4 5z" fill="${night ? '#7b8794' : '#eceff1'}"/>
+      <path d="M2 7q0-2 4-2h46q6 0 8 2q-2 2-8 2H6q-4 0-4-2z" fill="${night ? '#7b8794' : '#eceff1'}"/>
+      <path d="M26 7l-8 6h4l14-6z" fill="#cfd8dc"/>${lights(2, 1, 30, 9)}</svg>` };
   },
 
   // Drifting clouds (as many as the cloud cover) and falling rain or snow
