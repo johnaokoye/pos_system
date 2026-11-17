@@ -313,16 +313,54 @@ Object.assign(App, {
     return el;
   },
 
+  // One bird (40×20 box, body at 20,10) whose outline morphs through the
+  // wingbeat: a quick downstroke with the wings spread, a slower upstroke
+  // with them bent at the wrist, the body rising and dipping against the
+  // wings. Some flap steadily, others (gull-like) flap a few times and
+  // glide; each has its own pace and starts at a random point.
+  _homeBirdSvg(fill) {
+    const pose = (wy, ty, tx) => {
+      const L = (dx, dy) => `${(20 - dx).toFixed(1)} ${(10 + dy).toFixed(1)}`, R = (dx, dy) => `${(20 + dx).toFixed(1)} ${(10 + dy).toFixed(1)}`;
+      const lx = (tx + 8.5) / 2, ly = (ty + wy) / 2 - 1.1; // leading edge, wrist → tip
+      const trx = (tx + 8.5) / 2 - 1.5, tr = Math.max(ty, wy) + 1.6; // trailing edge
+      return `M${L(tx, ty)}Q${L(lx, ly)} ${L(8.5, wy)}Q${L(4, wy * .35 - .8)} ${L(2.2, -.9)}Q20 7.6 ${R(2.2, -.9)}`
+        + `Q${R(4, wy * .35 - .8)} ${R(8.5, wy)}Q${R(lx, ly)} ${R(tx, ty)}`
+        + `Q${R(trx, tr)} ${R(2.4, 1.2)}Q20 13.4 ${L(2.4, 1.2)}Q${L(trx, tr)} ${L(tx, ty)}Z`;
+    };
+    // Top of the stroke (spread high), bottom (spread low), the upstroke with
+    // the hand folded below the raised wrist, and level for gliding.
+    const shapes = { up: pose(-5.5, -9.5, 14), down: pose(3, 7, 15.5), fold: pose(-4.5, -.5, 11), glide: pose(-.6, .4, 17.5) };
+    const bob = { up: .9, down: -1.1, fold: .2, glide: 0 };
+    const beat = .28 + Math.random() * .22; // seconds per wingbeat
+    const steps = [['up', 0]];
+    const flap = () => { steps.push(['down', beat * .4], ['fold', beat * .32], ['up', beat * .28]); };
+    if (Math.random() < .45) for (let i = 0; i < 4; i++) flap(); // steady flapper
+    else {
+      const n = 2 + Math.floor(Math.random() * 3);
+      for (let i = 0; i < n; i++) flap();
+      steps.push(['glide', beat * .6], ['glide', 1.2 + Math.random() * 2.2], ['up', beat * .5]);
+    }
+    const dur = steps.reduce((t, [, s]) => t + s, 0);
+    let t = 0;
+    const times = steps.map(([, s]) => (t += s) / dur).map((v, i) => (i === 0 ? 0 : v).toFixed(4));
+    times[times.length - 1] = '1';
+    const splines = steps.slice(1).map(() => '.45 0 .55 1').join(';');
+    const begin = `-${(Math.random() * dur).toFixed(2)}s`;
+    const anim = (attr, vals) => `<animate attributeName="${attr}" dur="${dur.toFixed(2)}s" begin="${begin}" repeatCount="indefinite" calcMode="spline" keyTimes="${times.join(';')}" keySplines="${splines}" values="${vals}"/>`;
+    return `<g><animateTransform attributeName="transform" type="translate" dur="${dur.toFixed(2)}s" begin="${begin}" repeatCount="indefinite" calcMode="spline" keyTimes="${times.join(';')}" keySplines="${splines}" values="${steps.map(([p]) => `0 ${bob[p]}`).join(';')}"/>
+      <path d="${shapes.up}" fill="${fill}">${anim('d', steps.map(([p]) => shapes[p]).join(';'))}</path></g>`;
+  },
+
   // Facing right; flipped by the caller to fly left. speed is px/s at d (0–1).
   _homeFlyerSvg(kind, night, d) {
-    const bird = (x, y, delay) => `<path class="wing" style="animation-delay:-${delay}s" d="M${x} ${y + 6}q6-7 12 0q6-7 12 0" fill="none" stroke="${night ? '#1b1f2a' : '#263238'}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>`;
+    const bird = (x, y, sc = 1) => `<g transform="translate(${x} ${y}) scale(${sc})">${this._homeBirdSvg(night ? '#1b1f2a' : '#263238')}</g>`;
     const body = night ? '#7b8794' : '#f5f7fa', tail = ['#c62828', '#1565c0', '#2e7d32', '#ef6c00'][Math.floor(Math.random() * 4)];
     const lights = (x1, y1, x2, y2) => `<circle class="strobe" cx="${x1}" cy="${y1}" r="1.6" fill="#fff"/><circle class="beacon" cx="${x2}" cy="${y2}" r="1.5" fill="#ff1744"/>`;
-    if (kind === 'bird') return { w: 26, h: 14, speed: 35 + d * 110, svg: `<svg viewBox="0 0 26 14">${bird(1, 1, Math.random())}</svg>` };
+    if (kind === 'bird') return { w: 34, h: 22, speed: 35 + d * 110, svg: `<svg viewBox="0 0 40 26">${bird(0, 3)}</svg>` };
     if (kind === 'flock') {
       const n = 3 + Math.floor(Math.random() * 5);
       const pts = Array.from({ length: n }, (_, i) => { const k = Math.ceil(i / 2); return [64 - k * 14, 26 + (i % 2 ? -1 : 1) * k * 7]; });
-      return { w: 92, h: 66, speed: 30 + d * 90, svg: `<svg viewBox="0 0 92 66">${pts.map(([x, y]) => bird(x, y - 6, Math.random())).join('')}</svg>` };
+      return { w: 96, h: 70, speed: 30 + d * 90, svg: `<svg viewBox="0 0 96 70">${pts.map(([x, y]) => bird(x - 4, y - 8, .7 + Math.random() * .12)).join('')}</svg>` };
     }
     if (kind === 'airliner') return { w: 120, h: 38, speed: 40 + d * 150, svg: `<svg viewBox="0 0 120 38">
       <path d="M10 15L4 2h10l12 13z" fill="${tail}"/>
