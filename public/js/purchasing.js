@@ -1741,7 +1741,7 @@ Object.assign(App, {
             ${(po.receipts || []).map(r => `
               <div style="padding:8px 10px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px${r.status === 'reversed' ? ';opacity:.65' : ''}">
                 <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
-                  <div style="font-size:13px"><span class="fw-600">${r.receipt_number}</span> · ${this.fmtDateTime(r.received_at)}${r.received_by_name ? ` · ${this.escapeAttr(r.received_by_name)}` : ''}${r.bill_number ? ` · A/P ${r.bill_number}${r.bill_status === 'void' ? ' (void)' : ''}` : ''}
+                  <div style="font-size:13px"><span class="fw-600">${r.receipt_number}</span> · ${r.received_date ? `Received ${this.fmtDate(r.received_date)}` : this.fmtDateTime(r.received_at)}${r.received_by_name ? ` · ${this.escapeAttr(r.received_by_name)}` : ''}${r.vendor_invoice_number ? ` · Inv ${this.escapeAttr(r.vendor_invoice_number)}${r.invoice_date ? ` (${this.fmtDate(r.invoice_date)})` : ''}` : ''}${r.bill_number ? ` · A/P ${r.bill_number}${r.bill_status === 'void' ? ' (void)' : ''}` : ''}
                     ${r.status === 'reversed' ? `<span class="badge-pill badge-danger" style="font-size:10px">Reversed</span>` : ''}</div>
                   ${r.status === 'received' && ['received','partial'].includes(po.status) && this.can('purchasing_receive') ? `<button class="btn btn-sm btn-danger" onclick="App.showReversePOReceipt(${po.id}, ${r.id})">↩ Reverse</button>` : ''}
                 </div>
@@ -2228,6 +2228,14 @@ Object.assign(App, {
         <div class="modal-body">
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:6px">Enter the quantities received. If the supplier's price changed since the PO, enter the new <strong>unit cost</strong> (${po.currency ? `in ${po.currency}, ` : ''}per the line's unit, before tax and vendor discount) — the PO line, the item's cost and the A/P bill use it. ${canPrice ? 'Change the <strong>selling price</strong> here too if the shelf price should move with it.' : ''}</p>
           ${canRaise ? '' : '<p style="font-size:12px;color:var(--text-muted);margin:0 0 10px">You can lower a cost; raising one above the approved cost needs someone who can approve POs.</p>'}
+          <div style="display:flex;flex-wrap:wrap;gap:12px;margin:0 0 12px">
+            <div class="form-group" style="margin:0;min-width:150px"><label>Date received *</label>
+              <input id="recv-date" type="date" value="${this._storeDay(new Date())}" max="${this._storeDay(new Date())}"></div>
+            <div class="form-group" style="margin:0;min-width:180px;flex:1"><label>Supplier invoice #</label>
+              <input id="recv-invoice" type="text" maxlength="60" placeholder="e.g. INV-55102"></div>
+            <div class="form-group" style="margin:0;min-width:150px"><label>Invoice date</label>
+              <input id="recv-invoice-date" type="date" max="${this._storeDay(new Date())}"></div>
+          </div>
           <div class="table-wrap"><table class="data-table" style="width:100%">
             <thead><tr><th>Item</th><th style="text-align:right;width:90px">Receive</th><th style="text-align:right;width:130px">Unit cost</th><th style="text-align:right;width:130px">Selling price</th><th style="text-align:right;width:80px">Margin</th></tr></thead>
             <tbody>${pendingItems.map(i => {
@@ -2312,7 +2320,14 @@ Object.assign(App, {
     }
     const items = lines.filter(l => l.qty > 0).map(l => ({ item_id: l.i.id, quantity_received: l.qty, ...(l.costChanged ? { unit_cost: l.cost } : {}), ...(l.priceChanged ? { selling_price: l.price } : {}) }));
     if (!items.length) { this.alert('Enter at least one quantity', 'error'); return; }
-    this._pendingPOReceipt = { poId, items };
+    const todayDay = this._storeDay(new Date());
+    const received_date = document.getElementById('recv-date')?.value || '';
+    const vendor_invoice_number = document.getElementById('recv-invoice')?.value.trim() || '';
+    const invoice_date = document.getElementById('recv-invoice-date')?.value || '';
+    if (!received_date) return this.alert('Enter the date the items were received', 'error');
+    if (received_date > todayDay) return this.alert("The date received can't be in the future", 'error');
+    if (invoice_date && invoice_date > todayDay) return this.alert("The invoice date can't be in the future", 'error');
+    this._pendingPOReceipt = { poId, items, received_date, vendor_invoice_number, invoice_date };
     const flag = l => l.qty <= 0 ? '<span class="badge-pill badge-warning" style="font-size:10px">Not receiving</span>'
       : l.qty > l.pending ? `<span class="badge-pill badge-danger" style="font-size:10px">Over by ${Math.round((l.qty - l.pending) * 1000) / 1000}</span>`
       : l.qty < l.pending ? `<span class="badge-pill badge-info" style="font-size:10px">Short ${Math.round((l.pending - l.qty) * 1000) / 1000}</span>` : '';
@@ -2322,6 +2337,12 @@ Object.assign(App, {
         <div class="modal-header"><span class="modal-title">Confirm Counts — ${po.po_number}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">Check these counts against what's physically here. Stock${po.supplier_id ? ' and the A/P bill' : ''} will be updated with exactly these quantities.</p>
+          <div style="display:flex;flex-wrap:wrap;gap:18px;font-size:13px;margin-bottom:12px">
+            <div><span style="color:var(--text-muted)">Date received</span><div class="fw-600">${this.fmtDate(received_date)}</div></div>
+            <div><span style="color:var(--text-muted)">Supplier invoice #</span><div class="fw-600">${this.escapeAttr(vendor_invoice_number || '—')}</div></div>
+            <div><span style="color:var(--text-muted)">Invoice date</span><div class="fw-600">${invoice_date ? this.fmtDate(invoice_date) : '—'}</div></div>
+          </div>
+          ${vendor_invoice_number ? '' : '<p style="font-size:12px;color:var(--warning,#b7791f);margin:0 0 10px">No supplier invoice number entered — A/P will need it to match the bill.</p>'}
           <table class="data-table" style="width:100%">
             <thead><tr><th>Item</th><th style="text-align:right">Pending</th><th style="text-align:right">Receiving</th><th></th></tr></thead>
             <tbody>${lines.map(l => `<tr${l.qty <= 0 ? ' style="opacity:.6"' : ''}>
@@ -2349,10 +2370,10 @@ Object.assign(App, {
   },
 
   async submitReceivePO() {
-    const { poId, items } = this._pendingPOReceipt || {};
+    const { poId, items, received_date, vendor_invoice_number, invoice_date } = this._pendingPOReceipt || {};
     if (!poId) return;
     try {
-      await this.api('PATCH', `/purchase-orders/${poId}/receive`, { items });
+      await this.api('PATCH', `/purchase-orders/${poId}/receive`, { items, received_date, vendor_invoice_number: vendor_invoice_number || null, invoice_date: invoice_date || null });
       this._pendingPOReceipt = null;
       this._recvPO = null;
       this.closeSecondaryModal();

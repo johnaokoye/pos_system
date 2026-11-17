@@ -3561,6 +3561,12 @@ async function _init() {
     'ALTER TABLE ap_bills ADD COLUMN consignment_settlement_id INTEGER REFERENCES consignment_settlements(id)',
     'ALTER TABLE ap_bills ADD COLUMN obligation_amount REAL',
     'ALTER TABLE ap_bills ADD COLUMN variance_amount REAL',
+    // PO receiving: the store day the goods came in (may be earlier than when
+    // it was keyed — received_at) and the supplier's invoice # / date, which
+    // also go on the receipt's A/P bill.
+    'ALTER TABLE po_receipts ADD COLUMN received_date TEXT',
+    'ALTER TABLE po_receipts ADD COLUMN vendor_invoice_number TEXT',
+    'ALTER TABLE po_receipts ADD COLUMN invoice_date TEXT',
     'ALTER TABLE ap_payments ADD COLUMN tax_amount REAL',
     'ALTER TABLE ap_payments ADD COLUMN credit_account TEXT',
     'ALTER TABLE ap_payments ADD COLUMN consignment_settlement_id INTEGER REFERENCES consignment_settlements(id)',

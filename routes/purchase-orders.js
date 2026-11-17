@@ -393,6 +393,17 @@ router.patch('/:id/freight', async (req, res) => {
 router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req, res) => {
   try {
     const { items } = req.body;
+    // The store day the goods came in (defaults to today; never in the
+    // future) and the supplier's invoice # / date for this delivery.
+    const isDay = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
+    const todayDay = today();
+    const receivedDate = req.body.received_date ? String(req.body.received_date) : todayDay;
+    if (!isDay(receivedDate)) return res.status(400).json({ error: 'Enter a valid date received' });
+    if (receivedDate > todayDay) return res.status(400).json({ error: "The date received can't be in the future" });
+    const vendorInvoice = String(req.body.vendor_invoice_number || '').trim().slice(0, 60) || null;
+    const invoiceDate = req.body.invoice_date ? String(req.body.invoice_date) : null;
+    if (invoiceDate && !isDay(invoiceDate)) return res.status(400).json({ error: 'Enter a valid invoice date' });
+    if (invoiceDate && invoiceDate > todayDay) return res.status(400).json({ error: "The invoice date can't be in the future" });
     const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });
     if (!po) return res.status(404).json({ error: 'Not found' });
     if (po.status === 'cancelled') return res.status(400).json({ error: 'Cannot receive cancelled PO' });
@@ -421,7 +432,7 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
         // Logged as one receipt so it can be reversed as a unit later.
         if (!receiptId) {
           const receipt_number = await nextNumber(tx, 'po_receipts', 'receipt_number', 'RCV-', 6);
-          const r = await tx.execute({ sql: 'INSERT INTO po_receipts (receipt_number, po_id, branch_id, received_by) VALUES (?,?,?,?)', args: [receipt_number, po.id, po.branch_id || null, req.employee?.id || null] });
+          const r = await tx.execute({ sql: 'INSERT INTO po_receipts (receipt_number, po_id, branch_id, received_by, received_date, vendor_invoice_number, invoice_date) VALUES (?,?,?,?,?,?,?)', args: [receipt_number, po.id, po.branch_id || null, req.employee?.id || null, receivedDate, vendorInvoice, invoiceDate] });
           receiptId = Number(r.lastInsertRowid);
           receiptNumber = receipt_number;
         }
@@ -528,9 +539,10 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
         : { rows: [] };
       if (receiptValue > 0 && autoBills(supplier)) {
         const tax = receiptTax;
-        const billDate = today();
+        // Dated by the supplier's invoice when given, else the day the goods came in.
+        const billDate = invoiceDate || receivedDate;
         const billId = await createBill(tx, {
-          supplier_id: po.supplier_id, po_id: po.id, branch_id: po.branch_id,
+          supplier_id: po.supplier_id, vendor_invoice_number: vendorInvoice, po_id: po.id, branch_id: po.branch_id,
           bill_date: billDate, due_date: dueDateFor(supplier.payment_terms, billDate),
           amount: parseFloat(((receiptValue + tax) * rate).toFixed(2)),
           tax_amount: parseFloat((tax * rate).toFixed(2)),
