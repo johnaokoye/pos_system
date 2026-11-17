@@ -31,3 +31,26 @@ test("an old credit note is added from a cash customer's History", async ({ page
   await expect(page.locator('#cf-type')).toBeVisible();
   await expect(page.locator('#cust-credits')).toHaveCount(0);
 });
+
+test('the credit left on the account prints as a Credit Statement', async ({ page }) => {
+  const stamp = Date.now();
+  const c = await api(page, 'POST', '/customers', { first_name: 'Print', last_name: `Credit ${stamp}`, phone: `874${String(stamp).slice(-7)}`, customer_type: 'cash' });
+  await api(page, 'POST', `/customers/${c.id}/legacy-credit-notes`, { credit_note_number: `PCN-${stamp}`, date: '2026-02-01', amount: 300 });
+  const p = await api(page, 'POST', '/products', { sku: `PC-${stamp}`, name: `Credit Item ${stamp}`, price: 100, cost: 40, tax_rate: 0 });
+  await api(page, 'PATCH', `/products/${p.id}/stock`, { adjustment: 5, branch_id: 1, reason: 'test' });
+  const sale = await api(page, 'POST', '/transactions', { items: [{ product_id: p.id, quantity: 1 }], customer_id: c.id, branch_id: 1, employee_id: 1, payment_method: 'cash', amount_tendered: 0, store_credit_applied: 100 });
+  const credits = await api(page, 'GET', `/customers/${c.id}/credits`);
+  expect(credits.available).toBe(200);
+  expect(credits.notes[0].spent).toEqual([expect.objectContaining({ amount: 100, transaction_number: sale.transaction_number })]);
+
+  await page.evaluate(id => App.viewCustomer(id), c.id);
+  const [popup] = await Promise.all([
+    page.waitForEvent('popup'),
+    page.locator('#cust-credits').getByRole('button', { name: /Print/ }).click(),
+  ]);
+  await expect(popup.locator('.doc-title')).toHaveText('CREDIT STATEMENT');
+  await expect(popup.locator('.bill-name')).toHaveText(`Print Credit ${stamp}`);
+  await expect(popup.locator('.avail .amt')).toHaveText('$200.00');
+  await expect(popup.locator('body')).toContainText(`Old # PCN-${stamp}`);
+  await expect(popup.locator('body')).toContainText(`$100.00 used on ${sale.transaction_number}`);
+});

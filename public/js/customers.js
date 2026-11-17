@@ -1178,6 +1178,7 @@ Object.assign(App, {
             <div style="font-weight:700;font-size:20px;color:${data.available > 0 ? 'var(--success)' : 'var(--text)'}">${this.fmt(data.available)}</div>
             <div style="font-size:12px;color:var(--text-muted)">${data.available > 0 ? 'Offered as Available Credit when this customer is on a POS ticket' : 'No credit on the account'}</div>
           </div>
+          ${data.notes.length ? `<button class="btn btn-sm btn-secondary" onclick="App._printCustomerCredits(${customerId})" title="Letter-size statement of the credit on this account">🖨️ Print</button>` : ''}
           ${canAdd ? `<button class="btn btn-sm btn-primary" onclick="App._showLegacyCreditForm(${customerId})">+ Add Old Credit Note</button>` : ''}
         </div>
         ${data.notes.length ? `<table style="margin:0"><thead><tr><th>Credit Note</th><th>Old #</th><th>Dated</th><th style="text-align:right">Amount</th><th style="text-align:right">Left</th>${canVoid ? '<th></th>' : ''}</tr></thead><tbody>
@@ -1194,6 +1195,79 @@ Object.assign(App, {
           ${data.voided.map(v => `<div style="padding:4px 0;color:var(--text-muted)">${esc(v.payment_number)} — old # ${esc(v.credit_note_number)}, ${this.fmt(v.amount)} — voided ${this.fmtDateTime(v.voided_at)}${v.voided_by_name ? ` by ${esc(v.voided_by_name)}` : ''}: ${esc(v.reason)}</div>`).join('')}
         </details>` : ''}
       </div>`;
+  },
+
+  // Letter-size Credit Statement: the credit left on a cash customer's account,
+  // each credit note with what was spent (and on which sale) and what's left.
+  async _printCustomerCredits(customerId) {
+    const win = window.open('', '_blank', 'width=850,height=1000');
+    if (!win) { this.alert('Your browser blocked the print popup — allow popups for this site and try again', 'warning'); return; }
+    let c, data;
+    try { [c, data] = await Promise.all([this.api('GET', `/customers/${customerId}`), this.api('GET', `/customers/${customerId}/credits`)]); }
+    catch (e) { win.close(); this.alert(e.message, 'error'); return; }
+    const esc = v => this.escapeAttr(v == null ? '' : String(v));
+    const branch = (this.currentUser?.branches || []).find(b => b.id === this.posBranch?.id) || (this.currentUser?.branches || [])[0] || {};
+    const td = 'padding:7px 8px;border-bottom:1px solid #e8e8e8;vertical-align:top';
+    const kind = n => n.return_id ? 'Return' : n.entered_in_pos ? 'Old system' : 'RetailPOS Books';
+    const oldNo = n => n.return_id ? '' : String(n.reference || '').replace(/^Legacy CN /, '');
+    const notes = data.notes.filter(n => n.remaining > 0.005).concat(data.notes.filter(n => !(n.remaining > 0.005)));
+    const issued = notes.reduce((s, n) => s + Number(n.amount), 0);
+    const left = notes.reduce((s, n) => s + Number(n.remaining), 0);
+    const x = { customer_name: `${c.first_name || ''} ${c.last_name || ''}`.trim(), customer_number: c.customer_number, customer_address: c.address, customer_city: c.city, customer_state: c.state, customer_zip: c.zip };
+    win.document.write(`<!DOCTYPE html><html><head><title>Credit Statement – ${esc(x.customer_name)}</title>
+    <style>
+      body{font-family:Arial,sans-serif;font-size:13px;margin:0;padding:48px;color:#111}
+      .header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px}
+      .store h1{font-size:20px;margin:0 0 2px}
+      .store div{font-size:12px;color:#555}
+      .doc-title{font-size:22px;font-weight:700;text-align:right;color:#1a7f37}
+      table{width:100%;border-collapse:collapse}
+      th{background:#f0f0f0;text-align:left;padding:8px;font-size:11px;text-transform:uppercase;color:#555}
+      ${this._billToPrintCss}
+      .avail{margin:6px 0 18px;border:2px solid #1a7f37;border-radius:8px;padding:12px 16px;display:flex;justify-content:space-between;align-items:center}
+      .avail .amt{font-size:24px;font-weight:700;color:#1a7f37}
+      .spent{font-size:11px;color:#555}
+      .totals{width:320px;margin-left:auto;margin-top:16px}
+      .totals td{padding:4px 0;border:none}
+      .totals .total-row td{border-top:2px solid #111;font-size:16px;font-weight:700;padding-top:8px}
+      .footer{margin-top:32px;font-size:11px;color:#777;border-top:1px solid #ddd;padding-top:10px;text-align:center}
+      @page { size: letter; margin: 0.75in; }
+      @media print{body{padding:0}}
+    </style></head><body>
+    <div style="text-align:center;font-weight:700;font-size:20px;margin-bottom:16px">${esc(this.settings.store_name || 'My Store')}</div>
+    <div class="header">
+      <div class="store">
+        ${this._printLogoTag(50)}
+        ${branch.name ? `<h1>${esc(branch.name)}</h1>` : ''}
+        ${branch.address || this.settings.store_address ? `<div>${esc(branch.address || this.settings.store_address)}${branch.address && branch.city ? ', ' + esc(branch.city) : ''}</div>` : ''}
+        ${branch.phone || this.settings.store_phone ? `<div>${esc(branch.phone || this.settings.store_phone)}</div>` : ''}
+      </div>
+      <div class="doc-title">CREDIT STATEMENT</div>
+    </div>
+    ${this._billToPrintHtml(x, [['Date', this.fmtDate(this._storeDay(new Date()))], ['Phone', esc(c.phone || '')], ['Printed By', esc(`${this.currentUser?.first_name || ''} ${this.currentUser?.last_name || ''}`.trim())]])}
+    <div class="avail"><div><div style="font-size:11px;text-transform:uppercase;color:#555;font-weight:700">Credit available</div><div style="font-size:12px;color:#555">Can be used on purchases at any of our branches</div></div><div class="amt">${this.fmt(data.available)}</div></div>
+    <table>
+      <thead><tr><th>Credit Note</th><th>Dated</th><th>Source</th><th style="text-align:right">Amount</th><th style="text-align:right">Used</th><th style="text-align:right">Left</th></tr></thead>
+      <tbody>${notes.map(n => `<tr>
+        <td style="${td}"><div style="font-weight:600">${esc(n.payment_number)}</div>${oldNo(n) ? `<div class="spent">Old # ${esc(oldNo(n))}</div>` : ''}
+          ${(n.spent || []).map(u => `<div class="spent">${this.fmt(u.amount)} used on ${esc(u.transaction_number)}, ${this.fmtDate(u.created_at)}</div>`).join('')}</td>
+        <td style="${td};white-space:nowrap">${this.fmtDate(n.legacy_credit_date || n.created_at)}</td>
+        <td style="${td}">${kind(n)}</td>
+        <td style="${td};text-align:right">${this.fmt(n.amount)}</td>
+        <td style="${td};text-align:right">${this.fmt(Number(n.amount) - Number(n.remaining))}</td>
+        <td style="${td};text-align:right;font-weight:600">${n.remaining > 0.005 ? this.fmt(n.remaining) : 'Used'}</td>
+      </tr>`).join('')}</tbody>
+    </table>
+    <table class="totals">
+      <tr><td>Total credit issued</td><td style="text-align:right">${this.fmt(issued)}</td></tr>
+      <tr><td>Used</td><td style="text-align:right">${this.fmt(issued - left)}</td></tr>
+      <tr class="total-row"><td>CREDIT AVAILABLE</td><td style="text-align:right">${this.fmt(data.available)}</td></tr>
+    </table>
+    ${this._invoiceSignatureLinesHtml(false)}
+    <div class="footer">${this._receiptFooterHtml('Thank you!')}</div>
+    <script>window.onload=()=>{window.print()}<\/script>
+    </body></html>`);
+    win.document.close();
   },
 
   _showLegacyCreditForm(customerId) {

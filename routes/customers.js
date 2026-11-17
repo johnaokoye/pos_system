@@ -836,11 +836,18 @@ async function customerCredits(customerId) {
           WHERE v.customer_id = ? ORDER BY v.voided_at DESC`,
     args: [customerId],
   });
+  // Where each note was spent at the POS (the printed credit statement).
+  const { rows: spent } = notes.length ? await db.execute({
+    sql: `SELECT scu.payment_id, scu.amount, scu.created_at, t.transaction_number FROM store_credit_uses scu
+          JOIN transactions t ON t.id = scu.transaction_id
+          WHERE scu.payment_id IN (${notes.map(() => '?').join(',')}) ORDER BY scu.created_at, scu.id`,
+    args: notes.map(n => n.id),
+  }) : { rows: [] };
   return {
     customer_type: c.customer_type,
     is_credit_account: c.customer_type === 'credit' || !!c.credit_enabled,
     available: r2(Math.max(0, -(Number(c.account_balance) || 0))),
-    notes: notes.map(n => ({ ...n, remaining: r2(n.remaining), used_on_sales: r2(n.used_on_sales), can_void: !!n.entered_in_pos && Number(n.uses) === 0, uses: undefined })),
+    notes: notes.map(n => ({ ...n, remaining: r2(n.remaining), used_on_sales: r2(n.used_on_sales), can_void: !!n.entered_in_pos && Number(n.uses) === 0, uses: undefined, spent: spent.filter(u => u.payment_id === n.id).map(u => ({ amount: r2(u.amount), created_at: u.created_at, transaction_number: u.transaction_number })) })),
     voided,
   };
 }
