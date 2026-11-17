@@ -184,6 +184,13 @@ Object.assign(App, {
     };
     requestAnimationFrame(sweep);
     this._homeStartFlyers();
+    // Home is drawn straight after sign-in, often before GET /settings is
+    // back: once it is, redraw the vehicles if the logo (or name) arrived.
+    const drawnWith = `${this.settings?.company_logo_url || ''}|${this.settings?.store_name || ''}`;
+    Promise.resolve(this._settingsReady).then(() => {
+      const land = document.querySelector('#home-sky .home-land');
+      if (this.section === 'home' && land && `${this.settings?.company_logo_url || ''}|${this.settings?.store_name || ''}` !== drawnWith) land.innerHTML = this._homeLandscape();
+    });
     clearInterval(this._homeTimer);
     tick();
     this._homeTimer = setInterval(tick, 1000);

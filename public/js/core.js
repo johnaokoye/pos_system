@@ -298,7 +298,7 @@ const App = {
     // Non-blocking — the pre-login /settings/public fetch in init() already
     // painted a best-effort logo; this replaces it with the authenticated
     // GET /settings response (needed since /settings/public never runs again).
-    this.loadSettings().catch(() => {});
+    this._settingsReady = this.loadSettings().catch(() => {});
     const name = this.currentUser.first_name + ' ' + this.currentUser.last_name;
     const defaultBranch = (this.currentUser.branches || []).find(b => b.is_default) || (this.currentUser.branches || [])[0];
     this.activeCurrency = defaultBranch?.currency || null;
