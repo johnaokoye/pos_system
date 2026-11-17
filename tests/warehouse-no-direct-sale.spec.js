@@ -42,6 +42,27 @@ test('a warehouse branch can only supply a store sale through Get from here', as
     const detail = await api(page, 'GET', `/transactions/${sale.id}`);
     expect(detail).toMatchObject({ branch_id: store.id, collection_status: 'awaiting_transfer' });
     expect(detail.sale_transfers[0].from_branch_name).toBe(whRow.name);
+
+    // Held with a Get from here line: nothing requested until it's paid;
+    // recalled, the line still comes from the warehouse and the sale raises it.
+    const tooMany = await refused(page, 'POST', '/transactions/hold', { items: [{ product_id: p.id, quantity: 9, unit_price: 100, transfer_from_branch_id: whId, transfer_qty: 9 }], branch_id: store.id, employee_id: 1 });
+    expect(tooMany).toContain('only has');
+    const hold = await api(page, 'POST', '/transactions/hold', {
+      items: [{ product_id: p.id, product_name: p.name, quantity: 1, unit_price: 100, tax_rate: 0, transfer_from_branch_id: whId, transfer_qty: 1 }],
+      branch_id: store.id, employee_id: 1, customer_id: cust.id,
+    });
+    expect(hold.items[0]).toMatchObject({ transfer_from_branch_id: whId, transfer_qty: 1 });
+    expect((await api(page, 'GET', `/transfers?status=requested`)).filter(t => t.transaction_id === hold.id)).toHaveLength(0);
+    await page.evaluate(id => App.loadHeldOrder(id), hold.id);
+    await expect(page.locator('text=1 coming from')).toBeVisible();
+    const recalled = await page.evaluate(() => App.cart.map(i => ({ from: i.transfer_from_branch_id, qty: i.transfer_qty })));
+    expect(recalled).toEqual([{ from: whId, qty: 1 }]);
+    const sale2 = await api(page, 'POST', '/transactions', {
+      items: [{ product_id: p.id, quantity: 1, transfer_from_branch_id: whId, transfer_qty: 1 }],
+      hold_id: hold.id, customer_id: cust.id, branch_id: store.id, employee_id: 1, payment_method: 'cash', amount_tendered: 100,
+    });
+    expect(sale2.sale_transfers).toHaveLength(1);
+    expect((await api(page, 'GET', `/transactions/${hold.id}`).catch(() => null))?.status ?? 'gone').not.toBe('hold');
   } finally {
     // Leave no warehouse behind for later specs.
     const row = (await api(page, 'GET', '/branches')).find(b => b.id === whId);

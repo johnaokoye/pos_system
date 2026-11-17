@@ -158,9 +158,18 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
           const { rows: [prod] } = await txn.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] });
           if (prod) ({ sell_unit: sellUnit, units_per: unitsPer, uom_id: uomId } = await resolveUnit(txn, prod, requested));
         }
+        // A line getting part from another branch (Get from here) is held with
+        // it, checked as at the sale. Nothing is requested or reserved until
+        // the recalled ticket is paid — the sale re-checks the other branch then.
+        let transfer = null;
+        if (item.transfer_from_branch_id) {
+          if (!req.apiKey && !can(req.employee?.permissions, 'pos_request_transfer')) throw new Error('Missing permission: pos_request_transfer (get items from another branch)');
+          const { rows: [prod] } = item.product_id ? await txn.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] }) : { rows: [] };
+          transfer = await saleTransfers.transferLine(txn, { item, product: prod, variation: item.variation_id || null, unit: { sell_unit: sellUnit, units_per: unitsPer }, stockUnits: stockUnits(item.quantity, unitsPer), branchId: branch_id, serialNumber: serial });
+        }
         await txn.execute({
-          sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,serial_number,sell_unit,units_per,uom_id,is_comment,is_delivery,discount_percent,discount_override_by,discount_fixed,is_q_item) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          args: [txId, item.product_id || null, serial ? serialNumberLabel(serial) : item.product_name, item.sku || '', item.is_comment && !item.product_id ? 1 : item.quantity, parseFloat(item.unit_price) || 0, lineDisc[i], lineTax, lineTotal, item.variation_id || null, item.variation_name || null, serial || null, sellUnit, unitsPer, uomId, item.is_comment && !item.product_id ? 1 : 0, item.is_delivery && !item.product_id ? 1 : 0, linePct[i], linePct[i] > 0 ? (item.discount_override_employee_id || null) : null, lineFixed[i] && linePct[i] > 0 ? lineFixed[i] : null, item.is_q_item && !item.product_id ? 1 : 0]
+          sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,serial_number,sell_unit,units_per,uom_id,is_comment,is_delivery,discount_percent,discount_override_by,discount_fixed,is_q_item,transfer_from_branch_id,transfer_qty) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          args: [txId, item.product_id || null, serial ? serialNumberLabel(serial) : item.product_name, item.sku || '', item.is_comment && !item.product_id ? 1 : item.quantity, parseFloat(item.unit_price) || 0, lineDisc[i], lineTax, lineTotal, item.variation_id || null, item.variation_name || null, serial || null, sellUnit, unitsPer, uomId, item.is_comment && !item.product_id ? 1 : 0, item.is_delivery && !item.product_id ? 1 : 0, linePct[i], linePct[i] > 0 ? (item.discount_override_employee_id || null) : null, lineFixed[i] && linePct[i] > 0 ? lineFixed[i] : null, item.is_q_item && !item.product_id ? 1 : 0, transfer?.from ?? null, transfer?.qty ?? null]
         });
       }
       await txn.commit();
@@ -588,7 +597,7 @@ router.get('/:id', requireAuth, async (req, res) => {
       LEFT JOIN work_orders wo ON wo.assessment_transaction_id = t.id OR wo.deposit_transaction_id = t.id OR wo.final_transaction_id = t.id
       WHERE t.id = ?`, args: [req.params.id] });
     if (!tx) return res.status(404).json({ error: 'Transaction not found' });
-    const { rows: items } = await db.execute({ sql: `SELECT ti.*, oe.first_name || ' ' || oe.last_name AS discount_override_name FROM transaction_items ti LEFT JOIN employees oe ON oe.id = ti.discount_override_by WHERE ti.transaction_id = ? ORDER BY ti.id`, args: [req.params.id] });
+    const { rows: items } = await db.execute({ sql: `SELECT ti.*, oe.first_name || ' ' || oe.last_name AS discount_override_name, tfb.name AS transfer_from_name FROM transaction_items ti LEFT JOIN employees oe ON oe.id = ti.discount_override_by LEFT JOIN branches tfb ON tfb.id = ti.transfer_from_branch_id WHERE ti.transaction_id = ? ORDER BY ti.id`, args: [req.params.id] });
     tx.items = items;
     const { rows: payments } = await db.execute({ sql: 'SELECT * FROM transaction_payments WHERE transaction_id = ? ORDER BY id', args: [req.params.id] });
     tx.payments = payments;

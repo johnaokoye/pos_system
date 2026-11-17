@@ -2342,7 +2342,6 @@ Object.assign(App, {
 
   async holdOrder() {
     if (!this.cart.length) { this.alert('Cart is empty', 'warning'); return; }
-    if (this.cart.some(i => i.transfer_from_branch_id)) { this.alert('A ticket with items coming from another branch can\'t be held — complete the sale (the transfer request is raised then) or remove those lines', 'warning'); return; }
     try {
       const cartItems = this.cart.map(i => {
         const product = this.allProducts?.find(p => p.id === i.product_id);
@@ -2364,6 +2363,8 @@ Object.assign(App, {
           discount_percent: i.discountPercent || 0,
           discount_fixed: i.discountFixed || 0,
           discount_override_employee_id: i.discountOverrideEmployeeId || null,
+          // Get from here: held with the line; the request is raised when it's paid.
+          ...(i.transfer_from_branch_id ? { transfer_from_branch_id: i.transfer_from_branch_id, transfer_qty: i.transfer_qty } : {}),
         };
       });
       await this.api('POST', '/transactions/hold', {
@@ -2564,6 +2565,7 @@ Object.assign(App, {
           discountOverrideEmployeeId: item.discount_override_by || null,
           discountOverrideName: item.discount_override_name || null,
           ...this._recalledUnitFields(item, product),
+          ...(item.transfer_from_branch_id && item.transfer_qty > 0 ? { transfer_from_branch_id: item.transfer_from_branch_id, transfer_from_name: item.transfer_from_name, transfer_qty: Number(item.transfer_qty) } : {}),
           ...(fromQuote && item.product_id && !item.variation_id && !item.serial_number ? this._quotedLineFields(item, product, quoteValid) : {}),
         };
       });
