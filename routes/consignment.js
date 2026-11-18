@@ -26,7 +26,7 @@ const send = (res, e) => res.status(e.status || 500).json({ error: e.message });
 const isDay = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
 const RESPONSIBLE = ['supplier', 'total_tools'];
 const TRIGGERS = ['sale'];
-const FREQUENCIES = ['monthly'];
+const FREQUENCIES = ['monthly', 'fortnightly']; // fortnightly = every 14 days from the start date
 const TREATMENTS = ['principal', 'agent'];
 
 // ── Tracking ────────────────────────────────────────────────
@@ -164,7 +164,7 @@ async function validateAgreement(b) {
   if (!String(b.ownership_terms || '').trim()) throw err(400, 'Enter the ownership terms — when the stock stops being the supplier\'s');
   for (const k of ['shortage_responsibility', 'damage_responsibility']) if (b[k] && !RESPONSIBLE.includes(b[k])) throw err(400, 'Responsibility is the supplier or Total Tools');
   if (b.billing_trigger && !TRIGGERS.includes(b.billing_trigger)) throw err(400, 'Billing trigger must be a completed sale');
-  if (b.settlement_frequency && !FREQUENCIES.includes(b.settlement_frequency)) throw err(400, 'Settlement is monthly for now');
+  if (b.settlement_frequency && !FREQUENCIES.includes(b.settlement_frequency)) throw err(400, 'Settlement is monthly or every 14 days');
   const items = Array.isArray(b.items) ? b.items : [];
   if (!items.length) throw err(400, 'Add at least one item with its agreed cost');
   const seen = new Set();
@@ -617,12 +617,12 @@ router.get('/lot-check', canView, async (req, res) => {
 // and locked, by Finance (A9). A locked month is a snapshot: a later return
 // lands in the next open month (A3). Reopening: an Administrator, recording
 // the reason, the Finance approver and the approval reference.
-const { writeLines, periodBounds } = require('../lib/consignmentRecon');
+const { writeLines, periodBounds, periodLabel, checkPeriod, agreementPeriods, periodsOverlap } = require('../lib/consignmentRecon');
 const canPrepare = requireAnyPermission('consignment_receive', 'consignment_finance');
 
 async function loadRecon(id) {
   const { rows: [r] } = await db.execute({
-    sql: `SELECT r.*, a.agreement_number, a.shortage_responsibility, a.damage_responsibility, s.name AS supplier_name,
+    sql: `SELECT r.*, a.agreement_number, a.settlement_frequency, a.shortage_responsibility, a.damage_responsibility, s.name AS supplier_name,
             pe.first_name || ' ' || pe.last_name AS prepared_by_name, ae.first_name || ' ' || ae.last_name AS approved_by_name
           FROM consignment_reconciliations r JOIN consignment_agreements a ON a.id = r.agreement_id JOIN suppliers s ON s.id = a.supplier_id
           LEFT JOIN employees pe ON pe.id = r.prepared_by LEFT JOIN employees ae ON ae.id = r.approved_by WHERE r.id = ?`,
@@ -639,6 +639,7 @@ async function loadRecon(id) {
   const { rows: log } = await db.execute({ sql: `SELECT g.*, e.first_name || ' ' || e.last_name AS employee_name FROM consignment_reconciliation_log g LEFT JOIN employees e ON e.id = g.employee_id WHERE g.recon_id = ? ORDER BY g.id`, args: [r.id] });
   r.log = log;
   r.period_ended = periodBounds(r.period).last < storeToday();
+  r.period_label = periodLabel(r.period);
   const { rows: sts } = await db.execute({ sql: "SELECT id, settlement_number, status, total FROM consignment_settlements WHERE recon_id = ? ORDER BY id DESC", args: [r.id] });
   r.settlement = sts.find(x => x.status !== 'cancelled') || null;
   return r;
@@ -656,7 +657,7 @@ router.get('/reconciliations', canView, async (req, res) => {
     if (req.query.agreement_id) { sql += ' AND r.agreement_id = ?'; args.push(req.query.agreement_id); }
     sql += ' ORDER BY r.period DESC, r.id DESC LIMIT 500';
     const { rows } = await db.execute({ sql, args });
-    res.json(rows.map(r => ({ ...r, totals: r.totals_json ? JSON.parse(r.totals_json) : {}, totals_json: undefined })));
+    res.json(rows.map(r => ({ ...r, period_label: periodLabel(r.period), totals: r.totals_json ? JSON.parse(r.totals_json) : {}, totals_json: undefined })));
   } catch (e) { send(res, e); }
 });
 
@@ -668,17 +669,35 @@ router.get('/reconciliations/:id', canView, async (req, res) => {
   } catch (e) { send(res, e); }
 });
 
-// { agreement_id, period: 'YYYY-MM' } — one per agreement per month.
+// The settlement periods an agreement can be reconciled for (its months, or
+// its 14-day periods from the start date), newest first, with any
+// reconciliation already made for each.
+router.get('/agreements/:id/periods', canView, async (req, res) => {
+  try {
+    const { rows: [a] } = await db.execute({ sql: 'SELECT * FROM consignment_agreements WHERE id = ?', args: [req.params.id] });
+    if (!a) return res.status(404).json({ error: 'Agreement not found' });
+    const { rows: recs } = await db.execute({ sql: 'SELECT id, recon_number, period, status FROM consignment_reconciliations WHERE agreement_id = ?', args: [a.id] });
+    res.json({
+      settlement_frequency: a.settlement_frequency,
+      periods: agreementPeriods(a, storeToday()).map(p => ({ ...p, recon: recs.find(r => r.period === p.period) || null })),
+    });
+  } catch (e) { send(res, e); }
+});
+
+// { agreement_id, period } — period is 'YYYY-MM' for a monthly agreement, or
+// the first day ('YYYY-MM-DD') of one of a 14-day agreement's periods. One
+// per agreement per period; periods never overlap.
 router.post('/reconciliations', canPrepare, async (req, res) => {
   const tx = await db.transaction('write');
   let committed = false;
   try {
-    periodBounds(req.body.period);
     const { rows: [a] } = await tx.execute({ sql: 'SELECT * FROM consignment_agreements WHERE id = ?', args: [req.body.agreement_id || 0] });
     if (!a) throw err(400, 'Choose the agreement');
     if (!['approved', 'ended'].includes(a.status)) throw err(400, `${a.agreement_number} isn't approved`);
-    const { rows: [dup] } = await tx.execute({ sql: 'SELECT recon_number FROM consignment_reconciliations WHERE agreement_id = ? AND period = ?', args: [a.id, req.body.period] });
-    if (dup) throw err(400, `${dup.recon_number} already covers ${a.agreement_number} for ${req.body.period}`);
+    checkPeriod(a, req.body.period);
+    const { rows: others } = await tx.execute({ sql: 'SELECT recon_number, period FROM consignment_reconciliations WHERE agreement_id = ?', args: [a.id] });
+    const dup = others.find(o => o.period === req.body.period || periodsOverlap(o.period, req.body.period));
+    if (dup) throw err(400, `${dup.recon_number} already covers ${a.agreement_number} for ${periodLabel(dup.period)}`);
     const number = await nextNumber(tx, 'consignment_reconciliations', 'recon_number', 'CREC-', 6);
     const r = await tx.execute({ sql: 'INSERT INTO consignment_reconciliations (recon_number, agreement_id, period, prepared_by) VALUES (?,?,?,?)', args: [number, a.id, req.body.period, req.employee?.id || null] });
     const recon = { id: Number(r.lastInsertRowid), period: req.body.period };
@@ -763,7 +782,7 @@ router.post('/reconciliations/:id/approve', requirePermission('consignment_finan
     const cur = await loadRecon(req.params.id);
     if (!cur) return res.status(404).json({ error: 'Reconciliation not found' });
     if (cur.status !== 'draft') return res.status(400).json({ error: `${cur.recon_number} is already approved` });
-    if (!cur.period_ended) return res.status(400).json({ error: `${cur.period} hasn't ended yet — approve it after the month-end cut-off` });
+    if (!cur.period_ended) return res.status(400).json({ error: `${cur.period_label} hasn't ended yet — approve it after the period-end cut-off` });
     if (cur.lines.some(l => l.line_type === 'stock' && l.physical_count == null)) return res.status(400).json({ error: 'Enter the physical count for every line first' });
     let sig;
     try { sig = await resolveApprovalSignature(db, req.employee?.id, req.body.signature); }
@@ -847,7 +866,7 @@ router.get('/settlements', canSeeSettlements, async (req, res) => {
     if (req.query.status) { sql += ' AND s.status = ?'; args.push(req.query.status); }
     if (req.query.supplier_id) { sql += ' AND s.supplier_id = ?'; args.push(req.query.supplier_id); }
     sql += ' ORDER BY s.period DESC, s.id DESC LIMIT 500';
-    res.json((await db.execute({ sql, args })).rows);
+    res.json((await db.execute({ sql, args })).rows.map(r => ({ ...r, period_label: periodLabel(r.period) })));
   } catch (e) { send(res, e); }
 });
 
@@ -870,7 +889,7 @@ router.post('/reconciliations/:id/settlement', requirePermission('consignment_fi
       const { rows: [live] } = await tx.execute({ sql: "SELECT settlement_number FROM consignment_settlements WHERE recon_id = ? AND status != 'cancelled'", args: [r.id] });
       if (live) throw err(400, `${live.settlement_number} already covers ${r.recon_number}`);
       const made = await settlement.createSettlement(tx, r.id, req.employee?.id);
-      if (!made) throw err(400, `Nothing is owed to or by the supplier for ${r.period}`);
+      if (!made) throw err(400, `Nothing is owed to or by the supplier for ${periodLabel(r.period)}`);
       return made;
     });
     res.status(201).json(await settlement.loadSettlement(db, id));
@@ -921,7 +940,7 @@ router.get('/settlements/:id/statement', canSeeSettlements, async (req, res) => 
       <body style="font-family:Arial,sans-serif;font-size:12px;color:#111;margin:24px">
         <div style="display:flex;justify-content:space-between;align-items:flex-start">
           <div><div style="font-size:18px;font-weight:700">${esc(co?.value || 'Total Tools')}</div><div style="font-size:16px;margin-top:6px">Consignment Settlement Statement</div></div>
-          <div style="text-align:right"><div style="font-size:16px;font-weight:700">${esc(s.settlement_number)}</div><div>Period: ${esc(s.period)}</div><div>Reconciliation ${esc(s.recon_number)}</div></div>
+          <div style="text-align:right"><div style="font-size:16px;font-weight:700">${esc(s.settlement_number)}</div><div>Period: ${esc(periodLabel(s.period))}</div><div>Reconciliation ${esc(s.recon_number)}</div></div>
         </div>
         <div style="margin:14px 0">Supplier: <strong>${esc(s.supplier_name)}</strong>${s.supplier_number ? ` (${esc(s.supplier_number)})` : ''} · Agreement ${esc(s.agreement_number)}</div>
         <table style="width:100%;border-collapse:collapse"><thead><tr>${th('Item', false)}${th('Sold')}${th('Layaways paid')}${th('Work orders')}${th('Returned')}${th('Shop use')}${th('Chargeable short/damage')}${th('Billable qty')}${th('Unit cost')}${th('Amount')}${th('GCT')}</tr></thead>

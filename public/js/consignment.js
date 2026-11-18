@@ -11,7 +11,7 @@ Object.assign(App, {
   async renderConsignment(tab) {
     // A/P without consignment access sees only the settlements to match.
     const tabs = this._consFull()
-      ? [['agreements', 'Agreements'], ['orders', 'Orders'], ['grns', 'Goods Received (GRN)'], ['stock', 'Consignment Stock'], ['recon', 'Month-End Reconciliation'], ['settlements', 'Settlements'], ['postings', 'Books Postings']]
+      ? [['agreements', 'Agreements'], ['orders', 'Orders'], ['grns', 'Goods Received (GRN)'], ['stock', 'Consignment Stock'], ['recon', 'Period-End Reconciliation'], ['settlements', 'Settlements'], ['postings', 'Books Postings']]
       : [['settlements', 'Settlements']];
     this._consTab = tab || this._consTab || tabs[0][0];
     if (!tabs.some(([k]) => k === this._consTab)) this._consTab = tabs[0][0];
@@ -82,7 +82,7 @@ Object.assign(App, {
           <div class="input-row">
             <div class="form-group"><label>Shortages are the responsibility of</label>${resp('ca-short', v.shortage_responsibility)}</div>
             <div class="form-group"><label>Damage is the responsibility of</label>${resp('ca-damage', v.damage_responsibility)}</div>
-            <div class="form-group"><label>Settlement</label><select id="ca-freq" disabled><option>Monthly</option></select></div>
+            <div class="form-group"><label>Settlement</label><select id="ca-freq"><option value="monthly" ${v.settlement_frequency !== 'fortnightly' ? 'selected' : ''}>Monthly</option><option value="fortnightly" ${v.settlement_frequency === 'fortnightly' ? 'selected' : ''}>Every 14 days</option></select><div style="font-size:11px;color:var(--text-muted)">Every 14 days counts from the start date.</div></div>
           </div>
           <div class="input-row">
             <div class="form-group"><label>Payment terms</label><input id="ca-terms" value="${esc(v.payment_terms)}" placeholder="e.g. Net 30 after settlement"></div>
@@ -189,7 +189,7 @@ Object.assign(App, {
     const val = i => document.getElementById(i)?.value ?? '';
     const body = {
       supplier_id: val('ca-supplier'), start_date: val('ca-start'), end_date: val('ca-end'), ownership_terms: val('ca-ownership'), billable_rule: val('ca-billable'),
-      shortage_responsibility: val('ca-short'), damage_responsibility: val('ca-damage'), payment_terms: val('ca-terms'), notes: val('ca-notes'),
+      shortage_responsibility: val('ca-short'), damage_responsibility: val('ca-damage'), payment_terms: val('ca-terms'), notes: val('ca-notes'), settlement_frequency: val('ca-freq') || 'monthly',
       allow_work_orders: document.getElementById('ca-wo').checked, allow_shop_use: document.getElementById('ca-shop').checked, submit,
       items: [...document.querySelectorAll('.ca-item')].map(r => ({ product_id: r.querySelector('.ca-prod').value, cost: r.querySelector('.ca-cost').value })).filter(i => i.product_id),
     };
@@ -222,7 +222,7 @@ Object.assign(App, {
           ${a.status === 'rejected' ? `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:10px 12px;margin-bottom:12px;color:#991b1b"><strong>Rejected</strong> by ${esc(a.rejected_by_name)}: ${esc(a.rejection_reason)}</div>` : ''}
           <div class="two-col" style="margin-bottom:12px">
             <div><strong>Supplier:</strong> ${esc(a.supplier_name)}<br><strong>Term:</strong> ${this.fmtDate(a.start_date)} – ${a.end_date ? this.fmtDate(a.end_date) : 'open'}<br>
-              <strong>Settlement:</strong> Monthly<br><strong>Payment terms:</strong> ${esc(a.payment_terms || '—')}</div>
+              <strong>Settlement:</strong> ${a.settlement_frequency === 'fortnightly' ? `Every 14 days from ${this.fmtDate(a.start_date)}` : 'Monthly'}<br><strong>Payment terms:</strong> ${esc(a.payment_terms || '—')}</div>
             <div><strong>Shortages:</strong> ${this._consResp[a.shortage_responsibility]} · <strong>Damage:</strong> ${this._consResp[a.damage_responsibility]}<br>
               <strong>Work orders:</strong> ${a.allow_work_orders ? 'allowed' : 'not allowed'} · <strong>Shop use:</strong> ${a.allow_shop_use ? 'allowed' : 'not allowed'}<br>
               <strong>Drafted by:</strong> ${esc(a.created_by_name || '—')}${a.approved_at ? `<br><strong>Approved:</strong> ${esc(a.approved_by_name)} · ${this.fmtDate(a.approved_at)}` : ''}</div>
@@ -416,24 +416,37 @@ Object.assign(App, {
     } catch (e) { this.alert(e.message, 'error'); }
   },
 
-  // ── Month-end reconciliation ──
+  // ── Period-end reconciliation (a month, or 14 days) ──
   async _consReconTab() {
     const [rows, agreements] = await Promise.all([this.api('GET', '/consignment/reconciliations'), this.api('GET', '/consignment/agreements')]);
     const el = document.getElementById('cons-body');
     if (!el) return;
     const canPrep = this.can('consignment_receive') || this.can('consignment_finance');
-    const lastMonth = (() => { const d = new Date(this._storeDay(new Date()) + 'T00:00:00'); d.setDate(0); return d.toISOString().slice(0, 7); })();
     el.innerHTML = `
       ${canPrep ? `<div class="card" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-        <div class="form-group" style="margin:0"><label>Agreement</label><select id="crn-agr">${agreements.filter(a => ['approved', 'ended'].includes(a.status)).map(a => `<option value="${a.id}">${a.agreement_number} — ${this.escapeAttr(a.supplier_name)}</option>`).join('')}</select></div>
-        <div class="form-group" style="margin:0"><label>Month</label><input id="crn-month" type="month" value="${lastMonth}"></div>
+        <div class="form-group" style="margin:0"><label>Agreement</label><select id="crn-agr" onchange="App._consReconPeriods()">${agreements.filter(a => ['approved', 'ended'].includes(a.status)).map(a => `<option value="${a.id}">${a.agreement_number} — ${this.escapeAttr(a.supplier_name)}</option>`).join('')}</select></div>
+        <div class="form-group" style="margin:0"><label>Period</label><select id="crn-month"></select></div>
         <button class="btn btn-primary" onclick="App._consNewRecon()">Prepare Reconciliation</button></div>` : ''}
       <div class="card"><div class="table-wrap"><table>
-        <thead><tr><th>Reconciliation #</th><th>Month</th><th>Agreement</th><th>Supplier</th><th style="text-align:right">Billable qty</th><th style="text-align:right">Billable value</th><th>Status</th></tr></thead>
-        <tbody>${rows.length ? rows.map(r => `<tr style="cursor:pointer" onclick="App.viewConsRecon(${r.id})"><td class="fw-600">${r.recon_number}</td><td>${r.period}</td><td>${r.agreement_number}</td><td>${this.escapeAttr(r.supplier_name)}</td>
+        <thead><tr><th>Reconciliation #</th><th>Period</th><th>Agreement</th><th>Supplier</th><th style="text-align:right">Billable qty</th><th style="text-align:right">Billable value</th><th>Status</th></tr></thead>
+        <tbody>${rows.length ? rows.map(r => `<tr style="cursor:pointer" onclick="App.viewConsRecon(${r.id})"><td class="fw-600">${r.recon_number}</td><td>${this.escapeAttr(r.period_label || r.period)}</td><td>${r.agreement_number}</td><td>${this.escapeAttr(r.supplier_name)}</td>
           <td style="text-align:right">${r.totals.billable_qty ?? 0}</td><td style="text-align:right">${this.fmt(r.totals.billable_value || 0)}</td>
           <td><span class="badge-pill ${r.status === 'approved' ? 'badge-success' : 'badge-warning'}">${r.status === 'approved' ? 'Approved — locked' : 'Draft'}</span></td></tr>`).join('')
           : '<tr><td colspan="7" class="empty-state">No reconciliations yet</td></tr>'}</tbody></table></div></div>`;
+    if (canPrep) this._consReconPeriods();
+  },
+  // Fills the Period box with the chosen agreement's months or 14-day
+  // periods, newest first; picks the latest ended one not yet reconciled.
+  async _consReconPeriods() {
+    const sel = document.getElementById('crn-month');
+    const agr = document.getElementById('crn-agr')?.value;
+    if (!sel) return;
+    if (!agr) { sel.innerHTML = ''; return; }
+    let data;
+    try { data = await this.api('GET', `/consignment/agreements/${agr}/periods`); } catch (e) { this.alert(e.message, 'error'); return; }
+    const pick = data.periods.find(p => p.ended && !p.recon) || data.periods.find(p => !p.recon) || data.periods[0];
+    sel.innerHTML = data.periods.map(p => `<option value="${p.period}" ${p === pick ? 'selected' : ''}>${this.escapeAttr(p.label)}${p.recon ? ` — ${p.recon.recon_number}` : p.ended ? '' : ' (in progress)'}</option>`).join('')
+      || '<option value="">No periods yet</option>';
   },
   async _consNewRecon() {
     try {
@@ -457,12 +470,12 @@ Object.assign(App, {
     const th = (x, right = true) => `<th style="text-align:${right ? 'right' : 'left'};white-space:nowrap">${x}</th>`;
     this.showModal(`
       <div class="modal" style="max-width:1200px;width:96vw">
-        <div class="modal-header"><span class="modal-title">${r.recon_number} — ${esc(r.supplier_name)} · ${r.agreement_number} · ${r.period}</span>
+        <div class="modal-header"><span class="modal-title">${r.recon_number} — ${esc(r.supplier_name)} · ${r.agreement_number} · ${this.escapeAttr(r.period_label || r.period)}</span>
           <div style="display:flex;gap:8px;align-items:center"><span class="badge-pill ${draft ? 'badge-warning' : 'badge-success'}">${draft ? 'Draft' : 'Approved — locked'}</span><button class="modal-close">✕</button></div></div>
         <div class="modal-body" style="font-size:12px">
           <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:12px;font-size:13px">
             <div class="card" style="margin:0;padding:8px 10px"><div style="color:var(--text-muted);font-size:11px">POS-RECORDED SALES</div><strong>${n(t.pos_sales_qty)} · ${this.fmt(t.pos_sales_value || 0)}</strong>${t.layaway_qty ? `<div style="font-size:11px">+ layaways ${n(t.layaway_qty)} · ${this.fmt(t.layaway_value)}</div>` : ''}${t.work_order_qty ? `<div style="font-size:11px">+ work orders ${n(t.work_order_qty)} · ${this.fmt(t.work_order_value)}</div>` : ''}</div>
-            <div class="card" style="margin:0;padding:8px 10px"><div style="color:var(--text-muted);font-size:11px">RETURNS</div><strong>${n(t.returns_qty)} · ${this.fmt(t.returns_value || 0)}</strong>${t.prior_returns_qty ? `<div style="font-size:11px">+ of earlier months' sales ${n(t.prior_returns_qty)} · ${this.fmt(t.prior_returns_value)}</div>` : ''}</div>
+            <div class="card" style="margin:0;padding:8px 10px"><div style="color:var(--text-muted);font-size:11px">RETURNS</div><strong>${n(t.returns_qty)} · ${this.fmt(t.returns_value || 0)}</strong>${t.prior_returns_qty ? `<div style="font-size:11px">+ of earlier periods' sales ${n(t.prior_returns_qty)} · ${this.fmt(t.prior_returns_value)}</div>` : ''}</div>
             <div class="card" style="margin:0;padding:8px 10px"><div style="color:var(--text-muted);font-size:11px">COUNT DISCREPANCIES</div><strong>${t.discrepancy_lines || 0} line${t.discrepancy_lines === 1 ? '' : 's'}</strong><div style="font-size:11px">shortage ${n(t.shortage_qty)} · damage ${n(t.damage_qty)}${t.uncounted_lines ? ` · <span style="color:var(--warning, #d97706)">${t.uncounted_lines} not counted</span>` : ''}</div></div>
             <div class="card" style="margin:0;padding:8px 10px"><div style="color:var(--text-muted);font-size:11px">APPROVED BILLABLE</div><strong>${n(t.billable_qty)} · ${this.fmt(t.billable_value || 0)}</strong><div style="font-size:11px">incl. approved shortage ${n(t.approved_shortage_qty)} / damage ${n(t.approved_damage_qty)}</div></div>
             ${t.in_transit ? `<div class="card" style="margin:0;padding:8px 10px"><div style="color:var(--text-muted);font-size:11px">IN TRANSIT AT CUT-OFF</div><strong>${n(t.in_transit)}</strong></div>` : ''}
@@ -473,11 +486,11 @@ Object.assign(App, {
             <tbody>${stock.map(l => `<tr><td>${esc(l.product_name)}</td><td>${esc(l.branch_name)}</td>${['opening', 'receipts', 'transfers_in', 'transfers_out', 'sales', 'returns', 'layaways', 'work_orders', 'shop_use', 'damaged', 'adjustments'].map(c => `<td style="text-align:right">${n(l[c])}</td>`).join('')}
               <td style="text-align:right" class="fw-600">${n(l.expected_closing)}</td>
               <td style="text-align:right">${canPrep ? `<input type="number" min="0" step="1" value="${l.physical_count ?? ''}" style="width:70px;text-align:right" onchange="App._consReconLine(${r.id}, ${l.id}, { physical_count: this.value })">` : n(l.physical_count)}</td>
-              <td style="text-align:right;${Math.abs(l.discrepancy) > 0.0005 ? 'color:var(--danger);font-weight:600' : ''}">${l.physical_count == null ? '' : n(l.discrepancy)}</td></tr>`).join('') || '<tr><td colspan="16" class="empty-state">No supplier stock movements this month</td></tr>'}</tbody></table></div>
+              <td style="text-align:right;${Math.abs(l.discrepancy) > 0.0005 ? 'color:var(--danger);font-weight:600' : ''}">${l.physical_count == null ? '' : n(l.discrepancy)}</td></tr>`).join('') || '<tr><td colspan="16" class="empty-state">No supplier stock movements this period</td></tr>'}</tbody></table></div>
           ${transit.length ? `<div style="font-weight:600;margin:10px 0 4px">In transit at the cut-off (still the supplier's)</div>${transit.map(l => `<div>${esc(l.product_name)}: <strong>${n(l.in_transit)}</strong></div>`).join('')}` : ''}
           <div style="font-weight:600;margin:12px 0 4px">Billing</div>
           <div class="table-wrap"><table style="font-size:12px">
-            <thead><tr>${th('Item', false)}${th('Branch', false)}${th('POS sales')}${th('Layaways paid')}${th('Work orders')}${th('Returns')}${th('Earlier months returned')}${th('Shop use')}${th('Shortage')}${th('Approved shortage')}${th('Damage')}${th('Approved damage')}${th('Billable qty')}${th('Billable value')}</tr></thead>
+            <thead><tr>${th('Item', false)}${th('Branch', false)}${th('POS sales')}${th('Layaways paid')}${th('Work orders')}${th('Returns')}${th('Earlier periods returned')}${th('Shop use')}${th('Shortage')}${th('Approved shortage')}${th('Damage')}${th('Approved damage')}${th('Billable qty')}${th('Billable value')}</tr></thead>
             <tbody>${stock.map(l => `<tr><td>${esc(l.product_name)}</td><td>${esc(l.branch_name)}</td>
               <td style="text-align:right">${n(l.pos_sales_qty)}<div style="color:var(--text-muted)">${this.fmt(l.pos_sales_value)}</div></td>
               <td style="text-align:right">${n(l.layaway_qty)}</td>
@@ -490,12 +503,12 @@ Object.assign(App, {
               <td style="text-align:right">${n(l.damage_qty)}</td>
               <td style="text-align:right">${draft && fin && r.damage_responsibility === 'total_tools' && l.damage_qty > 0 ? `<input type="number" min="0" max="${l.damage_qty}" step="1" value="${l.approved_damage_qty || ''}" style="width:60px;text-align:right" onchange="App._consReconLine(${r.id}, ${l.id}, { approved_damage_qty: this.value })">` : n(l.approved_damage_qty)}</td>
               <td style="text-align:right" class="fw-600">${n(l.billable_qty)}</td><td style="text-align:right" class="fw-600">${this.fmt(l.billable_value)}</td></tr>`).join('')}</tbody></table></div>
-          <div style="font-size:11px;color:var(--text-muted);margin-top:6px">Shortages ${r.shortage_responsibility === 'total_tools' ? 'are' : "aren't"} and damage ${r.damage_responsibility === 'total_tools' ? 'is' : "isn't"} chargeable to Total Tools under this agreement. Sales and returns are at the cost saved on each sale; shop use, shortages and damage at the agreed cost on the last day of the month.</div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:6px">Shortages ${r.shortage_responsibility === 'total_tools' ? 'are' : "aren't"} and damage ${r.damage_responsibility === 'total_tools' ? 'is' : "isn't"} chargeable to Total Tools under this agreement. Sales and returns are at the cost saved on each sale; shop use, shortages and damage at the agreed cost on the last day of the period.</div>
           ${r.log.length ? `<div style="font-weight:600;margin:12px 0 4px">History</div>${r.log.map(g => `<div>${this.fmtDateTime(g.created_at)} — ${esc(g.action.replace('_', ' '))} by ${esc(g.employee_name || '—')}${g.reason ? `: ${esc(g.reason)}` : ''}${g.finance_approver ? ` · Finance approval: ${esc(g.finance_approver)} (${esc(g.approval_reference)})` : ''}</div>`).join('')}` : ''}
         </div>
         <div class="modal-footer" style="flex-wrap:wrap;gap:8px">
           ${canPrep ? `<button class="btn btn-outline" onclick="App._consReconAction(${r.id}, 'refresh')">Refresh Figures</button>` : ''}
-          ${draft && fin ? `<button class="btn btn-success" ${r.period_ended ? '' : 'disabled title="After the month has ended"'} onclick="App._consApproveRecon(${r.id})">Approve &amp; Lock</button>` : ''}
+          ${draft && fin ? `<button class="btn btn-success" ${r.period_ended ? '' : 'disabled title="After the period has ended"'} onclick="App._consApproveRecon(${r.id})">Approve &amp; Lock</button>` : ''}
           ${!draft && r.settlement ? `<button class="btn btn-primary" onclick="App.viewConsSettlement(${r.settlement.id})">Settlement ${r.settlement.settlement_number}</button>` : ''}
           ${!draft && !r.settlement && fin ? `<button class="btn btn-outline" onclick="App._consMakeSettlement(${r.id})">Make Settlement Statement</button>` : ''}
           ${!draft && this.can('settings') ? `<button class="btn btn-danger" onclick="App._consReopenRecon(${r.id})">Reopen…</button>` : ''}
@@ -513,7 +526,7 @@ Object.assign(App, {
   _consApproveRecon(id) {
     this._showApprovalDialog({
       title: 'Approve Reconciliation',
-      intro: 'Approving locks this month. A later return or correction goes into the next open month; reopening needs an Administrator acting on documented Finance approval.',
+      intro: 'Approving locks this period. A later return or correction goes into the next open period; reopening needs an Administrator acting on documented Finance approval.',
       approve: async (signature) => {
         await this.api('POST', `/consignment/reconciliations/${id}/approve`, { signature });
         this.alert('Reconciliation approved and locked', 'success');
@@ -523,7 +536,7 @@ Object.assign(App, {
     });
   },
   async _consReopenRecon(id) {
-    const reason = prompt('Why is this month being reopened?');
+    const reason = prompt('Why is this period being reopened?');
     if (!reason) return;
     const approver = prompt('Who in Finance approved reopening it?');
     if (!approver) return;
@@ -636,12 +649,12 @@ Object.assign(App, {
     const rows = await this.api('GET', '/consignment/settlements');
     const el = document.getElementById('cons-body');
     if (!el) return;
-    el.innerHTML = `<div class="card"><div style="font-size:13px;color:var(--text-muted);margin-bottom:8px">A settlement statement is made when Finance approves a month. A/P enters the supplier's invoice against it; any difference goes to Finance; accepting it raises the A/P bill, paid through a payment request.</div>
+    el.innerHTML = `<div class="card"><div style="font-size:13px;color:var(--text-muted);margin-bottom:8px">A settlement statement is made when Finance approves a period (a month, or 14 days). A/P enters the supplier's invoice against it; any difference goes to Finance; accepting it raises the A/P bill, paid through a payment request.</div>
       <div class="table-wrap"><table>
       <thead><tr><th>Settlement #</th><th>Period</th><th>Supplier</th><th>Agreement</th><th>Supplier invoice</th><th style="text-align:right">Total</th><th>Bill</th><th>Status</th></tr></thead>
-      <tbody>${rows.length ? rows.map(r => `<tr style="cursor:pointer" onclick="App.viewConsSettlement(${r.id})"><td class="fw-600">${r.settlement_number}</td><td>${r.period}</td><td>${this.escapeAttr(r.supplier_name)}</td><td>${r.agreement_number}</td>
+      <tbody>${rows.length ? rows.map(r => `<tr style="cursor:pointer" onclick="App.viewConsSettlement(${r.id})"><td class="fw-600">${r.settlement_number}</td><td>${this.escapeAttr(r.period_label || r.period)}</td><td>${this.escapeAttr(r.supplier_name)}</td><td>${r.agreement_number}</td>
         <td>${this.escapeAttr(r.invoice_number || '—')}</td><td style="text-align:right">${this.fmt(r.total)}</td><td>${r.bill_number || '—'}</td><td>${this._consSettleBadge(r.status)}</td></tr>`).join('')
-        : '<tr><td colspan="8" class="empty-state">No settlements yet — they are made when a month-end reconciliation is approved</td></tr>'}</tbody></table></div></div>`;
+        : '<tr><td colspan="8" class="empty-state">No settlements yet — they are made when a period-end reconciliation is approved</td></tr>'}</tbody></table></div></div>`;
   },
 
   async _consMakeSettlement(reconId) {
@@ -679,7 +692,7 @@ Object.assign(App, {
       ${inv.bill_number ? `<div style="margin-top:6px">A/P bill <strong>${inv.bill_number}</strong>${this.can('payables') ? ` — <a href="#" style="color:var(--primary)" onclick="event.preventDefault();App.viewBill(${inv.bill_id})">open it</a>` : ''}; it's paid through a payment request.</div>` : ''}`;
     this.showModal(`
       <div class="modal" style="max-width:1150px;width:96vw">
-        <div class="modal-header"><span class="modal-title">${s.settlement_number} — ${esc(s.supplier_name)} · ${s.agreement_number} · ${s.period}</span>
+        <div class="modal-header"><span class="modal-title">${s.settlement_number} — ${esc(s.supplier_name)} · ${s.agreement_number} · ${this.escapeAttr(s.period_label || s.period)}</span>
           <div style="display:flex;gap:8px;align-items:center">${this._consSettleBadge(s.status)}<button class="modal-close">✕</button></div></div>
         <div class="modal-body" style="font-size:12px">
           ${s.status === 'cancelled' ? `<div class="card" style="border-color:var(--danger);color:var(--danger);margin-bottom:10px">Cancelled: ${esc(s.cancel_reason)}</div>` : ''}
@@ -693,7 +706,7 @@ Object.assign(App, {
               <td style="text-align:right" class="fw-600">${this.fmt(l.billable_value)}</td><td style="text-align:right">${this.fmt(l.expected_tax)}</td></tr>`).join('')}</tbody>
             <tfoot><tr><td colspan="9" style="text-align:right">Subtotal</td><td style="text-align:right" class="fw-600">${this.fmt(s.subtotal)}</td><td style="text-align:right">${this.fmt(s.expected_tax)}</td></tr>
               <tr><td colspan="9" style="text-align:right;font-weight:700">Total owed</td><td colspan="2" style="text-align:right;font-weight:700">${this.fmt(s.total)}</td></tr></tfoot></table></div>
-          ${s.adjustments.length ? `<div style="font-weight:600;margin:12px 0 4px">Adjustments — returns this month of earlier months' sales (credited here; those months stay locked)</div>
+          ${s.adjustments.length ? `<div style="font-weight:600;margin:12px 0 4px">Adjustments — returns this period of earlier periods' sales (credited here; those periods stay locked)</div>
             ${s.adjustments.map(a => `<div>${esc(a.return_number || a.kind)} of sale ${esc(a.sale_number)} (${esc(String(a.sale_qualified_on || '').slice(0, 7))}) — ${esc(a.product_name)} × ${n(a.qty)} · credit ${this.fmt(a.value)}${a.goods_condition ? ` · ${esc(a.goods_condition)}` : ''}</div>`).join('')}` : ''}
           ${invoiceHtml}
           ${!inv && live && ap ? this._consInvoiceFormHtml(s) : ''}
@@ -780,7 +793,7 @@ Object.assign(App, {
     const label = { pending: 'Waiting for Books', waiting: 'Books accounts not set', failed: 'Failed', posted: 'Posted' };
     const badge = { pending: 'badge-info', waiting: 'badge-warning', failed: 'badge-danger', posted: 'badge-success' };
     el.innerHTML = `<div class="card">
-      <div style="font-size:13px;color:var(--text-muted);margin-bottom:8px">Entries RetailPOS Books posts: the supplier's cost accrued as each sale qualifies (and reversed by returns), and at month-end the approved chargeable shortages/damage and shop use. Books posts them once its four consignment accounts are set in its Settings. Settlement bills and supplier credit notes go through Accounts Payable.</div>
+      <div style="font-size:13px;color:var(--text-muted);margin-bottom:8px">Entries RetailPOS Books posts: the supplier's cost accrued as each sale qualifies (and reversed by returns), and at period-end the approved chargeable shortages/damage and shop use. Books posts them once its four consignment accounts are set in its Settings. Settlement bills and supplier credit notes go through Accounts Payable.</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">${counts.map(c => `<span class="badge-pill ${badge[c.status] || ''}">${label[c.status] || c.status}: ${c.n} · ${this.fmt(c.amount)}</span>`).join('') || '<span style="color:var(--text-muted)">Nothing yet</span>'}</div>
       <div class="table-wrap"><table style="font-size:12px">
         <thead><tr><th>Date</th><th>Supplier</th><th>Reference</th><th>For</th><th>Debit</th><th>Credit</th><th style="text-align:right">Amount</th><th>Status</th></tr></thead>
