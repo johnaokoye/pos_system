@@ -13,29 +13,190 @@ const { resolvePurchaseUnit, lineName, parseQty, stockUnits } = require('../lib/
 const { syncBinQty } = require('../lib/binSync');
 const { syncToBranch } = require('../lib/stockLots');
 const { addOwnedLot } = require('../lib/stockLots');
-const { autoBills, createBill, dueDateFor, today, PAID_SQL, round2 } = require('../lib/payables');
+const { autoBills, createBill, applyPoAdvances, dueDateFor, today, PAID_SQL, round2 } = require('../lib/payables');
 const { localTaxRate, defaultTaxOption, priceLine, poTotals } = require('../lib/poLines');
 
 router.use(requirePermission('purchasing_receive_direct'));
 
 const LIST_SELECT = `SELECT r.*, s.name AS supplier_name, b.name AS branch_name,
     er.first_name || ' ' || er.last_name AS received_by_name, ev.first_name || ' ' || ev.last_name AS reversed_by_name,
-    ab.bill_number, ab.status AS bill_status,
+    ab.bill_number, ab.status AS bill_status, po.po_number, el.first_name || ' ' || el.last_name AS po_linked_by_name,
     (SELECT COUNT(*) FROM direct_receipt_items i WHERE i.receipt_id = r.id) AS item_count
   FROM direct_receipts r
   LEFT JOIN suppliers s ON s.id = r.supplier_id
   LEFT JOIN branches b ON b.id = r.branch_id
   LEFT JOIN employees er ON er.id = r.received_by
   LEFT JOIN employees ev ON ev.id = r.reversed_by
-  LEFT JOIN ap_bills ab ON ab.id = r.bill_id`;
+  LEFT JOIN ap_bills ab ON ab.id = r.bill_id
+  LEFT JOIN purchase_orders po ON po.id = r.po_id
+  LEFT JOIN employees el ON el.id = r.po_linked_by`;
 
 async function loadReceipt(id) {
   const { rows: [r] } = await db.execute({ sql: `${LIST_SELECT} WHERE r.id = ?`, args: [id] });
   if (!r) return null;
   const { rows: items } = await db.execute({ sql: 'SELECT * FROM direct_receipt_items WHERE receipt_id = ? ORDER BY id', args: [id] });
   r.items = items;
+  const { rows: links } = await db.execute({
+    sql: `SELECT l.*, po.po_number, poi.product_name AS po_line_name, poi.purchase_unit AS po_purchase_unit, eu.first_name || ' ' || eu.last_name AS unlinked_by_name
+          FROM direct_receipt_po_links l JOIN purchase_orders po ON po.id = l.po_id JOIN purchase_order_items poi ON poi.id = l.po_item_id
+          LEFT JOIN employees eu ON eu.id = l.unlinked_by WHERE l.receipt_id = ? ORDER BY l.id`,
+    args: [id],
+  });
+  r.po_links = links;
   return r;
 }
+
+// ── Linking to a purchase order afterwards ─────────────────
+// Goods that came in before their PO was raised (or were received here by
+// mistake) are tied to the PO instead of being reversed and received again:
+// the PO lines take the quantities as received, the receipt's A/P bill goes
+// on the PO (and any advance paid on the PO is applied to it), and the
+// receipt and its supplier invoice show on the PO. Stock, cost and the
+// bill's amount don't change.
+const err = (status, message) => Object.assign(new Error(message), { status });
+const r3 = n => Math.round((Number(n) || 0) * 1000) / 1000;
+
+// Each receipt line matched to an open line on the PO for the same item
+// (same unit first), in the PO line's unit, within what is still to receive.
+// Returns { lines, problems }.
+async function matchPoLines(ex, receipt, items, po) {
+  const { rows: poItems } = await ex.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ? ORDER BY id', args: [po.id] });
+  const left = new Map(poItems.map(i => [i.id, r3((Number(i.quantity_ordered) || 0) - (Number(i.quantity_received) || 0))]));
+  const lines = [], problems = [];
+  for (const it of items) {
+    const cands = poItems.filter(pi => pi.product_id === it.product_id)
+      .sort((a, b) => ((b.uom_id ?? null) === (it.uom_id ?? null)) - ((a.uom_id ?? null) === (it.uom_id ?? null)));
+    if (!cands.length) { problems.push(`${it.product_name} isn't on ${po.po_number}`); continue; }
+    const pick = cands.map(pi => ({ pi, qty: r3(Number(it.stock_units) / (Number(pi.units_per) || 1)) })).find(c => c.qty > 0 && c.qty <= left.get(c.pi.id) + 0.0005);
+    if (!pick) {
+      const room = cands.reduce((t, pi) => t + left.get(pi.id), 0);
+      problems.push(`${it.product_name}: ${it.quantity} received here, but ${po.po_number} has only ${r3(room)} still to receive`);
+      continue;
+    }
+    left.set(pick.pi.id, r3(left.get(pick.pi.id) - pick.qty));
+    lines.push({ item: it, po_item: pick.pi, quantity: pick.qty });
+  }
+  return { lines, problems };
+}
+
+async function linkablePo(ex, receipt, poId) {
+  const { rows: [po] } = await ex.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [poId] });
+  if (!po) throw err(404, 'Purchase order not found');
+  if (po.supplier_id !== receipt.supplier_id) throw err(400, `${po.po_number} is for another supplier`);
+  if (receipt.branch_id && po.branch_id && po.branch_id !== receipt.branch_id) throw err(400, `${po.po_number} is for another branch — the goods went into ${receipt.branch_name || 'a different branch'}`);
+  if (!['approved', 'partial'].includes(po.status)) {
+    throw err(400, `${po.po_number} is ${{ draft: 'still a draft', sent: 'awaiting approval', received: 'already fully received', cancelled: 'cancelled' }[po.status] || po.status} — only an approved or part-received PO can be linked`);
+  }
+  return po;
+}
+
+const refreshPoStatus = async (ex, po) => {
+  const { rows: poItems } = await ex.execute({ sql: 'SELECT quantity_ordered, quantity_received FROM purchase_order_items WHERE po_id = ?', args: [po.id] });
+  const all = poItems.length && poItems.every(i => (Number(i.quantity_received) || 0) >= Number(i.quantity_ordered) - 0.0005);
+  const any = poItems.some(i => (Number(i.quantity_received) || 0) > 0);
+  const status = all ? 'received' : any ? 'partial' : 'approved';
+  await ex.execute({ sql: 'UPDATE purchase_orders SET status = ?, received_at = ? WHERE id = ?', args: [status, all ? (po.received_at || new Date().toISOString()) : null, po.id] });
+  if (all) await ex.execute({ sql: "UPDATE purchase_requests SET status = 'received' WHERE converted_to_po_id = ? AND status != 'received'", args: [po.id] });
+  else await ex.execute({ sql: "UPDATE purchase_requests SET status = 'converted' WHERE converted_to_po_id = ? AND status = 'received'", args: [po.id] });
+};
+
+// GET /direct-receipts/:id/po-candidates — the supplier's approved or
+// part-received POs (same branch) with how each receipt line would match.
+router.get('/:id/po-candidates', async (req, res) => {
+  try {
+    const r = await loadReceipt(req.params.id);
+    if (!r) return res.status(404).json({ error: 'Not found' });
+    const { rows: pos } = await db.execute({
+      sql: `SELECT po.id, po.po_number, po.status, po.total, po.currency, po.created_at, po.branch_id, b.name AS branch_name FROM purchase_orders po LEFT JOIN branches b ON b.id = po.branch_id
+            WHERE po.supplier_id = ? AND po.status IN ('approved', 'partial') ${r.branch_id ? 'AND (po.branch_id IS NULL OR po.branch_id = ?)' : ''} ORDER BY po.id DESC LIMIT 100`,
+      args: r.branch_id ? [r.supplier_id, r.branch_id] : [r.supplier_id],
+    });
+    const out = [];
+    for (const po of pos) {
+      const { lines, problems } = await matchPoLines(db, r, r.items, po);
+      out.push({ ...po, matches: lines.map(l => ({ receipt_item_id: l.item.id, product_name: l.item.product_name, po_item_id: l.po_item.id, po_line_name: l.po_item.product_name, quantity: l.quantity, purchase_unit: l.po_item.purchase_unit })), problems });
+    }
+    res.json(out);
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
+// POST /direct-receipts/:id/link-po — { po_id }. Every line on the receipt
+// must match an open line on the PO.
+router.post('/:id/link-po', async (req, res) => {
+  const tx = await db.transaction('write');
+  let committed = false;
+  try {
+    const { rows: [r] } = await tx.execute({ sql: 'SELECT r.*, b.name AS branch_name FROM direct_receipts r LEFT JOIN branches b ON b.id = r.branch_id WHERE r.id = ?', args: [req.params.id] });
+    if (!r) throw err(404, 'Not found');
+    if (r.status !== 'received') throw err(400, `${r.receipt_number} was reversed — there's nothing to link`);
+    if (r.po_id) throw err(400, `${r.receipt_number} is already linked to a PO`);
+    const po = await linkablePo(tx, r, req.body.po_id);
+    const { rows: items } = await tx.execute({ sql: 'SELECT * FROM direct_receipt_items WHERE receipt_id = ? ORDER BY id', args: [r.id] });
+    const { lines, problems } = await matchPoLines(tx, r, items, po);
+    if (problems.length) throw err(400, `Can't link to ${po.po_number}: ${problems.join('; ')}`);
+
+    let billLinked = 0;
+    if (r.bill_id) {
+      const { rows: [bill] } = await tx.execute({ sql: 'SELECT id, bill_number, po_id, status FROM ap_bills WHERE id = ?', args: [r.bill_id] });
+      if (bill && bill.status !== 'void') {
+        if (bill.po_id && bill.po_id !== po.id) throw err(400, `A/P bill ${bill.bill_number} is already on another PO`);
+        if (!bill.po_id) {
+          await tx.execute({ sql: 'UPDATE ap_bills SET po_id = ? WHERE id = ?', args: [po.id, bill.id] });
+          billLinked = 1;
+        }
+      }
+    }
+    for (const l of lines) {
+      await tx.execute({ sql: 'UPDATE purchase_order_items SET quantity_received = COALESCE(quantity_received, 0) + ? WHERE id = ?', args: [l.quantity, l.po_item.id] });
+      await tx.execute({ sql: 'INSERT INTO direct_receipt_po_links (receipt_id, receipt_item_id, po_id, po_item_id, quantity, stock_units, bill_linked, linked_by) VALUES (?,?,?,?,?,?,?,?)',
+        args: [r.id, l.item.id, po.id, l.po_item.id, l.quantity, Number(l.item.stock_units), billLinked, req.employee?.id || null] });
+    }
+    await tx.execute({ sql: 'UPDATE direct_receipts SET po_id = ?, po_linked_by = ?, po_linked_at = CURRENT_TIMESTAMP WHERE id = ?', args: [po.id, req.employee?.id || null, r.id] });
+    await refreshPoStatus(tx, po);
+    if (billLinked) await applyPoAdvances(tx, po.id);
+    await tx.commit();
+    committed = true;
+    res.json(await loadReceipt(r.id));
+  } catch (e) {
+    if (!committed) await tx.rollback().catch(() => {});
+    res.status(e.status || 400).json({ error: e.message });
+  }
+});
+
+// POST /direct-receipts/:id/unlink-po — { reason }. Undoes a link made in
+// error: the PO lines go back to what they had received, the bill comes off
+// the PO (advance payments the link applied to it go back on the PO).
+router.post('/:id/unlink-po', async (req, res) => {
+  const reason = String(req.body.reason || '').trim();
+  if (!reason) return res.status(400).json({ error: 'Enter the reason for unlinking' });
+  const tx = await db.transaction('write');
+  let committed = false;
+  try {
+    const { rows: [r] } = await tx.execute({ sql: 'SELECT * FROM direct_receipts WHERE id = ?', args: [req.params.id] });
+    if (!r) throw err(404, 'Not found');
+    if (!r.po_id) throw err(400, `${r.receipt_number} isn't linked to a PO`);
+    const { rows: [po] } = await tx.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [r.po_id] });
+    const { rows: links } = await tx.execute({ sql: 'SELECT * FROM direct_receipt_po_links WHERE receipt_id = ? AND unlinked_at IS NULL', args: [r.id] });
+    for (const l of links) {
+      const { rows: [pi] } = await tx.execute({ sql: 'SELECT product_name, quantity_received FROM purchase_order_items WHERE id = ?', args: [l.po_item_id] });
+      if (pi && Number(pi.quantity_received) < Number(l.quantity) - 0.0005) throw err(400, `${pi.product_name} on ${po.po_number} no longer shows this quantity received — it may have been reversed there`);
+      await tx.execute({ sql: 'UPDATE purchase_order_items SET quantity_received = MAX(0, COALESCE(quantity_received, 0) - ?) WHERE id = ?', args: [l.quantity, l.po_item_id] });
+    }
+    if (r.bill_id && links.some(l => l.bill_linked)) {
+      await tx.execute({ sql: 'DELETE FROM ap_payment_allocations WHERE bill_id = ? AND payment_id IN (SELECT id FROM ap_payments WHERE po_id = ?)', args: [r.bill_id, po.id] });
+      await tx.execute({ sql: 'UPDATE ap_bills SET po_id = NULL WHERE id = ? AND po_id = ?', args: [r.bill_id, po.id] });
+    }
+    await tx.execute({ sql: 'UPDATE direct_receipt_po_links SET unlinked_by = ?, unlinked_at = CURRENT_TIMESTAMP, unlink_reason = ? WHERE receipt_id = ? AND unlinked_at IS NULL', args: [req.employee?.id || null, reason, r.id] });
+    await tx.execute({ sql: 'UPDATE direct_receipts SET po_id = NULL, po_linked_by = NULL, po_linked_at = NULL WHERE id = ?', args: [r.id] });
+    if (po && po.status !== 'cancelled') await refreshPoStatus(tx, po);
+    await tx.commit();
+    committed = true;
+    res.json(await loadReceipt(r.id));
+  } catch (e) {
+    if (!committed) await tx.rollback().catch(() => {});
+    res.status(e.status || 400).json({ error: e.message });
+  }
+});
 
 // GET /direct-receipts?q=&supplier_id=&branch_id=&status=&start=&end=
 router.get('/', async (req, res) => {
@@ -181,6 +342,7 @@ router.post('/:id/reverse', async (req, res) => {
       const { rows: [r] } = await tx.execute({ sql: 'SELECT * FROM direct_receipts WHERE id = ?', args: [req.params.id] });
       if (!r) throw Object.assign(new Error('Not found'), { status: 404 });
       if (r.status !== 'received') throw new Error(`${r.receipt_number} has already been reversed`);
+      if (r.po_id) throw new Error(`${r.receipt_number} is linked to a purchase order — unlink it first`);
       const { rows: items } = await tx.execute({ sql: 'SELECT * FROM direct_receipt_items WHERE receipt_id = ?', args: [r.id] });
 
       const need = {};

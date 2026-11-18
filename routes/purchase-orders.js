@@ -93,6 +93,7 @@ router.get('/', async (req, res) => {
           UNION SELECT ab.vendor_invoice_number, 1000000000 + MIN(ab.id) FROM ap_bills ab WHERE ab.po_id = po.id AND ab.status != 'void' AND ab.vendor_invoice_number IS NOT NULL AND ab.vendor_invoice_number != ''
             AND NOT EXISTS (SELECT 1 FROM po_receipts r2 WHERE r2.po_id = po.id AND r2.status = 'received' AND r2.vendor_invoice_number = ab.vendor_invoice_number) GROUP BY ab.vendor_invoice_number
           UNION SELECT pi.vendor_invoice_number, 2000000000 + MIN(pi.id) FROM po_invoices pi WHERE pi.po_id = po.id GROUP BY pi.vendor_invoice_number
+          UNION SELECT dr.vendor_invoice_number, 3000000000 + MIN(dr.id) FROM direct_receipts dr WHERE dr.po_id = po.id AND dr.status = 'received' AND dr.vendor_invoice_number IS NOT NULL AND dr.vendor_invoice_number != '' GROUP BY dr.vendor_invoice_number
           ORDER BY ord)) AS invoice_numbers
       FROM purchase_orders po LEFT JOIN suppliers s ON po.supplier_id = s.id LEFT JOIN branches b ON po.branch_id = b.id LEFT JOIN employees e ON po.employee_id = e.id WHERE 1=1`;
     const params = [];
@@ -109,8 +110,9 @@ router.get('/', async (req, res) => {
         OR EXISTS (SELECT 1 FROM purchase_order_items poi WHERE poi.po_id = po.id AND (poi.product_name LIKE ? OR poi.sku LIKE ?))
         OR EXISTS (SELECT 1 FROM po_receipts r WHERE r.po_id = po.id AND r.status = 'received' AND r.vendor_invoice_number LIKE ?)
         OR EXISTS (SELECT 1 FROM ap_bills ab WHERE ab.po_id = po.id AND ab.status != 'void' AND ab.vendor_invoice_number LIKE ?)
-        OR EXISTS (SELECT 1 FROM po_invoices pi WHERE pi.po_id = po.id AND pi.vendor_invoice_number LIKE ?))`;
-      params.push(like, like, like, like, like, like, like, like, like, like);
+        OR EXISTS (SELECT 1 FROM po_invoices pi WHERE pi.po_id = po.id AND pi.vendor_invoice_number LIKE ?)
+        OR EXISTS (SELECT 1 FROM direct_receipts dr WHERE dr.po_id = po.id AND (dr.vendor_invoice_number LIKE ? OR dr.receipt_number LIKE ?)))`;
+      params.push(like, like, like, like, like, like, like, like, like, like, like, like);
     }
     sql += ' ORDER BY po.created_at DESC LIMIT ?';
     params.push(parseInt(limit));
@@ -130,6 +132,19 @@ router.get('/:id', async (req, res) => {
     po.receipts = await poReceipts(po.id);
     po.invoices = (await db.execute({ sql: `SELECT pi.*, ec.first_name || ' ' || ec.last_name AS created_by_name, eu.first_name || ' ' || eu.last_name AS updated_by_name
         FROM po_invoices pi LEFT JOIN employees ec ON ec.id = pi.created_by LEFT JOIN employees eu ON eu.id = pi.updated_by WHERE pi.po_id = ? ORDER BY pi.id`, args: [po.id] })).rows;
+    // Goods received without a PO and linked to this one afterwards.
+    const { rows: linked } = await db.execute({
+      sql: `SELECT dr.id, dr.receipt_number, dr.vendor_invoice_number, dr.received_at, dr.total, dr.po_linked_at, ab.bill_number, ab.status AS bill_status,
+              er.first_name || ' ' || er.last_name AS received_by_name, el.first_name || ' ' || el.last_name AS po_linked_by_name
+            FROM direct_receipts dr LEFT JOIN ap_bills ab ON ab.id = dr.bill_id LEFT JOIN employees er ON er.id = dr.received_by LEFT JOIN employees el ON el.id = dr.po_linked_by
+            WHERE dr.po_id = ? ORDER BY dr.id`,
+      args: [po.id],
+    });
+    if (linked.length) {
+      const { rows: li } = await db.execute({ sql: `SELECT l.receipt_id, l.quantity, poi.product_name FROM direct_receipt_po_links l JOIN purchase_order_items poi ON poi.id = l.po_item_id WHERE l.po_id = ? AND l.unlinked_at IS NULL ORDER BY l.id`, args: [po.id] });
+      for (const d of linked) d.items = li.filter(x => x.receipt_id === d.id);
+    }
+    po.linked_receipts = linked;
     res.json(po);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -774,7 +789,8 @@ async function poReceipts(poId) {
 async function unloggedReceived(executor, poId) {
   const { rows } = await executor.execute({
     sql: `SELECT poi.id, COALESCE(poi.quantity_received, 0) - COALESCE((SELECT SUM(ri.quantity) FROM po_receipt_items ri JOIN po_receipts r ON r.id = ri.receipt_id
-            WHERE ri.po_item_id = poi.id AND r.status = 'received'), 0) AS unlogged
+            WHERE ri.po_item_id = poi.id AND r.status = 'received'), 0)
+            - COALESCE((SELECT SUM(l.quantity) FROM direct_receipt_po_links l WHERE l.po_item_id = poi.id AND l.unlinked_at IS NULL), 0) AS unlogged
           FROM purchase_order_items poi WHERE poi.po_id = ?`,
     args: [poId],
   });

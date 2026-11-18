@@ -1733,6 +1733,19 @@ Object.assign(App, {
             </div>
           </div>
 
+          ${(po.linked_receipts || []).length || (['approved', 'partial'].includes(po.status) && this.can('purchasing_receive_direct')) ? `
+          <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:14px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+              <span style="font-weight:700;font-size:14px">Received Without PO — Linked</span>
+              ${['approved', 'partial'].includes(po.status) && this.can('purchasing_receive_direct') ? `<button class="btn btn-sm btn-outline" onclick="App.showLinkReceiptToPO(${po.id})">+ Link Receipt</button>` : ''}
+            </div>
+            ${(po.linked_receipts || []).map(d => `
+              <div style="padding:8px 10px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px">
+                <div style="font-size:13px"><a href="#" class="fw-600" onclick="event.preventDefault();App.viewDirectReceipt(${d.id})">${d.receipt_number}</a> · Received ${this.fmtDateTime(d.received_at)}${d.received_by_name ? ` · ${this.escapeAttr(d.received_by_name)}` : ''}${d.vendor_invoice_number ? ` · Inv ${this.escapeAttr(d.vendor_invoice_number)}` : ''}${d.bill_number ? ` · A/P ${d.bill_number}${d.bill_status === 'void' ? ' (void)' : ''}` : ''} · ${this.fmt(d.total)}</div>
+                <div style="font-size:12px;color:var(--text-muted);margin-top:3px">${(d.items || []).map(i => `${this.escapeAttr(i.product_name)} × ${i.quantity}`).join(' · ')} — linked ${this.fmtDateTime(d.po_linked_at)}${d.po_linked_by_name ? ` by ${this.escapeAttr(d.po_linked_by_name)}` : ''}</div>
+              </div>`).join('') || '<div style="font-size:12px;color:var(--text-muted)">Goods that came in before this PO (received without a PO) can be linked here instead of being reversed.</div>'}
+          </div>` : ''}
+
           ${(po.receipts || []).length || po.items.some(i => i.quantity_unlogged > 0) || (po.invoices || []).length ? `
           <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:14px">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -2707,7 +2720,9 @@ Object.assign(App, {
             <div><span style="color:var(--text-muted)">Branch</span><div class="fw-600">${this.escapeAttr(r.branch_name || '—')}</div></div>
             <div><span style="color:var(--text-muted)">Received</span><div class="fw-600">${this.fmtDateTime(r.received_at)} · ${this.escapeAttr(r.received_by_name || '—')}</div></div>
             <div><span style="color:var(--text-muted)">A/P bill</span><div class="fw-600">${r.bill_number ? `${r.bill_number}${r.bill_status === 'void' ? ' (void)' : ''}` : 'None — vendor not synced with A/P'}</div></div>
+            <div><span style="color:var(--text-muted)">Purchase order</span><div class="fw-600">${r.po_number ? `${this.escapeAttr(r.po_number)} <span style="font-weight:400;font-size:12px;color:var(--text-muted)">linked ${this.fmtDateTime(r.po_linked_at)}${r.po_linked_by_name ? ` by ${this.escapeAttr(r.po_linked_by_name)}` : ''}</span>` : 'None'}</div></div>
           </div>
+          ${(r.po_links || []).some(l => l.unlinked_at) ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">${[...new Map(r.po_links.filter(l => l.unlinked_at).map(l => [l.unlinked_at + l.po_number, l])).values()].map(l => `Was linked to ${this.escapeAttr(l.po_number)} — unlinked ${this.fmtDateTime(l.unlinked_at)}${l.unlinked_by_name ? ` by ${this.escapeAttr(l.unlinked_by_name)}` : ''}: ${this.escapeAttr(l.unlink_reason || '')}`).join('<br>')}</div>` : ''}
           <table class="data-table" style="width:100%">
             <thead><tr><th>Item</th><th>Unit</th><th style="text-align:right">Qty</th><th style="text-align:right">Unit cost</th><th>Tax</th><th style="text-align:right">Line</th><th style="text-align:right">Item cost was → now</th></tr></thead>
             <tbody>${r.items.map(l => `<tr>
@@ -2724,7 +2739,9 @@ Object.assign(App, {
           ${r.notes ? `<div style="margin-top:12px;font-size:13px"><span style="color:var(--text-muted)">Notes</span><div style="white-space:pre-wrap">${this.escapeAttr(r.notes)}</div></div>` : ''}
         </div>
         <div class="modal-footer">
-          ${r.status === 'received' ? `<button class="btn btn-danger" onclick="App.showReverseDirectReceipt(${r.id})">Reverse Receipt</button>` : ''}
+          ${r.status === 'received' && !r.po_id ? `<button class="btn btn-primary" onclick="App.showLinkDirectReceiptPO(${r.id})">Link to PO</button>` : ''}
+          ${r.status === 'received' && r.po_id ? `<button class="btn btn-outline" onclick="App.showUnlinkDirectReceiptPO(${r.id})">Unlink PO</button>` : ''}
+          ${r.status === 'received' && !r.po_id ? `<button class="btn btn-danger" onclick="App.showReverseDirectReceipt(${r.id})">Reverse Receipt</button>` : ''}
           <button class="btn btn-outline" onclick="App.printDirectReceipt()">Print</button>
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
@@ -2749,6 +2766,7 @@ Object.assign(App, {
 <div><span class="muted">Branch:</span> ${esc(r.branch_name || '—')}</div>
 <div><span class="muted">Received:</span> ${esc(this.fmtDateTime(r.received_at))} by ${esc(r.received_by_name || '—')}</div>
 <div><span class="muted">A/P bill:</span> ${esc(r.bill_number || '—')}</div>
+${r.po_number ? `<div><span class="muted">Purchase order:</span> ${esc(r.po_number)} (linked after receiving)</div>` : ''}
 </div>
 <table><thead><tr><th>Item</th><th>SKU</th><th>Unit</th><th class="r">Qty</th><th class="r">Unit cost</th><th class="r">Tax</th><th class="r">Line</th></tr></thead><tbody>
 ${r.items.map(l => `<tr><td>${esc(ul(l).name)}</td><td>${esc(l.sku || '')}</td><td>${esc(ul(l).unit)}</td><td class="r">${l.quantity}</td><td class="r">${esc(this.fmt(l.unit_cost))}</td><td class="r">${l.tax_option === 'local' ? esc(this.fmt(l.tax_amount)) : '—'}</td><td class="r">${esc(this.fmt(l.total))}</td></tr>`).join('')}
@@ -2758,6 +2776,101 @@ ${r.notes ? `<p><span class="muted">Notes:</span> ${esc(r.notes)}</p>` : ''}
 <div class="sig"><div>Received by</div><div>Delivered by</div></div>
 </body></html>`);
     win.document.close();
+  },
+
+  // Link goods received without a PO to the PO afterwards: the PO shows them
+  // as received, with the receipt, supplier invoice and A/P bill — no stock
+  // or cost moves, nothing reversed.
+  async showLinkDirectReceiptPO(id) {
+    let pos;
+    try { pos = await this.api('GET', `/direct-receipts/${id}/po-candidates`); } catch (e) { return this.alert(e.message, 'error'); }
+    const esc = v => this.escapeAttr(v ?? '');
+    this.showSecondaryModal(`
+      <div class="modal" style="max-width:640px">
+        <div class="modal-header"><span class="modal-title">Link to Purchase Order</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">The PO's lines take these quantities as received, and this receipt, its supplier invoice and its A/P bill go on the PO (any advance paid on the PO is applied to the bill). Stock and item costs don't change. Shown: this supplier's approved or part-received POs for the same branch.</p>
+          ${pos.length ? pos.map(po => `
+            <div style="border:1px solid var(--border);border-radius:6px;padding:10px 12px;margin-bottom:8px">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+                <div><span class="fw-600">${esc(po.po_number)}</span> <span style="font-size:12px;color:var(--text-muted)">· ${po.status === 'partial' ? 'part-received' : 'approved'} · ${this.fmtDate(po.created_at)}${po.branch_name ? ` · ${esc(po.branch_name)}` : ''}</span></div>
+                <button class="btn btn-sm btn-primary" ${po.problems.length ? 'disabled' : ''} onclick="App._linkDirectReceiptPO(${id}, ${po.id}, '${esc(po.po_number)}')">Link</button>
+              </div>
+              <div style="font-size:12px;margin-top:4px">${po.matches.map(m => `✓ ${esc(m.product_name)} → ${esc(m.po_line_name)} × ${m.quantity}`).join('<br>')}</div>
+              ${po.problems.length ? `<div style="font-size:12px;color:var(--danger);margin-top:4px">${po.problems.map(esc).join('<br>')}</div>` : ''}
+            </div>`).join('') : '<div class="empty-state">No approved or part-received PO from this supplier for this branch. Raise the PO and have it approved first.</div>'}
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeSecondaryModal()">Close</button></div>
+      </div>`);
+  },
+
+  async _linkDirectReceiptPO(id, poId, poNumber) {
+    if (!confirm(`Link this receipt to ${poNumber}? The PO will show these items as received.`)) return;
+    try {
+      await this.api('POST', `/direct-receipts/${id}/link-po`, { po_id: poId });
+      this.closeSecondaryModal();
+      this.alert(`Linked to ${poNumber}`);
+      if (this.section === 'purchasing' || this.section === 'purchase-requests') this._loadDirectReceiptList?.();
+      this.viewDirectReceipt(id);
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  showUnlinkDirectReceiptPO(id) {
+    this.showSecondaryModal(`
+      <div class="modal" style="max-width:520px">
+        <div class="modal-header"><span class="modal-title">Unlink PO</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">For a link made in error. The PO's lines go back to what they had received, and the A/P bill comes off the PO (any PO advance applied to it goes back on the PO). Stock doesn't change.</p>
+          <div class="form-group"><label>Reason *</label><textarea id="dr-unlink-reason" rows="3" placeholder="e.g. Linked to the wrong PO"></textarea></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeSecondaryModal()">Cancel</button>
+          <button class="btn btn-danger" onclick="App._submitUnlinkDirectReceiptPO(${id})">Unlink</button>
+        </div>
+      </div>`);
+  },
+
+  async _submitUnlinkDirectReceiptPO(id) {
+    const reason = document.getElementById('dr-unlink-reason')?.value.trim();
+    if (!reason) return this.alert('Enter the reason', 'error');
+    try {
+      await this.api('POST', `/direct-receipts/${id}/unlink-po`, { reason });
+      this.closeSecondaryModal();
+      this.alert('Unlinked from the PO');
+      this.viewDirectReceipt(id);
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  // From the PO: pick one of the supplier's receipts made without a PO.
+  async showLinkReceiptToPO(poId) {
+    const po = await this.api('GET', `/purchase-orders/${poId}`);
+    let list;
+    try { list = (await this.api('GET', `/direct-receipts?supplier_id=${po.supplier_id}&status=received`)).filter(r => !r.po_id && (!po.branch_id || !r.branch_id || r.branch_id === po.branch_id)); }
+    catch (e) { return this.alert(e.message, 'error'); }
+    const esc = v => this.escapeAttr(v ?? '');
+    this.showSecondaryModal(`
+      <div class="modal" style="max-width:600px">
+        <div class="modal-header"><span class="modal-title">Link Goods Received Without PO — ${esc(po.po_number)}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">The PO takes the receipt's quantities as received, with its supplier invoice and A/P bill. Stock doesn't change. Every item on the receipt must be on this PO with enough still to receive.</p>
+          ${list.length ? `<table class="data-table" style="width:100%"><thead><tr><th>Receipt</th><th>Received</th><th>Supplier invoice</th><th style="text-align:right">Total</th><th></th></tr></thead><tbody>
+            ${list.map(r => `<tr><td class="fw-600">${esc(r.receipt_number)}</td><td>${this.fmtDate(r.received_at)}</td><td>${esc(r.vendor_invoice_number || '—')}</td><td style="text-align:right">${this.fmt(r.total)}</td>
+              <td><button class="btn btn-sm btn-primary" onclick="App._linkReceiptFromPO(${r.id}, ${po.id}, '${esc(po.po_number)}')">Link</button></td></tr>`).join('')}
+          </tbody></table>` : '<div class="empty-state">No unlinked receipts without a PO from this supplier.</div>'}
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeSecondaryModal()">Close</button></div>
+      </div>`);
+  },
+
+  async _linkReceiptFromPO(receiptId, poId, poNumber) {
+    if (!confirm(`Link this receipt to ${poNumber}? The PO will show its items as received.`)) return;
+    try {
+      await this.api('POST', `/direct-receipts/${receiptId}/link-po`, { po_id: poId });
+      this.closeSecondaryModal();
+      this.alert(`Linked to ${poNumber}`);
+      this.closeModal();
+      this.viewPO(poId);
+    } catch (e) { this.alert(e.message, 'error'); }
   },
 
   showReverseDirectReceipt(id) {

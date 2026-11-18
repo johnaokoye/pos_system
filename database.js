@@ -3586,6 +3586,29 @@ async function _init() {
     // it was keyed — received_at) and the supplier's invoice # / date, which
     // also go on the receipt's A/P bill.
     'ALTER TABLE po_receipts ADD COLUMN received_date TEXT',
+    // Goods received without a PO, linked to the PO afterwards
+    // (POST /direct-receipts/:id/link-po): the PO lines take the quantities as
+    // received — no stock or cost moves — and the receipt's A/P bill goes on the PO.
+    'ALTER TABLE direct_receipts ADD COLUMN po_id INTEGER REFERENCES purchase_orders(id)',
+    'ALTER TABLE direct_receipts ADD COLUMN po_linked_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE direct_receipts ADD COLUMN po_linked_at DATETIME',
+    `CREATE TABLE IF NOT EXISTS direct_receipt_po_links (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      receipt_id INTEGER NOT NULL REFERENCES direct_receipts(id),
+      receipt_item_id INTEGER NOT NULL REFERENCES direct_receipt_items(id),
+      po_id INTEGER NOT NULL REFERENCES purchase_orders(id),
+      po_item_id INTEGER NOT NULL REFERENCES purchase_order_items(id),
+      quantity REAL NOT NULL,
+      stock_units REAL NOT NULL,
+      bill_linked INTEGER NOT NULL DEFAULT 0,
+      linked_by INTEGER REFERENCES employees(id),
+      linked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      unlinked_by INTEGER REFERENCES employees(id),
+      unlinked_at DATETIME,
+      unlink_reason TEXT
+    )`,
+    'CREATE INDEX IF NOT EXISTS idx_direct_receipt_po_links_po ON direct_receipt_po_links(po_id)',
+    'CREATE INDEX IF NOT EXISTS idx_direct_receipt_po_links_receipt ON direct_receipt_po_links(receipt_id)',
     'ALTER TABLE po_receipts ADD COLUMN vendor_invoice_number TEXT',
     'ALTER TABLE po_receipts ADD COLUMN invoice_date TEXT',
     // Who last filled in / changed those details after the receipt (PATCH /purchase-orders/:id/receipts/:rid/details).
