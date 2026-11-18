@@ -69,3 +69,33 @@ test('a warehouse branch can only supply a store sale through Get from here', as
     await api(page, 'PUT', `/branches/${whId}`, { ...row, is_warehouse: 0, active: 0 });
   }
 });
+
+// Sales made at a branch before it became a warehouse stay reportable on
+// their own: the report location filters list warehouses (labelled), while
+// the POS still won't sell there.
+test('reports can still be filtered to a warehouse branch', async ({ page }) => {
+  const s = Date.now();
+  const br = await api(page, 'POST', '/branches', { name: `Old Store ${s}`, active: 1 });
+  try {
+    const p = await api(page, 'POST', '/products', { sku: `WHR-${s}`, name: `Warehouse Report Item ${s}`, price: 100, cost: 40, tax_rate: 0 });
+    await api(page, 'PATCH', `/products/${p.id}/stock`, { adjustment: 3, branch_id: br.id, reason: 'test' });
+    await api(page, 'POST', '/transactions', { items: [{ product_id: p.id, quantity: 1 }], branch_id: br.id, employee_id: 1, payment_method: 'cash', amount_tendered: 100 });
+    const row = (await api(page, 'GET', '/branches')).find(b => b.id === br.id);
+    await api(page, 'PUT', `/branches/${br.id}`, { ...row, is_warehouse: 1 });
+
+    const today = new Date().toISOString().slice(0, 10);
+    const sales = await api(page, 'GET', `/reports/sales?start=2000-01-01&end=${today}&branch_id=${br.id}`);
+    expect(sales.summary.transaction_count).toBe(1);
+
+    await page.goto('/');
+    await page.waitForFunction(() => App.currentUser);
+    await page.evaluate(() => App.showSection('reports'));
+    await expect(page.locator(`#rpt-branch option[value="${br.id}"]`)).toHaveText(`Old Store ${s} (Warehouse)`);
+    await page.evaluate(() => App.showSection('pos'));
+    await page.waitForFunction(() => document.getElementById('pos-branch-bar')?.textContent.length > 0);
+    expect(await page.locator(`#pos-branch-select option[value="${br.id}"]`).count()).toBe(0);
+  } finally {
+    const row = (await api(page, 'GET', '/branches')).find(b => b.id === br.id);
+    await api(page, 'PUT', `/branches/${br.id}`, { ...row, is_warehouse: 0, active: 0 });
+  }
+});

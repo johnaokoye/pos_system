@@ -720,7 +720,6 @@ const App = {
         this.api('GET', '/categories').catch(() => []),
       ]);
       if (this.section !== hubKey) return;
-      const activeBranches = (branches || []).filter(b => b.active && !b.is_warehouse);
       const today = new Date().toISOString().slice(0,10);
       const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0,10);
       reportsPanel = `
@@ -730,7 +729,7 @@ const App = {
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <select id="whr-branch" style="min-width:140px">
                 <option value="">All Locations</option>
-                ${activeBranches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
+                ${this._reportBranchOptions(branches)}
               </select>
               <select id="whr-category" style="min-width:140px">
                 <option value="">All Categories</option>

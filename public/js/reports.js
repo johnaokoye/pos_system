@@ -1,6 +1,15 @@
 // Reports hub and individual reports.
 Object.assign(App, {
   // ─── Reports ──────────────────────────────────────────────
+  // Location options for a report's branch filter: every active branch,
+  // warehouses included and labelled — nothing is sold at a warehouse any more
+  // (warehouseSaleError), but sales made there before the rule must stay
+  // reportable on their own.
+  _reportBranchOptions(branches, selected) {
+    const list = (branches || []).filter(b => b.active);
+    const sorted = [...list.filter(b => !Number(b.is_warehouse)), ...list.filter(b => Number(b.is_warehouse))];
+    return sorted.map(b => `<option value="${b.id}"${String(selected ?? '') === String(b.id) ? ' selected' : ''}>${this.escapeAttr(b.name)}${Number(b.is_warehouse) ? ' (Warehouse)' : ''}</option>`).join('');
+  },
   // ─── Reports hub: Marketing / Sales / Accounts ─────────────────────────
   // The Sales and Accounts categories currently just point at the existing
   // Reports & Analytics screen (below) rather than duplicating it — the
@@ -307,7 +316,7 @@ Object.assign(App, {
       <input type="date" id="isr-start" style="width:145px" onchange="document.getElementById('isr-range').value='custom'">
       <span>to</span>
       <input type="date" id="isr-end" style="width:145px" onchange="document.getElementById('isr-range').value='custom'">
-      <select id="isr-branch" style="width:150px"><option value="">All Locations</option>${(branches || []).filter(b => b.active && !b.is_warehouse).map(b => `<option value="${b.id}">${this.escapeAttr(b.name)}</option>`).join('')}</select>
+      <select id="isr-branch" style="width:150px"><option value="">All Locations</option>${this._reportBranchOptions(branches)}</select>
       <select id="isr-category" style="width:160px"><option value="">All Categories</option><option value="none">Uncategorized</option>${(categories || []).map(c => `<option value="${c.id}">${this.escapeAttr(c.name)}</option>`).join('')}</select>
       <select id="isr-brand" style="width:150px"><option value="">All Brands</option>${(brands || []).map(b => `<option value="${this.escapeAttr(b.name || '')}">${this.escapeAttr(b.name || '')}</option>`).join('')}</select>
       <select id="isr-type" style="width:170px" title="Which items to include">
@@ -424,7 +433,7 @@ Object.assign(App, {
   },
 
   async showSupplierItemSalesReport(supplierId) {
-    const branches = (await this.api('GET', '/branches').catch(() => []) || []).filter(b => b.active && !b.is_warehouse);
+    const branches = await this.api('GET', '/branches').catch(() => []) || [];
     const filters = `
       <select id="sis-range" onchange="App._applySupplierSalesRange()" style="width:150px">
         <option value="this_month">This month</option><option value="today">Today</option><option value="this_week">This week</option>
@@ -438,7 +447,7 @@ Object.assign(App, {
       <select id="sis-period" title="Break the trend down by" style="width:120px">
         <option value="day">By day</option><option value="week">By week</option><option value="month">By month</option><option value="quarter">By quarter</option><option value="year">By year</option>
       </select>
-      <select id="sis-branch" style="width:150px"><option value="">All Locations</option>${branches.map(b => `<option value="${b.id}">${this.escapeAttr(b.name)}</option>`).join('')}</select>
+      <select id="sis-branch" style="width:150px"><option value="">All Locations</option>${this._reportBranchOptions(branches)}</select>
       <select id="sis-supplier" style="width:200px"><option value="">All suppliers</option></select>`;
     this._sisSupplier = supplierId ? String(supplierId) : '';
     this._showReportModal('Supplier Item Sales', filters, 'loadSupplierItemSalesReport');
@@ -1097,7 +1106,7 @@ Object.assign(App, {
   async showHourlySalesReport() {
     const branches = await this.api('GET', '/branches').catch(() => []);
     const filters = `${this._reportDateRangeFilters('hsr-start', 'hsr-end', 3)}
-      <select id="hsr-branch" style="width:170px"><option value="">All locations</option>${branches.map(b => `<option value="${b.id}">${this.escapeAttr(b.name)}</option>`).join('')}</select>
+      <select id="hsr-branch" style="width:170px"><option value="">All locations</option>${this._reportBranchOptions(branches)}</select>
       <select id="hsr-mode" style="width:170px" onchange="App._renderHourlySalesReport()"><option value="total">Totals for the range</option><option value="avg">Average per day</option></select>`;
     this._showReportModal('Hourly Sales by Day', filters, 'loadHourlySalesReport');
     const modal = document.getElementById('rpt-modal-content')?.closest('.modal');
@@ -1891,7 +1900,6 @@ Object.assign(App, {
     const today = new Date().toISOString().slice(0,10);
     const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0,10);
     const branches = await this.api('GET', '/branches').catch(() => []);
-    const activeBranches = (branches || []).filter(b => b.active && !b.is_warehouse);
 
     // The user may have navigated to a different section while /branches was
     // in flight — #content always exists, so without this check we'd silently
@@ -1904,7 +1912,7 @@ Object.assign(App, {
         <div style="display:flex;gap:10px;align-items:center;">
           <select id="rpt-branch" style="min-width:150px">
             <option value="">All Locations</option>
-            ${activeBranches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
+            ${this._reportBranchOptions(branches)}
           </select>
           <input type="date" id="rpt-start" value="${monthStart}" style="width:150px">
           <span>to</span>
