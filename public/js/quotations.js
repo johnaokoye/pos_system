@@ -1819,6 +1819,7 @@ Object.assign(App, {
         <div class="modal-body">
           ${convertedBanner}
           ${approvalBanner}
+          ${this._quoteCreditBanner(q)}
           <div class="two-col" style="margin-bottom:14px;font-size:13px">
             <div><strong>Customer:</strong> ${q.customer_name||'Walk-in'}<br><strong>Phone:</strong> ${q.customer_phone||'-'}<br><strong>Email:</strong> ${q.customer_email||'-'}</div>
             <div><strong>Date:</strong> ${this.fmtDate(q.created_at)}<br><strong>${isRental?'Due Date':'Valid Until'}:</strong> ${(isRental?q.due_date:q.valid_until) ? this.fmtDate(isRental?q.due_date:q.valid_until) : 'N/A'}<br><strong>Branch:</strong> ${q.branch_name||'-'}<br>${isRental ? `<strong>Rate:</strong> ${this._ratePlanLabel(q.rate_plan)}<br>` : ''}<strong>Assigned to:</strong> ${q.employee_name||'-'}${q.original_employee_name && q.employee_name !== q.original_employee_name ? `<br><strong>Sale credited to:</strong> ${q.original_employee_name} <span class="badge-pill badge-info" style="font-size:10px" title="Reassigned for completion — commission still goes to the original salesperson">reassigned</span>` : ''}</div>
@@ -2102,9 +2103,77 @@ Object.assign(App, {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
+  // Quote for a blocked credit account: it can't be converted to an invoice
+  // until the account is cleared or accounting (customers_credit_block)
+  // releases this quote — POST/DELETE /quotations/:id/credit-release.
+  _quoteCreditBanner(q) {
+    if (!q.customer_credit_blocked || ['converted', 'declined', 'cancelled'].includes(q.status)) return '';
+    const canRelease = this.can('customers_credit_block');
+    if (q.credit_released_at) {
+      return `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--success,#22c55e);border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:12px">
+        <strong>Credit account blocked — released for invoicing</strong> by ${this.escapeAttr(q.credit_released_by_name || 'accounting')} on ${this.fmtDateTime(q.credit_released_at)}: ${this.escapeAttr(q.credit_release_reason || '')}. This quote can be converted and sold, on account too; the account stays blocked otherwise.
+        ${canRelease ? ` <a href="#" style="color:var(--danger)" onclick="event.preventDefault();App.withdrawQuoteCreditRelease(${q.id})">Withdraw release</a>` : ''}
+      </div>`;
+    }
+    return `<div style="background:#ffebee;border:1px solid #f44336;border-left:3px solid #c62828;border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:#c62828">
+      <strong>Credit account blocked.</strong> This quote can't be converted to an invoice until the account is cleared or accounting releases it.
+      ${canRelease ? ` <button class="btn btn-sm btn-primary" style="margin-left:6px" onclick="App.showQuoteCreditRelease(${q.id})">Release for Invoicing</button>` : ''}
+    </div>`;
+  },
+
+  showQuoteCreditRelease(id) {
+    this.showModal(`
+      <div class="modal" style="max-width:460px">
+        <div class="modal-header"><span class="modal-title">Release for Invoicing</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted)">The customer's credit account stays blocked. Only this quote can then be converted and sold — on account too, past the credit limit. Editing the quote's total or customer cancels the release.</p>
+          <div class="form-group"><label>Reason *</label><textarea id="qcr-reason" rows="3" placeholder="e.g. Payment arrangement agreed with the customer"></textarea></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.confirmQuoteCreditRelease(${id})">Release</button>
+        </div>
+      </div>`);
+  },
+
+  async confirmQuoteCreditRelease(id) {
+    const reason = document.getElementById('qcr-reason')?.value.trim();
+    if (!reason) { this.alert('A reason is required', 'error'); return; }
+    try {
+      await this.api('POST', `/quotations/${id}/credit-release`, { reason });
+      this.closeModal();
+      this.alert('Quote released for invoicing');
+      this.viewQuote(id);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async withdrawQuoteCreditRelease(id) {
+    if (!confirm('Withdraw the release? The quote can\'t be converted again until the account is cleared or it is released again.')) return;
+    try {
+      await this.api('DELETE', `/quotations/${id}/credit-release`);
+      this.closeModal();
+      this.viewQuote(id);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
   async showConvertQuote(id) {
     const q = await this.api('GET', `/quotations/${id}`);
     const isRental = q.quote_type === 'rental';
+    if (q.customer_credit_blocked && !q.credit_released_at) {
+      this.showModal(`
+        <div class="modal" style="max-width:460px">
+          <div class="modal-header"><span class="modal-title">Can't Convert Yet</span><button class="modal-close">✕</button></div>
+          <div class="modal-body">
+            <p style="font-size:13px"><strong>${this.escapeAttr(q.customer_name || 'The customer')}</strong>'s credit account is blocked, so <strong>${this.escapeAttr(q.quote_number)}</strong> can't be converted to ${isRental ? 'a rental' : 'an invoice'} yet.</p>
+            <p style="font-size:13px;color:var(--text-muted);margin-top:8px">It can go ahead once the account is cleared, or when accounting releases this quote.</p>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
+            ${this.can('customers_credit_block') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showQuoteCreditRelease(${id})">Release for Invoicing</button>` : ''}
+          </div>
+        </div>`);
+      return;
+    }
     this.showModal(`
       <div class="modal" style="max-width:440px">
         <div class="modal-header"><span class="modal-title">${isRental?'Convert to Rental':'Convert to Invoice'}</span><button class="modal-close">✕</button></div>

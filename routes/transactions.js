@@ -21,7 +21,7 @@ function canOverrideDiscount(employeeRow) {
 }
 const { nextNumber } = require('../lib/nextNumber');
 const { refreshStoreTz, storeToday } = require('../lib/storeTime');
-const { blockedMessage, creditLimitError } = require('../lib/creditBlock');
+const { blockedMessage, creditLimitError, quoteCreditHold } = require('../lib/creditBlock');
 const { resolveUnit, lineName, parseQty, stockUnits } = require('../lib/units');
 const { isSerialNumberProduct, serialNumberLabel, serialNumberOf, serialClashError } = require('../lib/serialNumber');
 const { checkDiscountEligibility } = require('./promotions');
@@ -718,6 +718,15 @@ router.post('/', requirePermission('pos'), async (req, res) => {
     // quoted quantity, it's today's catalog price. A quote already turned
     // into a completed sale isn't honoured again.
     const quotedPool = [];
+    // A blocked credit customer's quote isn't invoiced until the account is
+    // cleared or accounting releases it (POST /quotations/:id/credit-release);
+    // a released one may then go on account despite the block.
+    let creditReleasedQuote = false;
+    if (quote_id) {
+      const creditHold = await quoteCreditHold(db, quote_id);
+      if (creditHold?.error) return res.status(409).json({ error: creditHold.error, code: 'credit_blocked' });
+      creditReleasedQuote = !!creditHold?.released && String(creditHold.customer_id) === String(customer_id || '');
+    }
     if (quote_id) {
       const { rows: [srcQuote] } = await db.execute({
         sql: `SELECT q.quote_type, q.quote_number, q.valid_until, q.status, ct.status AS converted_tx_status
@@ -961,8 +970,8 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       const { rows: [cust] } = await db.execute({ sql: 'SELECT customer_type, account_blocked, block_override, block_override_reason, credit_limit, account_balance FROM customers WHERE id = ?', args: [customer_id] });
       if (!cust) return res.status(400).json({ error: 'Customer not found' });
       if (cust.customer_type !== 'credit') return res.status(400).json({ error: 'Customer does not have a credit account' });
-      if (cust.account_blocked) return res.status(400).json({ error: blockedMessage(cust) });
-      const limitError = creditLimitError(cust, total);
+      if (cust.account_blocked && !creditReleasedQuote) return res.status(400).json({ error: blockedMessage(cust) });
+      const limitError = creditReleasedQuote ? null : creditLimitError(cust, total);
       if (limitError) return res.status(400).json({ error: limitError });
     }
 

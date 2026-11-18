@@ -939,6 +939,7 @@ Object.assign(App, {
   // everything downstream — collections, cancellation — is untouched).
   async posCreateLayawayFromCart() {
     if (this._posQItemBlocksSale()) return;
+    if (this._posBlockedCustomerSale()) return;
     await this.showLayawayCheckoutModal();
     // Set only after the modal opens (which resets it to false itself) —
     // so an abandoned/cancelled POS-seeded attempt can't leak into clearing
@@ -2175,19 +2176,30 @@ Object.assign(App, {
     });
   },
 
+  // A blocked credit customer on the ticket: no sale (any tender) unless the
+  // ticket comes from a quote — then the server decides (POST /transactions
+  // refuses it unless accounting released that quote, lib/creditBlock.js).
+  _posBlockedCustomerSale() {
+    const c = this.cartCustomer;
+    if (!c || String(c.customer_type || '').toLowerCase() !== 'credit' || !c.account_blocked || this._activeQuoteId) return false;
+    this.alert(`${this._creditBlockedText(c)} You can still create a quote or hold the ticket.`, 'error');
+    return true;
+  },
+
   async processPayment(method) {
     // One sale at a time — a second click while the first is still saving
     // would charge the ticket twice.
     if (this._paymentInFlight) return;
     if (!this.cart.length) { this.alert('Cart is empty', 'warning'); return; }
     if (this._posQItemBlocksSale()) return;
+    if (this._posBlockedCustomerSale()) return;
     if (!await this._salespersonReminder()) return;
     if (!await this._ticketDiscountApproved()) return;
 
     if (method === 'credit') {
       if (!this.cartCustomer) { this.alert('Please select a customer to use charge account', 'error'); return; }
       if (this.cartCustomer.customer_type !== 'credit') { this.alert('Selected customer does not have a credit account. Edit the customer and set type to Credit.', 'error'); return; }
-      if (this.cartCustomer.account_blocked) { this.alert(this._creditBlockedText(this.cartCustomer), 'error'); return; }
+      if (this.cartCustomer.account_blocked && !this._activeQuoteId) { this.alert(this._creditBlockedText(this.cartCustomer), 'error'); return; }
     }
 
     const { subtotal, tax, discount, total } = this.getCartTotals();
@@ -2199,9 +2211,11 @@ Object.assign(App, {
     if (method === 'credit') {
       const fresh = await this.api('GET', `/customers/${this.cartCustomer.id}`).catch(() => this.cartCustomer);
       this.cartCustomer = { ...this.cartCustomer, ...fresh };
-      if (fresh.account_blocked) { this.alert(this._creditBlockedText(fresh), 'error'); return; }
+      // From a quote the server checks the block: it allows a quote accounting
+      // released (block and limit both), and refuses any other.
+      if (fresh.account_blocked && !this._activeQuoteId) { this.alert(this._creditBlockedText(fresh), 'error'); return; }
       const limit = Number(fresh.credit_limit) || 0, balance = Number(fresh.account_balance) || 0;
-      if (limit > 0 && fresh.block_override !== 'unblock' && balance + total - limit > 0.005) {
+      if (limit > 0 && fresh.block_override !== 'unblock' && !(fresh.account_blocked && this._activeQuoteId) && balance + total - limit > 0.005) {
         this.alert(`This sale (${this.fmt(total)}) would take the account over its credit limit of ${this.fmt(limit)}. Available credit: ${this.fmt(Math.max(0, limit - balance))}.`, 'error');
         return;
       }
@@ -2738,6 +2752,7 @@ Object.assign(App, {
       if (!quote.items || !quote.items.length) { this.alert('Quote has no items', 'error'); return; }
       if (quote.quote_type === 'rental') { this.alert(`${quote.quote_number} is a rental quote — convert it to a rental agreement from Quotations, not at the POS`, 'error'); return; }
       if (quote.quote_type === 'special_project' && ['draft','pending_approval'].includes(quote.status)) { this.alert(`${quote.quote_number} hasn't been approved yet, so it can't be sold`, 'error'); return; }
+      if (quote.customer_credit_blocked && !quote.credit_released_at) { this.alert(`${quote.quote_number} can't be sold yet: ${quote.customer_name || 'the customer'}'s credit account is blocked. It can go ahead once the account is cleared, or when accounting releases this quote (Quotations → the quote → Release for Invoicing).`, 'error'); return; }
       const quoteValid = this._quoteStillValid(quote.valid_until);
 
       if (this.cart.length && !confirm(`Loading ${quote.quote_number} will replace your current cart. Continue?`)) return;
@@ -3232,9 +3247,11 @@ Object.assign(App, {
     list.addEventListener('click', e => {
       const c = results[e.target.closest('[data-idx]')?.dataset.idx];
       if (!c) return;
-      if (c.customer_type === 'credit' && c.account_blocked) {
-        this.alert('Account blocked: overdue balance must be settled before making purchases.', 'error');
-        return;
+      // A blocked credit account can be put on the ticket to quote or hold —
+      // _posBlockedCustomerSale() stops the sale itself (a quote is sold only
+      // once accounting releases it or the account is cleared).
+      if (String(c.customer_type || '').toLowerCase() === 'credit' && c.account_blocked) {
+        this.alert('Account blocked — you can create a quote or hold the ticket, but not sell until the account is cleared or accounting releases the quote.', 'warning');
       }
       overlay.remove();
       this.setCartCustomer(c.id, `${c.first_name} ${c.last_name}`);

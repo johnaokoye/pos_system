@@ -3515,6 +3515,13 @@ async function _init() {
     // (a blank write-in line when empty). Set on the quote or at the POS;
     // a sale from a quote takes the quote's unless the cashier typed one.
     'ALTER TABLE quotations ADD COLUMN po_number TEXT',
+    // A quote for a blocked credit customer can be made, but not turned into
+    // an invoice (Convert, or sold at the POS) until the account is cleared or
+    // someone with customers_credit_block releases that one quote
+    // (lib/creditBlock.js quoteCreditHold). Cleared when the quote is edited.
+    'ALTER TABLE quotations ADD COLUMN credit_released_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE quotations ADD COLUMN credit_released_at DATETIME',
+    'ALTER TABLE quotations ADD COLUMN credit_release_reason TEXT',
     'ALTER TABLE transactions ADD COLUMN po_number TEXT',
     // Hold Recall keeps the held ticket until it's sold (POST /transactions
     // with hold_id removes it), re-held or cancelled, so a sale that fails or

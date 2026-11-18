@@ -502,7 +502,13 @@ router.patch('/agreements/:id/checkout', requireAnyPermission('rentals_checkout'
       const cust = rentalCustomer;
       if (!cust) return res.status(400).json({ error: 'Customer not found' });
       if (!isCreditCustomerType(cust.customer_type)) return res.status(400).json({ error: 'Customer does not have a credit account' });
-      if (cust.account_blocked) return res.status(400).json({ error: blockedMessage(cust) });
+      // A rental quote accounting released for invoicing (POST
+      // /quotations/:id/credit-release) may go on account despite the block.
+      const { rows: [releasedQuote] } = cust.account_blocked
+        ? await db.execute({ sql: 'SELECT id FROM quotations WHERE converted_to_agreement_id = ? AND customer_id = ? AND credit_released_at IS NOT NULL', args: [agreement.id, cust.id] })
+        : { rows: [] };
+      if (cust.account_blocked && !releasedQuote) return res.status(400).json({ error: blockedMessage(cust) });
+      if (releasedQuote) cust.block_override = 'unblock'; // skips the credit limit too, as for a POS sale from a released quote
       // A credit rental charges straight to the customer's account with no
       // cash/card in hand — the PO is what ties that charge back to the
       // customer's own paperwork, so it's required before the charge posts.

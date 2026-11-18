@@ -17,6 +17,7 @@ const path = require('path');
 const fs = require('fs');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 const { resolveApprovalSignature } = require('../lib/signatures');
+const { quoteCreditHold, isCreditType } = require('../lib/creditBlock');
 
 // Special Projects (quote_type='special_project') are gated by their own
 // `special_projects`/`special_projects_approve` permissions, deliberately
@@ -26,6 +27,11 @@ const { resolveApprovalSignature } = require('../lib/signatures');
 // specific one they need (creating/editing needs special_projects,
 // approving needs special_projects_approve, viewing needs either).
 router.use(requireAnyPermission('quotations', 'special_projects'));
+
+// Whether the quote's customer is a blocked credit account, and who (if
+// anyone) released this quote for invoicing anyway (POST /:id/credit-release).
+const CREDIT_COLS = `CASE WHEN LOWER(TRIM(COALESCE(c.customer_type, ''))) = 'credit' AND COALESCE(c.account_blocked, 0) = 1 THEN 1 ELSE 0 END AS customer_credit_blocked,
+  (SELECT cre.first_name || ' ' || cre.last_name FROM employees cre WHERE cre.id = q.credit_released_by) AS credit_released_by_name`;
 
 // A rental quote's deposit depends on whether the customer is a credit
 // customer (see lib/rentals.js's depositWaiver).
@@ -49,7 +55,7 @@ const canSeeSpecialProjects = req => can(req.employee && req.employee.permission
 router.get('/', async (req, res) => {
   try {
     const { status, customer_id, quote_number, quote_type, start, end, special_order, limit = 100 } = req.query;
-    let sql = `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.customer_type, e.first_name || ' ' || e.last_name as employee_name, oe.first_name || ' ' || oe.last_name as original_employee_name, ae.first_name || ' ' || ae.last_name as approved_by_name, re.first_name || ' ' || re.last_name as rejected_by_name, b.name as branch_name, t.transaction_number as converted_tx_number, ra.agreement_number as converted_agreement_number, ra.status as converted_agreement_status, ${IS_SPECIAL_ORDER_SQL} as is_special_order FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN employees oe ON q.original_employee_id = oe.id LEFT JOIN employees ae ON q.approved_by = ae.id LEFT JOIN employees re ON q.rejected_by = re.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id LEFT JOIN rental_agreements ra ON q.converted_to_agreement_id = ra.id WHERE 1=1`;
+    let sql = `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.customer_type, e.first_name || ' ' || e.last_name as employee_name, oe.first_name || ' ' || oe.last_name as original_employee_name, ae.first_name || ' ' || ae.last_name as approved_by_name, re.first_name || ' ' || re.last_name as rejected_by_name, b.name as branch_name, t.transaction_number as converted_tx_number, ra.agreement_number as converted_agreement_number, ra.status as converted_agreement_status, ${IS_SPECIAL_ORDER_SQL} as is_special_order, ${CREDIT_COLS} FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN employees oe ON q.original_employee_id = oe.id LEFT JOIN employees ae ON q.approved_by = ae.id LEFT JOIN employees re ON q.rejected_by = re.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id LEFT JOIN rental_agreements ra ON q.converted_to_agreement_id = ra.id WHERE 1=1`;
     const params = [];
     if (status) { sql += ' AND q.status = ?'; params.push(status); }
     if (quote_type) { sql += ' AND q.quote_type = ?'; params.push(quote_type); }
@@ -238,7 +244,7 @@ router.post('/rental-line-estimate', requirePermission('special_projects'), asyn
 
 router.get('/:id', async (req, res) => {
   try {
-    const { rows: [quote] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.customer_type, c.email as customer_email, c.phone as customer_phone, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip, e.first_name || ' ' || e.last_name as employee_name, oe.first_name || ' ' || oe.last_name as original_employee_name, ae.first_name || ' ' || ae.last_name as approved_by_name, re.first_name || ' ' || re.last_name as rejected_by_name, b.name as branch_name, t.transaction_number as converted_tx_number, ra.agreement_number as converted_agreement_number, ra.status as converted_agreement_status, ${IS_SPECIAL_ORDER_SQL} as is_special_order FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN employees oe ON q.original_employee_id = oe.id LEFT JOIN employees ae ON q.approved_by = ae.id LEFT JOIN employees re ON q.rejected_by = re.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id LEFT JOIN rental_agreements ra ON q.converted_to_agreement_id = ra.id WHERE q.id = ?`, args: [req.params.id] });
+    const { rows: [quote] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.customer_type, c.email as customer_email, c.phone as customer_phone, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip, e.first_name || ' ' || e.last_name as employee_name, oe.first_name || ' ' || oe.last_name as original_employee_name, ae.first_name || ' ' || ae.last_name as approved_by_name, re.first_name || ' ' || re.last_name as rejected_by_name, b.name as branch_name, t.transaction_number as converted_tx_number, ra.agreement_number as converted_agreement_number, ra.status as converted_agreement_status, ${IS_SPECIAL_ORDER_SQL} as is_special_order, ${CREDIT_COLS} FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id LEFT JOIN employees e ON q.employee_id = e.id LEFT JOIN employees oe ON q.original_employee_id = oe.id LEFT JOIN employees ae ON q.approved_by = ae.id LEFT JOIN employees re ON q.rejected_by = re.id LEFT JOIN branches b ON q.branch_id = b.id LEFT JOIN transactions t ON q.converted_to_tx = t.id LEFT JOIN rental_agreements ra ON q.converted_to_agreement_id = ra.id WHERE q.id = ?`, args: [req.params.id] });
     if (!quote) return res.status(404).json({ error: 'Not found' });
     if (quote.quote_type === 'special_project' && !canSeeSpecialProjects(req)) return res.status(403).json({ error: 'Missing permission: special_projects' });
     const { rows: items } = await db.execute({ sql: QUOTE_ITEMS_SELECT, args: [req.params.id] });
@@ -868,6 +874,11 @@ router.put('/:id', async (req, res) => {
     const tx = await db.transaction('write');
     let committed = false;
     try {
+      // Accounting released this quote for invoicing at its old total for its
+      // old customer — a new total or customer needs releasing again.
+      if (quote.credit_released_at && (Math.abs((Number(quote.total) || 0) - (Number(total) || 0)) > 0.005 || String(quote.customer_id || '') !== String(customer_id || ''))) {
+        await tx.execute({ sql: 'UPDATE quotations SET credit_released_by = NULL, credit_released_at = NULL, credit_release_reason = NULL WHERE id = ?', args: [quote.id] });
+      }
       await tx.execute({ sql: `UPDATE quotations SET customer_id=?, employee_id=?, branch_id=?, subtotal=?, tax_amount=?, discount_amount=?, total=?, notes=?, valid_until=?, due_date=?,
         delivery_required=?, delivery_cost=?, delivery_address=?, pickup_required=?, pickup_cost=?, operator_required=?, operator_fee=?, pickup_address=?, rate_plan=?, po_number=? WHERE id=?`,
         args: [customer_id||null, employee_id||quote.employee_id||null, branch_id||null, subtotal, tax_amount, disc, total, notes||null, valid_until||null, isRental ? (due_date || quote.due_date) : null,
@@ -1044,6 +1055,38 @@ router.patch('/:id/status', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Release one quote of a blocked credit customer for invoicing (accounting's
+// call, customers_credit_block — the same people who work the customer's
+// Block box). The account stays blocked for everything else; this quote can
+// be converted and sold, on account too (lib/creditBlock.js quoteCreditHold).
+router.post('/:id/credit-release', requirePermission('customers_credit_block'), async (req, res) => {
+  try {
+    const reason = String(req.body?.reason || '').trim();
+    if (!reason) return res.status(400).json({ error: 'A reason is required' });
+    const { rows: [q] } = await db.execute({ sql: 'SELECT q.status, q.customer_id, q.credit_released_at, c.customer_type, c.account_blocked FROM quotations q LEFT JOIN customers c ON c.id = q.customer_id WHERE q.id = ?', args: [req.params.id] });
+    if (!q) return res.status(404).json({ error: 'Quotation not found' });
+    if (['converted', 'declined', 'cancelled'].includes(q.status)) return res.status(400).json({ error: `This quotation is ${q.status}` });
+    if (!q.customer_id || !isCreditType(q.customer_type) || !Number(q.account_blocked)) return res.status(400).json({ error: "The customer's credit account isn't blocked — nothing to release" });
+    await db.execute({ sql: 'UPDATE quotations SET credit_released_by = ?, credit_released_at = CURRENT_TIMESTAMP, credit_release_reason = ? WHERE id = ?', args: [req.employee?.id || null, reason, req.params.id] });
+    res.json(await quoteWithCredit(req.params.id));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/:id/credit-release', requirePermission('customers_credit_block'), async (req, res) => {
+  try {
+    const { rows: [q] } = await db.execute({ sql: 'SELECT status FROM quotations WHERE id = ?', args: [req.params.id] });
+    if (!q) return res.status(404).json({ error: 'Quotation not found' });
+    if (q.status === 'converted') return res.status(400).json({ error: 'This quotation has already been converted' });
+    await db.execute({ sql: 'UPDATE quotations SET credit_released_by = NULL, credit_released_at = NULL, credit_release_reason = NULL WHERE id = ?', args: [req.params.id] });
+    res.json(await quoteWithCredit(req.params.id));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+async function quoteWithCredit(id) {
+  const { rows: [r] } = await db.execute({ sql: `SELECT q.id, q.credit_released_at, q.credit_release_reason, ${CREDIT_COLS} FROM quotations q LEFT JOIN customers c ON c.id = q.customer_id WHERE q.id = ?`, args: [id] });
+  return r;
+}
+
 // Convert quotation to invoice — places it on hold for a cashier to pick up
 // and actually collect payment on at the POS, rather than completing the
 // sale here. Mirrors the shape of POST /transactions/hold (routes/transactions.js):
@@ -1060,6 +1103,8 @@ router.post('/:id/convert', async (req, res) => {
     if (quote.status === 'converted') return res.status(400).json({ error: 'Already converted to invoice' });
     if (quote.status === 'declined') return res.status(400).json({ error: 'Cannot convert declined quotation' });
     if (quote.status === 'cancelled') return res.status(400).json({ error: 'Cannot convert cancelled quotation' });
+    const creditHold = await quoteCreditHold(db, quote.id);
+    if (creditHold?.error) return res.status(409).json({ error: creditHold.error, code: 'credit_blocked' });
     if (quote.quote_type === 'special_project') {
       if (!req.apiKey && !can(req.employee && req.employee.permissions, 'special_projects')) return res.status(403).json({ error: 'Missing permission: special_projects' });
       if (!['approved', 'sent', 'accepted'].includes(quote.status)) {

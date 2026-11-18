@@ -330,7 +330,7 @@ Object.assign(App, {
               <input type="checkbox" id="sg-credit-block" ${perms.customers_credit_block ? 'checked' : ''} style="margin-top:2px;flex-shrink:0">
               <span>
                 <strong>Block / Unblock Credit Accounts</strong><br>
-                <span style="font-size:12px;color:var(--text-muted)">Change the Block box on a credit customer: unblock an overdue account, or block one that's up to date. Separate from Customers access, so it isn't granted with the Customers module.</span>
+                <span style="font-size:12px;color:var(--text-muted)">Change the Block box on a credit customer: unblock an overdue account, or block one that's up to date — and release a blocked customer's quote for invoicing. Separate from Customers access, so it isn't granted with the Customers module.</span>
               </span>
             </label>
           </div>
