@@ -296,6 +296,7 @@ Object.assign(App, {
       this.api('GET', '/suppliers'),
       this.api('GET', '/settings').catch(() => ({})),
       this.api('GET', '/purchase-requests/departments').catch(() => []),
+      this.api('GET', '/units').then(us => { this._prUoms = us.filter(u => u.active); }).catch(() => { this._prUoms = []; }),
     ]);
     const branches = this.currentUser.branches || [];
     const defaultCurrency = (settings.currency || 'USD').toUpperCase();
@@ -529,7 +530,7 @@ Object.assign(App, {
           <input type="hidden" id="pri-prod-${idx}" value="${prefill&&prefill.product_id||''}">
           <div id="pri-prod-dd-${idx}" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
         </span>
-        <input id="pri-name-${idx}" placeholder="${isService ? 'Describe the service' : 'Or type item name'}" value="${prefill&&!prefill.product_id?this.escapeAttr(prefill.product_name):''}" data-qi-id="${prefill&&prefill.quotation_item_id||''}" oninput="App.calcPRTotal()">
+        <input id="pri-name-${idx}" placeholder="${isService ? 'Describe the service' : 'Or type item name'}" value="${prefill&&!prefill.product_id?this.escapeAttr(prefill.product_name):''}" data-qi-id="${prefill&&prefill.quotation_item_id||''}" oninput="App._onPRNameInput(${idx})">
         <select id="pri-unit-${idx}" style="font-size:12px" onchange="App._onPRUnitChange(${idx})" title="Unit of measure to order in" disabled><option value="">—</option></select>
         <input id="pri-qty-${idx}" type="number" min="${supplierPriced?'0':'1'}" step="${supplierPriced?'any':'1'}" value="${prefill?prefill.quantity:1}" placeholder="Qty" ${supplierPriced?'title="Maximum quantity authorized"':''} oninput="App.calcPRTotal()">
         <input id="pri-cost-${idx}" type="number" step="0.01" value="${prefill&&!supplierPriced?prefill.unit_cost:''}" placeholder="${supplierPriced?'Invoice':'Est. Cost'}" ${supplierPriced?'title="Cost comes from the supplier\'s invoice on the PO"':''} ${supplierPriced?'disabled':''} oninput="App.calcPRTotal()">
@@ -555,6 +556,80 @@ Object.assign(App, {
       </div>`;
     container.appendChild(wrap);
     if (prefillProduct && !isService) this._setPRLineUnits(idx, prefillProduct, this._unitChoiceFor(prefillProduct, prefill.uom_id ?? prefillProduct.base_unit_id ?? null, 'buy'));
+    else if (!isService) this._setPRLooseUnits(idx, prefill?.uom_id ?? null);
+  },
+
+  // A typed-in item (not in inventory) can still be asked for by the box,
+  // gallon or ream: any unit on the managed list, plus "+ New unit…".
+  // Nothing converts it, so it's just what the supplier is asked for.
+  _setPRLooseUnits(idx, uomId) {
+    const unitSel = document.getElementById(`pri-unit-${idx}`);
+    if (!unitSel) return;
+    const uoms = (this._prUoms || []).filter(u => String(u.name).toLowerCase() !== 'each');
+    const sel = uomId == null ? '' : String(uomId);
+    const canNew = ['settings', 'inventory_units', 'pr_create', 'purchasing_create'].some(k => this.can(k));
+    unitSel.innerHTML = `<option value="">Each</option>`
+      + uoms.map(u => `<option value="${u.id}" ${String(u.id) === sel ? 'selected' : ''}>${this.escapeAttr(u.name)}</option>`).join('')
+      + (canNew ? '<option value="__new">+ New unit…</option>' : '');
+    unitSel.disabled = unitSel.options.length < 2;
+    unitSel.dataset.prev = unitSel.value;
+    unitSel.dataset.loose = '1';
+    const u = uoms.find(x => String(x.id) === unitSel.value);
+    const qty = document.getElementById(`pri-qty-${idx}`);
+    if (qty) {
+      const part = !!u?.allow_decimal || this._prRequestType === 'supplier_priced';
+      qty.dataset.measured = u?.allow_decimal ? '1' : '';
+      qty.step = part ? 'any' : '1'; qty.min = part ? '0' : '1';
+    }
+  },
+
+  _onPRNameInput(idx) {
+    const unitSel = document.getElementById(`pri-unit-${idx}`);
+    const hasProduct = !!document.getElementById(`pri-prod-${idx}`)?.value;
+    const isService = document.getElementById(`pri-itype-${idx}`)?.value === 'service';
+    if (unitSel && !hasProduct && !isService && unitSel.dataset.loose !== '1') this._setPRLooseUnits(idx, null);
+    this.calcPRTotal();
+  },
+
+  // "+ New unit…" on a typed-in line: adds the unit to the managed list
+  // (POST /units) and picks it.
+  _newPRLooseUnit(idx) {
+    return new Promise(resolve => {
+      this._looseUnitResolve = id => { this._looseUnitResolve = null; this.closeSecondaryModal(); resolve(id); };
+      this.showSecondaryModal(`
+        <div class="modal" style="max-width:420px">
+          <div class="modal-header"><span class="modal-title">New unit of measure</span><button class="modal-close" onclick="App._looseUnitResolve && App._looseUnitResolve(null)">✕</button></div>
+          <div class="modal-body">
+            <div style="display:grid;grid-template-columns:2fr 1fr;gap:8px">
+              <div class="form-group" style="margin:0"><label>Name</label><input id="plu-name" placeholder="e.g. Box"></div>
+              <div class="form-group" style="margin:0"><label>Abbreviation</label><input id="plu-abbr" placeholder="e.g. bx"></div>
+            </div>
+            <label style="display:flex;align-items:center;gap:6px;margin-top:10px;font-size:13px;cursor:pointer"><input type="checkbox" id="plu-decimal" style="width:16px;height:16px"> Measured unit — allows part quantities (e.g. 2.5)</label>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="App._looseUnitResolve(null)">Cancel</button>
+            <button class="btn btn-primary" id="plu-save" onclick="App._saveNewPRLooseUnit()">Add Unit</button>
+          </div>
+        </div>`);
+      const overlay = document.getElementById('secondary-modal-overlay');
+      overlay?.addEventListener('click', e => { if (e.target === overlay) this._looseUnitResolve?.(null); });
+      setTimeout(() => document.getElementById('plu-name')?.focus(), 0);
+    });
+  },
+
+  async _saveNewPRLooseUnit() {
+    const name = document.getElementById('plu-name').value.trim();
+    if (!name) { this.alert('Name the new unit', 'error'); return; }
+    const existing = (this._prUoms || []).find(u => String(u.name).toLowerCase() === name.toLowerCase());
+    if (existing) { this._looseUnitResolve?.(existing.id); return; }
+    const btn = document.getElementById('plu-save');
+    if (btn) btn.disabled = true;
+    try {
+      const u = await this.api('POST', '/units', { name, abbreviation: document.getElementById('plu-abbr').value.trim(), allow_decimal: document.getElementById('plu-decimal').checked });
+      this._prUoms = [...(this._prUoms || []), { ...u, active: 1 }];
+      this._looseUnitResolve?.(u.id);
+    } catch (e) { this.alert(e.message, 'error'); }
+    finally { if (btn) btn.disabled = false; }
   },
 
   // A PR line's unit dropdown (lib/units.js), like a PO line's: the item's
@@ -562,6 +637,7 @@ Object.assign(App, {
   _setPRLineUnits(idx, p, choice) {
     const unitSel = document.getElementById(`pri-unit-${idx}`);
     if (!unitSel) return;
+    delete unitSel.dataset.loose;
     unitSel.innerHTML = p ? this._orderUnitOptionsHtml(p, choice) : '<option value="">—</option>';
     unitSel.disabled = !p || unitSel.options.length < 2;
     unitSel.dataset.prev = unitSel.value;
@@ -581,6 +657,16 @@ Object.assign(App, {
     const hidden = document.getElementById(`pri-prod-${idx}`);
     const p = (this._prAllProducts || []).find(x => String(x.id) === hidden?.value);
     const unitSel = document.getElementById(`pri-unit-${idx}`);
+    if (unitSel && !p) {
+      let id = unitSel.value;
+      if (id === '__new') {
+        id = await this._newPRLooseUnit(idx);
+        if (!id) { unitSel.value = unitSel.dataset.prev || ''; return; }
+      }
+      this._setPRLooseUnits(idx, id || null);
+      this.calcPRTotal();
+      return;
+    }
     if (!p || !unitSel) return;
     let choice;
     if (unitSel.value === '__add') {
@@ -608,6 +694,8 @@ Object.assign(App, {
       hidden.value = ''; delete hidden.dataset.name; delete hidden.dataset.sku;
       search.value = '';
       this._setPRLineUnits(idx, null, null);
+    } else if (!hidden.value && document.getElementById(`pri-unit-${idx}`)?.dataset.loose !== '1') {
+      this._setPRLooseUnits(idx, null);
     }
     search.disabled = isService;
     search.placeholder = isService ? 'Service — not an inventory item' : 'Search product (optional)…';
@@ -707,8 +795,8 @@ Object.assign(App, {
       const details = document.getElementById(`pri-notes-${idx}`)?.value.trim() || null;
       if (!product_id && !product_name) { if (details) unnamedService = true; return; }
       if (request_type === 'supplier_priced' && !product_id) missingProduct = true;
-      const unitVal = product_id ? document.getElementById(`pri-unit-${idx}`)?.value : '';
-      const uom_id = unitVal && unitVal !== '__add' ? Number(unitVal) : null;
+      const unitVal = document.getElementById(`pri-itype-${idx}`)?.value === 'service' ? '' : document.getElementById(`pri-unit-${idx}`)?.value;
+      const uom_id = unitVal && !['__add', '__new'].includes(unitVal) ? Number(unitVal) : null;
       const quantity = request_type === 'supplier_priced' || qEl.step === 'any' ? (parseFloat(qEl.value) || 0) : (parseInt(qEl.value) || 1);
       const unit_cost = parseFloat(document.getElementById(`pri-cost-${idx}`)?.value) || 0;
       const item_type = document.getElementById(`pri-itype-${idx}`)?.value || (request_type === 'internal_use' ? 'internal' : 'sale');
