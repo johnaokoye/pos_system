@@ -91,7 +91,7 @@ Object.assign(App, {
               <label style="font-weight:400"><input type="checkbox" id="ca-shop" ${v.allow_shop_use ? 'checked' : ''}> May be taken for shop use</label>
             </div>
           </div>
-          <div style="font-weight:600;font-size:13px;margin:6px 0">Items and agreed costs (per stock unit)</div>
+          <div style="font-weight:600;font-size:13px;margin:6px 0">Items, unit and agreed cost (per that unit)</div>
           <div id="ca-items"></div>
           <button class="btn btn-sm btn-outline" onclick="App._consAddItemRow()">+ Add Item</button>
           <div class="form-group" style="margin-top:10px"><label>Notes</label><input id="ca-notes" value="${esc(v.notes)}"></div>
@@ -115,13 +115,28 @@ Object.assign(App, {
     // (_consNewProduct) for someone who may add inventory.
     const addAttr = this.can('inventory_add') ? ' data-add="App._consNewProduct"' : '';
     row.innerHTML = `<select class="ca-prod" data-searchable${addAttr} onchange="App._consProductPicked(this)" style="flex:1;min-width:0"><option value="">Choose item…</option>${(this._consProducts || []).map(p => `<option value="${p.id}" ${Number(it.product_id) === p.id ? 'selected' : ''}>${this.escapeAttr(p.name)}${p.sku ? ` (${this.escapeAttr(p.sku)})` : ''}</option>`).join('')}</select>
-      <input class="ca-cost" type="number" step="0.01" min="0" placeholder="Agreed cost" value="${it.current_cost ?? it.cost ?? ''}" style="width:130px">
+      <select class="ca-unit" title="Unit of measure — the agreed cost is per this unit" style="width:140px">${this._consUnitOptions(it.product_id, it.uom_id)}</select>
+      <input class="ca-cost" type="number" step="0.01" min="0" placeholder="Agreed cost" value="${it.current_unit_cost ?? it.current_cost ?? it.cost ?? ''}" style="width:130px">
       <button class="btn btn-sm btn-danger" onclick="this.parentElement.remove()">✕</button>`;
     box.appendChild(row);
   },
 
+  // Unit options for a consignment line: the item's stock unit and its
+  // alternate (case / pack) units, value = uom_id ('' = stock unit).
+  _consUnitOptions(productId, selected) {
+    const p = (this._consProducts || []).find(x => x.id === Number(productId));
+    const choices = p ? this._unitChoices(p, 'buy') : [{ uom_id: null, name: 'Each', isBase: true, factor: 1 }];
+    return choices.map(c => {
+      const val = c.isBase ? '' : c.uom_id;
+      const sel = String(selected ?? '') === String(val ?? '') || (c.isBase && selected != null && String(selected) === String(c.uom_id)) ? 'selected' : '';
+      return `<option value="${val ?? ''}" ${sel}>${this.escapeAttr(c.isBase ? c.name : (c.label || c.name))}</option>`;
+    }).join('');
+  },
+
   // A new item's agreed cost comes from the cost typed when creating it.
   _consProductPicked(sel) {
+    const unit = sel.closest('.ca-item')?.querySelector('.ca-unit');
+    if (unit) unit.innerHTML = this._consUnitOptions(sel.value, '');
     const cost = sel.closest('.ca-item')?.querySelector('.ca-cost');
     const agreed = (this._consNewCosts || {})[sel.value];
     if (cost && !cost.value && agreed != null) cost.value = agreed;
@@ -191,7 +206,7 @@ Object.assign(App, {
       supplier_id: val('ca-supplier'), start_date: val('ca-start'), end_date: val('ca-end'), ownership_terms: val('ca-ownership'), billable_rule: val('ca-billable'),
       shortage_responsibility: val('ca-short'), damage_responsibility: val('ca-damage'), payment_terms: val('ca-terms'), notes: val('ca-notes'), settlement_frequency: val('ca-freq') || 'monthly',
       allow_work_orders: document.getElementById('ca-wo').checked, allow_shop_use: document.getElementById('ca-shop').checked, submit,
-      items: [...document.querySelectorAll('.ca-item')].map(r => ({ product_id: r.querySelector('.ca-prod').value, cost: r.querySelector('.ca-cost').value })).filter(i => i.product_id),
+      items: [...document.querySelectorAll('.ca-item')].map(r => ({ product_id: r.querySelector('.ca-prod').value, uom_id: r.querySelector('.ca-unit')?.value || null, cost: r.querySelector('.ca-cost').value })).filter(i => i.product_id),
     };
     try {
       const a = await this.api(id ? 'PUT' : 'POST', id ? `/consignment/agreements/${id}` : '/consignment/agreements', body);
@@ -239,13 +254,14 @@ Object.assign(App, {
               <button class="btn btn-sm btn-primary" onclick="App._consSetFinance(${a.id})">Save Treatment</button>` : ''}
           </div>
           <div style="font-weight:600;margin-bottom:4px">Items and agreed costs</div>
-          <table style="width:100%"><thead><tr style="color:var(--text-muted);font-size:12px"><th style="text-align:left">Item</th><th style="text-align:right">Cost now</th><th style="text-align:left;padding-left:12px">History (effective from)</th></tr></thead>
+          <table style="width:100%"><thead><tr style="color:var(--text-muted);font-size:12px"><th style="text-align:left">Item</th><th style="text-align:left">Unit</th><th style="text-align:right">Cost now</th><th style="text-align:left;padding-left:12px">History (effective from)</th></tr></thead>
             <tbody>${a.items.map(it => `<tr style="border-top:1px solid var(--border)"><td style="padding:5px 0">${esc(it.product_name)}${it.sku ? ` <span style="color:var(--text-muted)">${esc(it.sku)}</span>` : ''}</td>
-              <td style="text-align:right" class="fw-600">${it.current_cost != null ? this.fmt(it.current_cost) : '—'}</td>
-              <td style="padding-left:12px;font-size:12px">${it.costs.map(c => `${this.fmt(c.cost)} from ${this.fmtDate(c.effective_from)}`).join(' · ')}</td></tr>`).join('')}</tbody></table>
+              <td>${esc(it.unit_label || 'Each')}</td>
+              <td style="text-align:right"><span class="fw-600">${it.current_unit_cost != null ? this.fmt(it.current_unit_cost) : '—'}</span>${Number(it.units_per) > 1 && it.current_cost != null ? `<div style="font-size:11px;color:var(--text-muted)">${this.fmt(it.current_cost)} / ${esc(it.stock_unit)}</div>` : ''}</td>
+              <td style="padding-left:12px;font-size:12px">${it.costs.map(c => `${this.fmt(c.unit_cost ?? c.cost)} from ${this.fmtDate(c.effective_from)}`).join(' · ')}</td></tr>`).join('')}</tbody></table>
           ${a.status === 'approved' && this.can('consignment_agreements') ? `<div class="input-row" style="margin-top:10px;align-items:flex-end">
-            <div class="form-group"><label>New agreed cost for</label><select id="cac-prod">${a.items.map(it => `<option value="${it.product_id}">${esc(it.product_name)}</option>`).join('')}</select></div>
-            <div class="form-group"><label>Cost</label><input id="cac-cost" type="number" step="0.01" min="0" style="width:120px"></div>
+            <div class="form-group"><label>New agreed cost for</label><select id="cac-prod">${a.items.map(it => `<option value="${it.product_id}">${esc(it.product_name)} — per ${esc(it.unit_label || 'Each')}</option>`).join('')}</select></div>
+            <div class="form-group"><label>Cost (per the item's unit)</label><input id="cac-cost" type="number" step="0.01" min="0" style="width:120px"></div>
             <div class="form-group"><label>Effective from</label><input id="cac-date" type="date"></div>
             <div class="form-group"><button class="btn btn-sm btn-outline" onclick="App._consAddCost(${a.id})">Add Cost</button></div></div>` : ''}
         </div>
@@ -322,13 +338,30 @@ Object.assign(App, {
     const id = document.getElementById('co-agr').value;
     const box = document.getElementById('co-items');
     if (!id) { box.innerHTML = ''; return; }
-    const a = await this.api('GET', `/consignment/agreements/${id}`);
-    box.innerHTML = `<table style="width:100%"><thead><tr style="color:var(--text-muted);font-size:12px"><th style="text-align:left">Item</th><th style="text-align:right">Agreed cost</th><th style="text-align:right;width:120px">Quantity</th></tr></thead>
-      <tbody>${a.items.filter(i => i.active).map(i => `<tr style="border-top:1px solid var(--border);color:var(--text)"><td style="padding:5px 0">${this.escapeAttr(i.product_name)}</td><td style="text-align:right">${i.current_cost != null ? this.fmt(i.current_cost) : '—'}</td>
+    const [a, products] = await Promise.all([this.api('GET', `/consignment/agreements/${id}`), this._consProducts ? null : this.api('GET', '/products?active=1')]);
+    if (products) this._consProducts = products.filter(p => !p.is_rental && !p.is_service && !p.is_non_inventory);
+    this._consOrderAgreement = a;
+    box.innerHTML = `<table style="width:100%"><thead><tr style="color:var(--text-muted);font-size:12px"><th style="text-align:left">Item</th><th style="text-align:left">Unit</th><th style="text-align:right">Agreed cost</th><th style="text-align:right;width:120px">Quantity</th></tr></thead>
+      <tbody>${a.items.filter(i => i.active).map(i => `<tr style="border-top:1px solid var(--border);color:var(--text)"><td style="padding:5px 0">${this.escapeAttr(i.product_name)}</td>
+        <td><select class="co-unit" data-product="${i.product_id}" onchange="App._consOrderUnitChanged(this)" style="width:140px">${this._consUnitOptions(i.product_id, i.uom_id ?? '')}</select></td>
+        <td style="text-align:right" class="co-cost" data-product="${i.product_id}">${this._consOrderCostText(i, i.uom_id ?? '')}</td>
         <td style="text-align:right"><input class="co-qty" data-product="${i.product_id}" type="number" min="0" step="1" style="width:100px;text-align:right" placeholder="0"></td></tr>`).join('')}</tbody></table>`;
   },
+  // The agreed cost shown for the unit chosen on an order line.
+  _consOrderCostText(item, uomId) {
+    if (item.current_cost == null) return '—';
+    const p = (this._consProducts || []).find(x => x.id === item.product_id);
+    const choice = p ? this._unitChoices(p, 'buy').find(c => (c.isBase ? '' : String(c.uom_id)) === String(uomId ?? '')) : null;
+    const factor = choice ? Number(choice.factor) || 1 : Number(item.units_per) || 1;
+    return `${this.fmt(Math.round(item.current_cost * factor * 100) / 100)} / ${this.escapeAttr(choice ? (choice.isBase ? choice.name : (choice.label || choice.name)) : (item.unit_label || 'Each'))}`;
+  },
+  _consOrderUnitChanged(sel) {
+    const item = (this._consOrderAgreement?.items || []).find(i => String(i.product_id) === sel.dataset.product);
+    const cell = document.querySelector(`.co-cost[data-product="${sel.dataset.product}"]`);
+    if (item && cell) cell.innerHTML = this._consOrderCostText(item, sel.value);
+  },
   async _consSaveOrder() {
-    const items = [...document.querySelectorAll('.co-qty')].map(i => ({ product_id: i.dataset.product, quantity: parseFloat(i.value) || 0 })).filter(i => i.quantity > 0);
+    const items = [...document.querySelectorAll('.co-qty')].map(i => ({ product_id: i.dataset.product, uom_id: document.querySelector(`.co-unit[data-product="${i.dataset.product}"]`)?.value || null, quantity: parseFloat(i.value) || 0 })).filter(i => i.quantity > 0);
     try {
       const o = await this.api('POST', '/consignment/orders', { agreement_id: document.getElementById('co-agr').value, branch_id: document.getElementById('co-branch').value, expected_date: document.getElementById('co-date').value, notes: document.getElementById('co-notes').value, items });
       this.alert(`${o.order_number} created`, 'success');
@@ -347,9 +380,11 @@ Object.assign(App, {
         <div class="modal-header"><span class="modal-title">Consignment Order ${o.order_number}</span><div style="display:flex;gap:8px;align-items:center">${this._consBadge(o.status)}<button class="modal-close">✕</button></div></div>
         <div class="modal-body" style="font-size:13px">
           <div style="margin-bottom:10px"><strong>${esc(o.supplier_name)}</strong> · ${o.agreement_number} · to ${esc(o.branch_name)}${o.expected_date ? ` · expected ${this.fmtDate(o.expected_date)}` : ''}</div>
-          <table style="width:100%"><thead><tr style="color:var(--text-muted);font-size:12px"><th style="text-align:left">Item</th><th style="text-align:right">Ordered</th><th style="text-align:right">Received</th><th style="text-align:right">Awaiting approval</th><th style="text-align:right">Left</th>${canReceive ? '<th style="text-align:right;width:110px">Receive now</th>' : ''}</tr></thead>
-            <tbody>${o.items.map(i => `<tr style="border-top:1px solid var(--border)"><td style="padding:5px 0">${esc(i.product_name)}</td><td style="text-align:right">${i.quantity_ordered}</td><td style="text-align:right">${i.quantity_received}</td><td style="text-align:right">${i.quantity_pending || 0}</td><td style="text-align:right" class="fw-600">${i.quantity_left}</td>
-              ${canReceive ? `<td style="text-align:right"><input class="cg-qty" data-line="${i.id}" type="number" min="0" max="${i.quantity_left}" step="1" style="width:90px;text-align:right" placeholder="0" ${i.quantity_left > 0 ? '' : 'disabled'}></td>` : ''}</tr>`).join('')}</tbody></table>
+          <table style="width:100%"><thead><tr style="color:var(--text-muted);font-size:12px"><th style="text-align:left">Item</th><th style="text-align:left">Unit</th><th style="text-align:right">Ordered</th><th style="text-align:right">Received</th><th style="text-align:right">Awaiting approval</th><th style="text-align:right">Left</th>${canReceive ? '<th style="text-align:right;width:110px">Receive now</th>' : ''}</tr></thead>
+            <tbody>${o.items.map(i => `<tr style="border-top:1px solid var(--border)"><td style="padding:5px 0">${esc(i.product_name)}</td><td>${esc(i.unit_label || 'Each')}${Number(i.units_per) > 1 ? `<div style="font-size:11px;color:var(--text-muted)">${i.quantity_ordered} ${esc(i.stock_unit)} ordered</div>` : ''}</td>
+              <td style="text-align:right">${i.ordered_units}</td><td style="text-align:right">${i.received_units}</td><td style="text-align:right">${i.pending_units || 0}</td><td style="text-align:right" class="fw-600">${i.left_units}</td>
+              ${canReceive ? `<td style="text-align:right"><input class="cg-qty" data-line="${i.id}" type="number" min="0" max="${i.left_units}" step="${Number(i.units_per) > 1 ? 'any' : '1'}" style="width:90px;text-align:right" placeholder="0" ${i.quantity_left > 0 ? '' : 'disabled'}></td>` : ''}</tr>`).join('')}</tbody></table>
+          ${o.items.some(i => Number(i.units_per) > 1) ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px">Quantities are in each line's unit; stock goes on hand in the item's stock unit.</div>` : ''}
           ${canReceive ? `<div class="input-row" style="margin-top:10px"><div class="form-group"><label>Supplier delivery note # *</label><input id="cg-note"></div><div class="form-group"><label>Notes</label><input id="cg-notes"></div></div>
             <button class="btn btn-primary btn-sm" onclick="App._consReceive(${o.id})">Enter GRN</button>
             <div style="font-size:11px;color:var(--text-muted);margin-top:4px">The stock goes on hand once the GRN is approved.</div>` : ''}
@@ -359,7 +394,7 @@ Object.assign(App, {
       </div>`);
   },
   async _consReceive(orderId) {
-    const items = [...document.querySelectorAll('.cg-qty')].map(i => ({ order_item_id: i.dataset.line, quantity: parseFloat(i.value) || 0 })).filter(i => i.quantity > 0);
+    const items = [...document.querySelectorAll('.cg-qty')].map(i => ({ order_item_id: i.dataset.line, unit_quantity: parseFloat(i.value) || 0 })).filter(i => i.unit_quantity > 0);
     try {
       const g = await this.api('POST', `/consignment/orders/${orderId}/grns`, { delivery_note_number: document.getElementById('cg-note').value, notes: document.getElementById('cg-notes').value, items });
       this.alert(`${g.grn_number} entered — waiting for approval`, 'success');
@@ -394,7 +429,8 @@ Object.assign(App, {
           <div class="two-col" style="margin-bottom:10px"><div><strong>Supplier:</strong> ${esc(g.supplier_name)}<br><strong>Agreement:</strong> ${g.agreement_number}<br><strong>Order:</strong> ${g.order_number}</div>
             <div><strong>Delivery note:</strong> ${esc(g.delivery_note_number)}<br><strong>Branch:</strong> ${esc(g.branch_name)}<br><strong>Received by:</strong> ${esc(g.received_by_name || '—')} · ${this.fmtDateTime(g.received_at)}
               ${g.approved_at ? `<br><strong>Approved by:</strong> ${esc(g.approved_by_name)} · ${this.fmtDateTime(g.approved_at)}` : ''}${g.rejected_at ? `<br><strong>Rejected by:</strong> ${esc(g.rejected_by_name)}: ${esc(g.rejection_reason)}` : ''}</div></div>
-          <table style="width:100%"><tbody>${g.items.map(i => `<tr style="border-top:1px solid var(--border)"><td style="padding:5px 0">${esc(i.product_name)}</td><td style="text-align:right" class="fw-600">${i.quantity}</td></tr>`).join('')}</tbody></table>
+          <table style="width:100%"><thead><tr style="color:var(--text-muted);font-size:12px"><th style="text-align:left">Item</th><th style="text-align:left">Unit</th><th style="text-align:right">Quantity</th><th style="text-align:right">Stock units</th></tr></thead>
+            <tbody>${g.items.map(i => `<tr style="border-top:1px solid var(--border)"><td style="padding:5px 0">${esc(i.product_name)}</td><td>${esc(i.unit_label || 'Each')}</td><td style="text-align:right" class="fw-600">${i.unit_quantity ?? i.quantity}</td><td style="text-align:right">${i.quantity} ${esc(i.stock_unit || '')}</td></tr>`).join('')}</tbody></table>
           ${g.notes ? `<div style="margin-top:8px">${esc(g.notes)}</div>` : ''}
           ${canApprove ? '<div style="font-size:12px;color:var(--text-muted);margin-top:8px">Approving puts this stock on hand at the branch, owned by the supplier, and saleable at the POS.</div>' : ''}
         </div>

@@ -3589,6 +3589,16 @@ async function _init() {
     // Goods received without a PO, linked to the PO afterwards
     // (POST /direct-receipts/:id/link-po): the PO lines take the quantities as
     // received — no stock or cost moves — and the receipt's A/P bill goes on the PO.
+    // Consignment units: an agreement line's unit (the agreed cost is entered
+    // per it, stored per stock unit), and an order line's unit — quantities
+    // ordered/received stay in stock units; order_qty is in the line's unit.
+    'ALTER TABLE consignment_agreement_items ADD COLUMN uom_id INTEGER',
+    'ALTER TABLE consignment_agreement_items ADD COLUMN purchase_unit TEXT',
+    'ALTER TABLE consignment_agreement_items ADD COLUMN units_per REAL NOT NULL DEFAULT 1',
+    'ALTER TABLE consignment_order_items ADD COLUMN uom_id INTEGER',
+    'ALTER TABLE consignment_order_items ADD COLUMN purchase_unit TEXT',
+    'ALTER TABLE consignment_order_items ADD COLUMN units_per REAL NOT NULL DEFAULT 1',
+    'ALTER TABLE consignment_order_items ADD COLUMN order_qty REAL',
     'ALTER TABLE direct_receipts ADD COLUMN po_id INTEGER REFERENCES purchase_orders(id)',
     'ALTER TABLE direct_receipts ADD COLUMN po_linked_by INTEGER REFERENCES employees(id)',
     'ALTER TABLE direct_receipts ADD COLUMN po_linked_at DATETIME',

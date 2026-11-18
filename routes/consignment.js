@@ -6,6 +6,7 @@ const { nextNumber } = require('../lib/nextNumber');
 const { syncBinQty } = require('../lib/binSync');
 const { resolveApprovalSignature } = require('../lib/signatures');
 const { storeToday } = require('../lib/storeTime');
+const { resolvePurchaseUnit, parseQty, stockUnits } = require('../lib/units');
 const { goLive, addLot, startTracking, reclassifyToConsignment, lotsOnHand, round3, consignmentEnabled, costOn } = require('../lib/stockLots');
 const settlement = require('../lib/consignmentSettlement');
 
@@ -113,7 +114,8 @@ async function loadAgreement(id) {
   if (!a) return null;
   const today = storeToday();
   const { rows: items } = await db.execute({
-    sql: `SELECT i.id, i.product_id, i.active, p.name AS product_name, p.sku FROM consignment_agreement_items i JOIN products p ON p.id = i.product_id
+    sql: `SELECT i.id, i.product_id, i.active, i.uom_id, i.purchase_unit, i.units_per, p.name AS product_name, p.sku, ${BASE_UNIT_SQL} AS base_unit_name
+          FROM consignment_agreement_items i JOIN products p ON p.id = i.product_id
           WHERE i.agreement_id = ? ORDER BY p.name`,
     args: [a.id],
   });
@@ -123,9 +125,12 @@ async function loadAgreement(id) {
             LEFT JOIN employees e ON e.id = c.created_by WHERE c.agreement_item_id = ? ORDER BY c.effective_from DESC, c.id DESC`,
       args: [it.id],
     });
-    it.costs = costs;
+    it.costs = costs.map(c => ({ ...c, unit_cost: perUnit(c.cost, it.units_per) }));
     const now = costs.find(c => c.effective_from <= today);
-    it.current_cost = now ? Number(now.cost) : null;
+    it.current_cost = now ? Number(now.cost) : null; // per stock unit
+    it.unit_label = unitLabelOf(it.purchase_unit, it.units_per, it.base_unit_name);
+    it.stock_unit = it.base_unit_name || 'Each';
+    it.current_unit_cost = perUnit(it.current_cost, it.units_per); // per the line's unit
   }
   a.items = items;
   return a;
@@ -172,22 +177,37 @@ async function validateAgreement(b) {
     if (!it.product_id) throw err(400, 'Each line needs an item');
     if (seen.has(Number(it.product_id))) throw err(400, 'An item is on the agreement twice');
     seen.add(Number(it.product_id));
-    const { rows: [p] } = await db.execute({ sql: 'SELECT id, name, is_rental, is_service, is_non_inventory, (SELECT COUNT(*) FROM product_variations v WHERE v.product_id = products.id AND v.active = 1) AS variations FROM products WHERE id = ?', args: [it.product_id] });
+    const { rows: [p] } = await db.execute({ sql: 'SELECT id, name, base_unit_id, is_rental, is_service, is_non_inventory, (SELECT COUNT(*) FROM product_variations v WHERE v.product_id = products.id AND v.active = 1) AS variations FROM products WHERE id = ?', args: [it.product_id] });
     if (!p) throw err(400, 'Item not found');
     if (p.is_rental || p.is_service || p.is_non_inventory) throw err(400, `${p.name} isn't a stocked retail item`);
     if (Number(p.variations) > 0) throw err(400, `${p.name} has variations — consignment is tracked per item, so it can't go on an agreement`);
     if (!(Number(it.cost) >= 0) || it.cost === '' || it.cost == null) throw err(400, `Enter the agreed cost for ${p.name}`);
+    // The unit the supplier deals in; the agreed cost is per that unit.
+    try { it.unit = await resolvePurchaseUnit(db, p, it.uom_id ?? null); } catch (e) { throw err(400, e.message); }
   }
   return items;
 }
+
+// Agreed costs are kept per stock unit (what sales, returns and billing
+// count in); entered per the line's unit.
+const perStockUnit = (cost, unitsPer) => Math.round((Number(cost) / (Number(unitsPer) || 1)) * 1e6) / 1e6;
+const perUnit = (cost, unitsPer) => cost == null ? null : Math.round(Number(cost) * (Number(unitsPer) || 1) * 100) / 100;
+// "Case of 12", "Yard", or the stock unit's name.
+const unitLabelOf = (purchaseUnit, unitsPer, baseName) => {
+  const per = Number(unitsPer) || 1;
+  if (!purchaseUnit || per === 1) return purchaseUnit || baseName || 'Each';
+  return Number.isInteger(per) ? `${purchaseUnit} of ${per}` : purchaseUnit;
+};
+const BASE_UNIT_SQL = `(SELECT u.name FROM units_of_measure u WHERE u.id = p.base_unit_id)`;
 
 async function writeItems(tx, agreementId, items, startDate, employeeId) {
   await tx.execute({ sql: 'DELETE FROM consignment_agreement_costs WHERE agreement_item_id IN (SELECT id FROM consignment_agreement_items WHERE agreement_id = ?)', args: [agreementId] });
   await tx.execute({ sql: 'DELETE FROM consignment_agreement_items WHERE agreement_id = ?', args: [agreementId] });
   for (const it of items) {
-    const r = await tx.execute({ sql: 'INSERT INTO consignment_agreement_items (agreement_id, product_id) VALUES (?,?)', args: [agreementId, it.product_id] });
+    const u = it.unit || { uom_id: null, purchase_unit: null, units_per: 1 };
+    const r = await tx.execute({ sql: 'INSERT INTO consignment_agreement_items (agreement_id, product_id, uom_id, purchase_unit, units_per) VALUES (?,?,?,?,?)', args: [agreementId, it.product_id, u.uom_id, u.purchase_unit, Number(u.units_per) || 1] });
     await tx.execute({ sql: 'INSERT INTO consignment_agreement_costs (agreement_item_id, cost, effective_from, created_by) VALUES (?,?,?,?)',
-      args: [Number(r.lastInsertRowid), Number(it.cost), isDay(it.effective_from) ? it.effective_from : startDate, employeeId] });
+      args: [Number(r.lastInsertRowid), perStockUnit(it.cost, u.units_per), isDay(it.effective_from) ? it.effective_from : startDate, employeeId] });
   }
 }
 
@@ -303,9 +323,10 @@ router.post('/agreements/:id/costs', requirePermission('consignment_agreements')
     const cost = Number(req.body.cost);
     if (!(cost >= 0) || req.body.cost === '' || req.body.cost == null) return res.status(400).json({ error: 'Enter the agreed cost' });
     if (!isDay(effective_from)) return res.status(400).json({ error: 'Enter the date the cost takes effect' });
-    const { rows: [it] } = await db.execute({ sql: 'SELECT i.id FROM consignment_agreement_items i JOIN consignment_agreements a ON a.id = i.agreement_id WHERE i.agreement_id = ? AND i.product_id = ? AND a.status != \'ended\'', args: [req.params.id, product_id] });
+    const { rows: [it] } = await db.execute({ sql: 'SELECT i.id, i.units_per FROM consignment_agreement_items i JOIN consignment_agreements a ON a.id = i.agreement_id WHERE i.agreement_id = ? AND i.product_id = ? AND a.status != \'ended\'', args: [req.params.id, product_id] });
     if (!it) return res.status(400).json({ error: "That item isn't on this agreement" });
-    await db.execute({ sql: 'INSERT INTO consignment_agreement_costs (agreement_item_id, cost, effective_from, created_by) VALUES (?,?,?,?)', args: [it.id, cost, effective_from, req.employee?.id || null] });
+    // Entered per the agreement line's unit.
+    await db.execute({ sql: 'INSERT INTO consignment_agreement_costs (agreement_item_id, cost, effective_from, created_by) VALUES (?,?,?,?)', args: [it.id, perStockUnit(cost, it.units_per), effective_from, req.employee?.id || null] });
     res.json(await loadAgreement(req.params.id));
   } catch (e) { send(res, e); }
 });
@@ -327,12 +348,17 @@ async function loadOrder(executor, id) {
   const { rows: [o] } = await executor.execute({ sql: `${ORDER_SELECT} WHERE o.id = ?`, args: [id] });
   if (!o) return null;
   const { rows: items } = await executor.execute({
-    sql: `SELECT oi.*, p.name AS product_name, p.sku,
+    sql: `SELECT oi.*, p.name AS product_name, p.sku, ${BASE_UNIT_SQL} AS base_unit_name,
             (SELECT COALESCE(SUM(gi.quantity), 0) FROM consignment_grn_items gi JOIN consignment_grns g ON g.id = gi.grn_id WHERE gi.order_item_id = oi.id AND g.status = 'pending') AS quantity_pending
           FROM consignment_order_items oi JOIN products p ON p.id = oi.product_id WHERE oi.order_id = ? ORDER BY oi.id`,
     args: [o.id],
   });
-  o.items = items.map(i => ({ ...i, quantity_left: round3(i.quantity_ordered - i.quantity_received - i.quantity_pending) }));
+  // Quantities are in stock units; the *_units figures are in the line's unit.
+  o.items = items.map(i => {
+    const per = Number(i.units_per) || 1, left = round3(i.quantity_ordered - i.quantity_received - i.quantity_pending);
+    return { ...i, quantity_left: left, unit_label: unitLabelOf(i.purchase_unit, per, i.base_unit_name), stock_unit: i.base_unit_name || 'Each',
+      ordered_units: i.order_qty ?? round3(i.quantity_ordered / per), received_units: round3(i.quantity_received / per), pending_units: round3(i.quantity_pending / per), left_units: round3(left / per) };
+  });
   const { rows: grns } = await executor.execute({ sql: 'SELECT id, grn_number, delivery_note_number, status, received_at, approved_at FROM consignment_grns WHERE order_id = ? ORDER BY id', args: [o.id] });
   o.grns = grns;
   return o;
@@ -369,11 +395,18 @@ router.post('/orders', requirePermission('consignment_agreements'), async (req, 
     if (a.status !== 'approved') throw err(400, `${a.agreement_number} isn't approved — stock can only be ordered on an approved agreement`);
     const { rows: [b] } = await tx.execute({ sql: 'SELECT id FROM branches WHERE id = ? AND COALESCE(active, 1) = 1', args: [branch_id || 0] });
     if (!b) throw err(400, 'Choose the branch receiving the stock');
-    const items = (Array.isArray(req.body.items) ? req.body.items : []).map(i => ({ product_id: Number(i.product_id), quantity: round3(i.quantity) })).filter(i => i.quantity > 0);
+    // { product_id, quantity, uom_id? } — quantity in the line's unit (the
+    // agreement line's unit unless another is chosen).
+    const items = (Array.isArray(req.body.items) ? req.body.items : []).filter(i => Number(i.quantity) > 0);
     if (!items.length) throw err(400, 'Add at least one item and quantity');
     for (const i of items) {
-      const { rows: [on] } = await tx.execute({ sql: 'SELECT id FROM consignment_agreement_items WHERE agreement_id = ? AND product_id = ? AND active = 1', args: [a.id, i.product_id] });
+      const { rows: [on] } = await tx.execute({ sql: 'SELECT id, uom_id FROM consignment_agreement_items WHERE agreement_id = ? AND product_id = ? AND active = 1', args: [a.id, i.product_id] });
       if (!on) throw err(400, `An item isn't on ${a.agreement_number}`);
+      const { rows: [p] } = await tx.execute({ sql: 'SELECT id, name, base_unit_id FROM products WHERE id = ?', args: [i.product_id] });
+      try { i.unit = await resolvePurchaseUnit(tx, p, i.uom_id !== undefined ? i.uom_id : on.uom_id); } catch (e) { throw err(400, e.message); }
+      i.qty = parseQty(i.quantity, i.unit.allow_decimal);
+      if (!(i.qty > 0)) throw err(400, `Enter a whole number of ${i.unit.purchase_unit || 'units'} for ${p.name}`);
+      i.stock_qty = stockUnits(i.qty, i.unit.units_per);
     }
     const number = await nextNumber(tx, 'consignment_orders', 'order_number', 'CON-', 6);
     const r = await tx.execute({
@@ -381,7 +414,10 @@ router.post('/orders', requirePermission('consignment_agreements'), async (req, 
       args: [number, a.id, a.supplier_id, b.id, isDay(req.body.expected_date) ? req.body.expected_date : null, String(req.body.notes || '').trim() || null, req.employee?.id || null],
     });
     const id = Number(r.lastInsertRowid);
-    for (const i of items) await tx.execute({ sql: 'INSERT INTO consignment_order_items (order_id, product_id, quantity_ordered) VALUES (?,?,?)', args: [id, i.product_id, i.quantity] });
+    for (const i of items) {
+      await tx.execute({ sql: 'INSERT INTO consignment_order_items (order_id, product_id, quantity_ordered, uom_id, purchase_unit, units_per, order_qty) VALUES (?,?,?,?,?,?,?)',
+        args: [id, i.product_id, i.stock_qty, i.unit.uom_id, i.unit.purchase_unit, Number(i.unit.units_per) || 1, i.qty] });
+    }
     await tx.commit();
     committed = true;
     res.status(201).json(await loadOrder(db, id));
@@ -413,8 +449,9 @@ const GRN_SELECT = `SELECT g.*, o.order_number, a.agreement_number, s.name AS su
 async function loadGrn(executor, id) {
   const { rows: [g] } = await executor.execute({ sql: `${GRN_SELECT} WHERE g.id = ?`, args: [id] });
   if (!g) return null;
-  const { rows: items } = await executor.execute({ sql: 'SELECT gi.*, p.name AS product_name, p.sku FROM consignment_grn_items gi JOIN products p ON p.id = gi.product_id WHERE gi.grn_id = ? ORDER BY gi.id', args: [g.id] });
-  g.items = items;
+  const { rows: items } = await executor.execute({ sql: `SELECT gi.*, p.name AS product_name, p.sku, oi.purchase_unit, oi.units_per, ${BASE_UNIT_SQL} AS base_unit_name
+      FROM consignment_grn_items gi JOIN products p ON p.id = gi.product_id LEFT JOIN consignment_order_items oi ON oi.id = gi.order_item_id WHERE gi.grn_id = ? ORDER BY gi.id`, args: [g.id] });
+  g.items = items.map(i => ({ ...i, unit_label: unitLabelOf(i.purchase_unit, i.units_per, i.base_unit_name), stock_unit: i.base_unit_name || 'Each', unit_quantity: round3(i.quantity / (Number(i.units_per) || 1)) }));
   return g;
 }
 
@@ -450,7 +487,12 @@ router.post('/orders/:id/grns', requirePermission('consignment_receive'), async 
     if (!['open', 'partial'].includes(o.status)) throw err(400, `${o.order_number} is ${o.status} — nothing more can be received on it`);
     const note = String(req.body.delivery_note_number || '').trim();
     if (!note) throw err(400, "Enter the supplier's delivery note number");
-    const lines = (Array.isArray(req.body.items) ? req.body.items : []).map(i => ({ order_item_id: Number(i.order_item_id), quantity: round3(i.quantity) })).filter(i => i.quantity > 0);
+    // quantity in stock units, or unit_quantity in the order line's unit.
+    const lines = (Array.isArray(req.body.items) ? req.body.items : []).map(i => {
+      const it = o.items.find(x => Number(x.id) === Number(i.order_item_id));
+      const quantity = i.unit_quantity != null && i.unit_quantity !== '' && it ? stockUnits(i.unit_quantity, it.units_per) : round3(i.quantity);
+      return { order_item_id: Number(i.order_item_id), quantity };
+    }).filter(i => i.quantity > 0);
     if (!lines.length) throw err(400, 'Enter the quantity received for at least one item');
     for (const l of lines) {
       const it = o.items.find(i => Number(i.id) === l.order_item_id);
