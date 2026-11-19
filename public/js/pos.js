@@ -2540,6 +2540,7 @@ Object.assign(App, {
     try {
       const held = await this.api('GET', `/transactions/${id}`);
       if (held.status !== 'hold') { this.alert('That held order is no longer on hold — it may have been completed at another till', 'warning'); this.updateHoldBadge(); return; }
+      if (!this._otherBranchRecallOk(held.branch_id, held.branch_name, held.source_quote_number ? `${held.source_quote_number} (held order ${held.transaction_number})` : `Held order ${held.transaction_number}`, held.source_quote_number ? 'quoted' : 'put on hold')) return;
       const listed = (this._holdRecallList || []).find(h => h.id === id);
       if (listed?.recalled_at && listed.recalled_by !== this.currentUser?.id
         && !confirm(`${listed.recalled_by_name || 'Someone'} opened this ticket at ${this._storeDateTime(listed.recalled_at)} and hasn't finished it. Open it here anyway?`)) return;
@@ -2736,6 +2737,15 @@ Object.assign(App, {
   },
 
   // Quote Recall: open quotes only, not rentals, and a Special Project only once approved.
+  // Recalling a quote, or a held order, made at another branch: the sale
+  // is recorded at this till's branch (the cashier's default branch), so
+  // say so and ask before going on. True = go ahead.
+  _otherBranchRecallOk(branchId, branchName, label, verb) {
+    const here = this.posBranch;
+    if (!branchId || !here || Number(branchId) === Number(here.id)) return true;
+    return confirm(`${label} was ${verb} at ${branchName || 'another branch'}, not ${here.name}.\n\nIf you go on, the sale will be recorded at ${here.name}. Proceed?`);
+  },
+
   _quoteRecallable(q) {
     if (['converted','declined','cancelled'].includes(q.status) || q.quote_type === 'rental') return false;
     return !(q.quote_type === 'special_project' && ['draft','pending_approval'].includes(q.status));
@@ -2764,6 +2774,7 @@ Object.assign(App, {
       if (quote.quote_type === 'special_project' && ['draft','pending_approval'].includes(quote.status)) { this.alert(`${quote.quote_number} hasn't been approved yet, so it can't be sold`, 'error'); return; }
       if (quote.customer_credit_blocked && !quote.credit_released_at) { this.alert(`${quote.quote_number} can't be sold yet: ${quote.customer_name || 'the customer'}'s credit account is blocked. It can go ahead once the account is cleared, or when accounting releases this quote (Quotations → the quote → Release for Invoicing).`, 'error'); return; }
       const quoteValid = this._quoteStillValid(quote.valid_until);
+      if (!this._otherBranchRecallOk(quote.branch_id, quote.branch_name, quote.quote_number, 'quoted')) return;
 
       if (this.cart.length && !confirm(`Loading ${quote.quote_number} will replace your current cart. Continue?`)) return;
 

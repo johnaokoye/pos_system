@@ -62,4 +62,30 @@ test('POS, layaway and quotes only use the default branch; a quote keeps its bra
   await page.evaluate(() => App.closeModal());
   await api(page, 'PUT', `/quotations/${theirs.id}`, { branch_id: home.id, items });
   expect((await api(page, 'GET', `/quotations/${theirs.id}`)).branch_id).toBe(other.id);
+
+  // Recalling that quote at the POS here asks first: no = nothing loaded.
+  await page.evaluate(() => App.showSection('pos'));
+  await page.waitForFunction(() => App.posBranch);
+  let message = '';
+  page.once('dialog', d => { message = d.message(); d.dismiss(); });
+  await page.evaluate(id => App.loadQuoteToCart(id), theirs.id);
+  expect(message).toContain(`${theirs.quote_number} was quoted at ${other.name}, not ${home.name}`);
+  expect(await page.evaluate(() => App.cart.length)).toBe(0);
+  page.once('dialog', d => d.accept());
+  await page.evaluate(id => App.loadQuoteToCart(id), theirs.id);
+  expect(await page.evaluate(() => App.cart.length)).toBeGreaterThan(0);
+  await page.evaluate(() => App.clearCart());
+
+  // The same for the held order a converted quote sends to the till.
+  const hold = await api(page, 'POST', `/quotations/${theirs.id}/convert`, {});
+  message = '';
+  page.once('dialog', d => { message = d.message(); d.dismiss(); });
+  await page.evaluate(id => App.loadHeldOrder(id), hold.id || hold.transaction_id);
+  expect(message).toContain(`was quoted at ${other.name}`);
+  expect(await page.evaluate(() => App.cart.length)).toBe(0);
+
+  // A quote from this branch loads without asking.
+  page.on('dialog', d => { throw new Error(`unexpected prompt: ${d.message()}`); });
+  await page.evaluate(id => App.loadQuoteToCart(id), mine.id);
+  expect(await page.evaluate(() => App.cart.length)).toBeGreaterThan(0);
 });
