@@ -1076,7 +1076,19 @@ Object.assign(App, {
     if (wrap) wrap.style.display = document.querySelector('input[name="ret-resolution"]:checked')?.value === 'refund' ? 'block' : 'none';
   },
 
+  // Customers imported from the old system often have the company's first
+  // word as First Name and the whole company as Last Name ("EXOTICRETE" +
+  // "EXOTICRETE SURFACE LIMITED"), so the joined name repeats it.
+  _plainCustomerName(name) {
+    const n = String(name || '').trim().replace(/\s+/g, ' ');
+    const sp = n.indexOf(' ');
+    if (sp < 0) return n;
+    const first = n.slice(0, sp), rest = n.slice(sp + 1);
+    return rest.toUpperCase().startsWith(first.toUpperCase() + ' ') || rest.toUpperCase() === first.toUpperCase() ? rest : n;
+  },
+
   showReturnReceipt(ret) {
+    if (ret?.customer_name) ret = { ...ret, customer_name: this._plainCustomerName(ret.customer_name) };
     this._returnReceipt = ret;
     const items = ret.items || [];
     const storeName = this.settings.store_name || 'My Store';
@@ -1097,7 +1109,7 @@ Object.assign(App, {
             <div class="receipt-row"><span>Return #:</span><span>${ret.return_number}</span></div>
             <div class="receipt-row"><span>Date:</span><span>${this.fmtDateTime(ret.created_at)}</span></div>
             ${ret.original_transaction_number ? `<div class="receipt-row"><span>Original Tx:</span><span>${ret.original_transaction_number}</span></div>` : ''}
-            ${ret.customer_name ? `<div class="receipt-row"><span>Customer:</span><span>${ret.customer_name}</span></div>` : ''}
+            ${ret.customer_name ? `<div class="receipt-row wrap"><span>Customer:</span><span>${this.escapeAttr(ret.customer_name)}</span></div>` : ''}
             <div class="receipt-row"><span>Resolution:</span><span>${resolutionLabel}</span></div>
             ${ret.employee_name ? `<div class="receipt-row"><span>Processed By:</span><span>${ret.employee_name}</span></div>` : ''}
             ${ret.override_by_name ? `<div class="receipt-row"><span>Authorized By:</span><span>${ret.override_by_name}</span></div>` : ''}
