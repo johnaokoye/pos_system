@@ -429,7 +429,7 @@ Object.assign(App, {
         <td class="fw-600">${this.fmt(tx.total)}</td>
         <td><span class="badge-pill badge-info">${tx.payment_method.replace(/_/g, ' ')}</span></td>
         <td style="font-size:12px">${this.escapeAttr(tx.credited_name || '—')}</td>
-        <td><span class="badge-pill ${tx.status==='completed'?'badge-success':'badge-danger'}">${tx.status}</span>${tx.return_count > 0 ? ` <span class="badge-pill badge-warning" title="Has ${tx.return_count} return${tx.return_count > 1 ? 's' : ''} — open the sale to see ${tx.return_count > 1 ? 'them' : 'it'}">↩ Returned</span>` : ''}</td>
+        <td><span class="badge-pill ${tx.status==='completed'?'badge-success':'badge-danger'}">${tx.status}</span>${tx.return_count > 0 ? ` <span class="badge-pill badge-warning" title="Has ${tx.return_count} return${tx.return_count > 1 ? 's' : ''} — open the sale to see ${tx.return_count > 1 ? 'them' : 'it'}">↩ ${this._returnTypesLabel(tx.return_types) || 'Returned'}</span>` : ''}${tx.source_return_number ? ` <span class="badge-pill badge-info" title="Replacement sale: the return credit from ${this.escapeAttr(tx.source_return_number)} is taken off this ticket">Exchange · ${this.escapeAttr(tx.source_return_number)}</span>` : ''}</td>
         <td style="white-space:nowrap">
           <button class="btn btn-secondary btn-sm" onclick="App.viewTransaction(${tx.id})">View</button>
           ${tx.status==='completed'&&!tx.rental_agreement_number&&!tx.work_order_number&&this.can('transactions_returns')?`<button class="btn btn-warning btn-sm" onclick="App.processReturn(${tx.id})" style="background:#f59e0b;color:#fff;border:none">Return</button>`:''}
@@ -593,7 +593,7 @@ Object.assign(App, {
             <span>Converted from quotation <a href="#" style="font-weight:700;color:var(--primary);text-decoration:none" onclick="event.preventDefault();App.closeModal();App.viewQuote(${tx.source_quote_id})">${tx.source_quote_number}</a>${tx.quote_created_by ? ` &nbsp;·&nbsp; <span style="color:var(--text-muted)">Created by</span> <strong>${tx.quote_created_by}</strong>` : ''}</span>
           </div>` : ''}
           ${tx.source_return_number ? `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:3px solid #f59e0b;border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:12px">
-            ↩ Replacement for return <strong style="color:#f59e0b">${tx.source_return_number}</strong>
+            ↩ Exchange — replacement for return <strong style="color:#f59e0b">${tx.source_return_number}</strong>
           </div>` : ''}
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px;font-size:13px">
             <div><span style="color:var(--text-muted)">Date:</span> ${this.fmtDateTime(tx.created_at)}</div>
@@ -882,11 +882,20 @@ Object.assign(App, {
     this.renderCart();
   },
 
+  // The Transactions list's return badge: how each return of the sale was
+  // settled — Exchange, Cash/Card/… Refund, Credit Note (return_types from
+  // GET /transactions).
+  _returnTypesLabel(types) {
+    const methods = { cash: 'Cash', card: 'Card', check: 'Cheque', direct_deposit: 'Direct Deposit' };
+    return [...new Set(String(types || '').split(',').filter(Boolean).map(t => t === 'exchange' ? 'Exchange' : t === 'credit_note' ? 'Credit Note'
+      : t.startsWith('refund') ? `${methods[t.split(':')[1]] ? methods[t.split(':')[1]] + ' ' : ''}Refund` : t))].join(' + ');
+  },
+
   // Hold Recall → Convert: the customer isn't taking a replacement, so the
   // waiting credit is settled as a refund or credit note instead.
   async showConvertExchange(returnId) {
     let ret;
-    try { ret = (await this.api('GET', '/transactions/pending-exchanges')).find(r => r.id === returnId); }
+    try { ret = (await this.api('GET', '/transactions/pending-exchanges?include_held=1')).find(r => r.id === returnId); }
     catch (e) { this.alert(e.message, 'error'); return; }
     if (!ret) { this.alert('That exchange credit has already been used or converted', 'warning'); this.updateHoldBadge(); return; }
     const esc = v => this.escapeAttr(v ?? '');
@@ -937,7 +946,8 @@ Object.assign(App, {
         const done = await this.api('POST', `/transactions/returns/${returnId}/convert`, { to, reason, override_pin: pinInput.value.trim(),
           ...(to === 'refund' ? { refund_method: document.getElementById('cx-refund-method')?.value || '', drawer_session_id: this.currentDrawerSession?.id || null } : {}) });
         this.closeModal();
-        this.alert(`${done.return_number} converted to a ${to === 'refund' ? 'refund' : 'credit note'} of ${this.fmt(done.total)}`, 'success');
+        this.alert(`${done.return_number} converted to a ${to === 'refund' ? 'refund' : 'credit note'} of ${this.fmt(done.total)}${done.held_tickets?.length ? `. Held ticket ${done.held_tickets.join(', ')} no longer has the return credit — cancel it if the customer doesn't want those items` : ''}`, 'success');
+        if (done.held_tickets?.length && this._returnCredit?.id === returnId) { this._returnCredit = null; this.cartDiscount = 0; this.renderCart(); }
         this.updateHoldBadge();
         this.showReturnReceipt(await this.api('GET', `/transactions/returns/${returnId}`));
       } catch (e) {

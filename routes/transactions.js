@@ -107,8 +107,19 @@ async function moveSaleCommissions(moved) {
 // Put order on hold (no stock updates, no payment processing)
 router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
   try {
-    const { customer_id, employee_id, created_by, branch_id, items, discount_amount, notes, promotion_code, promotion_name } = req.body;
+    const { customer_id, employee_id, created_by, branch_id, items, notes, promotion_code, promotion_name } = req.body;
+    let { discount_amount } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in cart' });
+    // An exchange's replacement ticket is held with its return credit (as the
+    // ticket discount, off after tax, capped at the return total) — it isn't
+    // a discount, so no discount source.
+    const sourceReturnId = Number(req.body.source_return_id) || null;
+    if (sourceReturnId) {
+      const { error, ret } = await exchangeCreditError(db, sourceReturnId, customer_id);
+      if (error) return res.status(400).json({ error });
+      discount_amount = Math.min(Math.max(0, parseFloat(discount_amount) || 0), parseFloat(ret.total));
+      req.body.discount_source = null;
+    }
     if (!req.apiKey) { const whErr = await warehouseSaleError(db, branch_id); if (whErr) return res.status(400).json({ error: whErr }); }
     { const homeErr = await homeBranchError(db, req, branch_id); if (homeErr) return res.status(400).json({ error: homeErr, code: 'home_branch' }); }
     if (!req.apiKey && items.some(i => i.is_q_item && !i.product_id) && !can(req.employee?.permissions, 'pos_q_item')) {
@@ -131,7 +142,8 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
     const linePct = items.map((item, i) => lineFixed[i] ? (lineGross[i] > 0 ? parseFloat((lineFixed[i] / lineGross[i] * 100).toFixed(4)) : 0) : Math.min(100, Math.max(0, parseFloat(item.discount_percent) || 0)));
     const lineDisc = lineGross.map((g, i) => lineFixed[i] ? parseFloat(lineFixed[i].toFixed(2)) : parseFloat((g * linePct[i] / 100).toFixed(2)));
     const lineTotals = lineGross.map((g, i) => parseFloat((g - lineDisc[i]).toFixed(2)));
-    const { discount: disc, shares } = allocateTicketDiscount(lineTotals, discount_amount);
+    const { discount: disc, shares: ticketShares } = allocateTicketDiscount(lineTotals, discount_amount);
+    const shares = sourceReturnId ? ticketShares.map(() => 0) : ticketShares;
     // A tax-exempt ticket (the POS Tax Exempt button, or an exempt customer)
     // is held without tax and comes back exempt on recall.
     const taxExempt = req.body.tax_exempt ? 1 : 0;
@@ -145,8 +157,8 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
     let committed = false;
     try {
       const result = await txn.execute({
-        sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,created_by,salesperson_id,branch_id,subtotal,tax_amount,discount_amount,total,payment_method,status,notes,amount_tendered,change_amount,promotion_code,promotion_name,discount_source,ticket_discount_percent,po_number,discount_override_by,tax_exempt,tax_exemption_number) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?,?,?,?)`,
-        args: [hold_number, customer_id || null, employee_id || 1, created_by || employee_id || 1, salespersonId, branch_id || null, subtotal, tax_amount, disc, total, 'hold', 'hold', notes || null, promotion_code || null, promotion_name || null, disc > 0 ? discountSource : null, disc > 0 ? ticketPct : null, String(req.body.po_number || '').trim() || null, disc > 0 && discountSource === 'manual' ? (Number(req.body.discount_override_employee_id) || null) : null, taxExempt, taxExemptionNumber]
+        sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,created_by,salesperson_id,branch_id,subtotal,tax_amount,discount_amount,total,payment_method,status,notes,amount_tendered,change_amount,promotion_code,promotion_name,discount_source,ticket_discount_percent,po_number,discount_override_by,tax_exempt,tax_exemption_number,source_return_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?,?,?,?,?)`,
+        args: [hold_number, customer_id || null, employee_id || 1, created_by || employee_id || 1, salespersonId, branch_id || null, subtotal, tax_amount, disc, total, 'hold', 'hold', notes || null, promotion_code || null, promotion_name || null, disc > 0 ? discountSource : null, disc > 0 ? ticketPct : null, String(req.body.po_number || '').trim() || null, disc > 0 && discountSource === 'manual' ? (Number(req.body.discount_override_employee_id) || null) : null, taxExempt, taxExemptionNumber, sourceReturnId]
       });
       const txId = Number(result.lastInsertRowid);
       for (const [i, item] of items.entries()) {
@@ -241,6 +253,11 @@ router.get('/', requireTransactionsList, async (req, res) => {
       wo.wo_number as work_order_number,
       CASE WHEN wo.assessment_transaction_id = t.id THEN 'assessment' WHEN wo.deposit_transaction_id = t.id THEN 'deposit' WHEN wo.final_transaction_id = t.id THEN 'final' END as wo_role,
       (SELECT COUNT(*) FROM returns rt WHERE rt.original_transaction_id = t.id) as return_count,
+      (SELECT GROUP_CONCAT(DISTINCT CASE rt.resolution WHEN 'replacement' THEN 'exchange' WHEN 'refund' THEN 'refund:' || COALESCE(rt.refund_method, '') ELSE rt.resolution END) FROM returns rt WHERE rt.original_transaction_id = t.id AND rt.status != 'cancelled') as return_types,
+      (SELECT sr.return_number FROM returns sr WHERE sr.id = t.source_return_id) as source_return_number,
+      (SELECT sr.total FROM returns sr WHERE sr.id = t.source_return_id) as source_return_total,
+      (SELECT ot.transaction_number FROM returns sr JOIN transactions ot ON ot.id = sr.original_transaction_id WHERE sr.id = t.source_return_id) as source_return_original_number,
+      (SELECT GROUP_CONCAT(ri.product_name, ', ') FROM return_items ri WHERE ri.return_id = t.source_return_id) as source_return_items,
       rce.first_name || ' ' || rce.last_name as recalled_by_name,
       (SELECT COALESCE(SUM(ti.discount_amount), 0) FROM transaction_items ti WHERE ti.transaction_id = t.id) as line_discount,
       (SELECT COALESCE(MAX(ti.discount_percent), 0) FROM transaction_items ti WHERE ti.transaction_id = t.id AND ti.discount_amount > 0) as max_line_discount_pct,
@@ -311,7 +328,10 @@ router.get('/', requireTransactionsList, async (req, res) => {
 // so a return processed by someone without POS access (or a browser that
 // closed before the replacement was rung up) isn't lost. Must stay above
 // GET /:id, like /returns below.
-const EXCHANGE_SPENT_SQL = `EXISTS (SELECT 1 FROM transactions st WHERE st.source_return_id = r.id AND st.status != 'voided')`;
+// A held ticket carrying the credit hasn't spent it (it's spent when that
+// ticket is paid); EXCHANGE_HELD_SQL finds such a hold.
+const EXCHANGE_SPENT_SQL = `EXISTS (SELECT 1 FROM transactions st WHERE st.source_return_id = r.id AND st.status NOT IN ('voided', 'hold'))`;
+const EXCHANGE_HELD_SQL = `EXISTS (SELECT 1 FROM transactions ht WHERE ht.source_return_id = r.id AND ht.status = 'hold')`;
 // The transfers raised for sales (lib/saleTransfers.js): transaction id ->
 // [{ id, transfer_number, status, from_branch_name, items }].
 async function saleTransfersFor(ids) {
@@ -434,7 +454,9 @@ router.post('/:id/collection-issues', canCollections, async (req, res) => {
 
 router.get('/pending-exchanges', requirePermission('pos'), async (req, res) => {
   try {
-    const { customer_id } = req.query;
+    // An exchange whose replacement ticket is on hold shows as that hold in
+    // Hold Recall, not as its own card (include_held=1 lists it anyway).
+    const { customer_id, include_held } = req.query;
     let sql = `SELECT r.id, r.return_number, r.created_at, r.total, r.customer_id, r.branch_id, r.notes,
       t.transaction_number as original_transaction_number, t.payment_method as original_payment_method, (COALESCE(t.is_credit, 0) = 1 OR t.payment_method = 'credit') as charged_to_account,
       c.first_name || ' ' || c.last_name as customer_name, e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name,
@@ -446,6 +468,7 @@ router.get('/pending-exchanges', requirePermission('pos'), async (req, res) => {
       LEFT JOIN branches b ON r.branch_id = b.id
       WHERE r.resolution = 'replacement' AND r.status != 'cancelled' AND NOT ${EXCHANGE_SPENT_SQL}`;
     const args = [];
+    if (!include_held) sql += ` AND NOT ${EXCHANGE_HELD_SQL}`;
     if (customer_id) { sql += ' AND r.customer_id = ?'; args.push(customer_id); }
     sql += ' ORDER BY r.created_at DESC LIMIT 100';
     const { rows } = await db.execute({ sql, args });
@@ -580,7 +603,7 @@ router.get('/customer-payments/:id', requireAnyPermission('transactions', 'pos_r
 // returns flow, online orders), not just the Transactions detail view.
 router.get('/:id', requireAuth, async (req, res) => {
   try {
-    const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, c.phone as customer_phone, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip, e.first_name || ' ' || e.last_name as employee_name, cbe.first_name || ' ' || cbe.last_name as created_by_name, spe.first_name || ' ' || spe.last_name as salesperson_name, (SELECT doe.first_name || ' ' || doe.last_name FROM employees doe WHERE doe.id = t.discount_override_by) as discount_override_name, ${CREDITED_SQL} as credited_id, ce.first_name || ' ' || ce.last_name as credited_name, b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone, q.id as source_quote_id, q.quote_number as source_quote_number, q.valid_until as source_quote_valid_until, qe.first_name || ' ' || qe.last_name as quote_created_by, r.return_number as source_return_number, sh.carrier as shipment_carrier, sh.tracking_number as shipment_tracking_number, sh.status as shipment_status, sh.ship_date as shipment_ship_date, sh.estimated_delivery as shipment_estimated_delivery,
+    const { rows: [tx] } = await db.execute({ sql: `SELECT t.*, c.first_name || ' ' || c.last_name as customer_name, c.customer_number, c.email as customer_email, c.phone as customer_phone, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip, e.first_name || ' ' || e.last_name as employee_name, cbe.first_name || ' ' || cbe.last_name as created_by_name, spe.first_name || ' ' || spe.last_name as salesperson_name, (SELECT doe.first_name || ' ' || doe.last_name FROM employees doe WHERE doe.id = t.discount_override_by) as discount_override_name, ${CREDITED_SQL} as credited_id, ce.first_name || ' ' || ce.last_name as credited_name, b.name as branch_name, b.address as branch_address, b.city as branch_city, b.state as branch_state, b.zip as branch_zip, b.phone as branch_phone, q.id as source_quote_id, q.quote_number as source_quote_number, q.valid_until as source_quote_valid_until, qe.first_name || ' ' || qe.last_name as quote_created_by, r.return_number as source_return_number, r.total as source_return_total, sh.carrier as shipment_carrier, sh.tracking_number as shipment_tracking_number, sh.status as shipment_status, sh.ship_date as shipment_ship_date, sh.estimated_delivery as shipment_estimated_delivery,
       ve.first_name || ' ' || ve.last_name as voided_by_name,
       ra.id as rental_agreement_id, ra.agreement_number as rental_agreement_number, ra.status as rental_status, ra.quotation_id as rental_quotation_id,
       ra.checkout_datetime as rental_checkout_datetime, ra.due_date as rental_due_date, ra.returned_at as rental_returned_at,
@@ -1322,6 +1345,7 @@ router.post('/returns/:id/convert', requirePermission('transactions_returns'), a
 
     const conv = await db.transaction('write');
     let committed = false;
+    let heldNumbers = [];
     try {
       // Again inside the write transaction: a till may be selling on this credit.
       const again = await exchangeCreditError(conv, req.params.id, current.customer_id);
@@ -1332,6 +1356,10 @@ router.post('/returns/:id/convert', requirePermission('transactions_returns'), a
         creditNoteId = await recordReturnCreditNote(conv, { returnId: ret.id, returnNumber: ret.return_number, transaction: sale, customerId: current.customer_id,
           employeeId: req.employee?.id, branchId: sale.branch_id, amount, number: creditNoteNumber });
       }
+      // A held replacement ticket loses the credit (it goes back to full price).
+      const { rows: heldTickets } = await conv.execute({ sql: "SELECT transaction_number FROM transactions WHERE source_return_id = ? AND status = 'hold'", args: [ret.id] });
+      await conv.execute({ sql: "UPDATE transactions SET total = ROUND(total + discount_amount, 2), discount_amount = 0, source_return_id = NULL WHERE source_return_id = ? AND status = 'hold'", args: [ret.id] });
+      heldNumbers = heldTickets.map(h => h.transaction_number);
       await conv.execute({ sql: 'UPDATE returns SET resolution = ? WHERE id = ?', args: [to, ret.id] });
       if (refundPaid) await conv.execute({ sql: 'UPDATE returns SET refund_method = ?, drawer_session_id = ?, refunded_at = CURRENT_TIMESTAMP WHERE id = ?', args: [refundPaid.method, refundPaid.sessionId, ret.id] });
       await conv.execute({ sql: 'INSERT INTO exchange_conversions (return_id, to_resolution, amount, credit_note_payment_id, reason, employee_id, override_by) VALUES (?,?,?,?,?,?,?)',
@@ -1342,7 +1370,7 @@ router.post('/returns/:id/convert', requirePermission('transactions_returns'), a
       if (!committed) await conv.rollback();
       throw e;
     }
-    res.json({ id: ret.id, return_number: ret.return_number, resolution: to, total: amount });
+    res.json({ id: ret.id, return_number: ret.return_number, resolution: to, total: amount, held_tickets: heldNumbers });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

@@ -2402,7 +2402,9 @@ Object.assign(App, {
         po_number: this._ticketPoNumber || null,
         tax_exempt: this.isCartTaxExempt() ? 1 : 0,
         tax_exemption_number: this.isCartTaxExempt() ? this.cartTaxExemptionNumber() : null,
-        ...this._ticketDiscountSource(),
+        // An exchange's replacement ticket keeps its return credit, so Hold
+        // Recall shows the one held ticket rather than the exchange as well.
+        ...(this._returnCredit ? { source_return_id: this._returnCredit.id } : this._ticketDiscountSource()),
       });
       const customerName = this.cartCustomer ? `${this.cartCustomer.first_name} ${this.cartCustomer.last_name}` : 'Walk-in Customer';
       // Re-holding a recalled ticket: the new hold replaces the old one.
@@ -2462,7 +2464,7 @@ Object.assign(App, {
               ${combined.map(entry => entry.type === 'order' ? (h => `
                 <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px;cursor:pointer;transition:background 0.15s" onmouseover="this.style.background='#f0f4ff'" onmouseout="this.style.background=''" onclick="App.loadHeldOrder(${h.id})">
                   <div style="display:flex;justify-content:space-between;align-items:center">
-                    <strong style="font-size:14px">${h.customer_name || 'Walk-in Customer'} <span class="badge-pill badge-success" style="font-size:10px;margin-left:4px">RETAIL</span>${h.source_quote_number ? ` <span class="badge-pill badge-info" style="font-size:10px;margin-left:2px">QUOTE</span>` : ''}</strong>
+                    <strong style="font-size:14px">${h.customer_name || 'Walk-in Customer'} <span class="badge-pill badge-success" style="font-size:10px;margin-left:4px">RETAIL</span>${h.source_quote_number ? ` <span class="badge-pill badge-info" style="font-size:10px;margin-left:2px">QUOTE</span>` : ''}${h.source_return_id ? ` <span class="badge-pill badge-info" style="font-size:10px;margin-left:2px">EXCHANGE</span>` : ''}</strong>
                     <span style="font-size:12px;color:var(--text-muted);font-family:monospace">${h.source_quote_number || h.transaction_number}</span>
                   </div>
                   <div style="font-size:13px;color:var(--text-muted);margin-top:3px">
@@ -2471,6 +2473,10 @@ Object.assign(App, {
                   </div>
                   ${this._recallMetaLine(h.employee_name, h.branch_name)}
                   ${h.recalled_at ? `<div style="font-size:12px;color:#b45309;margin-top:2px">Opened by ${this.escapeAttr(h.recalled_by_name || 'someone')} at ${this._storeDateTime(h.recalled_at)} — not finished yet</div>` : ''}
+                  ${h.source_return_id ? `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:4px">
+                    <span style="font-size:12px;color:var(--text-muted)">↩ Exchange — return credit <strong>${this.fmt(h.source_return_total)}</strong> from <span style="font-family:monospace">${this.escapeAttr(h.source_return_number || '')}</span>${h.source_return_original_number ? ` (${this.escapeAttr(h.source_return_items || 'items')} returned from ${this.escapeAttr(h.source_return_original_number)})` : ''}</span>
+                    ${this.can('transactions_returns') && (this.can('transactions_refund') || this.can('transactions_credit_note')) ? `<button class="btn btn-secondary btn-sm" style="flex-shrink:0" onclick="event.stopPropagation();App.showConvertExchange(${h.source_return_id})" title="The customer isn't taking a replacement: settle this credit as a refund or credit note">Convert</button>` : ''}
+                  </div>` : ''}
                 </div>`)(entry.data) : entry.type === 'rental' ? (r => `
                 <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px;cursor:pointer;transition:background 0.15s" onmouseover="this.style.background='#f0f4ff'" onmouseout="this.style.background=''" onclick="App.closeModal();App.showFinalizeRentalModal(${r.id})">
                   <div style="display:flex;justify-content:space-between;align-items:center">
@@ -2552,7 +2558,7 @@ Object.assign(App, {
       await this.api('PATCH', `/transactions/${id}/hold/recall`);
       // Each line's share of the held ticket discount — its tax was charged
       // on its total less that share (discount before tax).
-      const heldShares = this._allocateTicketDiscount(held.items.map(i => i.total), held.discount_amount).shares;
+      const heldShares = held.source_return_id ? held.items.map(() => 0) : this._allocateTicketDiscount(held.items.map(i => i.total), held.discount_amount).shares;
       // A hold made by converting a quote carries the quoted prices — kept
       // while the quote is valid, today's prices once it has expired.
       const fromQuote = !!held.source_quote_id;
@@ -2604,7 +2610,15 @@ Object.assign(App, {
       // Held tax-exempt: an exempt customer brings that back by themselves;
       // otherwise it was the Tax Exempt button, so put that back.
       this._manualTaxExempt = held.tax_exempt && !customer?.tax_exempt ? { number: held.tax_exemption_number || null } : null;
-      await this._restoreHeldTicketDiscount(held, customer);
+      if (held.source_return_id) {
+        // An exchange's replacement ticket: its return credit comes back (the
+        // whole credit, whatever the ticket comes to), not as a discount.
+        await this._restoreHeldTicketDiscount({ ...held, discount_amount: 0, discount_source: null }, null);
+        this._returnCredit = { id: held.source_return_id, amount: parseFloat(held.source_return_total ?? held.discount_amount) || 0, return_number: held.source_return_number };
+        this.cartDiscount = this._returnCredit.amount;
+      } else {
+        await this._restoreHeldTicketDiscount(held, customer);
+      }
       // A hold created by converting a quotation carries that link through
       // (via the existing quotations.converted_to_tx join on GET /transactions/:id)
       // — restoring it here is what makes checkout finalize the quote correctly,
