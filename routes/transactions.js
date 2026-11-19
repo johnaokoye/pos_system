@@ -19,6 +19,12 @@ function canOverrideDiscount(employeeRow) {
   if (!employeeRow) return false;
   try { return JSON.parse(employeeRow.permissions || '{}').pos_discount_override === true; } catch { return false; }
 }
+// Owner's rule: a discount past the store limit is approved by another
+// manager — never the person ringing the ticket up or the one who created it.
+function selfOverrideError(overrideId, ticketPeople) {
+  if (!overrideId || !ticketPeople.some(id => id && Number(id) === Number(overrideId))) return null;
+  return 'A discount over the store limit must be approved by another manager — not the person who created or is ringing up this ticket';
+}
 const { nextNumber } = require('../lib/nextNumber');
 const { refreshStoreTz, storeToday } = require('../lib/storeTime');
 const { blockedMessage, creditLimitError, quoteCreditHold } = require('../lib/creditBlock');
@@ -885,6 +891,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
           let authorized = false;
           authorized = canOverrideDiscount(overrider);
           if (!authorized) throw new Error(`The employee authorizing the discount override on ${product.name} doesn't have override privileges`);
+          { const selfErr = selfOverrideError(item.discount_override_employee_id, [req.employee?.id, employee_id, createdBy]); if (selfErr) throw new Error(`${product.name}: ${selfErr}`); }
           discountOverrideBy = item.discount_override_employee_id;
         }
         discountAmount = discountFixed ? parseFloat(discountFixed.toFixed(2)) : parseFloat((grossLineTotal * discountPercent / 100).toFixed(2));
@@ -944,6 +951,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         let authorized = false;
         authorized = canOverrideDiscount(overrider);
         if (!authorized) return res.status(400).json({ code: 'ticket_discount_override_required', error: "The employee authorizing the ticket discount override doesn't have override privileges" });
+        { const selfErr = selfOverrideError(overrideId, [req.employee?.id, employee_id, createdBy]); if (selfErr) return res.status(400).json({ code: 'self_discount_override', error: selfErr }); }
         ticketDiscountOverrideBy = overrideId;
       }
     }

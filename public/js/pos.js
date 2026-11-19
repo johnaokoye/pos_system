@@ -1450,6 +1450,13 @@ Object.assign(App, {
 
   // Manager PIN for a Ticket Discount past the store limit
   // (pos_discount_override). Resolves { id, name } or null if cancelled.
+  // A discount past the store limit needs another manager: not the person at
+  // the till, nor whoever created the ticket (the server checks it too).
+  _ownTicketApproval(approverId) {
+    const mine = [this.currentUser?.id, this._ticketCreatedBy].filter(Boolean).map(Number);
+    return mine.includes(Number(approverId)) ? "You can't approve a discount on your own ticket — another manager must enter their PIN." : null;
+  },
+
   _askTicketDiscountOverride(message) {
     return new Promise(resolve => {
       let settled = false;
@@ -1472,7 +1479,7 @@ Object.assign(App, {
         const pin = pinEl.value;
         if (!pin) { document.getElementById('tdo-msg').textContent = 'PIN is required to override the store limit.'; return; }
         this.api('POST', '/employees/validate-pin', { pin, permission: 'pos_discount_override' })
-          .then(r => finish({ id: r.id, name: r.name }))
+          .then(r => { const own = this._ownTicketApproval(r.id); if (own) throw new Error(own); finish({ id: r.id, name: r.name }); })
           .catch(e => { document.getElementById('tdo-msg').textContent = e.message; pinEl.value = ''; pinEl.focus(); });
       };
       document.getElementById('tdo-ok').addEventListener('click', submit);
@@ -2104,6 +2111,8 @@ Object.assign(App, {
       }
       if (!pin) { if (errEl) errEl.textContent = 'PIN is required to override the store limit.'; return; }
       this.api('POST', '/employees/validate-pin', { pin, permission: 'pos_discount_override' }).then(result => {
+        const own = this._ownTicketApproval(result.id);
+        if (own) throw new Error(own);
         item.discountPercent = fixed ? 0 : pct;
         item.discountFixed = fixed ? amt : 0;
         item.discountOverrideEmployeeId = result.id;

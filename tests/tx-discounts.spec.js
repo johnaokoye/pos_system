@@ -30,9 +30,13 @@ test.describe('Transactions — discounts', () => {
       const cust = await api(page, 'POST', '/customers', { first_name: 'Tx', last_name: last });
       const p = await product(page);
       const sell = extra => api(page, 'POST', '/transactions', { customer_id: cust.id, branch_id: 1, employee_id: 1, payment_method: 'cash', amount_tendered: 100000, ...extra });
+      // Another manager approves (never the person at the till).
+      const mgrGroup = (await api(page, 'GET', '/security-groups')).find(g => g.name === 'Manager');
+      const ms = stamp();
+      const mgr = await api(page, 'POST', '/employees', { first_name: 'Appr', last_name: `Mgr${ms}`, username: `am${ms}`, pin: ms.slice(-6), password: 'pw-123456', must_change_password: 0, security_group_id: mgrGroup.id, active: 1 });
 
-      // 20% off one line — past the 10% limit, so a manager (admin) approves it.
-      const approved = await sell({ items: [{ product_id: p.id, quantity: 2, discount_percent: 20, discount_override_employee_id: 1 }] });
+      // 20% off one line — past the 10% limit, so a manager approves it.
+      const approved = await sell({ items: [{ product_id: p.id, quantity: 2, discount_percent: 20, discount_override_employee_id: mgr.id }] });
       // A 5% ticket discount, within the limit.
       const ticketAmt = Math.round(p.price * 5) / 100;
       const ticket = await sell({ items: [{ product_id: p.id, quantity: 1 }], discount_amount: ticketAmt });
@@ -40,13 +44,12 @@ test.describe('Transactions — discounts', () => {
       const bigAmt = Math.round(p.price * 30) / 100;
       expect(await attempt(page, 'POST', '/transactions', { customer_id: cust.id, branch_id: 1, employee_id: 1, payment_method: 'cash', amount_tendered: 100000, items: [{ product_id: p.id, quantity: 1 }], discount_amount: bigAmt }))
         .toContain('exceeds the store limit of 10% — manager override required');
-      const bigTicket = await sell({ items: [{ product_id: p.id, quantity: 1 }], discount_amount: bigAmt, discount_override_employee_id: 1 });
+      const bigTicket = await sell({ items: [{ product_id: p.id, quantity: 1 }], discount_amount: bigAmt, discount_override_employee_id: mgr.id });
       // A promotion's discount is set up by the store — no override.
       const promo = await sell({ items: [{ product_id: p.id, quantity: 1 }], discount_amount: bigAmt, promotion_name: 'Test Promo' });
       const plain = await sell({ items: [{ product_id: p.id, quantity: 1 }] });
 
-      const admin = (await api(page, 'GET', '/employees')).find(e => e.id === 1);
-      const adminName = `${admin.first_name} ${admin.last_name}`;
+      const adminName = `Appr Mgr${ms}`;
 
       const list = await api(page, 'GET', `/transactions?customer_name=${last}`);
       const row = id => list.find(t => t.id === id);
@@ -67,7 +70,7 @@ test.describe('Transactions — discounts', () => {
       expect(await ids('&discounted=approved')).toEqual([approved.id, bigTicket.id].sort());
 
       // A held ticket keeps the approval (Hold Recall restores it).
-      const hold = await api(page, 'POST', '/transactions/hold', { customer_id: cust.id, employee_id: 1, branch_id: 1, items: [{ product_id: p.id, product_name: p.name, quantity: 1, unit_price: p.price, tax_rate: p.tax_rate || 0 }], discount_amount: bigAmt, discount_source: 'manual', discount_override_employee_id: 1 });
+      const hold = await api(page, 'POST', '/transactions/hold', { customer_id: cust.id, employee_id: 1, branch_id: 1, items: [{ product_id: p.id, product_name: p.name, quantity: 1, unit_price: p.price, tax_rate: p.tax_rate || 0 }], discount_amount: bigAmt, discount_source: 'manual', discount_override_employee_id: mgr.id });
       const held = await api(page, 'GET', `/transactions/${hold.id}`);
       expect(held.discount_override_name).toBe(adminName);
       await api(page, 'DELETE', `/transactions/${hold.id}/hold`);
@@ -176,6 +179,32 @@ test.describe('Transactions — discounts', () => {
       const mgrGroup = groups.find(g => g.name === 'Manager');
       const mgr = await api(page, 'POST', '/employees', { first_name: 'Real', last_name: `Mgr${s}`, username: `rm${s}`, pin: `9${s.slice(-5)}`, password: 'pw-123456', must_change_password: 0, security_group_id: mgrGroup.id, active: 1 });
       expect(await sale({ items: [{ product_id: p.id, quantity: 1, discount_percent: 20, discount_override_employee_id: mgr.id }] })).toBe('accepted');
+    });
+  });
+
+  test('a discount past the limit is never approved by the person ringing up or who created the ticket', async ({ page }) => {
+    const p = await product(page);
+    const s = stamp();
+    const mgrGroup = (await api(page, 'GET', '/security-groups')).find(g => g.name === 'Manager');
+    const other = await api(page, 'POST', '/employees', { first_name: 'Other', last_name: `Mgr${s}`, username: `om${s}`, pin: `8${s.slice(-5)}`, password: 'pw-123456', must_change_password: 0, security_group_id: mgrGroup.id, active: 1 });
+    const me = await page.evaluate(() => App.currentUser.id);
+    await withLimit(page, 10, async () => {
+      const sale = extra => attempt(page, 'POST', '/transactions', { branch_id: 1, employee_id: me, payment_method: 'cash', amount_tendered: 100000, ...extra });
+      const own = 'must be approved by another manager';
+      // Signed-in person, line and ticket.
+      expect(await sale({ items: [{ product_id: p.id, quantity: 1, discount_percent: 20, discount_override_employee_id: me }] })).toContain(own);
+      expect(await sale({ items: [{ product_id: p.id, quantity: 1 }], discount_amount: Math.round(p.price * 30) / 100, discount_override_employee_id: me })).toContain(own);
+      // Whoever created the ticket (a recalled hold) can't either.
+      expect(await sale({ created_by: other.id, items: [{ product_id: p.id, quantity: 1, discount_percent: 20, discount_override_employee_id: other.id }] })).toContain(own);
+      // Another manager can.
+      expect(await sale({ items: [{ product_id: p.id, quantity: 1, discount_percent: 20, discount_override_employee_id: other.id }] })).toBe('accepted');
+
+      // The POS refuses your own PIN at once.
+      expect(await page.evaluate(id => App._ownTicketApproval(id), me)).toContain('another manager');
+      expect(await page.evaluate(id => App._ownTicketApproval(id), other.id)).toBeNull();
+      await page.evaluate(id => { App._ticketCreatedBy = id; }, other.id);
+      expect(await page.evaluate(id => App._ownTicketApproval(id), other.id)).toContain('another manager');
+      await page.evaluate(() => { App._ticketCreatedBy = null; });
     });
   });
 });
