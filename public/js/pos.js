@@ -4,8 +4,18 @@ Object.assign(App, {
   // Branches the till can sell at: never a warehouse (branches.is_warehouse) —
   // warehouse stock is sold from a store with Get from here, which raises a
   // transfer. POST /transactions, /hold and /layaway/plans refuse a warehouse too.
+  // Sales are made at the person's default branch only, even with
+  // multi_branch_access (the owner's rule; the server refuses any other —
+  // homeBranchError in lib/branchStock.js). Someone with no default branch
+  // set keeps the full list.
   _posBranches() {
-    return (this.currentUser?.branches || []).filter(b => !Number(b.is_warehouse));
+    const home = this._homeBranch();
+    return (home ? [home] : (this.currentUser?.branches || [])).filter(b => !Number(b.is_warehouse));
+  },
+
+  // The signed-in person's default branch (null when none is set).
+  _homeBranch() {
+    return (this.currentUser?.branches || []).find(b => Number(b.is_default)) || null;
   },
 
   renderPOSBranchBar() {

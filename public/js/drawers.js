@@ -929,6 +929,10 @@ Object.assign(App, {
           this.currentDrawerSession = s;
           const sb = branches.find(b => b.id == s.branch_id);
           if (sb) this.posBranch = sb;
+          // A drawer opened at another branch before sales were tied to the
+          // default branch: sales go to the default branch, so the cash
+          // wouldn't match that drawer.
+          else if (s.branch_id) this.alert(`Your open drawer is at ${s.branch_name || 'another branch'}, but sales are made at your default branch. Close that drawer and open one here.`, 'warning');
           this.updateDrawerBadge();
           this.renderPOSBranchBar();
           return;

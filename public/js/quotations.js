@@ -461,10 +461,7 @@ Object.assign(App, {
               <p id="qt-cust-hint" style="display:none;font-size:11px;color:var(--text-muted);margin:4px 0 0">Only approved rental customers are listed.</p>
             </div>
             <div class="form-group"><label>Branch</label>
-              <select id="qt-branch" onchange="App.onQuoteBranchTypeChange()">
-                <option value="">-- Select Branch --</option>
-                ${branches.map(b => `<option value="${b.id}" ${q&&q.branch_id===b.id?'selected':''}>${b.name}</option>`).join('')}
-              </select>
+              ${this._quoteBranchSelectHtml(q, branches)}
             </div>
           </div>
           <div class="input-row">
@@ -679,6 +676,23 @@ Object.assign(App, {
     document.getElementById('qt-rental-items').innerHTML = '';
     this._quoteItems = [];
     if (type === 'rental') this.addRentalQuoteLine(); else this.addQuoteItem();
+  },
+
+  // A quote is made at its creator's default branch and keeps it whoever
+  // edits it (the server enforces both — homeBranchError, PUT keeps
+  // quote.branch_id), so the box is fixed: the quote's own branch when
+  // editing, else the signed-in person's default branch. Someone with no
+  // default branch still picks one.
+  _quoteBranchSelectHtml(q, branches) {
+    const home = this._homeBranch();
+    const fixed = q && q.branch_id ? { id: q.branch_id, name: q.branch_name || `Branch #${q.branch_id}` } : home;
+    if (fixed) {
+      return `<select id="qt-branch" disabled title="Quotes are made at the creator's default branch" onchange="App.onQuoteBranchTypeChange()"><option value="${fixed.id}" selected>${this.escapeAttr(fixed.name)}</option></select>`;
+    }
+    return `<select id="qt-branch" onchange="App.onQuoteBranchTypeChange()">
+                <option value="">-- Select Branch --</option>
+                ${branches.map(b => `<option value="${b.id}">${this.escapeAttr(b.name)}</option>`).join('')}
+              </select>`;
   },
 
   onQuoteBranchTypeChange() {

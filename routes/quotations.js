@@ -1,4 +1,5 @@
 const express = require('express');
+const { homeBranchError } = require('../lib/branchStock');
 const router = express.Router();
 const { db } = require('../database');
 const { requirePermission, requireAnyPermission, can } = require('../lib/permissions');
@@ -758,6 +759,8 @@ router.post('/', async (req, res) => {
     if (isRental && delivery_required && !String(delivery_address || '').trim()) return res.status(400).json({ error: "Enter the delivery address — ask the customer where it's going, even if it's their own address" });
     if (isRental && pickup_required && !String(pickup_address || '').trim()) return res.status(400).json({ error: "Enter the pickup address — ask the customer where it's being collected from, even if it's their own address" });
     const isSpecialProject = quote_type === 'special_project';
+    // A quote is made at its creator's default branch (homeBranchError).
+    { const homeErr = await homeBranchError(db, req, branch_id); if (homeErr) return res.status(400).json({ error: homeErr, code: 'home_branch' }); }
     if (isSpecialProject && !req.apiKey && !can(req.employee && req.employee.permissions, 'special_projects')) {
       return res.status(403).json({ error: 'Missing permission: special_projects' });
     }
@@ -850,10 +853,16 @@ router.put('/:id', async (req, res) => {
     }
 
     const {
-      customer_id, employee_id, branch_id, items, discount_amount, notes, valid_until, due_date,
+      customer_id, employee_id, branch_id: bodyBranchId, items, discount_amount, notes, valid_until, due_date,
       delivery_required, delivery_cost, delivery_address, pickup_required, pickup_cost, pickup_address, operator_required, operator_fee,
     } = req.body;
     if (!items || items.length === 0) return res.status(400).json({ error: 'No items in quotation' });
+    // A quote keeps the branch it was made at, whoever edits it (the form
+    // only offers branches the editor can work at, so it used to drop a
+    // quote from another branch). An older quote with none takes the
+    // editor's default branch.
+    const branch_id = quote.branch_id || bodyBranchId || null;
+    if (!quote.branch_id) { const homeErr = await homeBranchError(db, req, branch_id); if (homeErr) return res.status(400).json({ error: homeErr, code: 'home_branch' }); }
     const isRental = quote.quote_type === 'rental'; // quote_type is fixed at creation — never taken from req.body here
     const ratePlan = isRental ? (req.body.rate_plan || null) : null;
     if (isRental && delivery_required && !String(delivery_address || '').trim()) return res.status(400).json({ error: "Enter the delivery address — ask the customer where it's going, even if it's their own address" });
