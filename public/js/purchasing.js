@@ -312,7 +312,7 @@ Object.assign(App, {
     const prDept = departments.find(d => d.toLowerCase() === typedDept.toLowerCase()) || typedDept;
     if (prDept && !departments.includes(prDept)) departments.unshift(prDept);
     if (!currencies.includes(prCurrency.toUpperCase())) currencies.unshift(prCurrency);
-    const supOpts = `<option value="">-- No Supplier --</option>${suppliers.map(s=>`<option value="${s.id}" data-local="${s.is_local||0}" ${pr&&pr.supplier_id===s.id?'selected':''}>${s.name}${s.is_local?' (Local)':''}</option>`).join('')}`;
+    const supOpts = `<option value="">-- Select supplier --</option>${suppliers.map(s=>`<option value="${s.id}" data-local="${s.is_local||0}" ${pr&&pr.supplier_id===s.id?'selected':''}>${s.name}${s.is_local?' (Local)':''}</option>`).join('')}`;
     this.showModal(`
       <div class="modal" style="max-width:800px">
         <div class="modal-header"><span class="modal-title">${editId ? `Edit Purchase Request: ${pr.pr_number}` : 'New Purchase Request'}</span><button class="modal-close">✕</button></div>
@@ -329,7 +329,7 @@ Object.assign(App, {
           </div>
 
           <div class="input-row" style="grid-template-columns:1fr 1fr 1fr">
-            <div class="form-group"><label>Supplier</label>
+            <div class="form-group"><label>Supplier <span title="Needed to submit — a draft can be saved without one">*</span></label>
               <select id="pr-supplier" data-searchable onchange="App._onPRSupplierChange()">${supOpts}</select>
             </div>
             <div class="form-group"><label>Currency</label>
@@ -807,6 +807,7 @@ Object.assign(App, {
     });
     if (unnamedService) { this.alert('Give each line a name — e.g. "Promotional video" — the details go underneath', 'error'); return; }
     if (!items.length) { this.alert('Add at least one item', 'error'); return; }
+    if (initialStatus === 'submitted' && !supplier_id) { this.alert('Choose a supplier before submitting — the request can\'t become a PO without one. Use Save Draft to finish it later.', 'error'); return; }
     if (missingProduct) { this.alert('Fuel / supplier-priced requests need every item picked from inventory', 'error'); return; }
     if (request_type === 'supplier_priced' && items.some(i => !(i.quantity > 0))) { this.alert('Enter the maximum quantity for each item', 'error'); return; }
 

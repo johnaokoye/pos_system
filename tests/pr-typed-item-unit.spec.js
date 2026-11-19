@@ -8,6 +8,7 @@ const api = (page, method, url, data) => page.evaluate(([m, u, d]) => App.api(m,
 test('a typed-in PR line takes a unit, new or existing, through to the PO', async ({ page }) => {
   const s = `${Date.now()}`;
   const box = await api(page, 'POST', '/units', { name: `Box${s}`, abbreviation: 'bx' });
+  const sup = await api(page, 'POST', '/suppliers', { name: `Unit Supplier ${s}` });
 
   await page.evaluate(() => App.showPRForm());
   await page.fill('#pri-name-0', `Pens ${s}`);
@@ -27,6 +28,7 @@ test('a typed-in PR line takes a unit, new or existing, through to the PO', asyn
   await expect(page.locator('#pri-unit-1 option:checked')).toHaveText(`Gal${s}`);
   await page.fill('#pri-qty-1', '2.5');
   await page.fill('#pri-cost-1', '4000');
+  await page.evaluate(id => { const el = document.getElementById('pr-supplier'); el.value = String(id); el.dispatchEvent(new Event('change')); }, sup.id);
   await page.getByRole('button', { name: 'Save Draft' }).click();
 
   let pr;
@@ -39,7 +41,6 @@ test('a typed-in PR line takes a unit, new or existing, through to the PO', asyn
 
   // Approved and converted: the PO line is in the same unit.
   const SIG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
-  const sup = await api(page, 'POST', '/suppliers', { name: `Unit Supplier ${s}` });
   await page.evaluate(id => App.showPRForm(id), pr.id);
   await expect(page.locator('#pri-unit-0 option:checked')).toHaveText(`Box${s}`);
   await page.evaluate(() => App.closeModal());

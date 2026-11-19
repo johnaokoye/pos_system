@@ -277,6 +277,15 @@ router.patch('/:id/status', async (req, res) => {
     // A rejected request goes back to draft only by Edit & Resubmit (PATCH
     // /:id/reopen — the requester's own call).
     if (pr.status === 'rejected' && status === 'draft') return res.status(400).json({ error: 'Use Edit & Resubmit to rework a rejected request' });
+    // A request can't go forward without a supplier: it couldn't be turned
+    // into a PO. Drafts may leave it blank (quote/WO/shop-use requests start
+    // that way); it's needed to submit, and checked again at approval for any
+    // request submitted before this rule.
+    if ((status === 'submitted' || status === 'approved') && !pr.supplier_id) {
+      return res.status(400).json({ error: status === 'submitted'
+        ? 'Choose a supplier before submitting this request — it can\'t be converted to a PO without one'
+        : 'This request has no supplier — reject it so the requester can add one and resubmit', code: 'supplier_required' });
+    }
 
     if (status === 'approved') {
       // Signed with the approver's saved signature (or a newly drawn one).
@@ -311,6 +320,7 @@ router.post('/:id/convert', async (req, res) => {
     if (!pr) return res.status(404).json({ error: 'Not found' });
     if (pr.status === 'converted') return res.status(400).json({ error: 'PR already converted to a PO' });
     if (pr.status !== 'approved') return res.status(400).json({ error: 'Only approved PRs can be converted to a PO' });
+    if (!supplier_id && !pr.supplier_id) return res.status(400).json({ error: 'Choose a supplier for the PO', code: 'supplier_required' });
 
     const { rows: prItems } = await db.execute({ sql: 'SELECT * FROM purchase_request_items WHERE pr_id = ?', args: [pr.id] });
     if (!prItems.length) return res.status(400).json({ error: 'PR has no items' });
@@ -336,7 +346,7 @@ router.post('/:id/convert', async (req, res) => {
       const po_number = await nextNumber(tx, 'purchase_orders', 'po_number', 'PO-', 6);
       const poResult = await tx.execute({
         sql: 'INSERT INTO purchase_orders (po_number, supplier_id, branch_id, employee_id, subtotal, tax_amount, total, notes, internal_notes, expected_date, supplier_priced, currency, exchange_rate) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
-        args: [po_number, supplier_id || null, pr.branch_id, pr.employee_id, totals.subtotal, totals.tax_amount, totals.total, poNotes || pr.notes, pr.internal_notes || null, expected_date || pr.required_date || null, supplierPriced ? 1 : 0, cur.currency, cur.exchange_rate]
+        args: [po_number, supplier_id || pr.supplier_id, pr.branch_id, pr.employee_id, totals.subtotal, totals.tax_amount, totals.total, poNotes || pr.notes, pr.internal_notes || null, expected_date || pr.required_date || null, supplierPriced ? 1 : 0, cur.currency, cur.exchange_rate]
       });
       const poId = Number(poResult.lastInsertRowid);
 
