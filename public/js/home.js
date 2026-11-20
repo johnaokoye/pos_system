@@ -7,6 +7,21 @@ Object.assign(App, {
   // the time of day and the actual conditions, plus shortcuts to the screens
   // they can open.
   _homeWeatherText: { 0: 'Clear', 1: 'Mostly clear', 2: 'Partly cloudy', 3: 'Overcast', 45: 'Fog', 48: 'Freezing fog', 51: 'Light drizzle', 53: 'Drizzle', 55: 'Heavy drizzle', 56: 'Freezing drizzle', 57: 'Freezing drizzle', 61: 'Light rain', 63: 'Rain', 65: 'Heavy rain', 66: 'Freezing rain', 67: 'Freezing rain', 71: 'Light snow', 73: 'Snow', 75: 'Heavy snow', 77: 'Snow grains', 80: 'Rain showers', 81: 'Rain showers', 82: 'Violent showers', 85: 'Snow showers', 86: 'Snow showers', 95: 'Thunderstorm', 96: 'Thunderstorm, hail', 99: 'Thunderstorm, hail' },
+  // The forecast models often call a trace (0.1 mm) "light drizzle" or
+  // "showers" over a small island when it's really just cloud, so light
+  // drizzle / light rain / slight showers with no measurable rain are shown
+  // as the sky's cloud cover instead (current, each hour and each day).
+  _homeDropTraceRain(w) {
+    const light = new Set([51, 53, 61, 80]);
+    const sky = cover => cover == null ? 2 : cover < 25 ? 1 : cover < 80 ? 2 : 3;
+    const fix = (code, rain, cover, trace) => light.has(code) && (Number(rain) || 0) < trace ? sky(cover) : code;
+    if (w.current) w.current.weather_code = fix(w.current.weather_code, w.current.precipitation, w.current.cloud_cover, 0.2);
+    const h = w.hourly;
+    if (h?.weather_code) h.weather_code = h.weather_code.map((c, i) => fix(c, h.precipitation?.[i], h.cloud_cover?.[i], 0.2));
+    const d = w.daily;
+    if (d?.weather_code) d.weather_code = d.weather_code.map((c, i) => fix(c, d.precipitation_sum?.[i], d.cloud_cover_mean?.[i], 1));
+  },
+
   _homeKind(code) {
     if (code === 0 || code === 1) return 'clear';
     if (code === 2) return 'partly';
@@ -78,13 +93,14 @@ Object.assign(App, {
     }
     const qs = new URLSearchParams({
       latitude: place.lat, longitude: place.lon, timezone: 'auto', forecast_days: '4',
-      current: 'temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,is_day,cloud_cover',
-      daily: 'weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,precipitation_probability_max',
-      hourly: 'temperature_2m,weather_code,precipitation_probability,is_day', forecast_hours: '24',
+      current: 'temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,is_day,cloud_cover,precipitation',
+      daily: 'weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,precipitation_probability_max,precipitation_sum,cloud_cover_mean',
+      hourly: 'temperature_2m,weather_code,precipitation_probability,is_day,precipitation,cloud_cover', forecast_hours: '24',
       temperature_unit: unit === 'F' ? 'fahrenheit' : 'celsius', wind_speed_unit: unit === 'F' ? 'mph' : 'kmh',
     });
     const w = await fetch(`https://api.open-meteo.com/v1/forecast?${qs}`).then(r => r.json());
     if (!w.current) return { error: 'Weather is unavailable right now.' };
+    this._homeDropTraceRain(w);
     this._homeWeather = { city, unit, at: Date.now(), place, w };
     return this._homeWeather;
   },
