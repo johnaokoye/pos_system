@@ -1151,17 +1151,20 @@ Object.assign(App, {
     const panel = document.getElementById('bin-panel');
     if (!panel) return;
     this._binPanelBranchId = branchId;
-    const [product, assignments, bins] = await Promise.all([
+    const [product, assignments, bins, zones] = await Promise.all([
       this.api('GET', `/products/${productId}?branch_id=${branchId}`),
       this.api('GET', `/warehouse/assignments?product_id=${productId}&branch_id=${branchId}`),
       this.api('GET', `/warehouse/bins?branch_id=${branchId}`),
+      this.api('GET', `/warehouse/zones?branch_id=${branchId}`),
     ]);
     this._binPanelAssignments = assignments;
+    this._binPanelBins = bins;
+    const esc = v => this.escapeAttr(v ?? '');
+    const shelves = [...new Set(bins.map(b => b.shelf).filter(Boolean))].sort();
     this._binPanelBranchStock = product.branch_stock_qty || 0;
     const branchStock = this._binPanelBranchStock;
     const assigned = assignments.reduce((s, a) => s + a.quantity, 0);
     const remaining = branchStock - assigned;
-    const unassignedBins = bins.filter(b => !assignments.some(a => a.bin_id === b.id));
     panel.innerHTML = `
       <div style="padding:16px;border-bottom:1px solid var(--border)">
         <div class="form-group" style="margin-bottom:10px"><label>Location</label>
@@ -1175,42 +1178,65 @@ Object.assign(App, {
         </div>
       </div>
       <div style="padding:16px">
-        ${bins.length === 0 ? `<p style="color:var(--text-muted);font-size:13px">No bins set up for this location. Add them in Warehouse → Bins.</p>` : ''}
-        ${assignments.length ? `<table class="table"><thead><tr><th>Bin</th><th>Zone</th><th>Qty</th><th>Primary</th><th></th></tr></thead>
+        ${assignments.length ? `<table class="table"><thead><tr><th>Bin</th><th>Zone / Bay</th><th>Shelf</th><th>Qty</th><th>Primary</th><th></th></tr></thead>
           <tbody>${assignments.map(a => `
           <tr>
-            <td><strong>${a.bin_code}</strong></td>
-            <td style="color:var(--text-muted)">${a.zone_name||'—'}</td>
+            <td><strong>${esc(a.bin_code)}</strong></td>
+            <td style="color:var(--text-muted)">${esc(a.zone_name||'—')}</td>
+            <td style="color:var(--text-muted)">${esc(a.shelf||'—')}</td>
             <td><input type="number" min="0" value="${a.quantity}" style="width:80px" onchange="App._updateBinLocQty(${a.id},this.value)"></td>
             <td>${a.is_primary ? '<span class="badge-pill badge-success">Primary</span>' : `<button class="btn btn-secondary btn-sm" onclick="App._makeBinLocPrimary(${a.id})">Make Primary</button>`}</td>
             <td><button class="btn btn-danger btn-sm" onclick="App._removeBinLoc(${a.id})">Remove</button></td>
           </tr>`).join('')}</tbody></table>`
           : '<div class="empty-state"><p>No bins assigned yet at this location.</p></div>'}
-        ${unassignedBins.length ? `
-        <div style="display:flex;gap:8px;align-items:flex-end;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
-          <div class="form-group" style="margin:0;flex:1"><label>Add Bin</label>
-            <select id="binp-new-bin">${unassignedBins.map(b => `<option value="${b.id}">${b.bin_code}${b.zone_name?' — '+b.zone_name:''}</option>`).join('')}</select>
+        <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+          <div style="font-weight:600;font-size:13px;margin-bottom:6px">Add a bin location</div>
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Type the bay, shelf and bin number. A bin or bay that doesn't exist yet is created for this location and shows in Warehouse Management.</div>
+          <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+            <div class="form-group" style="margin:0;flex:1;min-width:120px"><label>Zone / Bay</label>
+              <input id="binp-zone" list="binp-zone-list" placeholder="e.g. Bay 7" autocomplete="off">
+              <datalist id="binp-zone-list">${zones.map(z => `<option value="${esc(z.name)}">`).join('')}</datalist>
+            </div>
+            <div class="form-group" style="margin:0;width:110px"><label>Shelf Number</label>
+              <input id="binp-shelf" list="binp-shelf-list" placeholder="e.g. 3" autocomplete="off">
+              <datalist id="binp-shelf-list">${shelves.map(v => `<option value="${esc(v)}">`).join('')}</datalist>
+            </div>
+            <div class="form-group" style="margin:0;flex:1;min-width:120px"><label>Bin Number *</label>
+              <input id="binp-bin" list="binp-bin-list" placeholder="e.g. TT101" autocomplete="off" oninput="App._binLocFillFromBin(this.value)">
+              <datalist id="binp-bin-list">${bins.filter(b => !assignments.some(a => a.bin_id === b.id)).map(b => `<option value="${esc(b.bin_code)}">${esc([b.zone_name, b.shelf ? 'Shelf ' + b.shelf : ''].filter(Boolean).join(' · '))}</option>`).join('')}</datalist>
+            </div>
+            <div class="form-group" style="margin:0"><label>Qty</label><input type="number" id="binp-new-qty" min="0" value="0" style="width:80px"></div>
+            <button class="btn btn-primary btn-sm" onclick="App._addBinLoc()">Assign</button>
           </div>
-          <div class="form-group" style="margin:0"><label>Qty</label><input type="number" id="binp-new-qty" min="0" value="0" style="width:90px"></div>
-          <button class="btn btn-primary btn-sm" onclick="App._addBinLoc()">Add</button>
-        </div>` : ''}
+        </div>
       </div>`;
     const branchSel = document.getElementById('binp-branch');
     if (branchSel) branchSel.onchange = (e) => this._renderBinLocationsBody(productId, e.target.value);
   },
 
+  // Picking an existing bin number fills in its bay and shelf.
+  _binLocFillFromBin(code) {
+    const bin = (this._binPanelBins || []).find(b => b.bin_code.toLowerCase() === String(code || '').trim().toLowerCase());
+    if (!bin) return;
+    const z = document.getElementById('binp-zone'), sh = document.getElementById('binp-shelf');
+    if (z && bin.zone_name) z.value = bin.zone_name;
+    if (sh && bin.shelf) sh.value = bin.shelf;
+  },
+
   async _addBinLoc() {
-    const binId = document.getElementById('binp-new-bin')?.value;
-    const qty = parseInt(document.getElementById('binp-new-qty')?.value) || 0;
-    if (!binId || qty <= 0) return this.alert('Select a bin and enter a quantity greater than 0', 'warning');
+    const binCode = document.getElementById('binp-bin')?.value.trim();
+    const qty = Math.max(0, parseInt(document.getElementById('binp-new-qty')?.value) || 0);
+    if (!binCode) return this.alert('Enter the bin number', 'warning');
     const branchStock = this._binPanelBranchStock || 0;
     const currentlyAssigned = (this._binPanelAssignments||[]).reduce((s,a) => s + a.quantity, 0);
     if (currentlyAssigned + qty > branchStock) {
       return this.alert(`Only ${branchStock - currentlyAssigned} unit(s) unassigned at this location — reduce the quantity`, 'error');
     }
     try {
+      const bin = await this.api('POST', '/warehouse/bins/locate', { branch_id: this._binPanelBranchId, bin_code: binCode,
+        zone: document.getElementById('binp-zone')?.value.trim() || '', shelf: document.getElementById('binp-shelf')?.value.trim() || '' });
       await this.api('POST', '/warehouse/assignments', {
-        product_id: this._binPanelProductId, bin_id: binId, branch_id: this._binPanelBranchId,
+        product_id: this._binPanelProductId, bin_id: bin.id, branch_id: this._binPanelBranchId,
         quantity: qty, is_primary: !(this._binPanelAssignments||[]).length,
       });
       this._renderBinLocationsBody(this._binPanelProductId, this._binPanelBranchId);

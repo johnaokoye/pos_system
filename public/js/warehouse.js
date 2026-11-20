@@ -206,6 +206,7 @@ Object.assign(App, {
     ]);
     this._whZones = zones;
     this._whBranches = branches;
+    this._whAllBins = bins;
     const activeBranches = branches.filter(b => b.active);
     el.innerHTML = `
       ${activeBranches.length === 0 ? `<div style="margin-bottom:12px;padding:8px 14px;background:rgba(245,158,11,0.08);border-left:3px solid #d97706;border-radius:4px;font-size:13px;color:#d97706">
@@ -217,13 +218,14 @@ Object.assign(App, {
           <option value="">All Locations</option>
           ${activeBranches.map(b=>`<option value="${b.id}">${b.name}${b.is_warehouse?' 🏭':''}</option>`).join('')}
         </select>
-        <select id="bin-filter-zone" onchange="App.filterBins()" style="width:175px">
-          <option value="">All Zones</option>
-          ${zones.map(z=>`<option value="${z.id}">${z.name} (${z.branch_name})</option>`).join('')}
+        <select id="bin-filter-zone" onchange="App._whShelfOptions('bin');App.filterBins()" style="width:175px">
+          <option value="">All Zones / Bays</option>
+          ${zones.map(z=>`<option value="${z.id}">${this.escapeAttr(z.name)} (${this.escapeAttr(z.branch_name)})</option>`).join('')}
         </select>
+        <select id="bin-filter-shelf" onchange="App.filterBins()" style="width:140px">${this._whShelfOptionsHtml(bins)}</select>
       </div>
       <table class="table">
-        <thead><tr><th>Bin Code</th><th>Zone</th><th>Location</th><th>Description</th><th>Capacity</th><th>Products</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>Bin Code</th><th>Zone / Bay</th><th>Shelf</th><th>Location</th><th>Items in Bin</th><th>Capacity</th><th>Status</th><th></th></tr></thead>
         <tbody id="bins-tbody">${this._renderBinRows(bins)}</tbody>
       </table>
       ${bins.length===0?'<div class="empty-state"><p>No bins yet. Add zones first, then create bins within them.</p></div>':''}`;
@@ -231,14 +233,15 @@ Object.assign(App, {
 
   _renderBinRows(bins) {
     if (!bins.length) return '<tr><td colspan="8" style="text-align:center;color:var(--text-muted)">No bins found</td></tr>';
+    const esc = v => this.escapeAttr(v ?? '');
     return bins.map(b=>`
       <tr>
-        <td><strong>${b.bin_code}</strong></td>
-        <td>${b.zone_name||'—'}</td>
-        <td>${b.branch_name||'—'}</td>
-        <td style="color:var(--text-muted)">${b.description||'—'}</td>
+        <td><strong>${esc(b.bin_code)}</strong>${b.description ? `<div style="font-size:11px;color:var(--text-muted)">${esc(b.description)}</div>` : ''}</td>
+        <td>${esc(b.zone_name||'—')}</td>
+        <td>${esc(b.shelf||'—')}</td>
+        <td>${esc(b.branch_name||'—')}</td>
+        <td style="font-size:12px;max-width:320px">${b.items ? esc(b.items) : '<span style="color:var(--text-muted)">Empty</span>'}</td>
         <td>${b.capacity||'—'}</td>
-        <td><span class="badge badge-info">${b.assignment_count}</span></td>
         <td><span class="badge ${b.active?'badge-success':'badge-secondary'}">${b.active?'Active':'Inactive'}</span></td>
         <td style="text-align:right;white-space:nowrap">
           <button class="btn btn-sm btn-outline" onclick='App.showBinModal(${JSON.stringify(b)})'>Edit</button>
@@ -250,12 +253,29 @@ Object.assign(App, {
   async filterBins() {
     const branchId = document.getElementById('bin-filter-branch')?.value;
     const zoneId   = document.getElementById('bin-filter-zone')?.value;
+    const shelf    = document.getElementById('bin-filter-shelf')?.value;
     let url = '/warehouse/bins?';
     if (branchId) url += `branch_id=${branchId}&`;
     if (zoneId)   url += `zone_id=${zoneId}&`;
+    if (shelf)    url += `shelf=${encodeURIComponent(shelf)}&`;
     const bins = await this.api('GET', url);
     const tbody = document.getElementById('bins-tbody');
     if (tbody) tbody.innerHTML = this._renderBinRows(bins);
+  },
+
+  // Shelf filter (Bins and Product Assignments tabs): the shelves in the
+  // chosen bay, or every shelf when no bay is chosen.
+  _whShelfOptionsHtml(bins, zoneId = '', current = '') {
+    const shelves = [...new Set((bins || []).filter(b => !zoneId || String(b.zone_id) === String(zoneId)).map(b => b.shelf).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    return `<option value="">All Shelves</option>${shelves.map(v => `<option value="${this.escapeAttr(v)}" ${v === current ? 'selected' : ''}>Shelf ${this.escapeAttr(v)}</option>`).join('')}`;
+  },
+
+  _whShelfOptions(prefix) {
+    const sel = document.getElementById(`${prefix}-filter-shelf`);
+    if (!sel) return;
+    const zoneId = document.getElementById(`${prefix}-filter-zone`)?.value || '';
+    sel.innerHTML = this._whShelfOptionsHtml(this._whAllBins, zoneId, sel.value);
   },
 
   showBinModal(bin) {
@@ -272,12 +292,15 @@ Object.assign(App, {
             <div class="form-group"><label>Bin Code *</label>
               <input id="b-code" placeholder="e.g. Aisle3-Shelf2-BinA" value="${bin?bin.bin_code:''}">
             </div>
+            <div class="form-group"><label>Shelf Number</label>
+              <input id="b-shelf" placeholder="e.g. 3" value="${bin&&bin.shelf?this.escapeAttr(bin.shelf):''}">
+            </div>
             <div class="form-group"><label>Capacity</label>
               <input id="b-cap" type="number" min="0" placeholder="Max units" value="${bin&&bin.capacity?bin.capacity:''}">
             </div>
           </div>
           <div class="input-row">
-            <div class="form-group"><label>Zone</label>
+            <div class="form-group"><label>Zone / Bay</label>
               <select id="b-zone">
                 <option value="">No Zone</option>
                 ${zones.map(z=>`<option value="${z.id}" ${bin&&bin.zone_id==z.id?'selected':''}>${z.name} — ${z.branch_name}</option>`).join('')}
@@ -309,6 +332,7 @@ Object.assign(App, {
   async saveBin(id) {
     const data = {
       bin_code:    document.getElementById('b-code').value.trim(),
+      shelf:       document.getElementById('b-shelf').value.trim()||null,
       zone_id:     document.getElementById('b-zone').value||null,
       branch_id:   document.getElementById('b-branch').value||null,
       description: document.getElementById('b-desc').value.trim()||null,
@@ -335,30 +359,37 @@ Object.assign(App, {
   },
 
   async renderWhAssignments(el) {
-    const [assignments, bins, branches] = await Promise.all([
+    const [assignments, bins, branches, zones] = await Promise.all([
       this.api('GET','/warehouse/assignments'),
       this.api('GET','/warehouse/bins'),
       this.api('GET','/branches'),
+      this.api('GET','/warehouse/zones'),
     ]);
     this._whBins     = bins;
+    this._whAllBins  = bins;
     this._whBranches = branches;
     el.innerHTML = `
       <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <label style="font-size:13px;color:var(--text-muted)">Filter by bin:</label>
+        <label style="font-size:13px;color:var(--text-muted)">Filter:</label>
+        <select id="asn-filter-zone" onchange="App._whShelfOptions('asn');App.filterAssignments()" style="width:175px">
+          <option value="">All Zones / Bays</option>
+          ${zones.map(z=>`<option value="${z.id}">${this.escapeAttr(z.name)} (${this.escapeAttr(z.branch_name)})</option>`).join('')}
+        </select>
+        <select id="asn-filter-shelf" onchange="App.filterAssignments()" style="width:140px">${this._whShelfOptionsHtml(bins)}</select>
         <select id="asn-filter-bin" onchange="App.filterAssignments()" style="width:220px">
           <option value="">All Bins</option>
           ${bins.map(b=>`<option value="${b.id}">${b.bin_code}${b.zone_name?' — '+b.zone_name:''}</option>`).join('')}
         </select>
       </div>
       <table class="table">
-        <thead><tr><th>Product</th><th>SKU</th><th>Category</th><th>Bin</th><th>Zone</th><th>Qty in Bin</th><th>Total Stock</th><th>Primary</th><th></th></tr></thead>
+        <thead><tr><th>Product</th><th>SKU</th><th>Category</th><th>Bin</th><th>Zone / Bay</th><th>Shelf</th><th>Qty in Bin</th><th>Total Stock</th><th>Primary</th><th></th></tr></thead>
         <tbody id="asn-tbody">${this._renderAsnRows(assignments)}</tbody>
       </table>
       ${assignments.length===0?'<div class="empty-state"><p>No bin assignments yet. Use "+ Assign Product" to place products into bins.</p></div>':''}`;
   },
 
   _renderAsnRows(rows) {
-    if (!rows.length) return '<tr><td colspan="9" style="text-align:center;color:var(--text-muted)">No assignments found</td></tr>';
+    if (!rows.length) return '<tr><td colspan="10" style="text-align:center;color:var(--text-muted)">No assignments found</td></tr>';
     return rows.map(a=>`
       <tr>
         <td><strong>${a.product_name}</strong></td>
@@ -366,8 +397,9 @@ Object.assign(App, {
         <td style="color:var(--text-muted)">${a.category_name||'—'}</td>
         <td><strong>${a.bin_code}</strong></td>
         <td>${a.zone_name||'—'}</td>
+        <td>${this.escapeAttr(a.shelf||'—')}</td>
         <td>
-          <input type="number" min="0" value="${a.quantity}" onchange="App.updateAssignmentQty(${a.id},this.value)"
+          <input type="number" min="0" value="${a.quantity}" onchange="App.updateAssignmentQty(${a.id},this.value,${a.is_primary ? 1 : 0})"
             style="width:70px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;font-size:13px">
         </td>
         <td>${a.total_stock}</td>
@@ -379,15 +411,19 @@ Object.assign(App, {
   },
 
   async filterAssignments() {
-    const binId = document.getElementById('asn-filter-bin')?.value;
-    const rows  = await this.api('GET',`/warehouse/assignments${binId?'?bin_id='+binId:''}`);
+    const q = new URLSearchParams();
+    for (const [k, id] of [['bin_id', 'asn-filter-bin'], ['zone_id', 'asn-filter-zone'], ['shelf', 'asn-filter-shelf']]) {
+      const v = document.getElementById(id)?.value;
+      if (v) q.set(k, v);
+    }
+    const rows  = await this.api('GET',`/warehouse/assignments${q.toString() ? '?' + q : ''}`);
     const tbody = document.getElementById('asn-tbody');
     if (tbody) tbody.innerHTML = this._renderAsnRows(rows);
   },
 
-  async updateAssignmentQty(id, qty) {
+  async updateAssignmentQty(id, qty, isPrimary = 0) {
     try {
-      await this.api('PUT',`/warehouse/assignments/${id}`,{ quantity: parseInt(qty)||0 });
+      await this.api('PUT',`/warehouse/assignments/${id}`,{ quantity: parseInt(qty)||0, is_primary: !!isPrimary });
     } catch(e) { this.alert(e.message,'error'); }
   },
 

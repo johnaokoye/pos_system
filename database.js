@@ -3368,6 +3368,10 @@ async function _init() {
     'ALTER TABLE customers ADD COLUMN rental_preapproved INTEGER DEFAULT 0',
     'ALTER TABLE customers ADD COLUMN rental_preapproved_by INTEGER REFERENCES employees(id)',
     'ALTER TABLE customers ADD COLUMN rental_preapproved_at DATETIME',
+    // Shelf within a zone (bay) for a bin: Location → Zone / Bay → Shelf → Bin.
+    // Bins can be made from the product's Bin Locations tab
+    // (POST /warehouse/bins/locate).
+    'ALTER TABLE storage_bins ADD COLUMN shelf TEXT',
     // Where a session was opened from and what it's doing now, for the
     // Admin > Active Sessions dashboard (see lib/sessionActivity.js).
     // ip_address/user_agent are captured at login and refreshed on each

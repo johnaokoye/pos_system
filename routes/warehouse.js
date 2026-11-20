@@ -58,9 +58,10 @@ router.delete('/zones/:id', requirePermission('warehouse'), async (req, res) => 
 // scope picker (showCycleCountModal), not just Warehouse management.
 router.get('/bins', requireAuth, async (req, res) => {
   try {
-    const { zone_id, branch_id } = req.query;
+    const { zone_id, branch_id, shelf } = req.query;
     let sql = `SELECT sb.*, z.name as zone_name, z.code as zone_code, br.name as branch_name,
-      (SELECT COUNT(*) FROM product_bin_assignments WHERE bin_id = sb.id) as assignment_count
+      (SELECT COUNT(*) FROM product_bin_assignments WHERE bin_id = sb.id) as assignment_count,
+      (SELECT GROUP_CONCAT(p.name || ' (' || a.quantity || ')', '; ') FROM product_bin_assignments a JOIN products p ON p.id = a.product_id WHERE a.bin_id = sb.id) as items
       FROM storage_bins sb
       LEFT JOIN warehouse_zones z ON sb.zone_id = z.id
       LEFT JOIN branches br ON sb.branch_id = br.id
@@ -68,7 +69,8 @@ router.get('/bins', requireAuth, async (req, res) => {
     const params = [];
     if (zone_id) { sql += ' AND sb.zone_id = ?'; params.push(zone_id); }
     if (branch_id) { sql += ' AND (sb.branch_id = ? OR z.branch_id = ?)'; params.push(branch_id, branch_id); }
-    sql += ' ORDER BY sb.bin_code';
+    if (shelf) { sql += ' AND sb.shelf = ?'; params.push(shelf); }
+    sql += ' ORDER BY z.name, sb.shelf, sb.bin_code';
     const { rows } = await db.execute({ sql, args: params });
     res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -78,7 +80,7 @@ router.post('/bins', requirePermission('warehouse'), async (req, res) => {
   try {
     const { zone_id, branch_id, bin_code, description, capacity } = req.body;
     if (!bin_code) return res.status(400).json({ error: 'bin_code required' });
-    const result = await db.execute({ sql: 'INSERT INTO storage_bins (zone_id, branch_id, bin_code, description, capacity) VALUES (?,?,?,?,?)', args: [zone_id || null, branch_id || null, bin_code, description || null, capacity || null] });
+    const result = await db.execute({ sql: 'INSERT INTO storage_bins (zone_id, branch_id, bin_code, description, capacity, shelf) VALUES (?,?,?,?,?,?)', args: [zone_id || null, branch_id || null, bin_code, description || null, capacity || null, String(req.body.shelf || '').trim() || null] });
     const { rows: [row] } = await db.execute({ sql: `SELECT sb.*, z.name as zone_name, br.name as branch_name FROM storage_bins sb LEFT JOIN warehouse_zones z ON sb.zone_id = z.id LEFT JOIN branches br ON sb.branch_id = br.id WHERE sb.id = ?`, args: [Number(result.lastInsertRowid)] });
     res.status(201).json(row);
   } catch(e) { res.status(400).json({ error: e.message }); }
@@ -87,11 +89,65 @@ router.post('/bins', requirePermission('warehouse'), async (req, res) => {
 router.put('/bins/:id', requirePermission('warehouse'), async (req, res) => {
   try {
     const { bin_code, description, capacity, active, zone_id, branch_id } = req.body;
-    await db.execute({ sql: 'UPDATE storage_bins SET bin_code=?, description=?, capacity=?, active=?, zone_id=?, branch_id=? WHERE id=?', args: [bin_code, description || null, capacity || null, active ?? 1, zone_id || null, branch_id || null, req.params.id] });
+    await db.execute({ sql: 'UPDATE storage_bins SET bin_code=?, description=?, capacity=?, active=?, zone_id=?, branch_id=?, shelf=? WHERE id=?', args: [bin_code, description || null, capacity || null, active ?? 1, zone_id || null, branch_id || null, String(req.body.shelf || '').trim() || null, req.params.id] });
     const { rows: [row] } = await db.execute({ sql: `SELECT sb.*, z.name as zone_name, br.name as branch_name FROM storage_bins sb LEFT JOIN warehouse_zones z ON sb.zone_id = z.id LEFT JOIN branches br ON sb.branch_id = br.id WHERE sb.id = ?`, args: [req.params.id] });
     res.json(row);
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
+
+// From a product's Bin Locations tab: Location (branch) + Zone / Bay + Shelf
+// + Bin Number typed in. An existing bin with that number is used (it must
+// be at that location, and in that bay/shelf when it has one); a new bay or
+// bin is created, so Warehouse Management lists it without entering it twice.
+router.post('/bins/locate', requireAnyPermission('warehouse', 'inventory_edit'), async (req, res) => {
+  const tx = await db.transaction('write');
+  let committed = false;
+  try {
+    const branchId = Number(req.body.branch_id) || null;
+    const zoneName = String(req.body.zone || '').trim();
+    const shelf = String(req.body.shelf || '').trim() || null;
+    const binCode = String(req.body.bin_code || '').trim();
+    const fail = msg => { const e = new Error(msg); e.status = 400; throw e; };
+    if (!branchId) fail('Choose the location');
+    if (!binCode) fail('Enter the bin number');
+    const { rows: [branch] } = await tx.execute({ sql: 'SELECT id, name FROM branches WHERE id = ?', args: [branchId] });
+    if (!branch) fail('That location no longer exists');
+    let zone = null;
+    if (zoneName) {
+      ({ rows: [zone] } = await tx.execute({ sql: 'SELECT * FROM warehouse_zones WHERE branch_id = ? AND LOWER(TRIM(name)) = LOWER(?)', args: [branchId, zoneName] }));
+    }
+    const { rows: [bin] } = await tx.execute({ sql: `SELECT sb.*, z.name AS zone_name, COALESCE(sb.branch_id, z.branch_id) AS at_branch, br.name AS at_branch_name
+      FROM storage_bins sb LEFT JOIN warehouse_zones z ON z.id = sb.zone_id LEFT JOIN branches br ON br.id = COALESCE(sb.branch_id, z.branch_id)
+      WHERE LOWER(sb.bin_code) = LOWER(?)`, args: [binCode] });
+    let binId;
+    if (bin) {
+      const where = [bin.zone_name, bin.shelf ? `shelf ${bin.shelf}` : null].filter(Boolean).join(', ');
+      if (bin.at_branch && Number(bin.at_branch) !== branchId) fail(`Bin ${bin.bin_code} is already at ${bin.at_branch_name} — use another bin number`);
+      if (bin.zone_id && zoneName && (!zone || zone.id !== bin.zone_id)) fail(`Bin ${bin.bin_code} is already in ${where} — leave the bay and shelf as they are or use another bin number`);
+      if (bin.shelf && shelf && bin.shelf.toLowerCase() !== shelf.toLowerCase()) fail(`Bin ${bin.bin_code} is already in ${where} — leave the bay and shelf as they are or use another bin number`);
+      if (!zone && zoneName && !bin.zone_id) zone = await createZone(tx, branchId, zoneName);
+      // Fill in what the existing bin didn't have.
+      await tx.execute({ sql: 'UPDATE storage_bins SET branch_id = COALESCE(branch_id, ?), zone_id = COALESCE(zone_id, ?), shelf = COALESCE(shelf, ?) WHERE id = ?', args: [branchId, zone?.id || null, shelf, bin.id] });
+      binId = bin.id;
+    } else {
+      if (!zone && zoneName) zone = await createZone(tx, branchId, zoneName);
+      const r = await tx.execute({ sql: 'INSERT INTO storage_bins (zone_id, branch_id, bin_code, shelf) VALUES (?,?,?,?)', args: [zone?.id || null, branchId, binCode, shelf] });
+      binId = Number(r.lastInsertRowid);
+    }
+    await tx.commit();
+    committed = true;
+    const { rows: [row] } = await db.execute({ sql: `SELECT sb.*, z.name as zone_name, br.name as branch_name FROM storage_bins sb LEFT JOIN warehouse_zones z ON sb.zone_id = z.id LEFT JOIN branches br ON sb.branch_id = br.id WHERE sb.id = ?`, args: [binId] });
+    res.json({ ...row, created: !bin });
+  } catch (e) {
+    if (!committed) await tx.rollback().catch(() => {});
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+async function createZone(tx, branchId, name) {
+  const r = await tx.execute({ sql: 'INSERT INTO warehouse_zones (branch_id, name) VALUES (?, ?)', args: [branchId, name] });
+  return { id: Number(r.lastInsertRowid), name };
+}
 
 router.delete('/bins/:id', requirePermission('warehouse'), async (req, res) => {
   try {
@@ -106,9 +162,9 @@ router.delete('/bins/:id', requirePermission('warehouse'), async (req, res) => {
 
 router.get('/assignments', requireAuth, async (req, res) => {
   try {
-    const { bin_id, product_id, branch_id } = req.query;
+    const { bin_id, product_id, branch_id, zone_id, shelf } = req.query;
     let sql = `SELECT a.*, p.name as product_name, p.sku, p.stock_qty as total_stock,
-      sb.bin_code, z.name as zone_name, br.name as branch_name, c.name as category_name
+      sb.bin_code, sb.shelf, sb.zone_id, z.name as zone_name, br.name as branch_name, c.name as category_name
       FROM product_bin_assignments a
       LEFT JOIN products p ON a.product_id = p.id
       LEFT JOIN storage_bins sb ON a.bin_id = sb.id
@@ -120,23 +176,28 @@ router.get('/assignments', requireAuth, async (req, res) => {
     if (bin_id)     { sql += ' AND a.bin_id = ?';     params.push(bin_id); }
     if (product_id) { sql += ' AND a.product_id = ?'; params.push(product_id); }
     if (branch_id)  { sql += ' AND a.branch_id = ?';  params.push(branch_id); }
-    sql += ' ORDER BY sb.bin_code, p.name';
+    if (zone_id)    { sql += ' AND sb.zone_id = ?';   params.push(zone_id); }
+    if (shelf)      { sql += ' AND sb.shelf = ?';     params.push(shelf); }
+    sql += ' ORDER BY z.name, sb.shelf, sb.bin_code, p.name';
     const { rows } = await db.execute({ sql, args: params });
     res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/assignments', requirePermission('warehouse'), async (req, res) => {
+// Also from the product form's Bin Locations tab, so inventory_edit too.
+router.post('/assignments', requireAnyPermission('warehouse', 'inventory_edit'), async (req, res) => {
   try {
     const { product_id, bin_id, branch_id, quantity, is_primary } = req.body;
     if (!product_id || !bin_id) return res.status(400).json({ error: 'product_id and bin_id required' });
+    const { rows: [dupe] } = await db.execute({ sql: 'SELECT sb.bin_code FROM product_bin_assignments a JOIN storage_bins sb ON sb.id = a.bin_id WHERE a.product_id = ? AND a.bin_id = ?', args: [product_id, bin_id] });
+    if (dupe) return res.status(400).json({ error: `This item is already in bin ${dupe.bin_code}` });
     const result = await db.execute({ sql: 'INSERT INTO product_bin_assignments (product_id, bin_id, branch_id, quantity, is_primary) VALUES (?,?,?,?,?)', args: [product_id, bin_id, branch_id || null, quantity || 0, is_primary ? 1 : 0] });
     const { rows: [row] } = await db.execute({ sql: `SELECT a.*, p.name as product_name, p.sku, sb.bin_code FROM product_bin_assignments a LEFT JOIN products p ON a.product_id = p.id LEFT JOIN storage_bins sb ON a.bin_id = sb.id WHERE a.id = ?`, args: [Number(result.lastInsertRowid)] });
     res.status(201).json(row);
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
 
-router.put('/assignments/:id', requirePermission('warehouse'), async (req, res) => {
+router.put('/assignments/:id', requireAnyPermission('warehouse', 'inventory_edit'), async (req, res) => {
   try {
     const { quantity, is_primary } = req.body;
     await db.execute({ sql: 'UPDATE product_bin_assignments SET quantity=?, is_primary=?, updated_at=CURRENT_TIMESTAMP WHERE id=?', args: [quantity || 0, is_primary ? 1 : 0, req.params.id] });
@@ -145,7 +206,7 @@ router.put('/assignments/:id', requirePermission('warehouse'), async (req, res) 
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/assignments/:id', requirePermission('warehouse'), async (req, res) => {
+router.delete('/assignments/:id', requireAnyPermission('warehouse', 'inventory_edit'), async (req, res) => {
   try {
     await db.execute({ sql: 'DELETE FROM product_bin_assignments WHERE id = ?', args: [req.params.id] });
     res.json({ success: true });
