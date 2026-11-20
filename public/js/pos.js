@@ -1566,11 +1566,14 @@ Object.assign(App, {
       // or customer-category customer wouldn't actually reduce the visible
       // total/Amount Due until the cashier opened that modal at least once.
       const subtotal = this.cart.reduce((s, i) => s + i.price * i.quantity, 0);
-      this.cartDiscount = parseFloat((subtotal * this.appliedDiscountCard.percent / 100).toFixed(2));
+      // The staff discount only applies from its minimum ticket (lib/staffPurchases.js).
+      const minAmt = this.appliedDiscountCard.min_amount || 0;
+      const belowMin = minAmt > 0 && subtotal + 0.005 < minAmt;
+      this.cartDiscount = belowMin ? 0 : parseFloat((subtotal * this.appliedDiscountCard.percent / 100).toFixed(2));
       if (row) row.style.display = 'none';
       if (discountRow) discountRow.style.display = 'none';
       if (pd) {
-        pd.innerHTML = `✓ ${this.appliedDiscountCard.type_name} ${this.appliedDiscountCard.label || 'Discount Card'}${this.appliedDiscountCard.card_number ? ` (${this.appliedDiscountCard.card_number})` : ''}: -${this.fmt(this.cartDiscount)}`;
+        pd.innerHTML = belowMin ? `${this.appliedDiscountCard.type_name} ${this.appliedDiscountCard.label || 'Discount Card'}: applies from ${this.fmt(minAmt)} (before tax) — ${this.fmt(minAmt - subtotal)} more` : `✓ ${this.appliedDiscountCard.type_name} ${this.appliedDiscountCard.label || 'Discount Card'}${this.appliedDiscountCard.card_number ? ` (${this.appliedDiscountCard.card_number})` : ''}: -${this.fmt(this.cartDiscount)}`;
         pd.style.display = 'block';
       }
       const rb = document.getElementById('remove-promo-btn');
@@ -3445,7 +3448,7 @@ Object.assign(App, {
       `<span class="badge-pill ${isCredit ? 'badge-blue' : 'badge-success'}" title="Customer type">${isCredit ? 'Credit' : 'Cash'}</span>`,
       c.is_rental_customer ? `<span class="badge-pill badge-purple" title="Rental customer">🔑 Rental</span>` : '',
       c.account_blocked ? `<span class="badge-pill badge-danger" title="${this.escapeAttr(this._creditBlockedText(c))}">Blocked</span>` : '',
-      c.staff_purchase ? `<span class="badge-pill badge-purple" title="Staff purchase: ${c.staff_purchase.discount_pct}% off, cash or card. Limit ${this.fmt(c.staff_purchase.limit)} for ${esc(c.staff_purchase.period_label)}, used ${this.fmt(c.staff_purchase.used)}">Staff · ${this.fmt(c.staff_purchase.remaining)} left</span>` : '',
+      c.staff_purchase ? `<span class="badge-pill badge-purple" title="Staff purchase: ${c.staff_purchase.discount_pct}% off${c.staff_purchase.discount_min > 0 ? ` from ${this.fmt(c.staff_purchase.discount_min)} (before tax)` : ''}, cash or card. Limit ${this.fmt(c.staff_purchase.limit)} for ${esc(c.staff_purchase.period_label)}, used ${this.fmt(c.staff_purchase.used)}">Staff · ${this.fmt(c.staff_purchase.remaining)} left</span>` : '',
     ].filter(Boolean).join('');
     return `<div class="cart-cust-name">${esc(`${c.first_name || ''} ${c.last_name || ''}`.trim())}</div><div class="cart-cust-meta">${meta}</div>`;
   },
@@ -3463,7 +3466,7 @@ Object.assign(App, {
   // Hold Recall) — null when neither applies.
   _customerDiscountCard(c) {
     // A staff account always gets the staff discount (lib/staffPurchases.js).
-    if (c.staff_purchase) return c.staff_purchase.discount_pct > 0 ? { type_name: 'Staff', percent: c.staff_purchase.discount_pct, card_number: null, label: 'Discount', staff: true } : null;
+    if (c.staff_purchase) return c.staff_purchase.discount_pct > 0 ? { type_name: 'Staff', percent: c.staff_purchase.discount_pct, min_amount: Number(c.staff_purchase.discount_min) || 0, card_number: null, label: 'Discount', staff: true } : null;
     if (c.discount_card_type_id && c.discount_card_type_active) return { type_name: c.discount_card_type_name, percent: c.discount_card_percent, card_number: c.discount_card_number, label: 'Discount Card' };
     if (c.customer_category_id && c.customer_category_active && c.customer_category_discount_percent > 0) return { type_name: c.customer_category_name, percent: c.customer_category_discount_percent, card_number: null, label: 'Customer Discount' };
     return null;

@@ -927,8 +927,9 @@ router.post('/', requirePermission('pos'), async (req, res) => {
     const staff = !req.apiKey && customer_id ? await staffAccountFor(db, customer_id) : null;
     const staffDiscount = staff && !source_return_id;
     if (staffDiscount) {
-      const { discount_pct } = await staffSettings(db);
-      disc = parseFloat((subtotal * discount_pct / 100).toFixed(2));
+      // Only from the minimum ticket (subtotal before tax); below it, full price.
+      const { discount_pct, discount_min } = await staffSettings(db);
+      disc = subtotal + 0.005 >= discount_min ? parseFloat((subtotal * discount_pct / 100).toFixed(2)) : 0;
     }
     const salePromoCode = staffDiscount ? null : (promotion_code || null);
     const salePromoName = staffDiscount ? (disc > 0 ? 'Staff Discount' : null) : (promotion_name || null);

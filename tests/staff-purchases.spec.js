@@ -104,3 +104,29 @@ test('POS shows the staff badge and refuses a cheque for a staff account', async
   await page.evaluate(() => App.processPayment('check'));
   await expect(page.locator('body')).toContainText('Staff purchases are paid at the till by cash or card');
 });
+
+test('the staff discount only applies from the minimum purchase (before tax)', async ({ page }) => {
+  const stamp = Date.now();
+  const cashier = (await api(page, 'GET', '/security-groups')).find(g => g.name === 'Cashier');
+  const emp = await api(page, 'POST', '/employees', { first_name: 'Min', last_name: `Staff${stamp}`, username: `min${stamp}`, pin: `${stamp}`.slice(-6), password: 'pw-123456', must_change_password: 0, security_group_id: cashier.id, default_branch_id: 1, active: 1 });
+  const acct = await api(page, 'POST', `/employees/${emp.id}/staff-account`, {});
+  const p = await api(page, 'POST', '/products', { sku: `STAFFMIN-${stamp}`, name: `Staff Bit ${stamp}`, price: 100, cost: 40, tax_rate: 15 });
+  await api(page, 'PATCH', `/products/${p.id}/stock`, { adjustment: 10, branch_id: 1, reason: 'test' });
+  const prev = (await api(page, 'GET', '/settings')).staff_discount_min ?? '0';
+  await api(page, 'PUT', '/settings', { staff_discount_min: '250' });
+  try {
+    const sell = qty => api(page, 'POST', '/transactions', { customer_id: acct.customer.id, items: [{ product_id: p.id, quantity: qty }], branch_id: 1, employee_id: 1, payment_method: 'cash', amount_tendered: 10000, discount_amount: 999 });
+    // 200 before tax (230 with GCT) is under 250: full price, whatever the till sent.
+    const small = await sell(2);
+    expect(small.discount_amount).toBe(0);
+    expect(small.promotion_name).toBeNull();
+    expect(small.total).toBe(230);
+    // 300 before tax reaches it: 15% off, taxed after the discount.
+    const big = await sell(3);
+    expect(big.discount_amount).toBe(45);
+    expect(big.total).toBe(293.25);
+    expect((await api(page, 'GET', `/customers/${acct.customer.id}`)).staff_purchase.discount_min).toBe(250);
+  } finally {
+    await api(page, 'PUT', '/settings', { staff_discount_min: String(prev) });
+  }
+});

@@ -3732,6 +3732,7 @@ async function _init() {
     "INSERT OR IGNORE INTO settings (key, value) VALUES ('staff_purchase_limit_staff', '45000')",
     "INSERT OR IGNORE INTO settings (key, value) VALUES ('staff_purchase_limit_manager', '150000')",
     "INSERT OR IGNORE INTO settings (key, value) VALUES ('staff_purchase_period', 'month')",
+    "INSERT OR IGNORE INTO settings (key, value) VALUES ('staff_discount_min', '0')",
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

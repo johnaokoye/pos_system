@@ -91,9 +91,12 @@ Object.assign(App, {
           </div>
           <div class="card" style="margin-bottom:16px">
             <div class="card-header"><span class="card-title">Staff Purchases</span></div>
-            <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">Employees buying for themselves are rung up on their staff account (Employees → Edit → Staff Purchases): this discount comes off automatically, payment is cash or card, nobody can ring up their own purchase, and a sale that would take them past their limit for the ${s.staff_purchase_period === 'year' ? 'year' : 'month'} is refused. Each employee is on the Staff or Manager limit, set on their form.</p>
+            <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">Employees buying for themselves are rung up on their staff account (Employees → Edit → Staff Purchases): this discount comes off automatically once the ticket reaches the minimum purchase (before tax), payment is cash or card, nobody can ring up their own purchase, and a sale that would take them past their limit for the ${s.staff_purchase_period === 'year' ? 'year' : 'month'} is refused. Each employee is on the Staff or Manager limit, set on their form.</p>
             <div class="input-row">
               <div class="form-group"><label>Staff Discount (%)</label><input type="number" id="s-staff-discount" value="${s.staff_discount_pct ?? 15}" min="0" max="100" step="0.1"></div>
+              <div class="form-group"><label>Minimum Purchase for Discount <span style="color:var(--text-muted);font-weight:400;font-size:11px">(before tax, 0 = any)</span></label><input type="number" id="s-staff-discount-min" value="${s.staff_discount_min ?? 0}" min="0" step="0.01"></div>
+            </div>
+            <div class="input-row">
               <div class="form-group"><label>Limit Period</label>
                 <select id="s-staff-period"><option value="month" ${s.staff_purchase_period !== 'year' ? 'selected' : ''}>Per month</option><option value="year" ${s.staff_purchase_period === 'year' ? 'selected' : ''}>Per year</option></select></div>
             </div>
@@ -712,6 +715,7 @@ Object.assign(App, {
       max_discount_pct: document.getElementById('s-max-discount').value,
       ...(document.getElementById('s-staff-discount') ? {
         staff_discount_pct: document.getElementById('s-staff-discount').value || '0',
+        staff_discount_min: document.getElementById('s-staff-discount-min').value || '0',
         staff_purchase_period: document.getElementById('s-staff-period').value,
         staff_purchase_limit_staff: document.getElementById('s-staff-limit-staff').value || '0',
         staff_purchase_limit_manager: document.getElementById('s-staff-limit-manager').value || '0',
