@@ -3721,6 +3721,17 @@ async function _init() {
     'ALTER TABLE transactions ADD COLUMN collected_at DATETIME',
     'ALTER TABLE transactions ADD COLUMN collected_by INTEGER REFERENCES employees(id)',
     'ALTER TABLE branch_transfers ADD COLUMN transaction_id INTEGER REFERENCES transactions(id)',
+    // Staff purchases (lib/staffPurchases.js): an employee's own customer
+    // account (one per employee), their limit tier ('staff' | 'manager') and
+    // an optional personal limit that replaces the tier's.
+    'ALTER TABLE customers ADD COLUMN staff_employee_id INTEGER REFERENCES employees(id)',
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_staff_employee ON customers(staff_employee_id) WHERE staff_employee_id IS NOT NULL',
+    "ALTER TABLE employees ADD COLUMN staff_purchase_tier TEXT DEFAULT 'staff'",
+    'ALTER TABLE employees ADD COLUMN staff_purchase_limit REAL',
+    "INSERT OR IGNORE INTO settings (key, value) VALUES ('staff_discount_pct', '15')",
+    "INSERT OR IGNORE INTO settings (key, value) VALUES ('staff_purchase_limit_staff', '45000')",
+    "INSERT OR IGNORE INTO settings (key, value) VALUES ('staff_purchase_limit_manager', '150000')",
+    "INSERT OR IGNORE INTO settings (key, value) VALUES ('staff_purchase_period', 'month')",
   ];
   for (const sql of migrations) {
     try { await db.execute({ sql, args: [] }); } catch(e) {}

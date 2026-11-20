@@ -32,6 +32,7 @@ const { resolveUnit, lineName, parseQty, stockUnits } = require('../lib/units');
 const { isSerialNumberProduct, serialNumberLabel, serialNumberOf, serialClashError } = require('../lib/serialNumber');
 const { checkDiscountEligibility } = require('./promotions');
 const { allocateTicketDiscount, returnedDiscountShare } = require('../lib/ticketDiscount');
+const { staffAccountFor, staffSettings, staffSaleError } = require('../lib/staffPurchases');
 const { UNAPPLIED_SQL, paymentReceipt } = require('../lib/customerPayments');
 const { recordReturnCreditNote, useStoreCredit } = require('../lib/returnCreditNotes');
 
@@ -921,6 +922,16 @@ router.post('/', requirePermission('pos'), async (req, res) => {
     // exchange is money already paid, tax included, so it stays after tax.
     const discountPreTax = source_return_id ? 0 : 1;
     let disc = parseFloat(discount_amount || 0);
+    // A staff account's sale (lib/staffPurchases.js) gets the staff discount
+    // as its ticket discount, worked out here — not the till's figure.
+    const staff = !req.apiKey && customer_id ? await staffAccountFor(db, customer_id) : null;
+    const staffDiscount = staff && !source_return_id;
+    if (staffDiscount) {
+      const { discount_pct } = await staffSettings(db);
+      disc = parseFloat((subtotal * discount_pct / 100).toFixed(2));
+    }
+    const salePromoCode = staffDiscount ? null : (promotion_code || null);
+    const salePromoName = staffDiscount ? (disc > 0 ? 'Staff Discount' : null) : (promotion_name || null);
     if (discountPreTax) {
       const split = allocateTicketDiscount(processedItems.map(p => p.lineTotal), disc);
       disc = split.discount;
@@ -946,7 +957,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
     // Discount (quote_id), an exchange's return credit, or an online order's
     // coupon (API key — there's no cashier or manager at the till).
     let ticketDiscountOverrideBy = null;
-    if (disc > 0 && maxLineDiscountPercent > 0 && !source_return_id && !promotion_name && !quote_id && !req.apiKey) {
+    if (disc > 0 && maxLineDiscountPercent > 0 && !source_return_id && !salePromoName && !quote_id && !req.apiKey) {
       const ticketPct = subtotal > 0 ? disc / subtotal * 100 : 100;
       if (disc > subtotal * maxLineDiscountPercent / 100 + 0.005) {
         const overrideId = Number(req.body.discount_override_employee_id) || null;
@@ -1012,6 +1023,18 @@ router.post('/', requirePermission('pos'), async (req, res) => {
       if (limitError) return res.status(400).json({ error: limitError });
     }
 
+    // Staff purchases: cash only, never rung up by the employee themselves,
+    // staff discount only, and within their limit for the period.
+    if (staff) {
+      const err = await staffSaleError(db, {
+        staff, customerId: customer_id, cashierId: req.employee?.id,
+        methods: tenderLegs ? tenderLegs.map(l => l.payment_method) : [method],
+        lineDiscount: processedItems.some(p => p.discount > 0),
+        value: total + storeCredit + cashBack + (source_return_id ? disc : 0),
+      });
+      if (err) return res.status(400).json(err);
+    }
+
     const tendered = tenderLegs ? total : parseFloat(amount_tendered || (isCredit ? 0 : total));
     const change = tenderLegs ? 0 : (isCredit ? 0 : parseFloat((tendered - total).toFixed(2)));
     const finalApprovalCode = tenderLegs ? (tenderLegs.length === 1 ? tenderLegs[0].approval_code : null) : (approval_code || null);
@@ -1030,7 +1053,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         throw Object.assign(new Error('This held ticket is no longer on hold — it may already have been completed at another till. Check Transactions before taking payment again.'), { status: 409, holdGone: true });
       }
       const txSource = req.apiKey ? 'online' : 'pos';
-      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,created_by,salesperson_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,promotion_code,promotion_name,total,payment_method,amount_tendered,change_amount,is_credit,notes,source_return_id,store_credit_applied,cash_back_applied,tax_exempt,tax_exemption_number,approval_code,source,discount_pre_tax,po_number,discount_override_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id || null, employee_id || 1, createdBy, salespersonId, branch_id || null, drawer_session_id || null, subtotal, tax_amount, disc, promotion_code || null, promotion_name || null, total, method, tendered, change > 0 ? change : 0, isCredit ? 1 : 0, notes || null, source_return_id || null, storeCredit > 0 ? storeCredit : 0, cashBack > 0 ? cashBack : 0, isTaxExempt, tax_exemption_number || null, finalApprovalCode, txSource, discountPreTax, poNumber, ticketDiscountOverrideBy] });
+      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,created_by,salesperson_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,promotion_code,promotion_name,total,payment_method,amount_tendered,change_amount,is_credit,notes,source_return_id,store_credit_applied,cash_back_applied,tax_exempt,tax_exemption_number,approval_code,source,discount_pre_tax,po_number,discount_override_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id || null, employee_id || 1, createdBy, salespersonId, branch_id || null, drawer_session_id || null, subtotal, tax_amount, disc, salePromoCode, salePromoName, total, method, tendered, change > 0 ? change : 0, isCredit ? 1 : 0, notes || null, source_return_id || null, storeCredit > 0 ? storeCredit : 0, cashBack > 0 ? cashBack : 0, isTaxExempt, tax_exemption_number || null, finalApprovalCode, txSource, discountPreTax, poNumber, ticketDiscountOverrideBy] });
       const txId = Number(txResult.lastInsertRowid);
 
       const paymentLegs = tenderLegs || [{ payment_method: method, amount: total, approval_code: finalApprovalCode }];

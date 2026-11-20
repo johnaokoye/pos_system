@@ -7,6 +7,7 @@ const { logActivity, clientIp } = require('../lib/sessionActivity');
 const { requireAuth, requirePermission, canSignApprovals } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { uploadSignature } = require('../lib/signatures');
+const { staffSettings, staffStatus, staffReport } = require('../lib/staffPurchases');
 
 // True once a password has been migrated to a bcrypt hash (bcryptjs always
 // produces $2a$/$2b$-prefixed output). Plaintext legacy passwords never
@@ -103,6 +104,91 @@ async function copyEmployeeAssociations(sourceId, newId, opts) {
       SELECT ?, hourly_target, daily_target, weekly_target, monthly_target FROM sales_targets WHERE employee_id = ?`, args: [newId, sourceId] });
   }
 }
+
+// ── Staff purchases (lib/staffPurchases.js) ──────────────────────────────
+// Report: every staff account's purchases in a period (?period=YYYY-MM, or
+// YYYY when the limit is yearly; default the current one).
+router.get('/staff-purchases', requirePermission('employees'), async (req, res) => {
+  try { res.json(await staffReport(db, req.query.period || null)); }
+  catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
+async function staffAccountPayload(employeeId) {
+  const { rows: [emp] } = await db.execute({ sql: 'SELECT id, staff_purchase_tier, staff_purchase_limit FROM employees WHERE id = ?', args: [employeeId] });
+  if (!emp) return null;
+  const { rows: [cust] } = await db.execute({ sql: 'SELECT id, customer_number, first_name, last_name, active FROM customers WHERE staff_employee_id = ?', args: [employeeId] });
+  return {
+    employee_id: emp.id,
+    tier: emp.staff_purchase_tier === 'manager' ? 'manager' : 'staff',
+    own_limit: emp.staff_purchase_limit,
+    settings: await staffSettings(db),
+    customer: cust || null,
+    status: cust ? await staffStatus(db, cust.id) : null,
+  };
+}
+
+router.get('/:id/staff-account', requirePermission('employees'), async (req, res) => {
+  try {
+    const out = await staffAccountPayload(req.params.id);
+    if (!out) return res.status(404).json({ error: 'Employee not found' });
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Give an employee their staff account: link an existing customer
+// (customer_id — a cash customer not already someone's staff account) or
+// create a new cash customer in their name.
+router.post('/:id/staff-account', requirePermission('employees_edit'), async (req, res) => {
+  try {
+    const { rows: [emp] } = await db.execute({ sql: 'SELECT id, first_name, last_name, active FROM employees WHERE id = ?', args: [req.params.id] });
+    if (!emp) return res.status(404).json({ error: 'Employee not found' });
+    if (!emp.active) return res.status(400).json({ error: 'This employee is inactive' });
+    const { rows: [already] } = await db.execute({ sql: 'SELECT customer_number FROM customers WHERE staff_employee_id = ?', args: [emp.id] });
+    if (already) return res.status(409).json({ error: `${emp.first_name} ${emp.last_name} already has staff account ${already.customer_number}` });
+    let customerId = Number(req.body.customer_id) || null;
+    if (customerId) {
+      const { rows: [c] } = await db.execute({ sql: 'SELECT id, customer_number, active, customer_type, staff_employee_id FROM customers WHERE id = ?', args: [customerId] });
+      if (!c) return res.status(404).json({ error: 'Customer not found' });
+      if (!c.active) return res.status(400).json({ error: `${c.customer_number} is inactive` });
+      if (String(c.customer_type || '').toLowerCase() === 'credit') return res.status(400).json({ error: `${c.customer_number} is a credit account — staff purchases are cash only, so link a cash customer or create a new account` });
+      if (c.staff_employee_id) return res.status(409).json({ error: `${c.customer_number} is already another employee's staff account` });
+      await db.execute({ sql: 'UPDATE customers SET staff_employee_id = ? WHERE id = ?', args: [emp.id, customerId] });
+    } else {
+      const customer_number = await nextNumber(db, 'customers', 'customer_number', 'CUST-', 4);
+      const r = await db.execute({
+        sql: "INSERT INTO customers (customer_number, first_name, last_name, customer_type, notes, staff_employee_id) VALUES (?, ?, ?, 'cash', ?, ?)",
+        args: [customer_number, emp.first_name, emp.last_name, 'Staff account — staff purchases', emp.id],
+      });
+      customerId = Number(r.lastInsertRowid);
+    }
+    res.status(201).json(await staffAccountPayload(emp.id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Unlink: the customer stays (with its sales); it just stops being a staff account.
+router.delete('/:id/staff-account', requirePermission('employees_edit'), async (req, res) => {
+  try {
+    await db.execute({ sql: 'UPDATE customers SET staff_employee_id = NULL WHERE staff_employee_id = ?', args: [req.params.id] });
+    res.json(await staffAccountPayload(req.params.id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Limit tier ('staff' | 'manager') and an optional personal limit (blank =
+// the tier's limit from Settings).
+router.put('/:id/staff-purchase', requirePermission('employees_edit'), async (req, res) => {
+  try {
+    const tier = req.body.tier === 'manager' ? 'manager' : 'staff';
+    const raw = req.body.limit;
+    let limit = null;
+    if (raw !== undefined && raw !== null && String(raw).trim() !== '') {
+      limit = parseFloat(raw);
+      if (!Number.isFinite(limit) || limit < 0) return res.status(400).json({ error: 'The personal limit must be an amount of 0 or more' });
+    }
+    const r = await db.execute({ sql: 'UPDATE employees SET staff_purchase_tier = ?, staff_purchase_limit = ? WHERE id = ?', args: [tier, limit, req.params.id] });
+    if (!r.rowsAffected) return res.status(404).json({ error: 'Employee not found' });
+    res.json(await staffAccountPayload(req.params.id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // Matches the "+ Add Employee" button's actual frontend gate — it's shown
 // to anyone with the `employees` module permission, not a finer sub-key

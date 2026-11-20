@@ -763,7 +763,9 @@ router.get('/:id', requireAuth, async (req, res) => {
     const { rows: [updated] } = await db.execute({ sql: CUSTOMER_WITH_CARD_SELECT, args: [req.params.id] });
     const { rows: transactions } = await db.execute({ sql: 'SELECT * FROM transactions WHERE customer_id = ? ORDER BY created_at DESC LIMIT 10', args: [req.params.id] });
     const { rows: contacts } = await db.execute({ sql: 'SELECT id, name, job_title, phone, email FROM customer_contacts WHERE customer_id = ? ORDER BY sort_order, id', args: [req.params.id] });
-    res.json({ ...updated, recent_transactions: transactions, contacts, credit_block: await creditBlockInfo(updated) });
+    // A staff account (lib/staffPurchases.js): discount, limit and what's left, for the POS.
+    const staff_purchase = updated.staff_employee_id ? await require('../lib/staffPurchases').staffStatus(db, updated.id) : null;
+    res.json({ ...updated, recent_transactions: transactions, contacts, credit_block: await creditBlockInfo(updated), staff_purchase });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

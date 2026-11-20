@@ -78,6 +78,10 @@ router.post('/plans', requirePermission('layaway_create'), async (req, res) => {
     const homeErr = await homeBranchError(db, req, branch_id);
     if (homeErr) return res.status(400).json({ error: homeErr, code: 'home_branch' });
     if (!items || !items.length) return res.status(400).json({ error: 'At least one item is required' });
+    // Staff purchases are cash at the till only (lib/staffPurchases.js).
+    if (await require('../lib/staffPurchases').staffAccountFor(db, customer_id)) {
+      return res.status(400).json({ error: 'Staff purchases are cash only — a staff account can\'t take a layaway', code: 'staff_cash_only' });
+    }
     const frequency = ['weekly', 'biweekly', 'monthly'].includes(payment_frequency) ? payment_frequency : 'monthly';
 
     // Layaway-eligible items sell at their shelf price plus this store-wide

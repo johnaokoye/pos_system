@@ -949,6 +949,7 @@ Object.assign(App, {
   // everything downstream — collections, cancellation — is untouched).
   async posCreateLayawayFromCart() {
     if (this._posQItemBlocksSale()) return;
+    if (this.cartCustomer?.staff_purchase) { this.alert('Staff purchases are cash only — a staff account can\'t take a layaway', 'error'); return; }
     if (this._posBlockedCustomerSale()) return;
     await this.showLayawayCheckoutModal();
     // Set only after the modal opens (which resets it to false itself) —
@@ -2039,6 +2040,7 @@ Object.assign(App, {
     const item = this.cart[idx];
     if (!item) return;
     if (!item.product_id) { this.alert('This line has no catalog product to check discount eligibility against', 'error'); return; }
+    if (this.cartCustomer?.staff_purchase) { this.alert('Staff purchases get the staff discount only — no line discounts', 'error'); return; }
     let eligibility;
     try {
       eligibility = await this.api('GET', `/promotions/discount-eligibility/${item.product_id}`);
@@ -2211,6 +2213,29 @@ Object.assign(App, {
     return true;
   },
 
+  // A staff account on the ticket (lib/staffPurchases.js, checked again by
+  // POST /transactions): cash only, not the cashier's own account, no line
+  // discounts, and within what's left of the employee's limit — read fresh.
+  async _staffPurchaseCheck(method) {
+    const sp = this.cartCustomer?.staff_purchase;
+    if (!sp) return true;
+    if (method !== 'cash') { this.alert('Staff purchases are cash only', 'error'); return false; }
+    if (Number(sp.employee_id) === Number(this.currentUser?.id)) { this.alert('You can\'t ring up a staff purchase on your own account — another cashier must process it', 'error'); return false; }
+    if (!sp.employee_active) { this.alert(`${sp.employee_name} is no longer an active employee, so staff purchases on this account are closed`, 'error'); return false; }
+    if (this.cart.some(i => i.discountPercent > 0 || i.discountFixed > 0)) { this.alert('Staff purchases get the staff discount only — remove the line discounts', 'error'); return false; }
+    const fresh = await this.api('GET', `/customers/${this.cartCustomer.id}`).catch(() => null);
+    const now = fresh?.staff_purchase || sp;
+    if (fresh) this.cartCustomer = { ...this.cartCustomer, staff_purchase: now };
+    this._renderCartCustomer();
+    const { total } = this.getCartTotals();
+    const value = total + (this._storeCreditApplied || 0) + (this._cashBackApplied || 0);
+    if (value - now.remaining > 0.005) {
+      this.alert(`This purchase (${this.fmt(value)}) would take ${now.employee_name} over their ${now.period === 'year' ? 'yearly' : 'monthly'} staff purchase limit of ${this.fmt(now.limit)}. Used in ${now.period_label}: ${this.fmt(now.used)}; left: ${this.fmt(now.remaining)}.`, 'error');
+      return false;
+    }
+    return true;
+  },
+
   async processPayment(method) {
     // One sale at a time — a second click while the first is still saving
     // would charge the ticket twice.
@@ -2218,6 +2243,7 @@ Object.assign(App, {
     if (!this.cart.length) { this.alert('Cart is empty', 'warning'); return; }
     if (this._posQItemBlocksSale()) return;
     if (this._posBlockedCustomerSale()) return;
+    if (!await this._staffPurchaseCheck(method)) return;
     if (!await this._salespersonReminder()) return;
     if (!await this._ticketDiscountApproved()) return;
 
@@ -3419,6 +3445,7 @@ Object.assign(App, {
       `<span class="badge-pill ${isCredit ? 'badge-blue' : 'badge-success'}" title="Customer type">${isCredit ? 'Credit' : 'Cash'}</span>`,
       c.is_rental_customer ? `<span class="badge-pill badge-purple" title="Rental customer">🔑 Rental</span>` : '',
       c.account_blocked ? `<span class="badge-pill badge-danger" title="${this.escapeAttr(this._creditBlockedText(c))}">Blocked</span>` : '',
+      c.staff_purchase ? `<span class="badge-pill badge-purple" title="Staff purchase: ${c.staff_purchase.discount_pct}% off, cash only. Limit ${this.fmt(c.staff_purchase.limit)} for ${esc(c.staff_purchase.period_label)}, used ${this.fmt(c.staff_purchase.used)}">Staff · ${this.fmt(c.staff_purchase.remaining)} left</span>` : '',
     ].filter(Boolean).join('');
     return `<div class="cart-cust-name">${esc(`${c.first_name || ''} ${c.last_name || ''}`.trim())}</div><div class="cart-cust-meta">${meta}</div>`;
   },
@@ -3435,6 +3462,8 @@ Object.assign(App, {
   // A customer's discount card, else their category discount (also used by
   // Hold Recall) — null when neither applies.
   _customerDiscountCard(c) {
+    // A staff account always gets the staff discount (lib/staffPurchases.js).
+    if (c.staff_purchase) return c.staff_purchase.discount_pct > 0 ? { type_name: 'Staff', percent: c.staff_purchase.discount_pct, card_number: null, label: 'Discount', staff: true } : null;
     if (c.discount_card_type_id && c.discount_card_type_active) return { type_name: c.discount_card_type_name, percent: c.discount_card_percent, card_number: c.discount_card_number, label: 'Discount Card' };
     if (c.customer_category_id && c.customer_category_active && c.customer_category_discount_percent > 0) return { type_name: c.customer_category_name, percent: c.customer_category_discount_percent, card_number: null, label: 'Customer Discount' };
     return null;

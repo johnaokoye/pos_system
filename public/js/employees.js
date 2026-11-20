@@ -7,7 +7,10 @@ Object.assign(App, {
     document.getElementById('content').innerHTML = `
       <div class="section-header">
         <h2>Employees</h2>
-        <button class="btn btn-primary" onclick="App.showEmployeeForm()">+ Add Employee</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-secondary" onclick="App.showStaffPurchasesReport()">Staff Purchases</button>
+          <button class="btn btn-primary" onclick="App.showEmployeeForm()">+ Add Employee</button>
+        </div>
       </div>
       <div class="card">
         <div class="table-wrap">
@@ -142,6 +145,10 @@ Object.assign(App, {
               </label>`).join('')}
             </div>
           </div>` : ''}
+          ${id ? `<div style="border-top:1px solid var(--border);margin:12px 0 0;padding-top:12px">
+            <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Staff Purchases</div>
+            <div id="ef-staff-box"><div style="font-size:12px;color:var(--text-muted)">Loading…</div></div>
+          </div>` : ''}
           ${id && this.can('employees_edit') ? `<div style="border-top:1px solid var(--border);margin:12px 0 0;padding-top:12px">
             <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Approval Signature</div>
             <div id="ef-sig-box"><div style="font-size:12px;color:var(--text-muted)">Loading…</div></div>
@@ -153,6 +160,7 @@ Object.assign(App, {
         </div>
       </div>`);
     if (id && this.can('employees_edit')) this._loadEmployeeSignature(id);
+    if (id) this._loadStaffAccount(id);
     if (!id && copyFromId) {
       document.getElementById('ef-copy-from').value = String(copyFromId);
       this.applyEmployeeCopySource(copyFromId);
@@ -214,6 +222,141 @@ Object.assign(App, {
       this.alert(id ? 'Employee updated' : 'Employee created');
       this.renderEmployees();
     } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  // ─── Staff purchases (lib/staffPurchases.js) ──────────────
+  // The employee form's Staff Purchases box: their staff account (a cash
+  // customer in their name), limit tier and this period's use.
+  async _loadStaffAccount(id) {
+    const box = document.getElementById('ef-staff-box');
+    if (!box) return;
+    let d;
+    try { d = await this.api('GET', `/employees/${id}/staff-account`); }
+    catch (e) { box.innerHTML = `<div style="font-size:12px;color:var(--danger)">${this.escapeAttr(e.message)}</div>`; return; }
+    this._renderStaffAccount(id, d);
+  },
+
+  _renderStaffAccount(id, d) {
+    const box = document.getElementById('ef-staff-box');
+    if (!box) return;
+    const edit = this.can('employees_edit');
+    const set = d.settings;
+    const per = set.period === 'year' ? 'year' : 'month';
+    const tierLimit = d.tier === 'manager' ? set.limit_manager : set.limit_staff;
+    const st = d.status;
+    const account = d.customer
+      ? `<div style="font-size:13px;margin-bottom:8px">Account <strong>${this.escapeAttr(d.customer.customer_number)}</strong> — ${this.escapeAttr(`${d.customer.first_name} ${d.customer.last_name}`.trim())}
+          ${edit ? ` <button class="btn btn-secondary btn-sm" style="margin-left:6px" onclick="App._unlinkStaffAccount(${id})">Unlink</button>` : ''}</div>
+         ${st ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">${this.escapeAttr(st.period_label)}: used <strong>${this.fmt(st.used)}</strong> of ${this.fmt(st.limit)} — <strong>${this.fmt(st.remaining)}</strong> left (${st.sales} sale${st.sales === 1 ? '' : 's'}).</div>` : ''}`
+      : `<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">No staff account yet. Staff purchases are rung up at the POS on this account: ${set.discount_pct}% off, cash only.</div>
+         ${edit ? `<div class="input-row" style="align-items:flex-end;margin-bottom:10px">
+           <button class="btn btn-secondary btn-sm" onclick="App._createStaffAccount(${id})">Create Staff Account</button>
+           <div class="form-group" style="flex:1;margin-bottom:0"><label>or link existing customer #</label><input id="ef-staff-link" placeholder="e.g. CUST-0123"></div>
+           <button class="btn btn-secondary btn-sm" onclick="App._createStaffAccount(${id}, true)">Link</button>
+         </div>` : ''}`;
+    box.innerHTML = `${account}
+      <div class="input-row" style="align-items:flex-end">
+        <div class="form-group" style="margin-bottom:0"><label>Limit Tier</label>
+          <select id="ef-staff-tier" ${edit ? '' : 'disabled'}>
+            <option value="staff" ${d.tier === 'staff' ? 'selected' : ''}>Staff — ${this.fmt(set.limit_staff)} a ${per}</option>
+            <option value="manager" ${d.tier === 'manager' ? 'selected' : ''}>Manager — ${this.fmt(set.limit_manager)} a ${per}</option>
+          </select></div>
+        <div class="form-group" style="margin-bottom:0"><label>Personal limit (blank = tier's ${this.fmt(tierLimit)})</label>
+          <input id="ef-staff-limit" type="number" min="0" step="0.01" value="${d.own_limit ?? ''}" ${edit ? '' : 'disabled'}></div>
+        ${edit ? `<button class="btn btn-secondary btn-sm" onclick="App._saveStaffPurchase(${id})">Save Limit</button>` : ''}
+      </div>`;
+  },
+
+  async _createStaffAccount(id, link) {
+    let customer_id;
+    if (link) {
+      const q = document.getElementById('ef-staff-link')?.value.trim();
+      if (!q) { this.alert('Enter the customer number to link', 'warning'); return; }
+      try {
+        const found = await this.api('GET', `/customers?search=${encodeURIComponent(q)}&limit=20`);
+        const list = Array.isArray(found) ? found : (found.customers || found.rows || []);
+        const c = list.find(x => String(x.customer_number).toLowerCase() === q.toLowerCase());
+        if (!c) { this.alert(`No customer numbered ${q}`, 'error'); return; }
+        customer_id = c.id;
+      } catch (e) { this.alert(e.message, 'error'); return; }
+    }
+    try {
+      const d = await this.api('POST', `/employees/${id}/staff-account`, customer_id ? { customer_id } : {});
+      this.alert(`Staff account ${d.customer.customer_number} ${link ? 'linked' : 'created'}`, 'success');
+      this._renderStaffAccount(id, d);
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  async _unlinkStaffAccount(id) {
+    if (!confirm('Unlink this staff account? The customer and its sales stay; it just stops getting the staff discount and limit.')) return;
+    try { this._renderStaffAccount(id, await this.api('DELETE', `/employees/${id}/staff-account`)); this.alert('Staff account unlinked'); }
+    catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  async _saveStaffPurchase(id) {
+    try {
+      const d = await this.api('PUT', `/employees/${id}/staff-purchase`, {
+        tier: document.getElementById('ef-staff-tier').value,
+        limit: document.getElementById('ef-staff-limit').value,
+      });
+      this._renderStaffAccount(id, d);
+      this.alert('Staff purchase limit saved', 'success');
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  // Employees → Staff Purchases: every staff account for a month (or year).
+  async showStaffPurchasesReport(period) {
+    let r;
+    try { r = await this.api('GET', `/employees/staff-purchases${period ? `?period=${encodeURIComponent(period)}` : ''}`); }
+    catch (e) { this.alert(e.message, 'error'); return; }
+    this._staffReport = r;
+    const yearly = r.period === 'year';
+    const tot = k => r.accounts.reduce((s, a) => s + (Number(a[k]) || 0), 0);
+    const rows = r.accounts.map(a => `<tr${a.employee_active ? '' : ' style="opacity:.6"'}>
+        <td class="fw-600">${this.escapeAttr(a.employee_name)}${a.employee_active ? '' : ' <span class="badge-pill badge-danger">Inactive</span>'}</td>
+        <td style="font-family:monospace;font-size:12px">${this.escapeAttr(a.customer_number)}</td>
+        <td>${a.tier === 'manager' ? 'Manager' : 'Staff'}${a.own_limit ? ' (personal)' : ''}</td>
+        <td class="text-right">${this.fmt(a.limit)}</td>
+        <td class="text-right">${a.sales}</td>
+        <td class="text-right">${this.fmt(a.purchases)}</td>
+        <td class="text-right">${a.returns ? '-' + this.fmt(a.returns) : '—'}</td>
+        <td class="text-right fw-600">${this.fmt(a.used)}</td>
+        <td class="text-right" style="color:${a.remaining <= 0 ? 'var(--danger)' : 'inherit'}">${this.fmt(a.remaining)}</td>
+        <td class="text-right">${this.fmt(a.discount_given)}</td>
+      </tr>`).join('');
+    this.showModal(`
+      <div class="modal" style="max-width:1000px">
+        <div class="modal-header"><span class="modal-title">Staff Purchases — ${this.escapeAttr(r.period_label)}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div class="input-row" style="align-items:flex-end;margin-bottom:12px">
+            <div class="form-group" style="margin-bottom:0;max-width:200px"><label>${yearly ? 'Year' : 'Month'}</label>
+              ${yearly ? `<input id="spr-period" type="number" min="2000" max="2100" value="${r.period_key}">` : `<input id="spr-period" type="month" value="${r.period_key}">`}</div>
+            <button class="btn btn-secondary" onclick="App.showStaffPurchasesReport(document.getElementById('spr-period').value)">Show</button>
+            <button class="btn btn-secondary" onclick="App._staffPurchasesCsv()">CSV</button>
+          </div>
+          <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px">${r.discount_pct}% staff discount, cash only. Used = purchases (after the discount, with GCT) less returns made in the ${yearly ? 'year' : 'month'}. Limit tiers and staff accounts are set on each employee's form; the discount and limits in Settings.</p>
+          ${r.accounts.length ? `<div class="table-wrap"><table>
+            <thead><tr><th>Employee</th><th>Account</th><th>Tier</th><th class="text-right">Limit</th><th class="text-right">Sales</th><th class="text-right">Purchases</th><th class="text-right">Returns</th><th class="text-right">Used</th><th class="text-right">Left</th><th class="text-right">Discount Given</th></tr></thead>
+            <tbody>${rows}</tbody>
+            <tfoot><tr class="fw-600"><td colspan="4">Total</td><td class="text-right">${tot('sales')}</td><td class="text-right">${this.fmt(tot('purchases'))}</td><td class="text-right">${tot('returns') ? '-' + this.fmt(tot('returns')) : '—'}</td><td class="text-right">${this.fmt(tot('used'))}</td><td></td><td class="text-right">${this.fmt(tot('discount_given'))}</td></tr></tfoot>
+          </table></div>` : '<p style="color:var(--text-muted)">No staff accounts yet — create one from an employee\'s form (Edit → Staff Purchases).</p>'}
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">Close</button></div>
+      </div>`);
+  },
+
+  _staffPurchasesCsv() {
+    const r = this._staffReport;
+    if (!r) return;
+    const head = ['employee', 'employee_number', 'account', 'tier', 'limit', 'sales', 'purchases', 'returns', 'used', 'remaining', 'discount_given'];
+    const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const lines = [head.join(',')].concat(r.accounts.map(a => [a.employee_name, a.employee_number, a.customer_number, a.tier, a.limit, a.sales, a.purchases, a.returns, a.used, a.remaining, a.discount_given].map(q).join(',')));
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `staff-purchases-${r.period_key}.csv`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
   },
 
 });
