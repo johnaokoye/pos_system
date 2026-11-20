@@ -239,7 +239,7 @@ Object.assign(App, {
   _renderStaffAccount(id, d) {
     const box = document.getElementById('ef-staff-box');
     if (!box) return;
-    const edit = this.can('employees_edit');
+    const edit = this.can('employees_staff_accounts');
     const set = d.settings;
     const per = set.period === 'year' ? 'year' : 'month';
     const tierLimit = d.tier === 'manager' ? set.limit_manager : set.limit_staff;

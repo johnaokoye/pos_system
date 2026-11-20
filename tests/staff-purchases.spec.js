@@ -147,3 +147,28 @@ test('limits are before tax', async ({ page }) => {
   expect(st).toMatchObject({ used: 170, remaining: 0 });
   expect(await attempt(page, 'POST', '/transactions', { ...sale, items: [{ product_id: p.id, quantity: 1 }] })).toContain('(85.00 before tax)');
 });
+
+test('assigning a staff account needs employees_staff_accounts', async ({ page }) => {
+  const stamp = Date.now();
+  const target = await api(page, 'POST', '/employees', { first_name: 'Perm', last_name: `Target${stamp}`, username: `pt${stamp}`, pin: `${stamp}`.slice(-6), password: 'pw-123456', must_change_password: 0, default_branch_id: 1, active: 1 });
+  const mk = async (name, perms) => {
+    const g = await api(page, 'POST', '/security-groups', { name: `${name} ${stamp}`, permissions: perms });
+    const u = `${name.toLowerCase()}${stamp}`;
+    await api(page, 'POST', '/employees', { first_name: name, last_name: `${stamp}`, username: u, pin: `${stamp + name.length}`.slice(-6), password: 'pw-123456', must_change_password: 0, security_group_id: g.id, default_branch_id: 1, active: 1 });
+    const ctx = await request.newContext({ baseURL: process.env.POS_TEST_URL });
+    await ctx.post('/api/employees/login', { data: { username: u, password: 'pw-123456' } });
+    return ctx;
+  };
+  const without = await mk('NoStaff', { employees_edit: true });
+  const withKey = await mk('Staffer', { employees_staff_accounts: true });
+  try {
+    // Seeing it is fine (Employees access); changing it isn't.
+    expect((await without.get(`/api/employees/${target.id}/staff-account`)).ok()).toBeTruthy();
+    expect((await without.post(`/api/employees/${target.id}/staff-account`, { data: {} })).status()).toBe(403);
+    expect((await without.put(`/api/employees/${target.id}/staff-purchase`, { data: { tier: 'manager' } })).status()).toBe(403);
+    const made = await withKey.post(`/api/employees/${target.id}/staff-account`, { data: {} });
+    expect(made.status()).toBe(201);
+    expect((await withKey.put(`/api/employees/${target.id}/staff-purchase`, { data: { tier: 'manager' } })).ok()).toBeTruthy();
+    expect((await withKey.delete(`/api/employees/${target.id}/staff-account`)).ok()).toBeTruthy();
+  } finally { await without.dispose(); await withKey.dispose(); }
+});

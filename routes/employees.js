@@ -138,7 +138,7 @@ router.get('/:id/staff-account', requirePermission('employees'), async (req, res
 // Give an employee their staff account: link an existing customer
 // (customer_id — a cash customer not already someone's staff account) or
 // create a new cash customer in their name.
-router.post('/:id/staff-account', requirePermission('employees_edit'), async (req, res) => {
+router.post('/:id/staff-account', requirePermission('employees_staff_accounts'), async (req, res) => {
   try {
     const { rows: [emp] } = await db.execute({ sql: 'SELECT id, first_name, last_name, active FROM employees WHERE id = ?', args: [req.params.id] });
     if (!emp) return res.status(404).json({ error: 'Employee not found' });
@@ -166,7 +166,7 @@ router.post('/:id/staff-account', requirePermission('employees_edit'), async (re
 });
 
 // Unlink: the customer stays (with its sales); it just stops being a staff account.
-router.delete('/:id/staff-account', requirePermission('employees_edit'), async (req, res) => {
+router.delete('/:id/staff-account', requirePermission('employees_staff_accounts'), async (req, res) => {
   try {
     await db.execute({ sql: 'UPDATE customers SET staff_employee_id = NULL WHERE staff_employee_id = ?', args: [req.params.id] });
     res.json(await staffAccountPayload(req.params.id));
@@ -175,7 +175,7 @@ router.delete('/:id/staff-account', requirePermission('employees_edit'), async (
 
 // Limit tier ('staff' | 'manager') and an optional personal limit (blank =
 // the tier's limit from Settings).
-router.put('/:id/staff-purchase', requirePermission('employees_edit'), async (req, res) => {
+router.put('/:id/staff-purchase', requirePermission('employees_staff_accounts'), async (req, res) => {
   try {
     const tier = req.body.tier === 'manager' ? 'manager' : 'staff';
     const raw = req.body.limit;

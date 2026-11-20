@@ -4423,6 +4423,9 @@ async function _init() {
       if (!('consignment_grn_approve' in perms)) { perms.consignment_grn_approve = can(perms, 'purchasing_approve'); changed = true; }
       if (!('consignment_finance' in perms)) { perms.consignment_finance = !!perms.payables_approve; changed = true; }
       // Deleting quotes (2026-11-12) starts with whoever can approve them.
+      // Assigning staff accounts / staff purchase tiers and limits
+      // (2026-11-20) starts with whoever could edit employees, which gated it.
+      if (!('employees_staff_accounts' in perms)) { perms.employees_staff_accounts = can(perms, 'employees_edit'); changed = true; }
       if (!('quotations_delete' in perms)) { perms.quotations_delete = can(perms, 'quotations_approve'); changed = true; }
       // Requesting an (advance) payment from an approved PO (2026-11-02)
       // starts with whoever can create POs.

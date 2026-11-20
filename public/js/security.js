@@ -72,6 +72,7 @@ Object.assign(App, {
       { key: 'employees_edit', label: 'Edit Employees' },
       { key: 'employees_delete', label: 'Deactivate Employees' },
       { key: 'employees_salaries', label: 'View Salary Info' },
+      { key: 'employees_staff_accounts', label: 'Assign Staff Accounts (staff purchases: account, tier, limit)' },
     ]},
     { key: 'suppliers', label: 'Suppliers', subs: [
       { key: 'suppliers_add', label: 'Add Suppliers' },
