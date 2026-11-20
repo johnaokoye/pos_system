@@ -2230,10 +2230,11 @@ Object.assign(App, {
     const now = fresh?.staff_purchase || sp;
     if (fresh) this.cartCustomer = { ...this.cartCustomer, staff_purchase: now };
     this._renderCartCustomer();
-    const { total } = this.getCartTotals();
-    const value = total + (this._storeCreditApplied || 0) + (this._cashBackApplied || 0);
+    // Limits are before tax: the goods after the staff discount.
+    const { subtotal, discount } = this.getCartTotals();
+    const value = subtotal - (this._returnCredit ? 0 : discount);
     if (value - now.remaining > 0.005) {
-      this.alert(`This purchase (${this.fmt(value)}) would take ${now.employee_name} over their ${now.period === 'year' ? 'yearly' : 'monthly'} staff purchase limit of ${this.fmt(now.limit)}. Used in ${now.period_label}: ${this.fmt(now.used)}; left: ${this.fmt(now.remaining)}.`, 'error');
+      this.alert(`This purchase (${this.fmt(value)} before tax) would take ${now.employee_name} over their ${now.period === 'year' ? 'yearly' : 'monthly'} staff purchase limit of ${this.fmt(now.limit)} (before tax). Used in ${now.period_label}: ${this.fmt(now.used)}; left: ${this.fmt(now.remaining)}.`, 'error');
       return false;
     }
     return true;
@@ -3448,7 +3449,7 @@ Object.assign(App, {
       `<span class="badge-pill ${isCredit ? 'badge-blue' : 'badge-success'}" title="Customer type">${isCredit ? 'Credit' : 'Cash'}</span>`,
       c.is_rental_customer ? `<span class="badge-pill badge-purple" title="Rental customer">🔑 Rental</span>` : '',
       c.account_blocked ? `<span class="badge-pill badge-danger" title="${this.escapeAttr(this._creditBlockedText(c))}">Blocked</span>` : '',
-      c.staff_purchase ? `<span class="badge-pill badge-purple" title="Staff purchase: ${c.staff_purchase.discount_pct}% off${c.staff_purchase.discount_min > 0 ? ` from ${this.fmt(c.staff_purchase.discount_min)} (before tax)` : ''}, cash or card. Limit ${this.fmt(c.staff_purchase.limit)} for ${esc(c.staff_purchase.period_label)}, used ${this.fmt(c.staff_purchase.used)}">Staff · ${this.fmt(c.staff_purchase.remaining)} left</span>` : '',
+      c.staff_purchase ? `<span class="badge-pill badge-purple" title="Staff purchase: ${c.staff_purchase.discount_pct}% off${c.staff_purchase.discount_min > 0 ? ` from ${this.fmt(c.staff_purchase.discount_min)} (before tax)` : ''}, cash or card. Limit ${this.fmt(c.staff_purchase.limit)} before tax for ${esc(c.staff_purchase.period_label)}, used ${this.fmt(c.staff_purchase.used)}">Staff · ${this.fmt(c.staff_purchase.remaining)} left (pre-tax)</span>` : '',
     ].filter(Boolean).join('');
     return `<div class="cart-cust-name">${esc(`${c.first_name || ''} ${c.last_name || ''}`.trim())}</div><div class="cart-cust-meta">${meta}</div>`;
   },

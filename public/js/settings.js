@@ -101,8 +101,8 @@ Object.assign(App, {
                 <select id="s-staff-period"><option value="month" ${s.staff_purchase_period !== 'year' ? 'selected' : ''}>Per month</option><option value="year" ${s.staff_purchase_period === 'year' ? 'selected' : ''}>Per year</option></select></div>
             </div>
             <div class="input-row">
-              <div class="form-group"><label>Staff Limit</label><input type="number" id="s-staff-limit-staff" value="${s.staff_purchase_limit_staff ?? 45000}" min="0" step="0.01"></div>
-              <div class="form-group"><label>Manager Limit</label><input type="number" id="s-staff-limit-manager" value="${s.staff_purchase_limit_manager ?? 150000}" min="0" step="0.01"></div>
+              <div class="form-group"><label>Staff Limit <span style="color:var(--text-muted);font-weight:400;font-size:11px">(before tax)</span></label><input type="number" id="s-staff-limit-staff" value="${s.staff_purchase_limit_staff ?? 45000}" min="0" step="0.01"></div>
+              <div class="form-group"><label>Manager Limit <span style="color:var(--text-muted);font-weight:400;font-size:11px">(before tax)</span></label><input type="number" id="s-staff-limit-manager" value="${s.staff_purchase_limit_manager ?? 150000}" min="0" step="0.01"></div>
             </div>
             <button class="btn btn-primary" onclick="App.saveSettings()">Save Settings</button>
           </div>

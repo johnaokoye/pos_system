@@ -247,7 +247,7 @@ Object.assign(App, {
     const account = d.customer
       ? `<div style="font-size:13px;margin-bottom:8px">Account <strong>${this.escapeAttr(d.customer.customer_number)}</strong> — ${this.escapeAttr(`${d.customer.first_name} ${d.customer.last_name}`.trim())}
           ${edit ? ` <button class="btn btn-secondary btn-sm" style="margin-left:6px" onclick="App._unlinkStaffAccount(${id})">Unlink</button>` : ''}</div>
-         ${st ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">${this.escapeAttr(st.period_label)}: used <strong>${this.fmt(st.used)}</strong> of ${this.fmt(st.limit)} — <strong>${this.fmt(st.remaining)}</strong> left (${st.sales} sale${st.sales === 1 ? '' : 's'}).</div>` : ''}`
+         ${st ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">${this.escapeAttr(st.period_label)}: used <strong>${this.fmt(st.used)}</strong> of ${this.fmt(st.limit)} (before tax) — <strong>${this.fmt(st.remaining)}</strong> left (${st.sales} sale${st.sales === 1 ? '' : 's'}).</div>` : ''}`
       : `<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">No staff account yet. Staff purchases are rung up at the POS on this account: ${set.discount_pct}% off, paid by cash or card.</div>
          ${edit ? `<div class="input-row" style="align-items:flex-end;margin-bottom:10px">
            <button class="btn btn-secondary btn-sm" onclick="App._createStaffAccount(${id})">Create Staff Account</button>
@@ -334,9 +334,9 @@ Object.assign(App, {
             <button class="btn btn-secondary" onclick="App.showStaffPurchasesReport(document.getElementById('spr-period').value)">Show</button>
             <button class="btn btn-secondary" onclick="App._staffPurchasesCsv()">CSV</button>
           </div>
-          <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px">${r.discount_pct}% staff discount${r.discount_min > 0 ? ` on purchases of ${this.fmt(r.discount_min)} or more (before tax)` : ''}, paid by cash or card. Used = purchases (after the discount, with GCT) less returns made in the ${yearly ? 'year' : 'month'}. Limit tiers and staff accounts are set on each employee's form; the discount and limits in Settings.</p>
+          <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px">${r.discount_pct}% staff discount${r.discount_min > 0 ? ` on purchases of ${this.fmt(r.discount_min)} or more (before tax)` : ''}, paid by cash or card. Limits and figures are before tax: Used = purchases (after the staff discount) less returns made in the ${yearly ? 'year' : 'month'}. Limit tiers and staff accounts are set on each employee's form; the discount and limits in Settings.</p>
           ${r.accounts.length ? `<div class="table-wrap"><table>
-            <thead><tr><th>Employee</th><th>Account</th><th>Tier</th><th class="text-right">Limit</th><th class="text-right">Sales</th><th class="text-right">Purchases</th><th class="text-right">Returns</th><th class="text-right">Used</th><th class="text-right">Left</th><th class="text-right">Discount Given</th></tr></thead>
+            <thead><tr><th>Employee</th><th>Account</th><th>Tier</th><th class="text-right">Limit (pre-tax)</th><th class="text-right">Sales</th><th class="text-right">Purchases</th><th class="text-right">Returns</th><th class="text-right">Used</th><th class="text-right">Left</th><th class="text-right">Discount Given</th></tr></thead>
             <tbody>${rows}</tbody>
             <tfoot><tr class="fw-600"><td colspan="4">Total</td><td class="text-right">${tot('sales')}</td><td class="text-right">${this.fmt(tot('purchases'))}</td><td class="text-right">${tot('returns') ? '-' + this.fmt(tot('returns')) : '—'}</td><td class="text-right">${this.fmt(tot('used'))}</td><td></td><td class="text-right">${this.fmt(tot('discount_given'))}</td></tr></tfoot>
           </table></div>` : '<p style="color:var(--text-muted)">No staff accounts yet — create one from an employee\'s form (Edit → Staff Purchases).</p>'}

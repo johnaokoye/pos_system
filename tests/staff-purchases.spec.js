@@ -51,7 +51,7 @@ test('staff purchases: 15% off, cash or card, not your own, within the limit', a
   expect(await attempt(page, 'POST', '/layaway/plans', { customer_id: custId, branch_id: 1, employee_id: 1, items: [{ product_id: p.id, quantity: 1 }], payment_method: 'cash', amount_tendered: 50 })).toContain('cash or card');
 
   // 170 used of 200 — another 85 is over.
-  expect(await attempt(page, 'POST', '/transactions', { customer_id: custId, items: [{ product_id: p.id, quantity: 1 }], branch_id: 1, employee_id: 1, payment_method: 'cash', amount_tendered: 1000 })).toContain('over their monthly staff purchase limit of 200.00');
+  expect(await attempt(page, 'POST', '/transactions', { customer_id: custId, items: [{ product_id: p.id, quantity: 1 }], branch_id: 1, employee_id: 1, payment_method: 'cash', amount_tendered: 1000 })).toContain('over their monthly staff purchase limit of 200.00 (before tax)');
 
   // A return frees up the limit in the month it's made.
   const group = groups.find(g => g.name === 'Manager');
@@ -129,4 +129,21 @@ test('the staff discount only applies from the minimum purchase (before tax)', a
   } finally {
     await api(page, 'PUT', '/settings', { staff_discount_min: String(prev) });
   }
+});
+
+test('limits are before tax', async ({ page }) => {
+  const stamp = Date.now();
+  const cashier = (await api(page, 'GET', '/security-groups')).find(g => g.name === 'Cashier');
+  const emp = await api(page, 'POST', '/employees', { first_name: 'Tax', last_name: `Staff${stamp}`, username: `tax${stamp}`, pin: `${stamp}`.slice(-6), password: 'pw-123456', must_change_password: 0, security_group_id: cashier.id, default_branch_id: 1, active: 1 });
+  const acct = await api(page, 'POST', `/employees/${emp.id}/staff-account`, {});
+  await api(page, 'PUT', `/employees/${emp.id}/staff-purchase`, { tier: 'staff', limit: 170 });
+  const p = await api(page, 'POST', '/products', { sku: `STAFFTAX-${stamp}`, name: `Staff Tape ${stamp}`, price: 100, cost: 40, tax_rate: 15 });
+  await api(page, 'PATCH', `/products/${p.id}/stock`, { adjustment: 10, branch_id: 1, reason: 'test' });
+  const sale = { customer_id: acct.customer.id, items: [{ product_id: p.id, quantity: 2 }], branch_id: 1, employee_id: 1, payment_method: 'cash', amount_tendered: 10000 };
+  // 2 × 100 − 15% = 170 before tax (195.50 with GCT) — exactly the limit.
+  const s = await api(page, 'POST', '/transactions', sale);
+  expect(s.total).toBe(195.5);
+  const st = (await api(page, 'GET', `/customers/${acct.customer.id}`)).staff_purchase;
+  expect(st).toMatchObject({ used: 170, remaining: 0 });
+  expect(await attempt(page, 'POST', '/transactions', { ...sale, items: [{ product_id: p.id, quantity: 1 }] })).toContain('(85.00 before tax)');
 });

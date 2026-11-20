@@ -1031,7 +1031,8 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         staff, customerId: customer_id, cashierId: req.employee?.id,
         methods: tenderLegs ? tenderLegs.map(l => l.payment_method) : [method],
         lineDiscount: processedItems.some(p => p.discount > 0),
-        value: total + storeCredit + cashBack + (source_return_id ? disc : 0),
+        // Limits are before tax: the goods after the staff discount.
+        value: subtotal - (source_return_id ? 0 : disc),
       });
       if (err) return res.status(400).json(err);
     }
