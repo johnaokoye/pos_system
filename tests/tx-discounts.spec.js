@@ -212,4 +212,22 @@ test.describe('Transactions — discounts', () => {
       await page.evaluate(() => { App._ticketCreatedBy = null; });
     });
   });
+
+  test('the receipt shows line discounts above the Subtotal', async ({ page }) => {
+    const p = await product(page);
+    const sale = await api(page, 'POST', '/transactions', { branch_id: 1, employee_id: 1, payment_method: 'cash', amount_tendered: 100000,
+      items: [{ product_id: p.id, quantity: 2, discount_percent: 2 }, { product_id: p.id, quantity: 1 }] });
+    const full = await api(page, 'GET', `/transactions/${sale.id}`);
+    const ld = Math.round(full.items.reduce((s, i) => s + (i.discount_amount || 0), 0) * 100) / 100;
+    expect(ld).toBeGreaterThan(0);
+    expect(await page.evaluate(t => App._lineDiscountTotal(t), full)).toBe(ld);
+    await page.evaluate(t => App.showReceipt(t), full);
+    const fmt = v => page.evaluate(v => App.fmt(v), v);
+    await expect(page.locator('.receipt-row', { hasText: 'Line Discounts' })).toContainText(`-${await fmt(ld)}`);
+    await expect(page.locator('.receipt-row', { hasText: 'Before Discounts' })).toContainText(await fmt(full.subtotal + ld));
+    await page.evaluate(() => App.closeModal());
+    // The sale view too.
+    await page.evaluate(id => App.viewTransaction(id), sale.id);
+    await expect(page.locator('.modal', { hasText: 'Line Discounts' })).toBeVisible();
+  });
 });

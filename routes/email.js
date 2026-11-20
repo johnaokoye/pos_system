@@ -174,6 +174,12 @@ function signatureLinesHtml(labels) {
       </table>`;
 }
 
+// A sale's line discounts summed: receipts show them above Subtotal, which is
+// already net of them (frontend twin App._lineDiscountTotal).
+function lineDiscountTotal(tx) {
+  return Math.round((tx?.items || []).reduce((sum, i) => sum + (i.is_comment ? 0 : parseFloat(i.discount_amount) || 0), 0) * 100) / 100;
+}
+
 function buildReceiptHtml(tx, s) {
   const storeName = s.store_name || 'My Store';
   const storeAddr = tx.branch_address
@@ -224,6 +230,7 @@ function buildReceiptHtml(tx, s) {
         <tbody>${rows}</tbody>
       </table>
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-top:12px">
+        ${(ld => ld > 0 ? `<tr><td style="padding:3px 0">Before Discounts</td><td style="text-align:right">${fmt(parseFloat(tx.subtotal) + ld)}</td></tr><tr><td style="padding:3px 0;color:${BRAND.green}">Line Discounts</td><td style="text-align:right;color:${BRAND.green}">-${fmt(ld)}</td></tr>` : '')(lineDiscountTotal(tx))}
         <tr><td style="padding:3px 0">Subtotal</td><td style="text-align:right">${fmt(tx.subtotal)}</td></tr>
         ${parseFloat(tx.discount_amount) > 0 && tx.discount_pre_tax ? `<tr><td style="padding:3px 0;color:${BRAND.green}">Discount</td><td style="text-align:right;color:${BRAND.green}">-${fmt(tx.discount_amount)}</td></tr>` : ''}
         <tr><td style="padding:3px 0">Tax</td><td style="text-align:right">${fmt(tx.tax_amount)}</td></tr>
@@ -2928,6 +2935,7 @@ function receiptPdfModel(tx, s) {
       return { cells: [i.product_name, i.quantity, fmt(i.unit_price), fmt(i.total)], sub: [i.sku, pct > 0 ? `less ${i.discount_fixed > 0 ? fmt(i.discount_amount) : `${pct}% (-${fmt(i.discount_amount)})`}` : ''].filter(Boolean).join(' · ') };
     }) }],
     totals: [
+      ...(ld => ld > 0 ? [{ label: 'Before Discounts', value: fmt(parseFloat(tx.subtotal) + ld) }, { label: 'Line Discounts', value: `-${fmt(ld)}`, style: 'green' }] : [])(lineDiscountTotal(tx)),
       { label: 'Subtotal', value: fmt(tx.subtotal) },
       parseFloat(tx.discount_amount) > 0 && tx.discount_pre_tax ? { label: 'Discount', value: `-${fmt(tx.discount_amount)}`, style: 'green' } : null,
       tx.tax_exempt ? { label: `Tax Exempt${tx.tax_exemption_number ? ` (Ref: ${tx.tax_exemption_number})` : ''}`, value: '-' } : { label: 'Tax', value: fmt(tx.tax_amount) },

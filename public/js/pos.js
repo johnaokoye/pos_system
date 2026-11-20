@@ -1457,6 +1457,12 @@ Object.assign(App, {
     return mine.includes(Number(approverId)) ? "You can't approve a discount on your own ticket — another manager must enter their PIN." : null;
   },
 
+  // A sale's line discounts summed — the receipt shows them above Subtotal
+  // (which is already net of them), so the discount is visible in the totals.
+  _lineDiscountTotal(tx) {
+    return Math.round((tx?.items || []).reduce((s, i) => s + (i.is_comment ? 0 : parseFloat(i.discount_amount) || 0), 0) * 100) / 100;
+  },
+
   _askTicketDiscountOverride(message) {
     return new Promise(resolve => {
       let settled = false;
@@ -2988,6 +2994,7 @@ Object.assign(App, {
               ${i.transfer_qty > 0 ? `<div style="font-size:11px;font-weight:600;padding-left:8px">TO COLLECT: ${i.transfer_qty} — coming from another branch; we'll contact you when it's here</div>` : ''}
             </div>`; }).join('')}
             <hr>
+            ${(ld => ld > 0 ? `<div class="receipt-row"><span>Before Discounts</span><span>${this.fmt(tx.subtotal + ld)}</span></div><div class="receipt-row"><span>Line Discounts</span><span>-${this.fmt(ld)}</span></div>` : '')(this._lineDiscountTotal(tx))}
             <div class="receipt-row"><span>Subtotal</span><span>${this.fmt(tx.subtotal)}</span></div>
             ${tx.discount_amount > 0 && tx.discount_pre_tax ? `<div class="receipt-row"><span>Discount${tx.promotion_code ? ` (${tx.promotion_code})` : ''}</span><span>-${this.fmt(tx.discount_amount)}</span></div>${tx.promotion_name ? `<div style="color:#666;font-size:11px;padding-left:4px">${tx.promotion_name}</div>` : ''}` : ''}
             ${tx.tax_exempt ? `<div class="receipt-row" style="color:#2e7d32"><span>Tax Exempt${tx.tax_exemption_number ? ` — Ref: ${tx.tax_exemption_number}` : ''}</span><span>—</span></div>` : `<div class="receipt-row"><span>Tax</span><span>${this.fmt(tx.tax_amount)}</span></div>`}
@@ -3131,6 +3138,7 @@ Object.assign(App, {
       ['Rental Deposit', this.fmt(rentalBreakdown.depositAmt)],
       tx.discount_amount > 0 ? ['Discount', `-${this.fmt(tx.discount_amount)}`] : null,
     ] : [
+      ...(ld => ld > 0 ? [['Before Discounts', this.fmt(tx.subtotal + ld)], ['Line Discounts', `-${this.fmt(ld)}`]] : [])(this._lineDiscountTotal(tx)),
       ['Subtotal', this.fmt(tx.subtotal)],
       // Discount above tax on sales where it came off before tax (discount_pre_tax), below it on older ones.
       tx.discount_amount > 0 && tx.discount_pre_tax ? [`Discount${tx.promotion_code ? ` (${tx.promotion_code})` : ''}`, `-${this.fmt(tx.discount_amount)}`] : null,
