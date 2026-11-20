@@ -172,3 +172,41 @@ test('assigning a staff account needs employees_staff_accounts', async ({ page }
     expect((await withKey.delete(`/api/employees/${target.id}/staff-account`)).ok()).toBeTruthy();
   } finally { await without.dispose(); await withKey.dispose(); }
 });
+
+test('Reports → Sales → Staff Purchases shows staff transactions', async ({ page }) => {
+  const stamp = Date.now();
+  const cashier = (await api(page, 'GET', '/security-groups')).find(g => g.name === 'Cashier');
+  const emp = await api(page, 'POST', '/employees', { first_name: 'Rpt', last_name: `Staff${stamp}`, username: `rpt${stamp}`, pin: `${stamp}`.slice(-6), password: 'pw-123456', must_change_password: 0, security_group_id: cashier.id, default_branch_id: 1, active: 1 });
+  const acct = await api(page, 'POST', `/employees/${emp.id}/staff-account`, {});
+  await api(page, 'PUT', `/employees/${emp.id}/staff-purchase`, { tier: 'manager', limit: '' });
+  const p = await api(page, 'POST', '/products', { sku: `STAFFRPT-${stamp}`, name: `Staff Ladder ${stamp}`, price: 100, cost: 40, tax_rate: 15 });
+  await api(page, 'PATCH', `/products/${p.id}/stock`, { adjustment: 10, branch_id: 1, reason: 'test' });
+  const sale = (qty, extra = {}) => api(page, 'POST', '/transactions', { customer_id: acct.customer.id, items: [{ product_id: p.id, quantity: qty }], branch_id: 1, employee_id: 1, payment_method: 'cash', amount_tendered: 10000, ...extra });
+  const s1 = await sale(2);                                                         // 200 − 30 = 170 pre-tax, 195.50 paid
+  await sale(1, { payment_method: 'debit_card', approval_code: '77', amount_tendered: undefined }); // 85 pre-tax, 97.75 paid
+  const v = await sale(1);
+  const mgrGroup = await api(page, 'POST', '/security-groups', { name: `Void Ret ${stamp}`, permissions: { void_transactions: true, returns_override: true } });
+  const pin = `${stamp + 3}`.slice(-6);
+  await api(page, 'POST', '/employees', { first_name: 'Rpt', last_name: `Mgr${stamp}`, username: `rptm${stamp}`, pin, password: 'pw-123456', must_change_password: 0, security_group_id: mgrGroup.id, active: 1 });
+  await api(page, 'PATCH', `/transactions/${v.id}/void`, { pin, reason: 'test' });
+  const full = await api(page, 'GET', `/transactions/${s1.id}`);
+  await api(page, 'POST', `/transactions/${s1.id}/return`, { items: [{ transaction_item_id: full.items[0].id, quantity: 1 }], resolution: 'credit_note', notes: 'Bent', override_pin: pin });
+
+  const d = await api(page, 'GET', `/reports/staff-purchases?employee_id=${emp.id}`);
+  expect(d.totals).toMatchObject({ transactions: 2, voided: 1, gross: 300, staff_discount: 45, net: 255, tax: 38.25, paid: 293.25, returns: 1, returns_pretax: 85, net_after_returns: 170 });
+  expect(d.transactions).toHaveLength(3);
+  const row = d.by_employee[0];
+  expect(row).toMatchObject({ staff_id: emp.id, tier: 'manager', transactions: 2, net: 255, net_after_returns: 170, limit: 150000, period_used: 170 });
+  expect(d.by_payment.map(x => x.method).sort()).toEqual(['cash', 'debit_card']);
+  expect(d.top_items[0]).toMatchObject({ product_id: p.id, units: 3, net: 255 });
+
+  // On screen.
+  await page.evaluate(() => App.showSection('reports-sales'));
+  await page.getByText('Staff Purchases', { exact: true }).waitFor();
+  await page.evaluate(() => App.showStaffSalesReport());
+  await page.locator('#ssr-employee option', { hasText: `Rpt Staff${stamp}` }).waitFor({ state: 'attached' });
+  await page.selectOption('#ssr-employee', String(emp.id));
+  await page.evaluate(() => App.loadStaffSalesReport());
+  await expect(page.locator('#rpt-modal-content')).toContainText(s1.transaction_number);
+  await expect(page.locator('#rpt-modal-content')).toContainText('Net After Returns');
+});

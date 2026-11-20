@@ -42,6 +42,7 @@ Object.assign(App, {
       <div class="section-header"><h2>Sales Reports</h2></div>
       ${this._reportButtonCard('Sales by Branch &amp; Department', 'Total sales per branch, broken down into Retail, Rental, Work Orders, and Special Projects.', 'App.showSalesByDepartmentReport()')}
       ${this._reportButtonCard('Hourly Sales by Day', 'For each day of the week, sales and tickets in every hour of the day, with average revenue per ticket — to see when the store is busiest.', 'App.showHourlySalesReport()')}
+      ${this._reportButtonCard('Staff Purchases', 'Everything employees bought on their staff accounts — by employee (with where each stands on their limit), payment, branch, cashier and day, top items, every transaction and the returns on them.', 'App.showStaffSalesReport()')}
       ${this._reportButtonCard('Online Sales', 'Orders from the website and WooCommerce — by channel, branch, fulfillment status and day, with top-selling products.', 'App.showOnlineSalesReport()')}
       ${this._reportButtonCard('Salesperson Leaderboard', 'Quotes created/converted, win rate, and total credited sales per salesperson.', 'App.showSalesLeaderboardReport()')}
       ${this._reportButtonCard('Quote Funnel &amp; Cycle Time', 'How many quotes sit in each status, and the average days spent between Draft, Sent, Accepted, and Converted.', 'App.showQuoteFunnelReport()')}
@@ -1098,6 +1099,105 @@ Object.assign(App, {
   },
 
   // ─── Online Sales ───────────────────────────────────────────────────────
+
+  // ─── Staff Purchases ────────────────────────────────────────────────────
+  // GET /reports/staff-purchases — sales on staff accounts (lib/staffPurchases.js).
+  // Money before tax (the limits are pre-tax), with GCT and amount paid beside it.
+
+  async showStaffSalesReport() {
+    const branches = await this.api('GET', '/branches').catch(() => []);
+    const filters = `${this._reportDateRangeFilters('ssr-start', 'ssr-end', 1)}
+      <select id="ssr-employee" style="width:190px"><option value="">All staff</option></select>
+      <select id="ssr-tier" style="width:140px"><option value="">All tiers</option><option value="staff">Staff tier</option><option value="manager">Manager tier</option></select>
+      <select id="ssr-branch" style="width:170px"><option value="">All locations</option>${this._reportBranchOptions(branches)}</select>`;
+    this._showReportModal('Staff Purchases', filters, 'loadStaffSalesReport');
+    const modal = document.getElementById('rpt-modal-content')?.closest('.modal');
+    if (modal) modal.style.maxWidth = '1240px';
+  },
+
+  async loadStaffSalesReport() {
+    const val = id => document.getElementById(id)?.value || '';
+    const content = document.getElementById('rpt-modal-content');
+    if (!content) return;
+    const q = new URLSearchParams({ start: val('ssr-start'), end: val('ssr-end') });
+    for (const [k, id] of [['employee_id', 'ssr-employee'], ['tier', 'ssr-tier'], ['branch_id', 'ssr-branch']]) if (val(id)) q.set(k, val(id));
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let d;
+    try { d = await this.api('GET', `/reports/staff-purchases?${q}`); }
+    catch (e) { content.innerHTML = `<div class="empty-state"><p>${this.escapeAttr(e.message)}</p></div>`; return; }
+    // The employee box lists every staff account (kept on the chosen one).
+    const sel = document.getElementById('ssr-employee');
+    if (sel) {
+      const cur = sel.value;
+      sel.innerHTML = `<option value="">All staff</option>${d.staff_accounts.map(a => `<option value="${a.id}"${String(a.id) === cur ? ' selected' : ''}>${this.escapeAttr(a.name)}${a.active ? '' : ' (inactive)'}</option>`).join('')}`;
+    }
+    this._renderStaffSalesReport(d);
+  },
+
+  _renderStaffSalesReport(d) {
+    const content = document.getElementById('rpt-modal-content');
+    if (!content) return;
+    const esc = v => this.escapeAttr(v ?? '');
+    const m = n => this.fmt(n);
+    const neg = n => (Number(n) ? '-' + this.fmt(n) : '—');
+    const t = d.totals;
+    const payLabel = k => ({ cash: 'Cash', credit_card: 'Credit Card', debit_card: 'Debit Card', split: 'Split' }[k] || String(k || '—').replace(/_/g, ' '));
+    const tierLabel = k => (k === 'manager' ? 'Manager' : 'Staff');
+    const fmtDay = v => new Date(v + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    const txLink = (id, num) => `<a href="#" onclick="event.preventDefault();App.closeModal();App.viewTransaction(${Number(id)})">${esc(num)}</a>`;
+    const r = 'style="text-align:right"';
+    const card = (title, inner, note) => `<div class="card" style="margin-bottom:16px"><div class="card-header"><span class="card-title">${title}</span>${note ? `<span style="font-size:11px;color:var(--text-muted)">${note}</span>` : ''}</div>${inner}</div>`;
+    const table = (head, rows, empty) => rows.length
+      ? `<div class="table-wrap"><table class="ssr-table"><thead><tr>${head.map(h => `<th${h.endsWith('$') ? ' ' + r : ''}>${h.replace(/\$$/, '')}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>`
+      : `<p style="color:var(--text-muted);font-size:13px;margin:4px 0">${empty}</p>`;
+    const moneyCols = g => `<td ${r}>${g.transactions}</td><td ${r}>${m(g.gross)}</td><td ${r}>${neg(g.staff_discount)}</td><td ${r} class="fw-600">${m(g.net)}</td><td ${r}>${m(g.tax)}</td><td ${r}>${m(g.paid)}</td>`;
+    const moneyHead = ['Txns$', 'Before Discount$', 'Staff Discount$', 'Net (pre-tax)$', 'GCT$', 'Paid$'];
+    const per = d.settings.period === 'year' ? 'year' : 'month';
+    const header = `<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">${fmtDay(d.start)} – ${fmtDay(d.end)} · ${d.branch_name ? esc(d.branch_name) : 'All locations'} · staff discount ${d.settings.discount_pct}%${d.settings.discount_min > 0 ? ` from ${m(d.settings.discount_min)} (before tax)` : ''} · limits per ${per}, before tax: Staff ${m(d.settings.limit_staff)}, Manager ${m(d.settings.limit_manager)}</div>`;
+
+    const empRows = d.by_employee.map(e => {
+      const pct = e.period_used_pct;
+      const color = pct == null ? 'inherit' : pct >= 100 ? 'var(--danger)' : pct >= 80 ? 'var(--warning, #f59e0b)' : 'inherit';
+      return `<tr${e.staff_active ? '' : ' style="opacity:.6"'}>
+        <td class="fw-600">${esc(e.staff_name)}${e.staff_active ? '' : ' <span class="badge-pill badge-danger">Inactive</span>'}<div style="font-size:11px;color:var(--text-muted)">${esc(e.employee_number)} · ${esc(e.customer_number)}</div></td>
+        <td>${tierLabel(e.tier)}</td>${moneyCols(e)}
+        <td ${r}>${e.returns ? `${neg(e.returns_pretax)} <span style="font-size:11px;color:var(--text-muted)">(${e.returns})</span>` : '—'}</td>
+        <td ${r} class="fw-600">${m(e.net_after_returns)}</td>
+        <td ${r}>${m(e.limit)}</td><td style="text-align:right;color:${color}">${m(e.period_used)}${pct != null ? ` <span style="font-size:11px">(${pct}%)</span>` : ''}</td><td style="text-align:right;color:${color}">${m(e.period_remaining)}</td>
+      </tr>`;
+    });
+    const periodLabel = d.by_employee[0]?.period_label || (per === 'year' ? 'This year' : 'This month');
+
+    content.innerHTML = `
+      <style>.ssr-table th,.ssr-table td{white-space:nowrap;font-size:12px;padding:7px 8px;font-variant-numeric:tabular-nums}</style>
+      ${header}
+      <div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));margin-bottom:18px">
+        <div class="stat-card blue" style="min-width:0;padding:14px"><div class="stat-label">Staff Transactions</div><div class="stat-value" style="font-size:18px">${t.transactions.toLocaleString('en-US')}</div><div class="stat-sub">${t.employees} employee${t.employees === 1 ? '' : 's'} · avg ${m(t.avg_net)}${t.voided ? ` · ${t.voided} voided` : ''}</div></div>
+        <div class="stat-card" style="min-width:0;padding:14px"><div class="stat-label">Before Discount</div><div class="stat-value" style="font-size:18px;overflow-wrap:anywhere">${m(t.gross)}</div><div class="stat-sub">before tax · ${t.units.toLocaleString('en-US')} units</div></div>
+        <div class="stat-card orange" style="min-width:0;padding:14px"><div class="stat-label">Staff Discount Given</div><div class="stat-value" style="font-size:18px;overflow-wrap:anywhere">${m(t.staff_discount)}</div><div class="stat-sub">${t.undiscounted ? `${t.undiscounted} sale${t.undiscounted === 1 ? '' : 's'} below the minimum` : 'every sale discounted'}</div></div>
+        <div class="stat-card green" style="min-width:0;padding:14px"><div class="stat-label">Net Purchases (pre-tax)</div><div class="stat-value" style="font-size:18px;overflow-wrap:anywhere">${m(t.net)}</div><div class="stat-sub">counts toward limits</div></div>
+        <div class="stat-card" style="min-width:0;padding:14px"><div class="stat-label">GCT</div><div class="stat-value" style="font-size:18px;overflow-wrap:anywhere">${m(t.tax)}</div><div class="stat-sub">paid ${m(t.paid)}</div></div>
+        <div class="stat-card" style="min-width:0;padding:14px"><div class="stat-label">Returns (pre-tax)</div><div class="stat-value" style="font-size:18px;overflow-wrap:anywhere">${neg(t.returns_pretax)}</div><div class="stat-sub">${t.returns} return${t.returns === 1 ? '' : 's'} · ${m(t.returns_total)} with GCT</div></div>
+        <div class="stat-card blue" style="min-width:0;padding:14px"><div class="stat-label">Net After Returns</div><div class="stat-value" style="font-size:18px;overflow-wrap:anywhere">${m(t.net_after_returns)}</div><div class="stat-sub">before tax</div></div>
+      </div>
+      ${card('By Employee', table(['Employee', 'Tier', ...moneyHead, 'Returns$', 'Net After Returns$', 'Limit$', `Used — ${esc(periodLabel)}$`, 'Left$'], empRows, 'No staff accounts match.'), `Limit columns are the current ${per}, whatever the date range`)}
+      ${card('By Day', table(['Day', ...moneyHead], d.by_day.map(g => `<tr><td>${fmtDay(g.day)}</td>${moneyCols(g)}</tr>`), 'No staff sales in this range.'))}
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:0 16px">
+        ${card('By Payment Method', table(['Method', 'Txns$', 'Amount$'], d.by_payment.map(g => `<tr><td>${payLabel(g.method)}</td><td ${r}>${g.transactions}</td><td ${r} class="fw-600">${m(g.amount)}</td></tr>`), 'No payments.'), 'with GCT')}
+        ${card('By Branch', table(['Branch', 'Txns$', 'Net (pre-tax)$', 'Paid$'], d.by_branch.map(g => `<tr><td>${esc(g.branch_name)}</td><td ${r}>${g.transactions}</td><td ${r} class="fw-600">${m(g.net)}</td><td ${r}>${m(g.paid)}</td></tr>`), 'No staff sales.'))}
+      </div>
+      ${card('By Cashier (who rang it up)', table(['Cashier', ...moneyHead], d.by_cashier.map(g => `<tr><td>${esc(g.cashier_name)}</td>${moneyCols(g)}</tr>`), 'No staff sales.'))}
+      ${card('Top Items', table(['Item', 'SKU', 'Units$', 'Txns$', 'Employees$', 'Before Discount$', 'Net (pre-tax)$'], d.top_items.map(i => `<tr><td>${esc(i.name)}</td><td style="font-family:monospace;font-size:11px">${esc(i.sku)}</td><td ${r}>${Number(i.units).toLocaleString('en-US')}</td><td ${r}>${i.transactions}</td><td ${r}>${i.employees}</td><td ${r}>${m(i.gross)}</td><td ${r} class="fw-600">${m(i.net)}</td></tr>`), 'No items.'), 'top 25 by net')}
+      ${card('Transactions', table(['Date', 'Sale #', 'Employee', 'Branch', 'Cashier', 'Units$', 'Before Discount$', 'Staff Discount$', 'Net (pre-tax)$', 'GCT$', 'Paid$', 'Payment', 'Returned (pre-tax)$', 'Status'],
+        d.transactions.map(x => `<tr${x.status === 'voided' ? ' style="opacity:.55;text-decoration:line-through"' : ''}>
+          <td>${this.fmtDateTime(x.created_at)}</td><td>${txLink(x.id, x.transaction_number)}</td><td>${esc(x.staff_name)}</td><td>${esc(x.branch_name || '—')}</td><td>${esc(x.cashier_name || '—')}</td>
+          <td ${r}>${Number(x.units).toLocaleString('en-US')}</td><td ${r}>${m(x.gross)}</td><td ${r}>${x.discounted ? neg(x.staff_discount) : '<span style="font-size:11px;color:var(--text-muted)">none</span>'}</td><td ${r} class="fw-600">${m(x.net)}</td><td ${r}>${m(x.tax_amount)}</td><td ${r}>${m(x.paid)}</td>
+          <td>${payLabel(x.payment_method)}</td><td ${r}>${x.returned_pretax ? neg(x.returned_pretax) : '—'}</td><td>${x.status === 'voided' ? '<span class="badge-pill badge-danger">Voided</span>' : x.source_return_id ? '<span class="badge-pill badge-purple">Exchange</span>' : 'Completed'}</td></tr>`),
+        'No staff sales in this range.'), `${d.transactions.length} sale${d.transactions.length === 1 ? '' : 's'}${t.voided ? ' — voided ones are struck through and not counted' : ''}`)}
+      ${card('Returns', table(['Date', 'Return #', 'Sale #', 'Employee', 'Resolution', 'Pre-tax$', 'GCT$', 'Total$'],
+        d.returns.map(x => `<tr><td>${this.fmtDateTime(x.created_at)}</td><td>${esc(x.return_number)}</td><td>${txLink(x.transaction_id, x.transaction_number)}</td><td>${esc(x.staff_name)}</td><td>${esc({ refund: 'Refund', credit_note: 'Credit Note', replacement: 'Exchange' }[x.resolution] || x.resolution)}</td><td ${r}>${m(x.subtotal)}</td><td ${r}>${m(x.tax_amount)}</td><td ${r} class="fw-600">${m(x.total)}</td></tr>`),
+        'No returns on staff purchases in this range.'), 'processed in the range')}`;
+  },
 
   // ─── Hourly Sales by Day ────────────────────────────────────────────────
   // GET /reports/hourly-sales — completed sales by weekday × hour (store time).

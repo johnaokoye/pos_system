@@ -1740,4 +1740,170 @@ router.get('/hourly-sales', requirePermission('reports'), async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Staff Purchases (Reports → Sales) — every sale on a staff account
+// (customers.staff_employee_id, lib/staffPurchases.js) in a store-clock date
+// range: totals, by employee (with where they stand on their limit in the
+// current period), payment, branch and cashier, top items, each transaction
+// and the returns made on them. Money is shown before tax (limits are
+// pre-tax) with GCT and the amount paid alongside. Voided sales are listed
+// but not counted.
+router.get('/staff-purchases', requirePermission('reports'), async (req, res) => {
+  try {
+    await refreshStoreTz();
+    const today = storeToday();
+    const s = /^\d{4}-\d{2}-\d{2}$/.test(req.query.start || '') ? req.query.start : `${today.slice(0, 7)}-01`;
+    const e = /^\d{4}-\d{2}-\d{2}$/.test(req.query.end || '') ? req.query.end : today;
+    const off = storeOffsetModifier();
+    const { staffStatus, staffSettings } = require('../lib/staffPurchases');
+    const settings = await staffSettings(db);
+
+    const where = [`c.staff_employee_id IS NOT NULL`, `t.status != 'hold'`, `date(t.created_at, '${off}') BETWEEN ? AND ?`];
+    const args = [s, e];
+    if (req.query.employee_id) { where.push('c.staff_employee_id = ?'); args.push(req.query.employee_id); }
+    if (req.query.branch_id) { where.push('t.branch_id = ?'); args.push(req.query.branch_id); }
+    if (req.query.tier === 'manager' || req.query.tier === 'staff') { where.push(`COALESCE(se.staff_purchase_tier, 'staff') = ?`); args.push(req.query.tier); }
+    const W = where.join(' AND ');
+    const FROM = `FROM transactions t JOIN customers c ON c.id = t.customer_id JOIN employees se ON se.id = c.staff_employee_id`;
+
+    const { rows: txs } = await db.execute({
+      sql: `SELECT t.id, t.transaction_number, t.created_at, date(t.created_at, '${off}') AS day, t.status, t.payment_method,
+              t.subtotal, t.discount_amount, t.tax_amount, t.total, t.source_return_id, t.promotion_name,
+              COALESCE(t.store_credit_applied, 0) AS store_credit, COALESCE(t.cash_back_applied, 0) AS cash_back,
+              c.id AS customer_id, c.customer_number, se.id AS staff_id, se.first_name || ' ' || se.last_name AS staff_name,
+              se.employee_number, COALESCE(se.staff_purchase_tier, 'staff') AS tier, se.active AS staff_active,
+              t.branch_id, b.name AS branch_name, t.employee_id AS cashier_id, ce.first_name || ' ' || ce.last_name AS cashier_name,
+              (SELECT COALESCE(SUM(ti.quantity * COALESCE(ti.units_per, 1)), 0) FROM transaction_items ti WHERE ti.transaction_id = t.id AND COALESCE(ti.is_comment, 0) = 0) AS units,
+              (SELECT COALESCE(SUM(r.subtotal), 0) FROM returns r WHERE r.original_transaction_id = t.id AND COALESCE(r.status, '') != 'cancelled') AS returned_pretax
+            ${FROM} LEFT JOIN branches b ON b.id = t.branch_id LEFT JOIN employees ce ON ce.id = t.employee_id
+            WHERE ${W} ORDER BY t.created_at DESC`,
+      args,
+    });
+    const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
+    const live = txs.filter(t => t.status !== 'voided');
+    for (const t of txs) {
+      const disc = t.source_return_id ? 0 : Number(t.discount_amount) || 0;
+      t.gross = r2(t.subtotal);                       // before tax, before the staff discount
+      t.staff_discount = r2(disc);
+      t.net = r2(t.subtotal - disc);                  // before tax — what counts toward the limit
+      t.paid = r2(t.total);
+      t.returned_pretax = r2(t.returned_pretax);
+      t.discounted = disc > 0;
+    }
+
+    // Returns processed in the range on staff-account sales (any sale date).
+    const rWhere = [`c.staff_employee_id IS NOT NULL`, `COALESCE(r.status, '') != 'cancelled'`, `date(r.created_at, '${off}') BETWEEN ? AND ?`];
+    const rArgs = [s, e];
+    if (req.query.employee_id) { rWhere.push('c.staff_employee_id = ?'); rArgs.push(req.query.employee_id); }
+    if (req.query.branch_id) { rWhere.push('r.branch_id = ?'); rArgs.push(req.query.branch_id); }
+    if (req.query.tier === 'manager' || req.query.tier === 'staff') { rWhere.push(`COALESCE(se.staff_purchase_tier, 'staff') = ?`); rArgs.push(req.query.tier); }
+    const { rows: returns } = await db.execute({
+      sql: `SELECT r.id, r.return_number, r.created_at, r.resolution, r.subtotal, r.tax_amount, r.total, r.notes,
+              t.id AS transaction_id, t.transaction_number, se.id AS staff_id, se.first_name || ' ' || se.last_name AS staff_name
+            FROM returns r JOIN transactions t ON t.id = r.original_transaction_id JOIN customers c ON c.id = t.customer_id
+            JOIN employees se ON se.id = c.staff_employee_id
+            WHERE ${rWhere.join(' AND ')} ORDER BY r.created_at DESC`,
+      args: rArgs,
+    });
+
+    const sum = (list, k) => r2(list.reduce((a, x) => a + (Number(x[k]) || 0), 0));
+    const totals = {
+      transactions: live.length, voided: txs.length - live.length,
+      gross: sum(live, 'gross'), staff_discount: sum(live, 'staff_discount'), net: sum(live, 'net'),
+      tax: sum(live, 'tax_amount'), paid: sum(live, 'paid'), units: sum(live, 'units'),
+      undiscounted: live.filter(t => !t.discounted && !t.source_return_id).length,
+      returns: returns.length, returns_pretax: sum(returns, 'subtotal'), returns_total: sum(returns, 'total'),
+    };
+    totals.net_after_returns = r2(totals.net - totals.returns_pretax);
+    totals.avg_net = live.length ? r2(totals.net / live.length) : 0;
+    totals.employees = new Set(live.map(t => t.staff_id)).size;
+
+    const group = (keyFn, init) => {
+      const m = new Map();
+      for (const t of live) {
+        const k = keyFn(t);
+        if (!m.has(k)) m.set(k, { ...init(t), transactions: 0, gross: 0, staff_discount: 0, net: 0, tax: 0, paid: 0, units: 0 });
+        const g = m.get(k);
+        g.transactions++; g.gross += t.gross; g.staff_discount += t.staff_discount; g.net += t.net; g.tax += Number(t.tax_amount) || 0; g.paid += t.paid; g.units += Number(t.units) || 0;
+      }
+      return [...m.values()].map(g => ({ ...g, gross: r2(g.gross), staff_discount: r2(g.staff_discount), net: r2(g.net), tax: r2(g.tax), paid: r2(g.paid), units: r2(g.units) })).sort((a, b) => b.net - a.net);
+    };
+
+    // By employee — every staff account in the filter, even with no sales.
+    const accWhere = ['c.staff_employee_id IS NOT NULL'];
+    const accArgs = [];
+    if (req.query.employee_id) { accWhere.push('c.staff_employee_id = ?'); accArgs.push(req.query.employee_id); }
+    if (req.query.tier === 'manager' || req.query.tier === 'staff') { accWhere.push(`COALESCE(e.staff_purchase_tier, 'staff') = ?`); accArgs.push(req.query.tier); }
+    const { rows: accounts } = await db.execute({
+      sql: `SELECT c.id AS customer_id, c.customer_number, e.id AS staff_id, e.first_name || ' ' || e.last_name AS staff_name, e.employee_number,
+              COALESCE(e.staff_purchase_tier, 'staff') AS tier, e.active AS staff_active
+            FROM customers c JOIN employees e ON e.id = c.staff_employee_id WHERE ${accWhere.join(' AND ')} ORDER BY e.first_name, e.last_name`,
+      args: accArgs,
+    });
+    const salesBy = new Map();
+    for (const t of live) {
+      const g = salesBy.get(t.staff_id) || { transactions: 0, gross: 0, staff_discount: 0, net: 0, tax: 0, paid: 0, units: 0 };
+      g.transactions++; g.gross += t.gross; g.staff_discount += t.staff_discount; g.net += t.net; g.tax += Number(t.tax_amount) || 0; g.paid += t.paid; g.units += Number(t.units) || 0;
+      salesBy.set(t.staff_id, g);
+    }
+    const by_employee = [];
+    for (const a of accounts) {
+      const g = salesBy.get(a.staff_id) || { transactions: 0, gross: 0, staff_discount: 0, net: 0, tax: 0, paid: 0, units: 0 };
+      const ret = returns.filter(r => r.staff_id === a.staff_id);
+      const st = await staffStatus(db, a.customer_id);
+      by_employee.push({
+        ...a, staff_active: !!a.staff_active,
+        transactions: g.transactions, gross: r2(g.gross), staff_discount: r2(g.staff_discount), net: r2(g.net), tax: r2(g.tax), paid: r2(g.paid), units: r2(g.units),
+        returns: ret.length, returns_pretax: sum(ret, 'subtotal'), net_after_returns: r2(g.net - sum(ret, 'subtotal')),
+        limit: st.limit, period_label: st.period_label, period_used: st.used, period_remaining: st.remaining,
+        period_used_pct: st.limit > 0 ? Math.round(st.used / st.limit * 1000) / 10 : null,
+      });
+    }
+    by_employee.sort((a, b) => b.net - a.net || a.staff_name.localeCompare(b.staff_name));
+
+    // Payment methods — from the tender legs, so a split counts in each.
+    const ids = live.map(t => t.id);
+    let by_payment = [];
+    if (ids.length) {
+      const { rows } = await db.execute({
+        sql: `SELECT payment_method AS method, COUNT(DISTINCT transaction_id) AS transactions, COALESCE(SUM(amount), 0) AS amount
+              FROM transaction_payments WHERE transaction_id IN (${ids.map(() => '?').join(',')}) GROUP BY payment_method ORDER BY amount DESC`,
+        args: ids,
+      });
+      by_payment = rows.map(r => ({ method: r.method, transactions: r.transactions, amount: r2(r.amount) }));
+    }
+    const by_branch = group(t => t.branch_id || 0, t => ({ branch_id: t.branch_id, branch_name: t.branch_name || '—' }));
+    const by_cashier = group(t => t.cashier_id || 0, t => ({ cashier_id: t.cashier_id, cashier_name: t.cashier_name || '—' }));
+    const by_day = group(t => t.day, t => ({ day: t.day })).sort((a, b) => a.day.localeCompare(b.day));
+
+    // Items — net of line discounts and each line's share of the staff discount, before tax.
+    let top_items = [];
+    if (ids.length) {
+      const { rows } = await db.execute({
+        sql: `SELECT ti.product_id, COALESCE(p.name, ti.product_name) AS name, COALESCE(p.sku, ti.sku) AS sku,
+                SUM(ti.quantity * COALESCE(ti.units_per, 1)) AS units, COUNT(DISTINCT ti.transaction_id) AS transactions,
+                SUM(ti.quantity * ti.unit_price) AS gross, SUM(ti.total - COALESCE(ti.ticket_discount, 0)) AS net,
+                COUNT(DISTINCT c.staff_employee_id) AS employees
+              FROM transaction_items ti JOIN transactions t ON t.id = ti.transaction_id JOIN customers c ON c.id = t.customer_id
+              LEFT JOIN products p ON p.id = ti.product_id
+              WHERE ti.transaction_id IN (${ids.map(() => '?').join(',')}) AND COALESCE(ti.is_comment, 0) = 0
+                AND (ti.serial_number IS NULL OR ti.serial_number = '') AND upper(COALESCE(p.sku, '')) != ?
+              GROUP BY COALESCE(ti.product_id, ti.product_name) ORDER BY net DESC LIMIT 25`,
+        args: [...ids, SERIAL_NUMBER_SKU],
+      });
+      top_items = rows.map(r => ({ ...r, units: r2(r.units), gross: r2(r.gross), net: r2(r.net) }));
+    }
+
+    let branchName = null;
+    if (req.query.branch_id) branchName = (await db.execute({ sql: 'SELECT name FROM branches WHERE id = ?', args: [req.query.branch_id] })).rows[0]?.name || null;
+    const { rows: staffList } = await db.execute({
+      sql: `SELECT e.id, e.first_name || ' ' || e.last_name AS name, e.active FROM customers c JOIN employees e ON e.id = c.staff_employee_id ORDER BY e.first_name, e.last_name`, args: [],
+    });
+    res.json({
+      start: s, end: e, branch_name: branchName, settings, staff_accounts: staffList,
+      totals, by_employee, by_payment, by_branch, by_cashier, by_day, top_items,
+      transactions: txs, returns: returns.map(r => ({ ...r, subtotal: r2(r.subtotal), tax_amount: r2(r.tax_amount), total: r2(r.total) })),
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 module.exports = router;
