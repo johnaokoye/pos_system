@@ -2,12 +2,12 @@ import { test, expect } from './fixtures.js';
 import { request } from '@playwright/test';
 
 // Staff purchases (lib/staffPurchases.js): an employee's staff account gets
-// the staff discount, is cash only, can't be rung up by the employee, and
+// the staff discount, is cash or card only, can't be rung up by the employee, and
 // stops at their limit for the period; returns free the limit up again.
 const api = (page, method, url, data) => page.evaluate(([m, u, d]) => App.api(m, u, d), [method, url, data]);
 const attempt = (page, method, url, data) => page.evaluate(([m, u, d]) => App.api(m, u, d).then(() => 'accepted', e => e.message), [method, url, data]);
 
-test('staff purchases: 15% off, cash only, not your own, within the limit', async ({ page }) => {
+test('staff purchases: 15% off, cash or card, not your own, within the limit', async ({ page }) => {
   const stamp = Date.now();
   const settings = await api(page, 'GET', '/settings');
   const pct = parseFloat(settings.staff_discount_pct);
@@ -44,10 +44,11 @@ test('staff purchases: 15% off, cash only, not your own, within the limit', asyn
   expect(s1.total).toBe(170);
   expect(s1.promotion_name).toBe('Staff Discount');
 
-  // Cash only; no line discounts; no layaway.
-  expect(await attempt(page, 'POST', '/transactions', { customer_id: custId, items: [{ product_id: p.id, quantity: 1 }], branch_id: 1, employee_id: 1, payment_method: 'credit_card', approval_code: '1' })).toContain('cash only');
+  // Cash or card only (not on account / cheque); no line discounts; no layaway.
+  expect(await attempt(page, 'POST', '/transactions', { customer_id: custId, items: [{ product_id: p.id, quantity: 1 }], branch_id: 1, employee_id: 1, payment_method: 'check' })).toContain('cash or card');
+  expect(await attempt(page, 'POST', '/transactions', { customer_id: custId, items: [{ product_id: p.id, quantity: 1 }], branch_id: 1, employee_id: 1, payment_method: 'split', tenders: [{ method: 'cash', amount: 40 }, { method: 'gift_card', amount: 45, approval_code: 'G1' }] })).toContain('cash or card');
   expect(await attempt(page, 'POST', '/transactions', { customer_id: custId, items: [{ product_id: p.id, quantity: 1, discount_percent: 5 }], branch_id: 1, employee_id: 1, payment_method: 'cash', amount_tendered: 1000 })).toContain('staff discount only');
-  expect(await attempt(page, 'POST', '/layaway/plans', { customer_id: custId, branch_id: 1, employee_id: 1, items: [{ product_id: p.id, quantity: 1 }], payment_method: 'cash', amount_tendered: 50 })).toContain('cash only');
+  expect(await attempt(page, 'POST', '/layaway/plans', { customer_id: custId, branch_id: 1, employee_id: 1, items: [{ product_id: p.id, quantity: 1 }], payment_method: 'cash', amount_tendered: 50 })).toContain('cash or card');
 
   // 170 used of 200 — another 85 is over.
   expect(await attempt(page, 'POST', '/transactions', { customer_id: custId, items: [{ product_id: p.id, quantity: 1 }], branch_id: 1, employee_id: 1, payment_method: 'cash', amount_tendered: 1000 })).toContain('over their monthly staff purchase limit of 200.00');
@@ -61,8 +62,10 @@ test('staff purchases: 15% off, cash only, not your own, within the limit', asyn
   const after = (await api(page, 'GET', `/customers/${custId}`)).staff_purchase;
   expect(after.used).toBe(85);
   expect(after.remaining).toBe(115);
-  const s2 = await sell(1);
+  // A card payment is fine.
+  const s2 = await sell(1, { payment_method: 'credit_card', approval_code: '4321', amount_tendered: undefined });
   expect(s2.total).toBe(85);
+  expect(s2.payment_method).toBe('credit_card');
 
   // The employee can't ring up their own staff purchase.
   const ctx = await request.newContext({ baseURL: process.env.POS_TEST_URL });
@@ -85,7 +88,7 @@ test('staff purchases: 15% off, cash only, not your own, within the limit', asyn
   expect(await attempt(page, 'POST', '/transactions', { customer_id: custId, items: [{ product_id: p.id, quantity: 1 }], branch_id: 1, employee_id: 1, payment_method: 'cash', amount_tendered: 1000 })).toContain('no longer an active employee');
 });
 
-test('POS shows the staff badge and refuses card for a staff account', async ({ page }) => {
+test('POS shows the staff badge and refuses a cheque for a staff account', async ({ page }) => {
   const stamp = Date.now();
   const cashier = (await api(page, 'GET', '/security-groups')).find(g => g.name === 'Cashier');
   const emp = await api(page, 'POST', '/employees', { first_name: 'Pos', last_name: `Staff${stamp}`, username: `pos${stamp}`, pin: `${stamp}`.slice(-6), password: 'pw-123456', must_change_password: 0, security_group_id: cashier.id, default_branch_id: 1, active: 1 });
@@ -98,6 +101,6 @@ test('POS shows the staff badge and refuses card for a staff account', async ({ 
   await expect(page.locator('#cart-customer-name')).toContainText('Staff ·');
   await page.evaluate(([pid]) => App.api('GET', `/products/${pid}`).then(prod => { App.cart.push({ product_id: prod.id, name: prod.name, price: prod.price, quantity: 1, tax_rate: 0, units_per: 1 }); App._checkAutoPromos(); }), [p.id]);
   await page.waitForFunction(() => App.cartDiscount === 30);
-  await page.evaluate(() => App.processPayment('credit_card'));
-  await expect(page.locator('body')).toContainText('Staff purchases are cash only');
+  await page.evaluate(() => App.processPayment('check'));
+  await expect(page.locator('body')).toContainText('Staff purchases are paid at the till by cash or card');
 });

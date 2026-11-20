@@ -949,7 +949,7 @@ Object.assign(App, {
   // everything downstream — collections, cancellation — is untouched).
   async posCreateLayawayFromCart() {
     if (this._posQItemBlocksSale()) return;
-    if (this.cartCustomer?.staff_purchase) { this.alert('Staff purchases are cash only — a staff account can\'t take a layaway', 'error'); return; }
+    if (this.cartCustomer?.staff_purchase) { this.alert('Staff purchases are paid at the till by cash or card — a staff account can\'t take a layaway', 'error'); return; }
     if (this._posBlockedCustomerSale()) return;
     await this.showLayawayCheckoutModal();
     // Set only after the modal opens (which resets it to false itself) —
@@ -2214,12 +2214,12 @@ Object.assign(App, {
   },
 
   // A staff account on the ticket (lib/staffPurchases.js, checked again by
-  // POST /transactions): cash only, not the cashier's own account, no line
+  // POST /transactions): cash or card (a split's legs are checked there), not the cashier's own account, no line
   // discounts, and within what's left of the employee's limit — read fresh.
   async _staffPurchaseCheck(method) {
     const sp = this.cartCustomer?.staff_purchase;
     if (!sp) return true;
-    if (method !== 'cash') { this.alert('Staff purchases are cash only', 'error'); return false; }
+    if (!['cash', 'credit_card', 'debit_card', 'split'].includes(method)) { this.alert('Staff purchases are paid at the till by cash or card', 'error'); return false; }
     if (Number(sp.employee_id) === Number(this.currentUser?.id)) { this.alert('You can\'t ring up a staff purchase on your own account — another cashier must process it', 'error'); return false; }
     if (!sp.employee_active) { this.alert(`${sp.employee_name} is no longer an active employee, so staff purchases on this account are closed`, 'error'); return false; }
     if (this.cart.some(i => i.discountPercent > 0 || i.discountFixed > 0)) { this.alert('Staff purchases get the staff discount only — remove the line discounts', 'error'); return false; }
@@ -3445,7 +3445,7 @@ Object.assign(App, {
       `<span class="badge-pill ${isCredit ? 'badge-blue' : 'badge-success'}" title="Customer type">${isCredit ? 'Credit' : 'Cash'}</span>`,
       c.is_rental_customer ? `<span class="badge-pill badge-purple" title="Rental customer">🔑 Rental</span>` : '',
       c.account_blocked ? `<span class="badge-pill badge-danger" title="${this.escapeAttr(this._creditBlockedText(c))}">Blocked</span>` : '',
-      c.staff_purchase ? `<span class="badge-pill badge-purple" title="Staff purchase: ${c.staff_purchase.discount_pct}% off, cash only. Limit ${this.fmt(c.staff_purchase.limit)} for ${esc(c.staff_purchase.period_label)}, used ${this.fmt(c.staff_purchase.used)}">Staff · ${this.fmt(c.staff_purchase.remaining)} left</span>` : '',
+      c.staff_purchase ? `<span class="badge-pill badge-purple" title="Staff purchase: ${c.staff_purchase.discount_pct}% off, cash or card. Limit ${this.fmt(c.staff_purchase.limit)} for ${esc(c.staff_purchase.period_label)}, used ${this.fmt(c.staff_purchase.used)}">Staff · ${this.fmt(c.staff_purchase.remaining)} left</span>` : '',
     ].filter(Boolean).join('');
     return `<div class="cart-cust-name">${esc(`${c.first_name || ''} ${c.last_name || ''}`.trim())}</div><div class="cart-cust-meta">${meta}</div>`;
   },

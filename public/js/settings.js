@@ -91,7 +91,7 @@ Object.assign(App, {
           </div>
           <div class="card" style="margin-bottom:16px">
             <div class="card-header"><span class="card-title">Staff Purchases</span></div>
-            <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">Employees buying for themselves are rung up on their staff account (Employees → Edit → Staff Purchases): this discount comes off automatically, payment is cash only, nobody can ring up their own purchase, and a sale that would take them past their limit for the ${s.staff_purchase_period === 'year' ? 'year' : 'month'} is refused. Each employee is on the Staff or Manager limit, set on their form.</p>
+            <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">Employees buying for themselves are rung up on their staff account (Employees → Edit → Staff Purchases): this discount comes off automatically, payment is cash or card, nobody can ring up their own purchase, and a sale that would take them past their limit for the ${s.staff_purchase_period === 'year' ? 'year' : 'month'} is refused. Each employee is on the Staff or Manager limit, set on their form.</p>
             <div class="input-row">
               <div class="form-group"><label>Staff Discount (%)</label><input type="number" id="s-staff-discount" value="${s.staff_discount_pct ?? 15}" min="0" max="100" step="0.1"></div>
               <div class="form-group"><label>Limit Period</label>
