@@ -423,7 +423,7 @@ Object.assign(App, {
         <td>${tx.rental_agreement_number ? `<span class="badge-pill badge-info" title="${tx.rental_agreement_number} (${tx.rental_role})">Rental</span>`
           : tx.work_order_number ? `<span class="badge-pill badge-info" title="${tx.work_order_number} (${tx.wo_role})">Work Order</span>`
           : `<span class="badge-pill badge-secondary">Retail</span>`}</td>
-        <td>${this.fmt(tx.subtotal)}</td>
+        <td title="Before discounts">${this.fmt(tx.gross_subtotal ?? tx.subtotal)}</td>
         ${this._txDiscountCells(tx)}
         <td style="color:var(--text-muted)">${this.fmt(tx.tax_amount)}</td>
         <td class="fw-600">${this.fmt(tx.total)}</td>

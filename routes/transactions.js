@@ -314,7 +314,11 @@ router.get('/', requireTransactionsList, async (req, res) => {
       const gross = (Number(r.subtotal) || 0) + line;
       r.ticket_discount = ticket;
       r.total_discount = total;
-      r.discount_pct = total > 0 && gross > 0 ? Math.round(total / gross * 1000) / 10 : 0;
+      // Under 1% keeps two decimals, so a small discount doesn't read 0%.
+      const pct = total > 0 && gross > 0 ? total / gross * 100 : 0;
+      r.discount_pct = pct > 0 && pct < 1 ? Math.round(pct * 100) / 100 : Math.round(pct * 10) / 10;
+      // Goods before any line discount: Subtotal − Discount + Tax = Total.
+      r.gross_subtotal = Math.round(gross * 100) / 100;
       // The store's Maximum Discount caps each line and the ticket discount
       // separately, so the Transactions screen flags on these, not the total.
       // A ticket discount is measured against the ticket after line

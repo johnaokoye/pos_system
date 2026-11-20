@@ -55,6 +55,11 @@ test.describe('Transactions — discounts', () => {
       const row = id => list.find(t => t.id === id);
       expect(row(approved.id).total_discount).toBeCloseTo(p.price * 2 * 0.2, 2);
       expect(row(approved.id).discount_pct).toBe(20);
+      // The list's Subtotal is before discounts, so the row adds up.
+      for (const id of [approved.id, ticket.id, bigTicket.id]) {
+        const r = row(id);
+        expect(r.gross_subtotal - r.total_discount + r.tax_amount).toBeCloseTo(r.total, 2);
+      }
       expect(row(approved.id).discount_approved_by).toBe(adminName);
       expect(row(ticket.id).total_discount).toBe(ticketAmt);
       expect(row(ticket.id).discount_pct).toBe(5);
