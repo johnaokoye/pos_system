@@ -28,4 +28,19 @@ test('the New Rental customer list shows only rental-approved or preapproved cus
   await expect(dd).not.toContainText('Not ');
   await page.fill('#rc-customer-search', `${tag} Missing`);
   await expect(dd).toContainText('No rental-approved or preapproved customers found');
+
+  // A rental quote's customer box is limited the same way.
+  await page.evaluate(() => App.closeModal());
+  await page.evaluate(() => App.showQuoteForm(null, 'rental'));
+  await page.fill('#qt-cust-search', tag);
+  const qdd = page.locator('#qt-cust-dd');
+  await expect(qdd).toContainText(`Pre ${tag} Approved`);
+  await expect(qdd).not.toContainText('Half');
+  await expect(qdd).not.toContainText('Not ');
+  await expect(page.locator('#qt-cust-hint')).toBeVisible();
+  // A retail quote still lists everyone.
+  await page.evaluate(() => App.closeModal());
+  await page.evaluate(() => App.showQuoteForm(null, 'retail'));
+  await page.fill('#qt-cust-search', tag);
+  await expect(page.locator('#qt-cust-dd')).toContainText('Half');
 });

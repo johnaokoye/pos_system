@@ -458,7 +458,7 @@ Object.assign(App, {
           <div class="input-row">
             <div class="form-group"><label>Customer</label>
               ${this._customerPickerHtml('qt-cust', quoteCustomer ? [quoteCustomer] : [], q && q.customer_id, { emptyLabel: '-- Walk-in / No Customer --', remote: '' })}
-              <p id="qt-cust-hint" style="display:none;font-size:11px;color:var(--text-muted);margin:4px 0 0">Only approved rental customers are listed.</p>
+              <p id="qt-cust-hint" style="display:none;font-size:11px;color:var(--text-muted);margin:4px 0 0">Only rental-approved or preapproved customers are listed.</p>
             </div>
             <div class="form-group"><label>Branch</label>
               ${this._quoteBranchSelectHtml(q, branches)}
@@ -653,8 +653,8 @@ Object.assign(App, {
     this.calcQuoteTotal();
   },
 
-  // Rental quotes only offer customers already approved for rentals
-  // (is_rental_customer) — the current selection is kept even if it doesn't
+  // Rental quotes only offer customers who can rent: rental approved (every
+  // document on file) or preapproved, as on New Rental — the current selection is kept even if it doesn't
   // match, so editing an older quote (or a customer whose flag changed
   // since) never silently loses its assigned customer.
   _applyQuoteCustomerFilter(type) {
@@ -662,7 +662,7 @@ Object.assign(App, {
     const hint = document.getElementById('qt-cust-hint');
     const cfg = (this._custPickerLists || {})['qt-cust'];
     if (!input || !cfg) return;
-    cfg.remote = type === 'rental' ? '&rental=1' : '';
+    cfg.remote = type === 'rental' ? '&type=rental_approved' : '';
     if (hint) hint.style.display = type === 'rental' ? '' : 'none';
   },
 
