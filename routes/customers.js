@@ -13,7 +13,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
-const { getMissingRentalFields } = require('../lib/rentals');
+const { getMissingRentalFields, RENTAL_APPROVED_SQL } = require('../lib/rentals');
 const { storeToday } = require('../lib/storeTime');
 
 const upload = multer({
@@ -265,7 +265,7 @@ router.get('/', requireAuth, async (req, res) => {
       await runCreditCheckBatch(overdue.map(c => c.id));
     }
 
-    let sql = 'SELECT * FROM customers WHERE 1=1';
+    let sql = 'SELECT * FROM customers c WHERE 1=1';
     const params = [];
     if (search) {
       sql += ` AND (first_name LIKE ? OR last_name LIKE ? OR (first_name || ' ' || last_name) LIKE ? OR business_name LIKE ? OR email LIKE ? OR phone LIKE ? OR customer_number LIKE ?)`;
@@ -293,25 +293,19 @@ router.get('/', requireAuth, async (req, res) => {
     if (type === 'credit' || type === 'cash') { sql += ' AND customer_type = ?'; params.push(type); }
     // Only customers with something owing on account (POS Receive Payment).
     if (req.query.owing) sql += ' AND account_balance > 0.005';
-    // Rental approved / other is worked out per row below, so those filters
-    // can't be paged in SQL — they page the filtered list instead.
-    const rentalType = type === 'rental_approved' || type === 'other';
+    // Rental approved (also the New Rental customer picker) / other.
+    if (type === 'rental_approved') sql += ` AND ${RENTAL_APPROVED_SQL}`;
+    else if (type === 'other') sql += ` AND NOT ${RENTAL_APPROVED_SQL}`;
     let total = null;
-    if (paged && !rentalType) {
+    if (paged) {
       const { rows: [n] } = await db.execute({ sql: sql.replace('SELECT *', 'SELECT COUNT(*) AS n'), args: params });
       total = Number(n.n);
     }
     // ?owing_first=1 (POS Receive Payment search): customers with a balance
     // come first, so a common name doesn't bury the one who's paying.
     sql += ` ORDER BY ${req.query.owing_first ? 'CASE WHEN account_balance > 0.005 THEN 0 ELSE 1 END, ' : ''}last_name, first_name${paged ? ', id' : ''}`;
-    if (limit && !(paged && rentalType)) { sql += ' LIMIT ? OFFSET ?'; params.push(limit, offset); }
-    let { rows } = await db.execute({ sql, args: params });
-    if (paged && rentalType) {
-      const approved = c => !!c.is_rental_customer && (!!c.rental_preapproved || getMissingRentalFields(c).length === 0);
-      rows = rows.filter(c => approved(c) === (type === 'rental_approved'));
-      total = rows.length;
-      rows = rows.slice(offset, offset + limit);
-    }
+    if (limit) { sql += ' LIMIT ? OFFSET ?'; params.push(limit, offset); }
+    const { rows } = await db.execute({ sql, args: params });
     if (limit) {
       const owing = rows.filter(c => c.customer_type === 'credit' && c.active && c.account_balance > 0).map(c => c.id);
       if (owing.length) {
@@ -322,10 +316,6 @@ router.get('/', requireAuth, async (req, res) => {
       }
     }
     if (paged) return res.json({ rows, total });
-    if (rentalType) {
-      const approved = c => !!c.is_rental_customer && (!!c.rental_preapproved || getMissingRentalFields(c).length === 0);
-      return res.json(rows.filter(c => approved(c) === (type === 'rental_approved')));
-    }
     res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

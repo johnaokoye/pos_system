@@ -2392,7 +2392,7 @@ Object.assign(App, {
         <div class="modal-body">
           <div class="input-row">
             <div class="form-group" style="position:relative"><label>Customer *</label>
-              <input type="text" id="rc-customer-search" placeholder="Search customer…" autocomplete="off"
+              <input type="text" id="rc-customer-search" placeholder="Search rental-approved customers…" autocomplete="off"
                 oninput="App._filterRentalCustomers(this.value)" onfocus="App._filterRentalCustomers(this.value)">
               <input type="hidden" id="rc-customer" value="">
               <div id="rc-customer-dd" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
@@ -2565,13 +2565,15 @@ Object.assign(App, {
     if (!dd) return;
     if (dd.style.display === 'none') { dd.innerHTML = '<div style="padding:10px;color:var(--text-muted);font-size:13px">Searching…</div>'; dd.style.display = ''; }
     let matches;
-    try { matches = await this._customerSearch('rental', q); }
+    // Only customers who can rent today: rental approved (every document on
+    // file) or preapproved — the others are set up on the Customers screen.
+    try { matches = await this._customerSearch('rental', q, '&type=rental_approved'); }
     catch (e) { dd.innerHTML = `<div style="padding:10px;color:var(--danger);font-size:13px">${this.escapeAttr(e.message)}</div>`; return; }
     if (!matches) return;
     this._rentalCustomers = this._mergeCustomers(this._rentalCustomers, matches);
     const esc = v => this.escapeAttr(v ?? '');
     if (!matches.length) {
-      dd.innerHTML = this._addCustomerRowHtml('rental') + '<div style="padding:10px;color:var(--text-muted);font-size:13px">No customers found</div>';
+      dd.innerHTML = this._addCustomerRowHtml('rental') + '<div style="padding:10px;color:var(--text-muted);font-size:13px">No rental-approved or preapproved customers found. A customer must be set up as a rental customer (ID, proof of address, references) or marked Preapproved before they can rent.</div>';
       dd.style.display = '';
       return;
     }
