@@ -402,25 +402,38 @@ Object.assign(App, {
     const t = await this.api('GET', `/transfers/${id}`);
     this._sendingTransfer = t;
     if (t.status !== 'requested') { this.alert('This transfer has already been sent', 'warning'); return this.viewTransfer(id); }
-    const stock = t.items.map(i => i.product_id ? (i.source_stock ?? 0) : null);
-    this.showModal(`
-      <div class="modal" style="max-width:640px">
+    const canAdjust = this.can('inventory_adjust');
+    const overlay = this.showModal(`
+      <div class="modal" style="max-width:680px">
         <div class="modal-header"><span class="modal-title">Send Transfer — ${t.transfer_number}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:6px">From <strong>${t.from_branch_name}</strong> to <strong>${t.to_branch_name}</strong> · requested by ${t.employee_name || '—'}</p>
           ${this._transferCustomerOrderBanner(t)}
           ${t.notes ? `<p style="font-size:13px;color:var(--text-muted);margin-bottom:6px">${t.notes}</p>` : ''}
-          <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px">Enter the quantity you're sending for each item (0 to leave it out). Stock is taken from ${t.from_branch_name} when you send.</p>
-          ${t.items.map((i, n) => {
-            const avail = stock[n];
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:14px">
+            <p style="font-size:13px;color:var(--text-muted);margin:0">Enter the quantity you're sending for each item (0 to leave it out). Stock is taken from ${t.from_branch_name} when you send.${canAdjust ? ' If a stock figure is wrong, use <strong>Adjust</strong> on the line — no need to leave this screen.' : ''}</p>
+            <button class="btn btn-outline btn-sm" style="flex-shrink:0" onclick="App._refreshSendTransferStock(true)" title="Re-read stock at ${this.escapeAttr(t.from_branch_name)} — the quantities you've typed stay">↻ Refresh stock</button>
+          </div>
+          ${t.items.map(i => {
+            const avail = i.product_id ? (i.source_stock ?? 0) : null;
             const def = avail == null ? i.quantity_requested : Math.max(0, Math.min(i.quantity_requested, avail));
             return `
-            <div class="po-receive-row">
+            <div class="po-receive-row" style="flex-wrap:wrap">
               <div style="flex:1">
                 <div class="fw-600">${i.product_name}</div>
-                <div style="font-size:12px;color:var(--text-muted)">${i.sku || ''}${i.sku ? ' · ' : ''}Requested: ${i.quantity_requested}${avail != null ? ` · In stock at ${t.from_branch_name}: <span class="${avail < i.quantity_requested ? 'color-danger fw-600' : ''}">${avail}</span>` : ''}</div>
+                <div style="font-size:12px;color:var(--text-muted)">${i.sku || ''}${i.sku ? ' · ' : ''}Requested: ${i.quantity_requested}${avail != null ? ` · In stock at ${t.from_branch_name}: <span id="tsend-stock-${i.id}" class="${avail < i.quantity_requested ? 'color-danger fw-600' : ''}">${avail}</span>${canAdjust ? ` · <a href="#" onclick="event.preventDefault();App._toggleSendTransferAdjust(${i.id})">Adjust</a>` : ''}` : ''}</div>
               </div>
-              <input id="tsend-${i.id}" type="number" min="0" step="1" value="${def}" style="width:80px" placeholder="Qty">
+              <input id="tsend-${i.id}" type="number" min="0" step="1" value="${def}" style="width:80px" placeholder="Qty" oninput="this.dataset.touched='1'">
+              ${avail != null && canAdjust ? `
+              <div id="tsend-adj-${i.id}" style="display:none;flex-basis:100%;margin-top:8px;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary, rgba(0,0,0,.02))">
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+                  <div class="form-group" style="margin:0"><label style="font-size:12px">Counted at ${this.escapeAttr(t.from_branch_name)}</label><input id="tsend-adj-qty-${i.id}" type="number" step="1" style="width:110px"></div>
+                  <div class="form-group" style="margin:0;flex:1;min-width:180px"><label style="font-size:12px">Reason *</label><input id="tsend-adj-reason-${i.id}" type="text" placeholder="e.g. Recount while picking ${this.escapeAttr(t.transfer_number)}"></div>
+                  <button class="btn btn-primary btn-sm" id="tsend-adj-btn-${i.id}" onclick="App._saveSendTransferAdjust(${i.id})">Save count</button>
+                  <button class="btn btn-secondary btn-sm" onclick="App._toggleSendTransferAdjust(${i.id})">Cancel</button>
+                </div>
+                <div style="font-size:11px;color:var(--text-muted);margin-top:4px">Sets ${this.escapeAttr(t.from_branch_name)}'s stock to the number counted, logged as an adjustment — the same as adjusting it on the item.</div>
+              </div>` : ''}
             </div>`;
           }).join('')}
         </div>
@@ -431,6 +444,76 @@ Object.assign(App, {
           <button class="btn btn-primary" id="tsend-btn" onclick="App.confirmSendTransfer(${t.id}, [${t.items.map(i => i.id).join(',')}])">Send</button>
         </div>
       </div>`);
+    // Stock adjusted in another tab shows here when you come back to this one.
+    const onFocus = () => { if (document.visibilityState === 'visible') this._refreshSendTransferStock(false); };
+    document.addEventListener('visibilitychange', onFocus);
+    window.addEventListener('focus', onFocus);
+    const stop = () => { document.removeEventListener('visibilitychange', onFocus); window.removeEventListener('focus', onFocus); };
+    new MutationObserver((_, obs) => { if (!overlay.isConnected) { stop(); obs.disconnect(); } }).observe(document.body, { childList: true });
+  },
+
+  // Re-reads the sending branch's stock for the open Send Transfer screen and
+  // updates the "In stock" figures. Quantities typed in are kept; a line not
+  // touched yet takes the new default (the ask, capped at what's there).
+  async _refreshSendTransferStock(announce) {
+    const cur = this._sendingTransfer;
+    if (!cur || !document.getElementById('tsend-btn') || this._tsendRefreshing) return;
+    this._tsendRefreshing = true;
+    try {
+      const t = await this.api('GET', `/transfers/${cur.id}`);
+      if (t.status !== 'requested') { this.closeModal(); this.alert(`${t.transfer_number} has been ${t.status === 'cancelled' ? 'cancelled' : 'sent'} by someone else`, 'warning'); return this._refreshTransferView?.(); }
+      const changed = [];
+      for (const i of t.items) {
+        const el = document.getElementById(`tsend-stock-${i.id}`);
+        if (!el) continue;
+        const avail = i.source_stock ?? 0;
+        if (String(avail) !== el.textContent) changed.push(`${i.product_name}: ${el.textContent} → ${avail}`);
+        el.textContent = avail;
+        el.className = avail < i.quantity_requested ? 'color-danger fw-600' : '';
+        const input = document.getElementById(`tsend-${i.id}`);
+        if (input && !input.dataset.touched) input.value = Math.max(0, Math.min(i.quantity_requested, avail));
+      }
+      this._sendingTransfer = { ...cur, items: t.items };
+      if (announce || changed.length) this.alert(changed.length ? `Stock updated — ${changed.join('; ')}` : 'Stock is up to date', changed.length ? 'warning' : 'success');
+    } catch (e) { if (announce) this.alert(e.message, 'error'); }
+    finally { this._tsendRefreshing = false; }
+  },
+
+  _toggleSendTransferAdjust(itemId) {
+    const box = document.getElementById(`tsend-adj-${itemId}`);
+    if (!box) return;
+    const open = box.style.display === 'none';
+    box.style.display = open ? 'block' : 'none';
+    if (open) {
+      const qty = document.getElementById(`tsend-adj-qty-${itemId}`);
+      qty.value = document.getElementById(`tsend-stock-${itemId}`)?.textContent || '';
+      qty.focus(); qty.select();
+    }
+  },
+
+  // Sets the sending branch's stock of one line to the number counted
+  // (PATCH /products/:id/stock with the difference), then refreshes the screen.
+  async _saveSendTransferAdjust(itemId) {
+    const t = this._sendingTransfer;
+    const line = t?.items.find(i => i.id === itemId);
+    if (!line) return;
+    const counted = parseInt(document.getElementById(`tsend-adj-qty-${itemId}`).value, 10);
+    const reason = document.getElementById(`tsend-adj-reason-${itemId}`).value.trim();
+    if (!Number.isFinite(counted)) { this.alert('Enter the number counted', 'error'); return; }
+    if (!reason) { this.alert('Enter a reason for the adjustment', 'error'); return; }
+    const btn = document.getElementById(`tsend-adj-btn-${itemId}`);
+    if (btn) btn.disabled = true;
+    try {
+      // Re-read the live figure first so the adjustment is against what's there now.
+      const fresh = await this.api('GET', `/transfers/${t.id}`);
+      const now = fresh.items.find(i => i.id === itemId)?.source_stock ?? 0;
+      const diff = counted - now;
+      if (diff !== 0) await this.api('PATCH', `/products/${line.product_id}/stock`, { adjustment: diff, branch_id: t.from_branch_id, reason: `${reason} (transfer ${t.transfer_number})` });
+      document.getElementById(`tsend-adj-${itemId}`).style.display = 'none';
+      await this._refreshSendTransferStock(false);
+      this.alert(diff ? `${line.product_name}: stock at ${t.from_branch_name} set to ${counted} (${diff > 0 ? '+' : ''}${diff})` : `${line.product_name}: already ${counted} — nothing to adjust`);
+    } catch (e) { this.alert(e.message, 'error'); }
+    finally { if (btn) btn.disabled = false; }
   },
 
   // Pick list for the sending branch's inventory team: each item with its
