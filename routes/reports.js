@@ -3,7 +3,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { requireAuth, requirePermission, requireAnyPermission } = require('../lib/permissions');
 const { SERIAL_NUMBER_SKU } = require('../lib/serialNumber');
-const { refreshStoreTz, storeToday, storeOffsetModifier } = require('../lib/storeTime');
+const { refreshStoreTz, storeToday, storeOffsetModifier, storeDay } = require('../lib/storeTime');
 const { oldestOpenLegacySql, oldestUnpaidSaleSql, earliestDate } = require('../lib/legacyInvoices');
 
 // Sales summary for a date range
@@ -1905,5 +1905,273 @@ router.get('/staff-purchases', requirePermission('reports'), async (req, res) =>
     });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
+// ─── Item Transaction History ───────────────────────────────────────────────
+// Every stock movement of one item at one location (or all) over a range of
+// store days: sales, returns, transfers out / in, purchase-order and direct
+// receipts, adjustments and counts, layaways, shipments, shop use and work
+// orders. `item` = SKU, barcode or unit barcode (exact; retail preferred), or
+// `product_id`. No exact match → 404 with `matches` (name/SKU contains) to
+// pick from. Rows that didn't move stock (voided sales, transfer requests not
+// sent, transfers on their way in, cancelled transfers) come back with
+// `counted: false` so the report can show them without adding them in.
+router.get('/item-history', requireAnyPermission('reports', 'inventory'), async (req, res) => {
+  try {
+    await refreshStoreTz();
+    const today = storeToday();
+    const s = /^\d{4}-\d{2}-\d{2}$/.test(req.query.start || '') ? req.query.start : `${today.slice(0, 7)}-01`;
+    const e = /^\d{4}-\d{2}-\d{2}$/.test(req.query.end || '') ? req.query.end : today;
+    if (s > e) return res.status(400).json({ error: 'The start date is after the end date' });
+    const off = storeOffsetModifier();
+    const branchId = req.query.branch_id ? Number(req.query.branch_id) : null;
+
+    // The item.
+    let product = null;
+    const pcols = `p.id, p.sku, p.barcode, p.name, p.brand, p.cost, p.price, p.is_rental, p.is_service, p.active,
+      COALESCE(u.name, 'Each') AS unit_name, COALESCE(c.name, 'Uncategorized') AS category_name`;
+    const pjoin = 'FROM products p LEFT JOIN units_of_measure u ON u.id = p.base_unit_id LEFT JOIN categories c ON c.id = p.category_id';
+    if (req.query.product_id) {
+      ({ rows: [product] } = await db.execute({ sql: `SELECT ${pcols} ${pjoin} WHERE p.id = ?`, args: [Number(req.query.product_id)] }));
+    } else {
+      const item = String(req.query.item || '').trim();
+      if (!item) return res.status(400).json({ error: 'Enter an item number' });
+      ({ rows: [product] } = await db.execute({
+        sql: `SELECT ${pcols} ${pjoin}
+              WHERE upper(p.sku) = upper(?) OR p.barcode = ? OR p.id IN (SELECT product_id FROM product_units WHERE barcode = ?)
+              ORDER BY p.is_rental, (upper(p.sku) = upper(?)) DESC, p.active DESC LIMIT 1`,
+        args: [item, item, item, item] }));
+      if (!product) {
+        const like = `%${item}%`;
+        const { rows: matches } = await db.execute({
+          sql: `SELECT p.id, p.sku, p.name, p.brand, p.is_rental, p.active FROM products p
+                WHERE (p.name LIKE ? OR p.sku LIKE ? OR p.barcode LIKE ?) AND upper(COALESCE(p.sku, '')) != ?
+                ORDER BY p.active DESC, p.is_rental, p.name LIMIT 25`,
+          args: [like, like, like, SERIAL_NUMBER_SKU] });
+        return res.status(404).json({ error: `No item with the number "${item}"`, matches });
+      }
+    }
+    if (!product) return res.status(404).json({ error: 'Item not found', matches: [] });
+    const pid = product.id;
+
+    const inRange = col => `date(${col}, '${off}') BETWEEN ? AND ?`;
+    const br = (col) => branchId ? ` AND ${col} = ?` : '';
+    const bArgs = branchId ? [branchId] : [];
+    const rows = [];
+    const push = (list, fn) => { for (const r of list) rows.push(fn(r)); };
+
+    // Sales (completed, credit, online…; holds left out). Voided ones are listed, not counted.
+    const { rows: sales } = await db.execute({
+      sql: `SELECT t.id AS transaction_id, t.transaction_number, t.created_at, t.status, t.branch_id, b.name AS branch_name,
+              ti.quantity, COALESCE(ti.units_per, 1) AS units_per, ti.sell_unit, ti.unit_price, ti.total, ti.discount_amount, ti.variation_name,
+              ti.transfer_qty, tfb.name AS transfer_from_name,
+              COALESCE(NULLIF(c.business_name, ''), TRIM(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))) AS customer_name,
+              e.first_name || ' ' || e.last_name AS employee_name
+            FROM transaction_items ti JOIN transactions t ON t.id = ti.transaction_id
+            LEFT JOIN branches b ON b.id = t.branch_id LEFT JOIN branches tfb ON tfb.id = ti.transfer_from_branch_id
+            LEFT JOIN customers c ON c.id = t.customer_id LEFT JOIN employees e ON e.id = t.employee_id
+            WHERE ti.product_id = ? AND COALESCE(ti.is_comment, 0) = 0 AND t.status != 'hold' AND ${inRange('t.created_at')}${br('t.branch_id')}`,
+      args: [pid, s, e, ...bArgs] });
+    push(sales, r => {
+      const units = Number(r.quantity) * Number(r.units_per);
+      const voided = r.status === 'voided';
+      const notes = [];
+      if (r.variation_name) notes.push(r.variation_name);
+      if (r.sell_unit && Number(r.units_per) !== 1) notes.push(`${r.quantity} × ${r.sell_unit}`);
+      if (Number(r.discount_amount) > 0) notes.push(`discount ${Number(r.discount_amount).toFixed(2)}`);
+      if (Number(r.transfer_qty) > 0) notes.push(`${r.transfer_qty} to come by transfer from ${r.transfer_from_name || 'another branch'}`);
+      return { date: r.created_at, type: 'sale', label: voided ? 'Sale (voided)' : 'Sale', branch_id: r.branch_id, branch_name: r.branch_name,
+        reference: r.transaction_number, link: { kind: 'transaction', id: r.transaction_id },
+        party: r.customer_name || 'Walk-in', by: r.employee_name, qty: -units, counted: !voided,
+        unit_price: Number(r.units_per) ? Number(r.unit_price) / Number(r.units_per) : Number(r.unit_price), value: Number(r.total), notes: notes.join(' · '), status: r.status };
+    });
+
+    // Returns (restocked where processed).
+    const { rows: rets } = await db.execute({
+      sql: `SELECT r.id AS return_id, r.return_number, r.created_at, r.resolution, r.goods_condition, r.branch_id, b.name AS branch_name,
+              ri.quantity, COALESCE(ti.units_per, 1) AS units_per, ri.total, t.transaction_number, t.id AS transaction_id, r.notes,
+              COALESCE(NULLIF(c.business_name, ''), TRIM(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))) AS customer_name,
+              e.first_name || ' ' || e.last_name AS employee_name
+            FROM return_items ri JOIN returns r ON r.id = ri.return_id
+            LEFT JOIN transaction_items ti ON ti.id = ri.transaction_item_id LEFT JOIN transactions t ON t.id = r.original_transaction_id
+            LEFT JOIN branches b ON b.id = r.branch_id LEFT JOIN customers c ON c.id = r.customer_id LEFT JOIN employees e ON e.id = r.employee_id
+            WHERE ri.product_id = ? AND COALESCE(r.status, '') != 'cancelled' AND ${inRange('r.created_at')}${br('r.branch_id')}`,
+      args: [pid, s, e, ...bArgs] });
+    const resLabel = { refund: 'refund', credit_note: 'credit note', replacement: 'exchange' };
+    push(rets, r => {
+      const units = Number(r.quantity) * Number(r.units_per);
+      return { date: r.created_at, type: 'return', label: 'Return', branch_id: r.branch_id, branch_name: r.branch_name,
+        reference: r.return_number, link: r.transaction_id ? { kind: 'transaction', id: r.transaction_id } : null,
+        party: r.customer_name || 'Walk-in', by: r.employee_name, qty: units, counted: true, unit_price: units ? Number(r.total) / units : null, value: Number(r.total),
+        notes: [`of ${r.transaction_number || 'sale'}`, resLabel[r.resolution] || r.resolution, r.goods_condition === 'damaged' ? 'damaged' : null, r.notes].filter(Boolean).join(' · ') };
+    });
+
+    // Transfers out — stock leaves the sender when the request is sent (older
+    // transfers, at creation). Requests not sent yet and cancelled transfers are listed, not counted.
+    const { rows: tout } = await db.execute({
+      sql: `SELECT t.id, t.transfer_number, t.status, t.is_quick, t.created_at, t.sent_at, t.from_branch_id, fb.name AS from_name, tb.name AS to_name,
+              ti.quantity_requested, ti.quantity_asked, ti.quantity_received, st.transaction_number AS sale_number,
+              COALESCE(se.first_name || ' ' || se.last_name, re.first_name || ' ' || re.last_name) AS by_name
+            FROM branch_transfer_items ti JOIN branch_transfers t ON t.id = ti.transfer_id
+            LEFT JOIN branches fb ON fb.id = t.from_branch_id LEFT JOIN branches tb ON tb.id = t.to_branch_id
+            LEFT JOIN employees se ON se.id = t.sent_by LEFT JOIN employees re ON re.id = t.employee_id
+            LEFT JOIN transactions st ON st.id = t.transaction_id
+            WHERE ti.product_id = ? AND ${inRange('COALESCE(t.sent_at, t.created_at)')}${br('t.from_branch_id')}`,
+      args: [pid, s, e, ...bArgs] });
+    const tStatus = { requested: 'requested, not sent', pending: 'sent, awaiting pickup', in_transit: 'in transit', received: 'received', partial: 'part received', cancelled: 'cancelled' };
+    push(tout, r => {
+      const requested = r.status === 'requested', cancelled = r.status === 'cancelled';
+      const qty = requested ? Number(r.quantity_asked ?? r.quantity_requested) : Number(r.quantity_requested);
+      return { date: r.sent_at || r.created_at, type: 'transfer_out', label: r.is_quick ? 'Quick transfer out' : requested ? 'Transfer requested' : 'Transfer out',
+        branch_id: r.from_branch_id, branch_name: r.from_name, reference: r.transfer_number, link: { kind: 'transfer', id: r.id },
+        party: `To ${r.to_name || '—'}`, by: r.by_name, qty: -qty, counted: !requested && !cancelled,
+        notes: [tStatus[r.status] || r.status, r.sale_number ? `for sale ${r.sale_number}` : null,
+          !requested && r.quantity_asked != null && Number(r.quantity_asked) !== Number(r.quantity_requested) ? `asked ${r.quantity_asked}` : null].filter(Boolean).join(' · '), status: r.status };
+    });
+
+    // Transfers in — each delivery received (quick transfers log one too).
+    const { rows: tin } = await db.execute({
+      sql: `SELECT t.id, t.transfer_number, t.is_quick, t.to_branch_id, fb.name AS from_name, tb.name AS to_name, rc.received_at, ri.quantity,
+              rb.first_name || ' ' || rb.last_name AS by_name, COALESCE(dl.first_name || ' ' || dl.last_name, rc.delivered_by_name) AS delivered_by
+            FROM branch_transfer_receipt_items ri JOIN branch_transfer_receipts rc ON rc.id = ri.receipt_id
+            JOIN branch_transfer_items ti ON ti.id = ri.transfer_item_id JOIN branch_transfers t ON t.id = rc.transfer_id
+            LEFT JOIN branches fb ON fb.id = t.from_branch_id LEFT JOIN branches tb ON tb.id = t.to_branch_id
+            LEFT JOIN employees rb ON rb.id = rc.received_by LEFT JOIN employees dl ON dl.id = rc.delivered_by_id
+            WHERE ti.product_id = ? AND ri.quantity > 0 AND ${inRange('rc.received_at')}${br('t.to_branch_id')}`,
+      args: [pid, s, e, ...bArgs] });
+    push(tin, r => ({ date: r.received_at, type: 'transfer_in', label: r.is_quick ? 'Quick transfer in' : 'Transfer in', branch_id: r.to_branch_id, branch_name: r.to_name,
+      reference: r.transfer_number, link: { kind: 'transfer', id: r.id }, party: `From ${r.from_name || '—'}`, by: r.by_name, qty: Number(r.quantity), counted: true,
+      notes: r.delivered_by && !r.is_quick ? `delivered by ${r.delivered_by}` : '' }));
+    // Older transfers received before deliveries were logged.
+    const { rows: tinOld } = await db.execute({
+      sql: `SELECT t.id, t.transfer_number, t.to_branch_id, fb.name AS from_name, tb.name AS to_name, t.received_at, ti.quantity_received
+            FROM branch_transfer_items ti JOIN branch_transfers t ON t.id = ti.transfer_id
+            LEFT JOIN branches fb ON fb.id = t.from_branch_id LEFT JOIN branches tb ON tb.id = t.to_branch_id
+            WHERE ti.product_id = ? AND ti.quantity_received > 0 AND t.received_at IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM branch_transfer_receipts rc WHERE rc.transfer_id = t.id)
+              AND ${inRange('t.received_at')}${br('t.to_branch_id')}`,
+      args: [pid, s, e, ...bArgs] });
+    push(tinOld, r => ({ date: r.received_at, type: 'transfer_in', label: 'Transfer in', branch_id: r.to_branch_id, branch_name: r.to_name,
+      reference: r.transfer_number, link: { kind: 'transfer', id: r.id }, party: `From ${r.from_name || '—'}`, by: null, qty: Number(r.quantity_received), counted: true, notes: '' }));
+    // On the way in (sent, not all received yet) — listed by the date sent, not counted.
+    const { rows: incoming } = await db.execute({
+      sql: `SELECT t.id, t.transfer_number, t.status, t.sent_at, t.created_at, t.to_branch_id, fb.name AS from_name, tb.name AS to_name,
+              ti.quantity_requested - COALESCE(ti.quantity_received, 0) AS due
+            FROM branch_transfer_items ti JOIN branch_transfers t ON t.id = ti.transfer_id
+            LEFT JOIN branches fb ON fb.id = t.from_branch_id LEFT JOIN branches tb ON tb.id = t.to_branch_id
+            WHERE ti.product_id = ? AND t.status IN ('pending', 'in_transit', 'partial') AND ti.quantity_requested - COALESCE(ti.quantity_received, 0) > 0
+              AND ${inRange('COALESCE(t.sent_at, t.created_at)')}${br('t.to_branch_id')}`,
+      args: [pid, s, e, ...bArgs] });
+    push(incoming, r => ({ date: r.sent_at || r.created_at, type: 'transfer_incoming', label: 'Transfer on its way in', branch_id: r.to_branch_id, branch_name: r.to_name,
+      reference: r.transfer_number, link: { kind: 'transfer', id: r.id }, party: `From ${r.from_name || '—'}`, by: null, qty: Number(r.due), counted: false,
+      notes: `${tStatus[r.status] || r.status} — not received yet`, status: r.status }));
+
+    // Purchase-order receipts (a reversal is its own stock_movements row below).
+    const { rows: poRec } = await db.execute({
+      sql: `SELECT r.receipt_number, r.received_at, r.branch_id, b.name AS branch_name, ri.stock_units, ri.quantity, ri.new_cost, po.po_number, po.id AS po_id,
+              s.name AS supplier_name, r.vendor_invoice_number, e.first_name || ' ' || e.last_name AS by_name
+            FROM po_receipt_items ri JOIN po_receipts r ON r.id = ri.receipt_id JOIN purchase_orders po ON po.id = r.po_id
+            LEFT JOIN suppliers s ON s.id = po.supplier_id LEFT JOIN branches b ON b.id = r.branch_id LEFT JOIN employees e ON e.id = r.received_by
+            WHERE ri.product_id = ? AND ri.stock_units > 0 AND ${inRange('r.received_at')}${br('r.branch_id')}`,
+      args: [pid, s, e, ...bArgs] });
+    push(poRec, r => ({ date: r.received_at, type: 'received', label: 'Received (PO)', branch_id: r.branch_id, branch_name: r.branch_name,
+      reference: r.receipt_number, link: { kind: 'po', id: r.po_id }, party: r.supplier_name || '', by: r.by_name, qty: Number(r.stock_units), counted: true,
+      unit_price: r.new_cost != null ? Number(r.new_cost) : null, value: r.new_cost != null ? Number(r.new_cost) * Number(r.stock_units) : null,
+      notes: [r.po_number, r.vendor_invoice_number ? `invoice ${r.vendor_invoice_number}` : null].filter(Boolean).join(' · ') }));
+
+    // Logged stock movements: adjustments, cycle counts, direct receipts,
+    // receipt reversals, damaged, shop use, work orders… (no branch = only on All Locations).
+    const smLabel = { adjustment: 'Adjustment', received: 'Received (no PO)', receipt_reversed: 'Receipt reversed', damaged: 'Damaged',
+      shop_use: 'Shop use', wo_issue: 'Issued to work order', wo_return_used: 'Work order return', merge: 'Item merge' };
+    const { rows: sms } = await db.execute({
+      sql: `SELECT sm.created_at, sm.type, sm.quantity_change, sm.reference, sm.reason, sm.branch_id, b.name AS branch_name
+            FROM stock_movements sm LEFT JOIN branches b ON b.id = sm.branch_id
+            WHERE sm.product_id = ? AND sm.quantity_change != 0 AND ${inRange('sm.created_at')}${branchId ? ' AND sm.branch_id = ?' : ''}`,
+      args: [pid, s, e, ...bArgs] });
+    push(sms, r => ({ date: r.created_at, type: r.type === 'received' ? 'received' : r.type === 'adjustment' ? 'adjustment' : r.type || 'adjustment',
+      label: smLabel[r.type] || (r.type ? r.type.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase()) : 'Adjustment'),
+      branch_id: r.branch_id, branch_name: r.branch_name || 'All locations', reference: r.reference || '', link: null, party: '', by: null,
+      qty: Number(r.quantity_change), counted: true, notes: r.reason || '' }));
+
+    // Layaways — stock set aside when the plan is made, put back if it's cancelled.
+    const { rows: lays } = await db.execute({
+      sql: `SELECT lp.id, lp.plan_number, lp.status, lp.created_at, lp.cancelled_at, lp.branch_id, b.name AS branch_name,
+              li.quantity * COALESCE(li.units_per, 1) AS units, li.unit_price, li.line_total,
+              COALESCE(NULLIF(c.business_name, ''), TRIM(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))) AS customer_name,
+              e.first_name || ' ' || e.last_name AS by_name
+            FROM layaway_plan_items li JOIN layaway_plans lp ON lp.id = li.plan_id
+            LEFT JOIN branches b ON b.id = lp.branch_id LEFT JOIN customers c ON c.id = lp.customer_id LEFT JOIN employees e ON e.id = lp.employee_id
+            WHERE li.product_id = ?${br('lp.branch_id')}
+              AND (${inRange('lp.created_at')} OR (lp.status = 'cancelled' AND lp.cancelled_at IS NOT NULL AND ${inRange('lp.cancelled_at')}))`,
+      args: [pid, ...bArgs, s, e, s, e] });
+    for (const r of lays) {
+      const base = { branch_id: r.branch_id, branch_name: r.branch_name, reference: r.plan_number, link: null, party: r.customer_name || '', by: r.by_name, counted: true };
+      rows.push({ ...base, date: r.created_at, type: 'layaway', label: 'Layaway', qty: -Number(r.units), value: Number(r.line_total), notes: `plan ${r.status}`, _check: 'created' });
+      if (r.status === 'cancelled' && r.cancelled_at) rows.push({ ...base, date: r.cancelled_at, type: 'layaway_cancel', label: 'Layaway cancelled', qty: Number(r.units), notes: 'stock put back', _check: 'cancelled' });
+    }
+
+    // Shipments out of the location.
+    const { rows: ships } = await db.execute({
+      sql: `SELECT sh.shipment_number, sh.status, sh.shipped_at, sh.from_branch_id, b.name AS branch_name, si.quantity, sh.carrier, sh.tracking_number,
+              COALESCE(NULLIF(c.business_name, ''), TRIM(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))) AS customer_name
+            FROM shipment_items si JOIN shipments sh ON sh.id = si.shipment_id
+            LEFT JOIN branches b ON b.id = sh.from_branch_id LEFT JOIN customers c ON c.id = sh.customer_id
+            WHERE si.product_id = ? AND sh.shipped_at IS NOT NULL AND sh.status != 'cancelled' AND ${inRange('sh.shipped_at')}${br('sh.from_branch_id')}`,
+      args: [pid, s, e, ...bArgs] });
+    push(ships, r => ({ date: r.shipped_at, type: 'shipment', label: 'Shipped', branch_id: r.from_branch_id, branch_name: r.branch_name, reference: r.shipment_number, link: null,
+      party: r.customer_name || '', by: null, qty: -Number(r.quantity), counted: true, notes: [r.status, r.carrier, r.tracking_number].filter(Boolean).join(' · ') }));
+
+    // Layaway rows outside the range (made before it, cancelled in it) drop out here.
+    const inDay = d => { const k = storeDay(d); return k >= s && k <= e; };
+    const list = rows.filter(r => !r._check || inDay(r.date)).map(({ _check, ...r }) => r);
+    list.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+
+    // Totals by kind (counted rows only), and in / out.
+    const byType = new Map();
+    let unitsIn = 0, unitsOut = 0;
+    for (const r of list) {
+      if (!r.counted) continue;
+      const k = r.label.replace(' (voided)', '');
+      const t = byType.get(k) || { label: k, count: 0, units_in: 0, units_out: 0, value: 0 };
+      t.count += 1;
+      if (r.qty > 0) { t.units_in += r.qty; unitsIn += r.qty; } else { t.units_out += -r.qty; unitsOut += -r.qty; }
+      if (r.value != null && (r.type === 'sale' || r.type === 'return')) t.value += r.type === 'return' ? -r.value : r.value;
+      byType.set(k, t);
+    }
+    const sold = list.filter(r => r.type === 'sale' && r.counted);
+    const returned = list.filter(r => r.type === 'return');
+    const round = n => Math.round(n * 1000) / 1000;
+
+    // On hand now at the location (or per location).
+    const { rows: onHand } = await db.execute({
+      sql: `SELECT bi.branch_id, b.name AS branch_name, bi.stock_qty FROM branch_inventory bi JOIN branches b ON b.id = bi.branch_id
+            WHERE bi.product_id = ?${branchId ? ' AND bi.branch_id = ?' : ''} ORDER BY b.name`,
+      args: [pid, ...bArgs] });
+    let branchName = null;
+    if (branchId) ({ rows: [{ name: branchName } = {}] } = await db.execute({ sql: 'SELECT name FROM branches WHERE id = ?', args: [branchId] }));
+
+    res.json({
+      start: s, end: e, branch_id: branchId, branch_name: branchName,
+      product,
+      on_hand: onHand,
+      on_hand_total: round(onHand.reduce((n, r) => n + Number(r.stock_qty || 0), 0)),
+      totals: {
+        movements: list.filter(r => r.counted).length,
+        units_in: round(unitsIn), units_out: round(unitsOut), net: round(unitsIn - unitsOut),
+        units_sold: round(sold.reduce((n, r) => n + -r.qty, 0)),
+        sales_value: Math.round(sold.reduce((n, r) => n + r.value, 0) * 100) / 100,
+        sales: sold.length,
+        units_returned: round(returned.reduce((n, r) => n + r.qty, 0)),
+        returns_value: Math.round(returned.reduce((n, r) => n + r.value, 0) * 100) / 100,
+        transfers_in: round(list.filter(r => r.type === 'transfer_in').reduce((n, r) => n + r.qty, 0)),
+        transfers_out: round(list.filter(r => r.type === 'transfer_out' && r.counted).reduce((n, r) => n + -r.qty, 0)),
+        received: round(list.filter(r => r.type === 'received').reduce((n, r) => n + r.qty, 0)),
+        adjustments: round(list.filter(r => r.counted && !['sale', 'return', 'transfer_in', 'transfer_out', 'received', 'layaway', 'layaway_cancel', 'shipment'].includes(r.type)).reduce((n, r) => n + r.qty, 0)),
+      },
+      by_type: [...byType.values()].map(t => ({ ...t, units_in: round(t.units_in), units_out: round(t.units_out), value: Math.round(t.value * 100) / 100 })),
+      rows: list.map(r => ({ ...r, qty: round(r.qty) })),
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 
 module.exports = router;

@@ -76,6 +76,7 @@ Object.assign(App, {
       <div class="section-header"><h2>Inventory Reports</h2>${this.can('inventory') ? `<button class="btn btn-outline btn-sm" onclick="App.showSection('inventory')">← Retail Inventory</button>` : ''}</div>
       ${this._reportButtonCard('Items Sold', 'Every item sold over a period — units sold and returned, net sales, cost, margin and what\'s on hand now — filterable by location, category, brand or item.', 'App.showItemsSoldReport()')}
       ${this._reportButtonCard('Items Returned', 'Every item returned over a period — how often, how many, the value, the return rate against what sold, and which customers returned it (with their last reason).', 'App.showItemsReturnedReport()')}
+      ${this._reportButtonCard('Item Transaction History', 'Every transaction for one item at a location over a period — sales, returns, transfers out and in, receipts, adjustments and counts, layaways and shipments — with units in and out and what\'s on hand now.', 'App.showItemHistoryReport()')}
       ${this._reportButtonCard('Zero &amp; Negative Stock', 'Every inventory item at or below zero on hand, per location — negative counts to investigate and zero counts to reorder — with cost value, last sold and last received.', 'App.showZeroStockReport()')}`;
   },
 
@@ -199,6 +200,163 @@ Object.assign(App, {
         </table></div>`}
       </div>
       <p style="font-size:11px;color:var(--text-muted);margin-top:10px">Returns counted by the day they were processed; cancelled returns left out. Value is what each return credited for the item, before tax. Units are in each item's stock unit (a case of 12 counts as 12). <em>Sold</em> is the item's units sold in the same period and location, and <em>Return %</em> is units returned ÷ sold — an item sold before the period and returned in it can go over 100%. <em>Returns</em> counts returns, so one return of 3 units counts once.</p>`;
+  },
+
+  // ─── Item Transaction History ───────────────────────────────────────────
+  // GET /reports/item-history — one item's movements at a location over a
+  // range. The item box takes an item number (SKU or barcode); with no exact
+  // match the server sends `matches` to pick from (kept in _ithProductId).
+
+  async showItemHistoryReport(productId, itemLabel) {
+    const branches = await this.api('GET', '/branches').catch(() => []);
+    const home = this.currentUser?.default_branch_id;
+    const filters = `
+      <input type="text" id="ith-item" placeholder="Item number (SKU or barcode)" style="width:220px" value="${this.escapeAttr(itemLabel || '')}"
+        oninput="App._ithProductId=null" onkeydown="if(event.key==='Enter')App.loadItemHistoryReport()">
+      <select id="ith-range" onchange="App._applyItemHistoryRange()" style="width:150px">
+        <option value="this_month">This month</option><option value="today">Today</option><option value="this_week">This week</option>
+        <option value="last_month">Last month</option><option value="last_3_months">Last 3 months</option><option value="this_quarter">This quarter</option>
+        <option value="last_12_months">Last 12 months</option><option value="this_year">This year</option><option value="last_year">Last year</option>
+        <option value="custom">Custom</option>
+      </select>
+      <input type="date" id="ith-start" style="width:145px" onchange="document.getElementById('ith-range').value='custom'">
+      <span>to</span>
+      <input type="date" id="ith-end" style="width:145px" onchange="document.getElementById('ith-range').value='custom'">
+      <select id="ith-branch" style="width:170px"><option value="">All Locations</option>${this._reportBranchOptions(branches, home)}</select>
+      <select id="ith-show" style="width:190px" onchange="App._renderItemHistory()" title="Which rows to list">
+        <option value="all">All transactions</option><option value="sale">Sales &amp; returns</option><option value="transfer">Transfers</option>
+        <option value="received">Receipts</option><option value="adjustment">Adjustments &amp; other</option>
+      </select>`;
+    this._ithProductId = productId || null;
+    this._ithData = null;
+    this._showReportModal('Item Transaction History', filters, 'loadItemHistoryReport');
+    document.querySelector('#rpt-modal-content')?.closest('.modal')?.style.setProperty('max-width', '1250px');
+  },
+
+  _applyItemHistoryRange() {
+    const r = this._supplierSalesRanges()[document.getElementById('ith-range')?.value];
+    if (!r) return;
+    document.getElementById('ith-start').value = r[0];
+    document.getElementById('ith-end').value = r[1];
+  },
+
+  _pickItemHistoryItem(i) {
+    const m = (this._ithMatches || [])[i];
+    if (!m) return;
+    this._ithProductId = m.id;
+    const el = document.getElementById('ith-item');
+    if (el) el.value = m.sku || m.name;
+    this.loadItemHistoryReport();
+  },
+
+  async loadItemHistoryReport() {
+    const startEl = document.getElementById('ith-start');
+    if (!startEl) return;
+    if (!startEl.value) this._applyItemHistoryRange();
+    const content = document.getElementById('rpt-modal-content');
+    const item = document.getElementById('ith-item').value.trim();
+    if (!item && !this._ithProductId) {
+      content.innerHTML = '<div class="empty-state"><p>Enter an item number (SKU or barcode), choose the dates and location, and click Generate.</p></div>';
+      return;
+    }
+    const params = new URLSearchParams({ start: startEl.value, end: document.getElementById('ith-end').value });
+    if (this._ithProductId) params.set('product_id', this._ithProductId); else params.set('item', item);
+    const branch = document.getElementById('ith-branch').value;
+    if (branch) params.set('branch_id', branch);
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    const res = await fetch(`/api/reports/item-history?${params}`, { credentials: 'same-origin' });
+    const data = await res.json().catch(() => ({}));
+    if (!document.getElementById('rpt-modal-content')) return;
+    if (!res.ok) {
+      const matches = data.matches || [];
+      this._ithMatches = matches;
+      content.innerHTML = `<div class="empty-state"><p>${this.escapeAttr(data.error || 'Could not load the report')}</p>
+        ${matches.length ? `<p style="font-size:13px">Did you mean one of these?</p>
+        <div style="max-width:620px;margin:0 auto;text-align:left">${matches.map((m, i) => `
+          <button class="btn btn-outline btn-sm" style="display:block;width:100%;text-align:left;margin-bottom:6px" onclick="App._pickItemHistoryItem(${i})">
+            <span style="font-family:monospace">${this.escapeAttr(m.sku || '')}</span> — ${this.escapeAttr(m.name)}${m.brand ? ` <span style="color:var(--text-muted)">(${this.escapeAttr(m.brand)})</span>` : ''}${m.is_rental ? ' <span class="badge-pill badge-info" style="font-size:10px">Rental</span>' : ''}${m.active ? '' : ' <span class="badge-pill badge-warning" style="font-size:10px">Inactive</span>'}
+          </button>`).join('')}</div>` : ''}</div>`;
+      return;
+    }
+    this._ithProductId = data.product.id;
+    this._ithData = data;
+    this._renderItemHistory();
+  },
+
+  _renderItemHistory() {
+    const d = this._ithData;
+    const content = document.getElementById('rpt-modal-content');
+    if (!d || !content) return;
+    const p = d.product, t = d.totals;
+    const qty = n => Number(n || 0).toLocaleString('en-US', { maximumFractionDigits: 3 });
+    const esc = v => this.escapeAttr(v == null ? '' : String(v));
+    const show = document.getElementById('ith-show')?.value || 'all';
+    const groups = { sale: ['sale', 'return'], transfer: ['transfer_out', 'transfer_in', 'transfer_incoming'], received: ['received', 'receipt_reversed'] };
+    const known = ['sale', 'return', 'transfer_out', 'transfer_in', 'transfer_incoming', 'received', 'receipt_reversed'];
+    const rows = d.rows.filter(r => show === 'all' || (show === 'adjustment' ? !known.includes(r.type) : groups[show].includes(r.type)));
+    const allLoc = !d.branch_id;
+    const link = r => {
+      if (!r.link) return esc(r.reference);
+      const fn = { transaction: 'viewTransaction', transfer: 'viewTransfer', po: 'viewPO' }[r.link.kind];
+      return `<a href="#" onclick="event.preventDefault();App.${fn}(${r.link.id})">${esc(r.reference)}</a>`;
+    };
+    const typeColor = r => !r.counted ? 'var(--text-muted)' : r.qty > 0 ? 'var(--success)' : 'var(--danger)';
+    const unit = (p.unit_name || 'Each').toLowerCase();
+
+    content.innerHTML = `
+      <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:12px">
+        <div>
+          <div style="font-size:16px;font-weight:700">${esc(p.name)}</div>
+          <div style="font-size:12px;color:var(--text-muted)">Item # <span style="font-family:monospace">${esc(p.sku || '—')}</span>${p.barcode ? ` · Barcode ${esc(p.barcode)}` : ''} · ${esc(p.category_name)}${p.brand ? ` · ${esc(p.brand)}` : ''} · Stock unit: ${esc(p.unit_name)}${p.active ? '' : ' · <span style="color:var(--warning)">Inactive</span>'}</div>
+        </div>
+        <div style="font-size:12px;color:var(--text-muted);text-align:right">${this.fmtDate(d.start)} – ${this.fmtDate(d.end)}<br>${allLoc ? 'All locations' : esc(d.branch_name)}</div>
+      </div>
+      <div class="stats-grid" style="grid-template-columns:repeat(5,1fr);margin-bottom:12px">
+        <div class="stat-card blue"><div class="stat-label">On Hand Now</div><div class="stat-value">${qty(d.on_hand_total)}</div><div class="stat-sub">${allLoc ? `${d.on_hand.length} location${d.on_hand.length === 1 ? '' : 's'}` : esc(d.branch_name)}</div></div>
+        <div class="stat-card green"><div class="stat-label">Units In</div><div class="stat-value" style="color:var(--success)">${qty(t.units_in)}</div><div class="stat-sub">in the period</div></div>
+        <div class="stat-card red"><div class="stat-label">Units Out</div><div class="stat-value" style="color:var(--danger)">${qty(t.units_out)}</div><div class="stat-sub">in the period</div></div>
+        <div class="stat-card"><div class="stat-label">Net Change</div><div class="stat-value">${t.net > 0 ? '+' : ''}${qty(t.net)}</div><div class="stat-sub">${t.movements} movement${t.movements === 1 ? '' : 's'}</div></div>
+        <div class="stat-card orange"><div class="stat-label">Sold</div><div class="stat-value">${qty(t.units_sold)}</div><div class="stat-sub">${t.sales} sale${t.sales === 1 ? '' : 's'} · ${this.fmt(t.sales_value)}</div></div>
+      </div>
+      <div class="stats-grid" style="grid-template-columns:repeat(5,1fr);margin-bottom:18px">
+        <div class="stat-card"><div class="stat-label">Returned</div><div class="stat-value" style="font-size:20px">${qty(t.units_returned)}</div><div class="stat-sub">${this.fmt(t.returns_value)}</div></div>
+        <div class="stat-card"><div class="stat-label">Transferred Out</div><div class="stat-value" style="font-size:20px">${qty(t.transfers_out)}</div></div>
+        <div class="stat-card"><div class="stat-label">Transferred In</div><div class="stat-value" style="font-size:20px">${qty(t.transfers_in)}</div></div>
+        <div class="stat-card"><div class="stat-label">Received</div><div class="stat-value" style="font-size:20px">${qty(t.received)}</div><div class="stat-sub">PO &amp; direct receipts</div></div>
+        <div class="stat-card"><div class="stat-label">Adjustments &amp; Other</div><div class="stat-value" style="font-size:20px">${t.adjustments > 0 ? '+' : ''}${qty(t.adjustments)}</div><div class="stat-sub">counts, damage, shop use…</div></div>
+      </div>
+      ${d.by_type.length ? `<div class="card" style="margin-bottom:14px">
+        <div class="card-header"><span class="card-title">Summary by Transaction Type</span></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Type</th><th>Transactions</th><th>Units In</th><th>Units Out</th><th>Sales Value</th></tr></thead>
+          <tbody>${d.by_type.map(r => `<tr><td class="fw-600">${esc(r.label)}</td><td>${r.count}</td><td>${r.units_in ? qty(r.units_in) : '—'}</td><td>${r.units_out ? qty(r.units_out) : '—'}</td><td>${r.value ? this.fmt(r.value) : '—'}</td></tr>`).join('')}</tbody>
+        </table></div></div>` : ''}
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-header"><span class="card-title">Transactions</span><span style="font-size:12px;color:var(--text-muted)">${rows.length} row${rows.length === 1 ? '' : 's'} · oldest first · units in ${esc(unit)}</span></div>
+        ${!rows.length ? '<div class="empty-state"><p>No transactions for this item in the period.</p></div>' : `
+        <div class="table-wrap"><table>
+          <thead><tr><th>Date &amp; Time</th><th>Type</th>${allLoc ? '<th>Location</th>' : ''}<th>Reference</th><th>Customer / Supplier / Branch</th><th>In</th><th>Out</th><th>Unit Price</th><th>Value</th><th>By</th><th>Details</th></tr></thead>
+          <tbody>${rows.map(r => `<tr${r.counted ? '' : ' style="color:var(--text-muted)"'}>
+            <td style="white-space:nowrap">${this.fmtDateTime(r.date)}</td>
+            <td style="white-space:nowrap;color:${typeColor(r)};font-weight:600">${esc(r.label)}</td>
+            ${allLoc ? `<td>${esc(r.branch_name || '—')}</td>` : ''}
+            <td style="white-space:nowrap">${link(r)}</td>
+            <td>${esc(r.party || '—')}</td>
+            <td class="fw-600" style="color:var(--success)">${r.qty > 0 ? (r.counted ? qty(r.qty) : `(${qty(r.qty)})`) : ''}</td>
+            <td class="fw-600" style="color:var(--danger)">${r.qty < 0 ? (r.counted ? qty(-r.qty) : `(${qty(-r.qty)})`) : ''}</td>
+            <td>${r.unit_price != null ? this.fmt(r.unit_price) : ''}</td>
+            <td>${r.value != null ? this.fmt(r.value) : ''}</td>
+            <td>${esc(r.by || '')}</td>
+            <td style="font-size:12px;min-width:160px">${esc(r.notes || '')}${r.counted ? '' : ' <span class="badge-pill badge-warning" style="font-size:10px">not counted</span>'}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>`}
+      </div>
+      ${allLoc && d.on_hand.length ? `<div class="card" style="margin-bottom:14px">
+        <div class="card-header"><span class="card-title">On Hand Now by Location</span></div>
+        <div class="table-wrap"><table><thead><tr><th>Location</th><th>On Hand</th></tr></thead>
+          <tbody>${d.on_hand.map(r => `<tr><td>${esc(r.branch_name)}</td><td class="fw-600"${Number(r.stock_qty) < 0 ? ' style="color:var(--danger)"' : ''}>${qty(r.stock_qty)}</td></tr>`).join('')}</tbody>
+        </table></div></div>` : ''}
+      <p style="font-size:11px;color:var(--text-muted);margin-top:10px">Dates are store days. Units are in the item's stock unit (a case of 12 counts as 12). A sale counts the whole quantity at the selling location — any part brought in from another branch shows there as a transfer in. Transfers leave the sender when they're sent and arrive with each delivery received. Rows in grey, with the quantity in brackets, didn't move stock and aren't in the totals: voided sales, transfer requests not sent yet, cancelled transfers and transfers still on their way in. Sales value is after line discounts, before tax. On Hand Now is today's count, not the count at the end of the period.</p>`;
   },
 
   // ─── Zero & Negative Stock ──────────────────────────────────────────────
