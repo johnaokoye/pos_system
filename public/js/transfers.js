@@ -434,7 +434,7 @@ Object.assign(App, {
   },
 
   // Pick list for the sending branch's inventory team: each item with its
-  // bin location(s) there, sorted by bin so it can be walked in order, the
+  // bin location(s) there, in the order the items were entered, the
   // quantity to pick (asked while still a request, sent once sent), what's
   // in stock, and blank Picked boxes + sign-off lines. Once sent, the stock
   // (and bin counts) already exclude these units, so those are left off.
@@ -446,8 +446,10 @@ Object.assign(App, {
     const isRequest = t.status === 'requested';
     const qtyLabel = isRequest ? 'Requested' : 'Sent';
     const binText = i => i.bins.length ? i.bins.map(b => `${esc(b.bin_code)}${b.zone_name ? ` <span style="color:#777">(${esc(b.zone_name)})</span>` : ''}${isRequest && i.bins.length > 1 ? ` <span style="color:#777">· ${b.quantity}</span>` : ''}`).join('<br>') : '—';
-    const lines = [...t.items].filter(i => isRequest || i.quantity_requested > 0)
-      .sort((a, b) => (a.bins[0]?.bin_code ? 0 : 1) - (b.bins[0]?.bin_code ? 0 : 1) || String(a.bins[0]?.bin_code || '').localeCompare(String(b.bins[0]?.bin_code || ''), undefined, { numeric: true }) || a.product_name.localeCompare(b.product_name));
+    // Lines print in the order they were entered on the request (GET
+    // /transfers/:id returns them by ti.id) — never re-sorted (owner's rule:
+    // requesters group items the way the warehouse stores them).
+    const lines = t.items.filter(i => isRequest || i.quantity_requested > 0);
     const totalQty = lines.reduce((n, i) => n + (Number(i.quantity_requested) || 0), 0);
     const rows = lines.map(i => `
       <tr>
