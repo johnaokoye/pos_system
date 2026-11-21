@@ -352,6 +352,8 @@ Object.assign(App, {
     const cashBackCardTypeOptions = c.cash_back_card_type_id && !cashBackCardTypes.some(t => t.id === c.cash_back_card_type_id)
       ? [...cashBackCardTypes, { id: c.cash_back_card_type_id, name: `${c.cash_back_card_type_name} (inactive)` }]
       : cashBackCardTypes;
+    // Discounted categories: only customers_discount_category assigns or removes them (server checks too).
+    const canDiscCat = this.can('customers_discount_category');
     const customerCategoryOptions = c.customer_category_id && !customerCategories.some(t => t.id === c.customer_category_id)
       ? [...customerCategories, { id: c.customer_category_id, name: `${c.customer_category_name} (inactive)`, discount_percent: 0 }]
       : customerCategories;
@@ -398,11 +400,11 @@ Object.assign(App, {
             ${this.can('customers_credit') ? '' : '<p style="font-size:11px;color:var(--text-muted);margin-top:4px">Switching between Cash and Credit, and credit limits and terms, need the Manage Credit Limits permission.</p>'}
           </div>
           <div class="form-group"><label>Customer Category</label>
-            <select id="cf-category">
+            <select id="cf-category"${!canDiscCat && Number(c.customer_category_discount_percent) > 0 ? ' disabled' : ''}>
               <option value="">— None —</option>
-              ${customerCategoryOptions.map(cat => `<option value="${cat.id}" ${c.customer_category_id===cat.id?'selected':''}>${cat.name}${cat.discount_percent > 0 ? ` (${cat.discount_percent}% off)` : ''}</option>`).join('')}
+              ${customerCategoryOptions.map(cat => `<option value="${cat.id}" ${c.customer_category_id===cat.id?'selected':''}${!canDiscCat && cat.discount_percent > 0 && c.customer_category_id !== cat.id ? ' disabled' : ''}>${cat.name}${cat.discount_percent > 0 ? ` (${cat.discount_percent}% off)` : ''}</option>`).join('')}
             </select>
-            <p style="font-size:11px;color:var(--text-muted);margin-top:4px">A classification like Individual/Company/Contractor — separate from the Cash/Credit type above. Set up in Settings.</p>
+            <p style="font-size:11px;color:var(--text-muted);margin-top:4px">A classification like Individual/Company/Contractor — separate from the Cash/Credit type above. Set up in Settings.${canDiscCat ? '' : ' Categories that give a discount can only be assigned or removed by someone with the Assign Discount Categories permission.'}</p>
           </div>
           <div class="form-group"><label>Home Branch</label>
             <select id="cf-home-branch">
@@ -903,7 +905,7 @@ Object.assign(App, {
     await this._runBatchedCsvImport({
       rows, endpoint: '/customers/import', title: 'Importing Customers',
       extraBody: { duplicate_mode: duplicateMode, batch_id: batchId },
-      summarize: totals => `${totals.created||0} created${totals.skipped ? `, ${totals.skipped} skipped (possible duplicate)` : ''}${totals.imported_as_cash ? `, ${totals.imported_as_cash} marked Credit imported as Cash (needs Manage Credit Limits)` : ''}`,
+      summarize: totals => `${totals.created||0} created${totals.skipped ? `, ${totals.skipped} skipped (possible duplicate)` : ''}${totals.imported_as_cash ? `, ${totals.imported_as_cash} marked Credit imported as Cash (needs Manage Credit Limits)` : ''}${totals.discount_category_dropped ? `, ${totals.discount_category_dropped} imported with no category — their category gives a discount (needs Assign Discount Categories)` : ''}`,
       onFinish: async () => {
         await this.api('PATCH', `/customer-imports/${batchId}/finish`).catch(() => {});
         this.renderCustomers();

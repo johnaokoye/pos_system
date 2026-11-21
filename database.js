@@ -4449,6 +4449,13 @@ async function _init() {
         perms.pos_petty_cash = /^(senior )?cashiers?$/i.test(String(g.name || '').trim());
         changed = true;
       }
+      // Putting a customer in a discounted customer category (2026-11-21,
+      // owner: "only select people") — standalone, starts on Administrator
+      // only; the owner ticks it for whoever else should have it.
+      if (!('customers_discount_category' in perms)) {
+        perms.customers_discount_category = /^administrator$/i.test(String(g.name || '').trim());
+        changed = true;
+      }
       if (!('customers_credit_block' in perms)) {
         perms.customers_credit_block = /^(administrator|manager|accounts? receivables?)$/i.test(String(g.name || '').trim());
         changed = true;

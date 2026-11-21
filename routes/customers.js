@@ -449,6 +449,23 @@ function normalizeCustomerType(t) {
 // customer's type/limit/terms (a field the caller left out counts as
 // unchanged; a cash customer's hidden limit/terms are ignored). Returns
 // { type, terms, limit } to save, or { error }.
+// Owner's rule (2026-11-21): only select people put a customer in — or take
+// them out of — a customer category that gives a discount
+// (customer_categories.discount_percent > 0). Standalone key
+// customers_discount_category, not inherited with Customers. Categories
+// without a discount stay open to anyone who can add/edit customers.
+async function discountCategoryError(req, newId, oldId) {
+  if (req.apiKey || can(req.employee?.permissions, 'customers_discount_category')) return null;
+  const n = Number(newId) || null, o = Number(oldId) || null;
+  if (n === o) return null;
+  const ids = [n, o].filter(Boolean);
+  if (!ids.length) return null;
+  const { rows } = await db.execute({ sql: `SELECT id, name, discount_percent FROM customer_categories WHERE id IN (${ids.map(() => '?').join(',')}) AND discount_percent > 0`, args: ids });
+  if (!rows.length) return null;
+  const c = rows.find(r => r.id === n) || rows[0];
+  return `${c.name} gives a ${+Number(c.discount_percent).toFixed(2)}% discount — only someone with the Assign Discount Categories permission can put a customer in or take them out of it`;
+}
+
 const CREDIT_PERMISSION_ERROR = 'Changing a customer between Cash and Credit, or a credit limit or terms, needs the Manage Credit Limits permission';
 // customers.salesperson_id on create/edit: only sales_manager can change it,
 // because it moves targets and commission. Returns { unchanged: true } when the
@@ -1020,6 +1037,8 @@ router.post('/', requirePermission('customers_add'), async (req, res) => {
     if (assignedSalesperson.error) return res.status(assignedSalesperson.status).json({ error: assignedSalesperson.error });
     const credit = resolveCreditFields(req, req.body, null);
     if (credit.error) return res.status(403).json({ error: credit.error });
+    const catErr = await discountCategoryError(req, customer_category_id, null);
+    if (catErr) return res.status(403).json({ code: 'discount_category', error: catErr });
     const customer_number = await nextNumber(db, 'customers', 'customer_number', 'CUST-', 4);
     const { type, terms, limit } = credit;
     const creditEnabled = type === 'credit' ? 1 : 0;
@@ -1087,7 +1106,7 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
     if (cardError) return res.status(400).json({ error: cardError });
     const cashBackCardError = await validateCashBackCard(cash_back_card_type_id, cash_back_card_number, req.params.id);
     if (cashBackCardError) return res.status(400).json({ error: cashBackCardError });
-    const { rows: [existing] } = await db.execute({ sql: 'SELECT phone, email, rental_preapproved, rental_preapproved_by, rental_preapproved_at, customer_type, credit_terms_days, credit_limit, active, account_balance FROM customers WHERE id = ?', args: [req.params.id] });
+    const { rows: [existing] } = await db.execute({ sql: 'SELECT phone, email, rental_preapproved, rental_preapproved_by, rental_preapproved_at, customer_type, credit_terms_days, credit_limit, active, account_balance, customer_category_id FROM customers WHERE id = ?', args: [req.params.id] });
     if (!existing) return res.status(404).json({ error: 'Customer not found' });
     if (active != null && !Number(active) && existing.active) {
       const owes = owesBlockError(existing);
@@ -1097,6 +1116,8 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
     if (assignedSalesperson.error) return res.status(assignedSalesperson.status).json({ error: assignedSalesperson.error });
     const credit = resolveCreditFields(req, req.body, existing);
     if (credit.error) return res.status(403).json({ error: credit.error });
+    const catErr = await discountCategoryError(req, customer_category_id, existing.customer_category_id);
+    if (catErr) return res.status(403).json({ code: 'discount_category', error: catErr });
     // Changing a customer's phone/email to one another active customer
     // already uses is refused, same as on create. Only checked when the value
     // actually changes, so records that already shared a number before this
@@ -1192,8 +1213,13 @@ router.post('/import', requirePermission('customers_import'), async (req, res) =
     if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ error: 'No rows provided' });
     const force = duplicate_mode === 'force';
 
-    const { rows: catRows } = await db.execute({ sql: 'SELECT id, name FROM customer_categories', args: [] });
+    const { rows: catRows } = await db.execute({ sql: 'SELECT id, name, discount_percent FROM customer_categories', args: [] });
     const catMap = Object.fromEntries(catRows.map(c => [c.name.toLowerCase(), c.id]));
+    // Without Assign Discount Categories, a row naming a discounted category
+    // comes in with no category (counted and reported back), like Credit → Cash.
+    const discountedCats = new Set(catRows.filter(c => Number(c.discount_percent) > 0).map(c => c.id));
+    const canDiscountCategory = !!req.apiKey || can(req.employee?.permissions, 'customers_discount_category');
+    let categoryDropped = 0;
     // Only an employee holding customers_rental_preapprove can actually set
     // the flag through an import — same restriction as PUT /:id (see
     // resolveRentalPreapproval above). Checked once for the whole batch
@@ -1253,7 +1279,8 @@ router.post('/import', requirePermission('customers_import'), async (req, res) =
             continue;
           }
         }
-        const category_id = customer_category_name ? (catMap[customer_category_name.toLowerCase()] ?? null) : null;
+        let category_id = customer_category_name ? (catMap[customer_category_name.toLowerCase()] ?? null) : null;
+        if (category_id && !canDiscountCategory && discountedCats.has(category_id)) { category_id = null; categoryDropped++; }
         const asCash = !canCredit && normalizeCustomerType(customer_type) === 'credit';
         const type = asCash ? 'cash' : normalizeCustomerType(customer_type);
         const customer_number = await nextNumber(db, 'customers', 'customer_number', 'CUST-', 4);
@@ -1291,7 +1318,7 @@ router.post('/import', requirePermission('customers_import'), async (req, res) =
       }
     }
 
-    res.json({ created, skipped, errors, duplicates, total: rows.length, imported_as_cash: importedAsCash });
+    res.json({ created, skipped, errors, duplicates, total: rows.length, imported_as_cash: importedAsCash, discount_category_dropped: categoryDropped });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

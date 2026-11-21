@@ -326,6 +326,16 @@ Object.assign(App, {
             </label>
           </div>
           <div class="form-group">
+            <label>Customer Discounts</label>
+            <label class="perm-item" style="padding:10px 12px;border:1px solid var(--border);border-radius:6px;display:flex;align-items:flex-start;gap:10px;cursor:pointer;margin-top:6px">
+              <input type="checkbox" id="sg-discount-category" ${perms.customers_discount_category ? 'checked' : ''} style="margin-top:2px;flex-shrink:0">
+              <span>
+                <strong>Assign Discount Categories</strong><br>
+                <span style="font-size:12px;color:var(--text-muted)">Put a customer in — or take them out of — a customer category that gives a discount (on the customer form or an import). Categories without a discount stay open to anyone who can edit customers. Separate from Customers access, so it isn't granted with the Customers module.</span>
+              </span>
+            </label>
+          </div>
+          <div class="form-group">
             <label>Credit Control</label>
             <label class="perm-item" style="padding:10px 12px;border:1px solid var(--border);border-radius:6px;display:flex;align-items:flex-start;gap:10px;cursor:pointer;margin-top:6px">
               <input type="checkbox" id="sg-credit-block" ${perms.customers_credit_block ? 'checked' : ''} style="margin-top:2px;flex-shrink:0">
@@ -412,7 +422,7 @@ Object.assign(App, {
     const description = document.getElementById('sg-desc').value.trim();
     if (!name) { this.alert('Name required', 'error'); return; }
     // Start from the stored blob so keys outside _permissionTree survive a save.
-    const permissions = { ...(id ? this._sgEditingPerms : {}), multi_branch_access: document.getElementById('sg-multi-branch')?.checked || false, pos_view_margin: document.getElementById('sg-pos-margin')?.checked || false, customers_credit_block: document.getElementById('sg-credit-block')?.checked || false, pos_receive_payment: document.getElementById('sg-receive-payment')?.checked || false, pos_petty_cash: document.getElementById('sg-petty-cash')?.checked || false, returns_override: document.getElementById('sg-returns-override')?.checked || false, customers_legacy_credit: document.getElementById('sg-legacy-credit')?.checked || false, customers_legacy_credit_void: document.getElementById('sg-legacy-credit-void')?.checked || false };
+    const permissions = { ...(id ? this._sgEditingPerms : {}), multi_branch_access: document.getElementById('sg-multi-branch')?.checked || false, pos_view_margin: document.getElementById('sg-pos-margin')?.checked || false, customers_credit_block: document.getElementById('sg-credit-block')?.checked || false, customers_discount_category: document.getElementById('sg-discount-category')?.checked || false, pos_receive_payment: document.getElementById('sg-receive-payment')?.checked || false, pos_petty_cash: document.getElementById('sg-petty-cash')?.checked || false, returns_override: document.getElementById('sg-returns-override')?.checked || false, customers_legacy_credit: document.getElementById('sg-legacy-credit')?.checked || false, customers_legacy_credit_void: document.getElementById('sg-legacy-credit-void')?.checked || false };
     this._permissionTree.forEach(mod => {
       permissions[mod.key] = document.getElementById(`perm-${mod.key}`)?.checked || false;
       mod.subs.forEach(s => { permissions[s.key] = document.getElementById(`perm-${s.key}`)?.checked || false; });
