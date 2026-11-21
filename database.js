@@ -3728,6 +3728,11 @@ async function _init() {
     'CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_staff_employee ON customers(staff_employee_id) WHERE staff_employee_id IS NOT NULL',
     "ALTER TABLE employees ADD COLUMN staff_purchase_tier TEXT DEFAULT 'staff'",
     'ALTER TABLE employees ADD COLUMN staff_purchase_limit REAL',
+    // Shop Use backdating (2026-11-21): the day the items were actually
+    // requested, and the issue's transaction date (its Books posting date) —
+    // store days; NULL on older rows = created_at / issued_at.
+    'ALTER TABLE shop_use_requests ADD COLUMN requested_date TEXT',
+    'ALTER TABLE shop_use_issues ADD COLUMN transaction_date TEXT',
     "INSERT OR IGNORE INTO settings (key, value) VALUES ('staff_discount_pct', '15')",
     "INSERT OR IGNORE INTO settings (key, value) VALUES ('staff_purchase_limit_staff', '45000')",
     "INSERT OR IGNORE INTO settings (key, value) VALUES ('staff_purchase_limit_manager', '150000')",

@@ -299,6 +299,9 @@ async function normalizeLines(rawLines, existing = []) {
   return out;
 }
 
+const storeTime = require('../lib/storeTime');
+const isDay = v => /^\d{4}-\d{2}-\d{2}$/.test(v) && !isNaN(Date.parse(v));
+
 async function headerFrom(body) {
   const category = String(body.category || '');
   if (!CATEGORY_KEYS.includes(category)) throw new UserError('Choose the Shop Use category');
@@ -314,8 +317,16 @@ async function headerFrom(body) {
   }
   const reason = String(body.reason || '').trim();
   if (!reason) throw new UserError('Give the reason the items are needed');
+  // The day the items were actually requested (may be earlier than the day
+  // it's entered); not sent = keep / today.
+  let requested_date = null;
+  if (body.requested_date) {
+    requested_date = String(body.requested_date).slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(requested_date) || isNaN(Date.parse(requested_date))) throw new UserError('The date requested isn\'t a valid date');
+    if (requested_date > storeTime.storeToday()) throw new UserError('The date requested can\'t be in the future');
+  }
   return {
-    category, branch_id, source_branch_id, department, reason,
+    category, branch_id, source_branch_id, department, reason, requested_date,
     equipment_ref: String(body.equipment_ref || '').trim() || null,
     project_ref: String(body.project_ref || '').trim() || null,
     notes: String(body.notes || '').trim() || null,
@@ -383,8 +394,8 @@ router.get('/requests', inModule, async (req, res) => {
       }
     }
     if (q.department) { sql += ' AND LOWER(r.department) = LOWER(?)'; args.push(q.department); }
-    if (q.from) { sql += ' AND date(r.created_at) >= ?'; args.push(q.from); }
-    if (q.to) { sql += ' AND date(r.created_at) <= ?'; args.push(q.to); }
+    if (q.from) { sql += ' AND COALESCE(r.requested_date, date(r.created_at)) >= ?'; args.push(q.from); }
+    if (q.to) { sql += ' AND COALESCE(r.requested_date, date(r.created_at)) <= ?'; args.push(q.to); }
     if (q.q && String(q.q).trim()) {
       const like = `%${String(q.q).trim()}%`;
       sql += ` AND (r.request_number LIKE ? OR r.reason LIKE ? OR r.equipment_ref LIKE ? OR r.project_ref LIKE ? OR (e.first_name || ' ' || e.last_name) LIKE ?
@@ -432,10 +443,10 @@ router.post('/requests', requirePermission('shop_use_request'), async (req, res)
     const id = await inTransaction(async tx => {
       const number = await nextNumber(tx, 'shop_use_requests', 'request_number', 'SU-', 6);
       const r = await tx.execute({
-        sql: `INSERT INTO shop_use_requests (request_number, requested_by, branch_id, department, source_branch_id, category, reason, equipment_ref, project_ref, notes, total_estimated)
-              VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+        sql: `INSERT INTO shop_use_requests (request_number, requested_by, branch_id, department, source_branch_id, category, reason, equipment_ref, project_ref, notes, total_estimated, requested_date)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
         args: [number, req.employee?.id || null, header.branch_id, header.department, header.source_branch_id, header.category, header.reason,
-          header.equipment_ref, header.project_ref, header.notes, total],
+          header.equipment_ref, header.project_ref, header.notes, total, header.requested_date || storeTime.storeToday()],
       });
       const id = Number(r.lastInsertRowid);
       await writeLines(tx, id, lines);
@@ -468,8 +479,13 @@ router.put('/requests/:id', requirePermission('shop_use_request'), async (req, r
         if (String(cur[k] ?? '') !== String(header[k] ?? '')) return fail(res, 400, `Items have already been issued on this request — its ${label} can't change`);
       }
     }
+    if (!header.requested_date) header.requested_date = cur.requested_date || null;
+    if (header.requested_date && header.requested_date !== cur.requested_date) {
+      const { rows: [first] } = await db.execute({ sql: 'SELECT MIN(transaction_date) AS d FROM shop_use_issues WHERE request_id = ?', args: [cur.id] });
+      if (first?.d && header.requested_date > first.d) return fail(res, 400, `Items were already issued on this request dated ${first.d} — the date requested can't be after that`);
+    }
     const changes = {};
-    for (const k of ['category', 'branch_id', 'department', 'source_branch_id', 'reason', 'equipment_ref', 'project_ref', 'notes']) {
+    for (const k of ['category', 'branch_id', 'department', 'source_branch_id', 'reason', 'equipment_ref', 'project_ref', 'notes', 'requested_date']) {
       if (String(cur[k] ?? '') !== String(header[k] ?? '')) changes[k] = { from: cur[k], to: header[k] };
     }
     const lineChanges = [];
@@ -486,9 +502,9 @@ router.put('/requests/:id', requirePermission('shop_use_request'), async (req, r
       const needsApproval = material && ['pending_approval', 'approved'].includes(cur.approval_status);
       await tx.execute({
         sql: `UPDATE shop_use_requests SET category = ?, branch_id = ?, department = ?, source_branch_id = ?, reason = ?, equipment_ref = ?, project_ref = ?, notes = ?,
-                total_estimated = ?, version = version + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+                requested_date = ?, total_estimated = ?, version = version + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
         args: [header.category, header.branch_id, header.department, header.source_branch_id, header.reason, header.equipment_ref, header.project_ref, header.notes,
-          total, needsApproval ? 1 : 0, cur.id],
+          header.requested_date, total, needsApproval ? 1 : 0, cur.id],
       });
       await writeLines(tx, cur.id, lines, existing);
       if (needsApproval) {
@@ -720,6 +736,14 @@ router.post('/requests/:id/issues', requirePermission('shop_use_issue'), async (
     if (!recipientName) return fail(res, 400, 'Who is receiving the items?');
     if (!req.body.acknowledged) return fail(res, 400, 'The recipient must acknowledge receiving the items');
     const comments = String(req.body.comments || '').trim() || null;
+    // Transaction date: the day the items actually went out — the Books
+    // posting date. Defaults to the request's date requested; never in the
+    // future or before that date. issued_at keeps when it was processed.
+    await storeTime.refreshStoreTz();
+    const today = storeTime.storeToday();
+    let txDate = req.body.transaction_date ? String(req.body.transaction_date).slice(0, 10) : null;
+    if (txDate && !isDay(txDate)) return fail(res, 400, 'The transaction date isn\'t a valid date');
+    if (txDate && txDate > today) return fail(res, 400, 'The transaction date can\'t be in the future');
     const signature = req.body.signature ? await uploadSignature(req.body.signature, `shop-use-${req.params.id}`, 'shop-use-signatures') : null;
 
     const result = await inTransaction(async tx => {
@@ -727,6 +751,8 @@ router.post('/requests/:id/issues', requirePermission('shop_use_issue'), async (
       if (!r) throw new UserError('Shop Use request not found', 404);
       if (r.approval_status !== 'approved') throw new UserError(r.approval_status === 'pending_approval' ? 'This request is waiting for (re)approval — nothing can be issued until it is approved' : 'Only an approved request can be issued');
       if (r.fulfillment_status === 'cancelled') throw new UserError('This request is cancelled');
+      if (!txDate) txDate = r.requested_date && r.requested_date <= today ? r.requested_date : today;
+      if (r.requested_date && txDate < r.requested_date) throw new UserError(`The transaction date can't be before the date requested (${r.requested_date})`);
       const { rows: lines } = await tx.execute({
         sql: `SELECT l.*, u.allow_decimal FROM shop_use_request_lines l LEFT JOIN units_of_measure u ON u.id = l.uom_id WHERE l.request_id = ?`,
         args: [r.id],
@@ -767,9 +793,9 @@ router.post('/requests/:id/issues', requirePermission('shop_use_issue'), async (
 
       const issueNumber = await nextNumber(tx, 'shop_use_issues', 'issue_number', 'SUI-', 6);
       const ins = await tx.execute({
-        sql: `INSERT INTO shop_use_issues (issue_number, issue_key, request_id, request_version, source_branch_id, issued_by, recipient_employee_id, recipient_name, acknowledged, recipient_signature, comments)
-              VALUES (?,?,?,?,?,?,?,?,1,?,?)`,
-        args: [issueNumber, key, r.id, r.version, r.source_branch_id, req.employee?.id || null, recipientId, recipientName, signature, comments],
+        sql: `INSERT INTO shop_use_issues (issue_number, issue_key, request_id, request_version, source_branch_id, issued_by, recipient_employee_id, recipient_name, acknowledged, recipient_signature, comments, transaction_date)
+              VALUES (?,?,?,?,?,?,?,?,1,?,?,?)`,
+        args: [issueNumber, key, r.id, r.version, r.source_branch_id, req.employee?.id || null, recipientId, recipientName, signature, comments, txDate],
       });
       const issueId = Number(ins.lastInsertRowid);
       let total = 0, inventoryLines = 0;
@@ -830,13 +856,12 @@ router.post('/requests/:id/issues', requirePermission('shop_use_issue'), async (
       total = round2(total);
       await tx.execute({ sql: 'UPDATE shop_use_issues SET total_cost = ? WHERE id = ?', args: [total, issueId] });
       if (inventoryLines) {
-        const d = require('../lib/storeTime').storeToday();
-        await queuePosting(tx, { sourceType: 'issue', sourceId: issueId, reference: issueNumber, request: r, amount: total, date: d,
+        await queuePosting(tx, { sourceType: 'issue', sourceId: issueId, reference: issueNumber, request: r, amount: total, date: txDate,
           memo: `Shop Use ${issueNumber} (${r.request_number}) — ${categoryLabel(r.category)}` });
       }
       const status = await refreshFulfillment(tx, r.id);
       await audit(tx, { requestId: r.id, entity: 'issue', entityId: issueId, action: 'issued', employee: req.employee,
-        details: { issue_number: issueNumber, recipient: recipientName, total_cost: total, fulfillment: status, comments,
+        details: { issue_number: issueNumber, transaction_date: txDate, ...(txDate !== today ? { backdated_from: today } : {}), recipient: recipientName, total_cost: total, fulfillment: status, comments,
           lines: picks.map(p => ({ item: p.l.description, qty: p.qty })) } });
       return { issueId, issueNumber };
     }).catch(async e => {
@@ -908,7 +933,7 @@ router.get('/issues/:id/slip.pdf', inModule, async (req, res) => {
     const pdf = await renderDocumentPdf({
       store: { name: s.store_name || 'My Store', branch: i.source_branch_name || '', address: i.source_branch_address || s.store_address || '', phone: i.source_branch_phone || s.store_phone || '', logo: s.company_logo_url || null },
       title: 'SHOP USE ISSUE SLIP', number: i.issue_number,
-      meta: [['Issued', pdfDateTime(i.issued_at)], ['Request', i.request_number], ['From', i.source_branch_name]],
+      meta: [['Transaction date', i.transaction_date ? storeTime.fmtDate(i.transaction_date) : pdfDateTime(i.issued_at)], ['Processed', pdfDateTime(i.issued_at)], ['Request', i.request_number], ['From', i.source_branch_name]],
       party: { label: 'Issued To', boldFirst: true, lines: [i.recipient_name, `${i.branch_name || ''} — ${i.department || ''}`] },
       info: [['Category', i.category_label], ['Reason', i.reason], ['Equipment / project', [i.equipment_ref, i.project_ref].filter(Boolean).join(' / ')],
         ['Requested by', i.requested_by_name], ['Approved by', i.approved_by_name ? `${i.approved_by_name} (${pdfDateTime(i.approved_at)})` : ''], ['Issued by', i.issued_by_name],
@@ -1686,14 +1711,14 @@ async function buildReport(type, q) {
     const out = [];
     if (type === 'detail') {
       const { rows } = await db.execute({
-        sql: `SELECT i.issued_at AS date, 'Issue' AS kind, i.issue_number AS doc, r.request_number, b.name AS branch, r.department, r.category,
+        sql: `SELECT COALESCE(i.transaction_date, i.issued_at) AS date, 'Issue' AS kind, i.issue_number AS doc, r.request_number, b.name AS branch, r.department, r.category,
                 l.sku, l.description, l.unit_name, il.quantity, il.unit_cost * l.units_per AS unit_cost, il.line_cost AS value,
                 rq.first_name || ' ' || rq.last_name AS requester, ap.first_name || ' ' || ap.last_name AS approver,
                 p.status AS posting_status, p.recon_status
               FROM shop_use_issue_lines il JOIN shop_use_issues i ON i.id = il.issue_id JOIN shop_use_request_lines l ON l.id = il.request_line_id ${R_JOINS}
               LEFT JOIN shop_use_postings p ON p.source_type = 'issue' AND p.source_id = i.id
-              WHERE 1=1${reportFilter(q, 'i.issued_at').where}${productFilter}`,
-        args: [...reportFilter(q, 'i.issued_at').args, ...productArgs],
+              WHERE 1=1${reportFilter(q, 'COALESCE(i.transaction_date, i.issued_at)').where}${productFilter}`,
+        args: [...reportFilter(q, 'COALESCE(i.transaction_date, i.issued_at)').args, ...productArgs],
       });
       out.push(...rows);
     }
@@ -1749,7 +1774,7 @@ async function buildReport(type, q) {
   }
 
   if (type === 'usage') {
-    const fi = reportFilter(q, 'i.issued_at');
+    const fi = reportFilter(q, 'COALESCE(i.transaction_date, i.issued_at)');
     const { rows } = await db.execute({
       sql: `SELECT l.product_id, l.sku, COALESCE(pr.name, l.description) AS item, r.category,
               SUM(il.stock_units) AS issued_units, SUM(il.line_cost) AS issued_cost,

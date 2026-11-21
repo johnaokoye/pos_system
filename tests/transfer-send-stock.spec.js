@@ -38,6 +38,7 @@ test('send transfer: refresh and adjust stock in place, keeping typed quantities
   expect(moves.some(m => m.qty === 5 && /Recount while picking/.test(m.detail))).toBeTruthy();
 
   await page.fill(`#tsend-${lb.id}`, '4');
+  await page.evaluate(() => document.getElementById('notify-stack')?.replaceChildren()); // other tests' request notices
   await page.click('#tsend-btn');
   await expect(page.locator('#tsend-btn')).toHaveCount(0);
   const sent = await api(page, 'GET', `/transfers/${tr.id}`);

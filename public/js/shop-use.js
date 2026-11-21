@@ -79,7 +79,7 @@ Object.assign(App, {
     return rows.map(r => `
       <tr style="cursor:pointer" onclick="App.viewShopUseRequest(${r.id})">
         <td class="fw-600">${r.request_number}${r.overdue ? ' <span class="badge-pill badge-danger" style="font-size:9px">Overdue</span>' : ''}${r.awaiting_me ? ' <span class="badge-pill badge-info" style="font-size:9px">Your approval</span>' : ''}</td>
-        <td style="white-space:nowrap">${this._apDate(r.created_at)}</td>
+        <td style="white-space:nowrap">${this._apDate(r.requested_date || r.created_at)}</td>
         <td>${this.escapeAttr(r.requested_by_name || '—')}</td>
         <td>${this.escapeAttr(r.branch_name || '—')}<div style="font-size:12px;color:var(--text-muted)">${this.escapeAttr(r.department || '')}</div></td>
         <td style="font-size:12px">${this.escapeAttr(r.category_label || r.category)}</td>
@@ -218,6 +218,8 @@ Object.assign(App, {
             <div class="form-group"><label>Equipment ID</label><input id="su-equip" value="${this.escapeAttr(req.equipment_ref || '')}" placeholder="Asset tag / serial being repaired"></div>
             <div class="form-group"><label>Project reference</label><input id="su-project" value="${this.escapeAttr(req.project_ref || '')}" placeholder="Internal project code"></div>
           </div>
+          <div class="form-group" style="max-width:260px"><label>Date requested *</label><input type="date" id="su-req-date" value="${req.requested_date || this._storeDay(new Date())}" max="${this._storeDay(new Date())}">
+            <div style="font-size:11px;color:var(--text-muted);margin-top:3px">The day the items were actually asked for — set it back if this is being entered later.</div></div>
           <div class="form-group"><label>Reason *</label><textarea id="su-reason" rows="2" placeholder="What the items are needed for">${this.escapeAttr(req.reason || '')}</textarea></div>
           <div class="card-header" style="margin-top:6px"><span class="card-title">Items</span>
             <div style="display:flex;gap:8px">
@@ -404,7 +406,7 @@ Object.assign(App, {
     }));
     const body = {
       category: v('su-cat'), branch_id: v('su-branch'), department: v('su-dept'), source_branch_id: v('su-source'), reason: v('su-reason'),
-      equipment_ref: v('su-equip'), project_ref: v('su-project'), notes: v('su-notes'), lines, submit, amend_reason: v('su-amend-reason'),
+      equipment_ref: v('su-equip'), project_ref: v('su-project'), notes: v('su-notes'), requested_date: v('su-req-date'), lines, submit, amend_reason: v('su-amend-reason'),
     };
     const files = [...(document.getElementById('su-files')?.files || [])];
     try {
@@ -458,7 +460,7 @@ Object.assign(App, {
           ${r.approval_status === 'pending_approval' ? `<div style="background:#FFF8E1;border:1px solid #f0d58a;border-radius:6px;padding:8px 12px;font-size:13px;margin-bottom:12px">Waiting for approval by ${this.escapeAttr(r.routed_approvers.map(a => a.name).join(', ') || 'a Shop Use approver')}${r.submitted_at ? ` since ${this._suDate(r.submitted_at)}` : ''}.${!r.can_decide && r.decide_block && this.can('shop_use_approve') ? ` <em>${this.escapeAttr(r.decide_block)}.</em>` : ''}</div>` : ''}
           ${['returned', 'rejected'].includes(r.approval_status) ? `<div style="background:#FFEBEE;border-radius:6px;padding:8px 12px;font-size:13px;margin-bottom:12px"><strong>${r.approval_status === 'returned' ? 'Returned for correction' : 'Rejected'}</strong> by ${this.escapeAttr(r.decided_by_name || '')} ${this._suDate(r.decided_at)}: ${this.escapeAttr(r.decision_comment || '')}</div>` : ''}
           <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:14px">
-            ${info('Requested', `${this._suDate(r.created_at)}<br>${this.escapeAttr(r.requested_by_name || '')}`)}
+            ${info('Requested', `${r.requested_date ? this.fmtDate(r.requested_date) : this._suDate(r.created_at)}<br>${this.escapeAttr(r.requested_by_name || '')}${r.requested_date && r.requested_date !== this._storeDay(r.created_at) ? `<div style="font-size:11px;color:var(--text-muted)">entered ${this._suDate(r.created_at)}</div>` : ''}`)}
             ${info('For', `${this.escapeAttr(r.branch_name || '')}<br>${this.escapeAttr(r.department || '')}`)}
             ${info('Supplying location', this.escapeAttr(r.source_branch_name || ''))}
             ${info('Category', this.escapeAttr(r.category_label))}
@@ -490,7 +492,7 @@ Object.assign(App, {
           <div class="table-wrap"><table style="font-size:13px">
             <thead><tr><th>Issue #</th><th>Date</th><th>Items</th><th>Recipient</th><th>Issued By</th><th style="text-align:right">Cost</th><th>Posting</th><th>Recon.</th><th></th></tr></thead>
             <tbody>${r.issues.map(i => `<tr>
-              <td class="fw-600">${i.issue_number}</td><td style="white-space:nowrap">${this._suDate(i.issued_at)}</td>
+              <td class="fw-600">${i.issue_number}</td><td style="white-space:nowrap">${i.transaction_date ? this.fmtDate(i.transaction_date) : this._suDate(i.issued_at)}${i.transaction_date && i.transaction_date !== this._storeDay(i.issued_at) ? `<div style="font-size:11px;color:var(--text-muted)">processed ${this._suDate(i.issued_at)}</div>` : ''}</td>
               <td style="font-size:12px">${i.lines.map(x => `${this._suQty(x.quantity)} × ${this.escapeAttr(x.description)}${x.qty_returned ? ` <span style="color:var(--text-muted)">(${this._suQty(x.qty_returned)} back)</span>` : ''}${x.tools.length ? `<div style="color:var(--text-muted)">${x.tools.map(t => `${t.tool_number}${t.serial_number ? ` S/N ${this.escapeAttr(t.serial_number)}` : ''}`).join(', ')}</div>` : ''}`).join('<br>')}${i.comments ? `<div style="color:var(--text-muted);margin-top:3px">${this.escapeAttr(i.comments)}</div>` : ''}</td>
               <td>${this.escapeAttr(i.recipient_name || '')}${i.acknowledged ? '<div style="font-size:11px;color:var(--success)">✓ acknowledged</div>' : ''}</td>
               <td>${this.escapeAttr(i.issued_by_name || '')}</td>
@@ -690,6 +692,9 @@ Object.assign(App, {
               <select id="su-iss-emp" data-searchable><option value="">— Not an employee —</option>${meta.employees.map(e => `<option value="${e.id}" ${r.requested_by === e.id ? 'selected' : ''}>${this.escapeAttr(e.name)}</option>`).join('')}</select></div>
             <div class="form-group"><label>…or recipient name</label><input id="su-iss-name" placeholder="If not an employee"></div>
           </div>
+          <div class="form-group" style="max-width:320px"><label>Transaction date *</label>
+            <input type="date" id="su-iss-date" value="${r.requested_date && r.requested_date <= this._storeDay(new Date()) ? r.requested_date : this._storeDay(new Date())}" ${r.requested_date ? `min="${r.requested_date}"` : ''} max="${this._storeDay(new Date())}">
+            <div style="font-size:11px;color:var(--text-muted);margin-top:3px">The day the items actually went out — the date it's charged to the cost centre and posted to the books. Starts at the date requested${r.requested_date ? ` (${this.fmtDate(r.requested_date)})` : ''}; today's date is kept as when it was processed.</div></div>
           <div class="form-group"><label>Comments <span style="font-weight:400;color:var(--text-muted);font-size:12px">(required for a partial issue — what is still to come and why)</span></label><input id="su-iss-comments"></div>
           ${this._sigPadHtml('su-iss-sig', 'Recipient signature', 'optional')}
           <label style="display:flex;gap:8px;align-items:center;font-weight:500"><input type="checkbox" id="su-iss-ack" style="width:16px;height:16px"> The recipient acknowledges receiving the items above</label>
@@ -709,6 +714,7 @@ Object.assign(App, {
     const body = {
       issue_key: this._suIssueKey, lines, recipient_employee_id: document.getElementById('su-iss-emp').value || null, recipient_name: document.getElementById('su-iss-name').value,
       acknowledged: document.getElementById('su-iss-ack').checked, comments: document.getElementById('su-iss-comments').value,
+      transaction_date: document.getElementById('su-iss-date').value || null,
       signature: this._sigPadHasDrawn('su-iss-sig') ? this._sigPadDataUrl('su-iss-sig') : null,
     };
     btn.disabled = true;
@@ -733,7 +739,7 @@ Object.assign(App, {
       .note{margin-top:14px;font-size:11px;color:#666} @media print{body{margin:12px}}
     </style></head><body>
       ${this._printLogoTag(40)}<h1>${this.escapeAttr(s.store_name || 'RetailPOS')}</h1><h2>Shop Use Issue Slip — ${i.issue_number}</h2>
-      <table>${row('Request', i.request_number)}${row('Issued', this._suDate(i.issued_at))}${row('From', this.escapeAttr(i.source_branch_name || ''))}
+      <table>${row('Request', i.request_number)}${row('Transaction date', i.transaction_date ? this.fmtDate(i.transaction_date) : this._suDate(i.issued_at))}${i.transaction_date && i.transaction_date !== this._storeDay(i.issued_at) ? row('Processed', this._suDate(i.issued_at)) : ''}${row('From', this.escapeAttr(i.source_branch_name || ''))}
         ${row('For', `${this.escapeAttr(i.branch_name || '')} — ${this.escapeAttr(i.department || '')}`)}${row('Category', this.escapeAttr(i.category_label))}${row('Reason', this.escapeAttr(i.reason || ''))}
         ${row('Equipment / project', this.escapeAttr([i.equipment_ref, i.project_ref].filter(Boolean).join(' / ')))}${row('Requested by', this.escapeAttr(i.requested_by_name || ''))}
         ${row('Approved by', i.approved_by_name ? `${this.escapeAttr(i.approved_by_name)} (${this._suDate(i.approved_at)})` : '')}${row('Issued by', this.escapeAttr(i.issued_by_name || ''))}
