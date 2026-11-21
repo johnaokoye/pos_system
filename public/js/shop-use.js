@@ -444,6 +444,7 @@ Object.assign(App, {
     if (r.approval_status === 'approved' && outstanding && this.can('shop_use_issue')) actions.push(`<button class="btn btn-primary" onclick="App._suIssue(${r.id})">Issue Items</button>`);
     if (shortage && open && this.can('pr_create')) actions.push(`<button class="btn btn-outline" onclick="App._suRaisePR(${r.id})">Raise Purchase Request</button>`);
     if (open && (mine || this.can('shop_use_issue') || r.can_decide)) actions.push(`<button class="btn btn-outline" style="color:var(--danger)" onclick="App._suCancel(${r.id})">${r.lines.some(l => l.qty_issued > 0) ? 'Cancel Outstanding…' : 'Cancel Request'}</button>`);
+    actions.push(`<button class="btn btn-outline" onclick="App._suPrintRequest(${r.id})" title="Request with item check list, and spaces for Issued by, Received by and Security to sign">🖨 Print</button>`);
     const info = (label, value) => value ? `<div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.03em">${label}</div><div style="font-weight:500">${value}</div></div>` : '';
     const actionLabel = { submitted: 'Submitted', resubmitted: 'Resubmitted', amended: 'Amended — sent for reapproval', approved: 'Approved', approved_reduced: 'Approved (reduced)', rejected: 'Rejected', returned: 'Returned for correction', cancelled: 'Cancelled', cancelled_quantity: 'Outstanding quantity cancelled' };
     const postingCell = (status, err, pid) => `${this._suBadge('posting', status)}${status === 'failed' && err ? `<div style="font-size:11px;color:var(--danger);max-width:220px">${this.escapeAttr(err)}</div>` : ''}${status === 'failed' && this.can('shop_use_finance') ? ` <button class="btn btn-sm btn-outline" style="margin-top:3px" onclick="App._suRetryPosting(${pid}, ${r.id})">Retry</button>` : ''}`;
@@ -751,7 +752,82 @@ Object.assign(App, {
       </tbody></table>
       ${i.recipient_signature ? `<div style="margin-top:16px"><img src="${this.escapeAttr(i.recipient_signature)}" style="max-height:70px"></div>` : ''}
       <div class="sig"><div>Received by: ${this.escapeAttr(i.recipient_name || '')}${i.acknowledged ? ' (acknowledged)' : ''}</div><div>Issued by: ${this.escapeAttr(i.issued_by_name || '')}</div></div>
+      ${this._suSecurityBoxHtml()}
       <div class="note">Valued at inventory cost. Company use only — not a sale.</div>
+      <script>window.onload=()=>{window.print()}<\/script></body></html>`);
+    win.document.close();
+  },
+
+  // Security sign-off box for printed Shop Use documents (owner, 2026-11-21:
+  // Security verifies the items leaving; the receiver signs for them).
+  _suSecurityBoxHtml() {
+    const line = label => `<div style="flex:1;min-width:150px"><div style="border-bottom:1px solid #333;height:26px"></div><div style="font-size:11px;color:#555;margin-top:3px">${label}</div></div>`;
+    return `<div style="border:2px solid #333;border-radius:4px;padding:10px 12px;margin-top:22px;page-break-inside:avoid">
+      <div style="font-weight:700;font-size:13px;margin-bottom:6px">SECURITY VERIFICATION</div>
+      <div style="font-size:12px;margin-bottom:8px">I have checked the items leaving against this list:
+        &nbsp; <span style="display:inline-block;width:12px;height:12px;border:1px solid #333;vertical-align:middle"></span> All correct
+        &nbsp; <span style="display:inline-block;width:12px;height:12px;border:1px solid #333;vertical-align:middle"></span> Discrepancy (note below)</div>
+      <div style="display:flex;gap:18px;flex-wrap:wrap">${line('Security officer (print name)')}${line('Signature')}${line('Date &amp; time out')}</div>
+      <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:10px">${line('Vehicle / plate no. (if any)')}${line('Discrepancy notes')}</div>
+    </div>`;
+  },
+
+  // Printed Shop Use request: the items with what's approved and issued, a
+  // check column, and spaces for the storeperson, the person receiving the
+  // items and Security to sign. Unapproved requests print marked as such.
+  async _suPrintRequest(id) {
+    const r = await this.api('GET', `/shop-use/requests/${id}`);
+    const s = this.settings || {};
+    const esc = v => this.escapeAttr(v == null ? '' : String(v));
+    const approved = r.approval_status === 'approved';
+    const row = (k, v) => v ? `<tr><th style="text-align:left;padding:3px 14px 3px 0;color:#555;font-weight:600;white-space:nowrap;vertical-align:top">${k}</th><td style="padding:3px 0">${v}</td></tr>` : '';
+    const line = label => `<div style="flex:1;min-width:150px"><div style="border-bottom:1px solid #333;height:26px"></div><div style="font-size:11px;color:#555;margin-top:3px">${label}</div></div>`;
+    const box = '<span style="display:inline-block;width:14px;height:14px;border:1px solid #333"></span>';
+    const statusText = { draft: 'DRAFT — NOT SUBMITTED', pending_approval: 'WAITING FOR APPROVAL', returned: 'RETURNED FOR CORRECTION', rejected: 'REJECTED' }[r.approval_status];
+    const lines = r.lines.filter(l => Number(l.qty_requested) > 0);
+    const win = window.open('', '_blank', 'width=900,height=1000');
+    win.document.write(`<!DOCTYPE html><html><head><title>Shop Use ${esc(r.request_number)}</title><style>
+      body{font-family:Arial,sans-serif;font-size:13px;margin:28px;color:#111} h1{font-size:18px;margin:0} h2{font-size:15px;margin:2px 0 12px}
+      table.lines{width:100%;border-collapse:collapse;margin-top:12px} .lines th{background:#eee;text-align:left;padding:6px 8px;font-size:11px;text-transform:uppercase;border:1px solid #ccc}
+      .lines td{padding:7px 8px;border:1px solid #ccc;vertical-align:top} .r{text-align:right} .c{text-align:center}
+      .block{border:1px solid #999;border-radius:4px;padding:10px 12px;margin-top:16px;page-break-inside:avoid} .block h3{font-size:13px;margin:0 0 6px}
+      .warn{border:2px solid #c00;color:#c00;font-weight:700;padding:6px 10px;margin:8px 0;text-align:center}
+      .note{margin-top:14px;font-size:11px;color:#666} @media print{body{margin:12px}}
+    </style></head><body>
+      ${this._printLogoTag(40)}<h1>${esc(s.store_name || 'RetailPOS')}</h1><h2>Shop Use Request — ${esc(r.request_number)}</h2>
+      ${statusText ? `<div class="warn">${statusText} — items must not leave on this request</div>` : ''}
+      ${r.fulfillment_status === 'cancelled' ? '<div class="warn">CANCELLED — items must not leave on this request</div>' : ''}
+      <table>
+        ${row('Date requested', r.requested_date ? this.fmtDate(r.requested_date) : this._suDate(r.created_at))}
+        ${row('Requested by', esc(r.requested_by_name))}
+        ${row('For', `${esc(r.branch_name)} — ${esc(r.department)}`)}
+        ${row('Supplying location', esc(r.source_branch_name))}
+        ${row('Category', esc(r.category_label))}
+        ${row('Reason', esc(r.reason))}
+        ${row('Equipment / project', esc([r.equipment_ref, r.project_ref].filter(Boolean).join(' / ')))}
+        ${row('Approved by', approved && r.decided_by_name ? `${esc(r.decided_by_name)} (${this._suDate(r.decided_at)})` : '')}
+        ${row('Status', `${esc(this._suStatus.approval[r.approval_status]?.[0] || r.approval_status.replace(/_/g, ' '))}${approved ? ` · ${esc(this._suStatus.fulfillment[r.fulfillment_status]?.[0] || r.fulfillment_status.replace(/_/g, ' '))}` : ''}`)}
+        ${row('Printed', `${this._suDate(new Date().toISOString())} by ${esc([this.currentUser?.first_name, this.currentUser?.last_name].filter(Boolean).join(' '))}`)}
+      </table>
+      <table class="lines"><thead><tr><th>#</th><th>Code</th><th>Item</th><th>Unit</th><th class="r">Requested</th><th class="r">Approved</th><th class="r">Issued so far</th><th class="r">To issue</th><th class="c" style="width:70px">Qty out</th><th class="c" style="width:60px">Security ✓</th></tr></thead><tbody>
+        ${lines.map((l, n) => `<tr><td>${n + 1}</td><td>${esc(l.sku || l.tool_number || '')}</td>
+          <td>${esc(l.description)}${l.tool_id ? '<div style="font-size:11px;color:#555">borrowed from the tool register</div>' : ''}${l.equipment_ref ? `<div style="font-size:11px;color:#555">For ${esc(l.equipment_ref)}</div>` : ''}</td>
+          <td>${esc(l.unit_name || 'Each')}</td><td class="r">${this._suQty(l.qty_requested)}</td>
+          <td class="r">${approved && l.qty_approved != null ? this._suQty(l.qty_approved) : '—'}</td>
+          <td class="r">${this._suQty(l.qty_issued)}</td><td class="r" style="font-weight:700">${approved ? this._suQty(Math.max(0, l.outstanding || 0)) : '—'}</td>
+          <td></td><td class="c">${box}</td></tr>`).join('')}
+      </tbody></table>
+      <div style="font-size:11px;color:#555;margin-top:4px">"Qty out" is filled in by hand with what actually leaves; Security ticks each line after checking it.</div>
+
+      <div class="block"><h3>ISSUED BY (stores / warehouse)</h3>
+        <div style="display:flex;gap:18px;flex-wrap:wrap">${line('Name')}${line('Signature')}${line('Date &amp; time')}</div></div>
+
+      <div class="block"><h3>RECEIVED BY</h3>
+        <div style="font-size:12px;margin-bottom:8px">I acknowledge receiving the items and quantities listed above (as filled in under "Qty out") for company use, and that they remain company property.</div>
+        <div style="display:flex;gap:18px;flex-wrap:wrap">${line('Name')}${line('Signature')}${line('Date &amp; time')}</div></div>
+
+      ${this._suSecurityBoxHtml()}
+      <div class="note">Company use only — not a sale. Keep this copy with the stores records; the issue is recorded in the system against ${esc(r.request_number)}.</div>
       <script>window.onload=()=>{window.print()}<\/script></body></html>`);
     win.document.close();
   },

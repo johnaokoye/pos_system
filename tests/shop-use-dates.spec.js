@@ -62,3 +62,18 @@ test('shop use: date requested and issue transaction date drive the posting date
   await page.evaluate(() => App.closeModal());
   expect(await issue(r1, null, 'rest', 1)).toBe('accepted');
 });
+
+test('shop use: printed request has the item check list and Issued by / Received by / Security sign-off', async ({ page }) => {
+  const stamp = Date.now();
+  const p = await api(page, 'POST', '/products', { sku: `SUP-${stamp}`, name: `Shop Use Mop ${stamp}`, price: 10, cost: 4, tax_rate: 0 });
+  await api(page, 'PATCH', `/products/${p.id}/stock`, { adjustment: 10, branch_id: 1, reason: 'test' });
+  const r = await api(page, 'POST', '/shop-use/requests', { category: 'cleaning', branch_id: 1, source_branch_id: 1, department: 'Operations', reason: 'Mopping the store', lines: [{ product_id: p.id, quantity: 3 }] });
+
+  await page.evaluate(id => App.viewShopUseRequest(id), r.id);
+  const [popup] = await Promise.all([page.waitForEvent('popup'), page.locator('.modal').getByRole('button', { name: /Print/ }).click()]);
+  await popup.waitForLoadState();
+  const text = await popup.locator('body').innerText();
+  for (const t of [`Shop Use Request — ${r.request_number}`, `Shop Use Mop ${stamp}`, `SUP-${stamp}`, 'Mopping the store', 'DRAFT — NOT SUBMITTED', 'items must not leave',
+    'Security ✓', 'Qty out', 'ISSUED BY', 'RECEIVED BY', 'I acknowledge receiving', 'SECURITY VERIFICATION', 'Security officer', 'Date & time out']) expect(text.toLowerCase()).toContain(t.toLowerCase());
+  await popup.close();
+});
