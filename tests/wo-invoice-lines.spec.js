@@ -29,6 +29,8 @@ test('work order invoice lines, GCT, non-refundable assessment deposit, and a si
   expect(text).toMatch(/Labour 1 \$6,000\.00 \$900\.00 \$6,000\.00/);
   expect(text).toMatch(/Consumables 1 \$850\.00 \$127\.50 \$850\.00/);
   expect(text).not.toContain('labor + consumables');
+  const intakeBy = await page.evaluate(() => `${App.currentUser.first_name} ${App.currentUser.last_name}`);
+  expect(text).toContain(`Taken In By: ${intakeBy}`);
   // Services first, parts at the bottom with each part's total and a parts total.
   expect(text.indexOf('Labour')).toBeLessThan(text.indexOf(`Carbon brush ${s}`));
   expect(text).toMatch(new RegExp(`Carbon brush ${s} .*2 \\$400\\.00 \\$120\\.00 \\$800\\.00`));
@@ -43,6 +45,7 @@ test('work order invoice lines, GCT, non-refundable assessment deposit, and a si
   await page.evaluate(() => App.showSection('work-orders'));
   await page.evaluate(id => App.viewWorkOrder(id), wo.id);
   await expect(page.locator('.modal')).toContainText('Consumables');
+  await expect(page.locator('.modal')).toContainText('Taken In By');
   await expect(page.locator('.modal')).not.toContainText('labor + consumables');
 
   // Attach the signed contract.

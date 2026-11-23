@@ -2514,7 +2514,8 @@ router.post('/send-work-order-ready/:id', requireAuth, async (req, res) => {
 // item sourcing) for the management UI; this only needs items, so it re-queries
 // directly rather than importing that route's private helpers.
 async function loadWorkOrderForInvoice(id) {
-  const { rows: [wo] } = await db.execute({ sql: `SELECT wo.*, c.first_name || ' ' || c.last_name as customer_name, c.phone as customer_phone, c.email as customer_email, ${BILL_TO_COLS}, b.name as branch_name
+  const { rows: [wo] } = await db.execute({ sql: `SELECT wo.*, c.first_name || ' ' || c.last_name as customer_name, c.phone as customer_phone, c.email as customer_email, ${BILL_TO_COLS}, b.name as branch_name,
+    (SELECT first_name || ' ' || last_name FROM employees WHERE id = wo.employee_id) as intake_by_name
     FROM work_orders wo
     LEFT JOIN customers c ON wo.customer_id = c.id
     LEFT JOIN branches b ON wo.branch_id = b.id
@@ -2612,7 +2613,7 @@ ${print ? PRINT_PAGE_STYLE : ''}
           <div style="font-size:13px;color:#888;margin-top:2px">${wo.wo_number}</div>
         </div>
       </div>
-      ${billToRowHtml(wo, [['Invoice #', wo.wo_number], ['P.O. #', poValueHtml(wo.po_number)], ['Status', `${WO_STATUS_LABELS[wo.status] || wo.status}${wo.is_express ? ' (Express)' : ''}`], ['Opened', fmtDate(wo.created_at)], ['Pickup Due', wo.pickup_due_date ? new Date(wo.pickup_due_date + 'T00:00:00').toLocaleDateString() : '']], [wo.customer_phone, wo.customer_email])}
+      ${billToRowHtml(wo, [['Invoice #', wo.wo_number], ['P.O. #', poValueHtml(wo.po_number)], ['Status', `${WO_STATUS_LABELS[wo.status] || wo.status}${wo.is_express ? ' (Express)' : ''}`], ['Opened', fmtDate(wo.created_at)], ['Taken In By', esc(wo.intake_by_name || '')], ['Pickup Due', wo.pickup_due_date ? new Date(wo.pickup_due_date + 'T00:00:00').toLocaleDateString() : '']], [wo.customer_phone, wo.customer_email])}
       <div style="font-size:13px;color:#444;margin-bottom:16px">
         <strong>Description:</strong> ${wo.description}
         ${wo.item_label ? `<br><strong>Item:</strong> ${wo.item_label}` : ''}
@@ -3029,7 +3030,7 @@ function workOrderInvoicePdfModel(wo, s) {
   return {
     store: pdfStore(s, { branch_name: wo.branch_name }),
     title: 'SERVICE AND REPAIR TAX INVOICE', number: wo.wo_number,
-    meta: [['P.O. #', wo.po_number || '________________'], ['Status', `${WO_STATUS_LABELS[wo.status] || wo.status}${wo.is_express ? ' (Express)' : ''}`], ['Opened', pdfDate(wo.created_at)], ['Pickup Due', wo.pickup_due_date ? pdfDate(wo.pickup_due_date) : '']],
+    meta: [['P.O. #', wo.po_number || '________________'], ['Status', `${WO_STATUS_LABELS[wo.status] || wo.status}${wo.is_express ? ' (Express)' : ''}`], ['Opened', pdfDate(wo.created_at)], ['Taken In By', wo.intake_by_name || '-'], ['Pickup Due', wo.pickup_due_date ? pdfDate(wo.pickup_due_date) : '']],
     party: { label: 'Bill To', boldFirst: true, lines: [wo.customer_name || 'Cash Customer', ...billToLines(wo), wo.customer_phone, wo.customer_email] },
     info: [['Description', wo.description], ['Item', wo.item_label], ['Item #', wo.item_serial]],
     tables: [

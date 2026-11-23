@@ -77,7 +77,7 @@ Object.assign(App, {
       ${isQueue ? `<p style="font-size:12px;color:var(--text-muted);margin:0 0 8px">Waiting to be assessed, oldest first — work top to bottom unless a supervisor bumps a job for express service.</p>` : ''}
       <div class="table-wrap">
       <table class="table">
-        <thead><tr>${isQueue ? '<th>#</th>' : ''}<th>WO #</th><th>Customer</th><th>Description</th><th>Branch</th><th>Opened</th>${isQueue ? '<th>Waiting</th>' : '<th>Pickup Due</th>'}<th>Status</th><th></th></tr></thead>
+        <thead><tr>${isQueue ? '<th>#</th>' : ''}<th>WO #</th><th>Customer</th><th>Description</th><th>Branch</th><th>Opened</th><th>Taken In By</th>${isQueue ? '<th>Waiting</th>' : '<th>Pickup Due</th>'}<th>Status</th><th></th></tr></thead>
         <tbody>${workOrders.map((wo,i) => `<tr>
           ${isQueue ? `<td class="fw-600">${i+1}</td>` : ''}
           <td class="fw-600">${wo.wo_number}${wo.is_express ? ' <span class="badge-pill badge-danger" style="font-size:10px" title="Express same-day service">⚡</span>' : ''}</td>
@@ -85,6 +85,7 @@ Object.assign(App, {
           <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${this.escapeAttr(wo.description)}">${wo.description}</td>
           <td>${wo.branch_name||'—'}</td>
           <td>${this.fmtDate(wo.created_at)}</td>
+          <td>${wo.employee_name ? this.escapeAttr(wo.employee_name) : '—'}</td>
           ${isQueue ? `<td>${this._woWaitingLabel(wo.created_at)}</td>` : `<td>${wo.pickup_due_date ? this.fmtDate(wo.pickup_due_date) : '<span style="color:var(--text-muted)">After completion</span>'}${this._woPickupBadge(wo)}</td>`}
           <td><span class="badge-pill ${this._woStatusBadge[wo.status]||'badge-secondary'}">${this._woStatusLabels[wo.status]||wo.status}</span>${wo.returned_to_customer_at ? '<div style="font-size:11px;color:var(--text-muted)">Returned to customer</div>' : ''}${wo.status === 'awaiting_pickup' && wo.cashier_hold_at ? '<div style="font-size:11px;color:var(--warning)">On hold for cashier</div>' : ''}${this._woFollowUpBadge(wo)}</td>
           <td style="text-align:right;white-space:nowrap">
@@ -469,6 +470,7 @@ Object.assign(App, {
           </div>
           <div class="input-row" style="margin-bottom:10px">
             <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Opened</label><div>${this.fmtDateTime(wo.created_at)}</div></div>
+            <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Taken In By</label><div>${wo.employee_name ? this.escapeAttr(wo.employee_name) : '—'}</div></div>
             <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Pickup Due</label><div>${wo.pickup_due_date ? this.fmtDate(wo.pickup_due_date) : '30 days after completion'}${this._woPickupBadge(wo)}</div></div>
           </div>
           ${wo.returned_to_customer_at ? `<div style="margin-bottom:10px;padding:6px 10px;border-radius:6px;background:var(--bg-secondary);font-size:13px">✓ <strong>Returned to customer</strong> ${this.fmtDateTime(wo.returned_to_customer_at)}${wo.returned_to_customer_by_name ? ` by ${this.escapeAttr(wo.returned_to_customer_by_name)}` : ''}</div>` : ''}
