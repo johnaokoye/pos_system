@@ -2150,6 +2150,24 @@ async function _init() {
       posted_at DATETIME,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // Technician incentive targets per store-clock month (period YYYY-MM):
+    // employee_id NULL = the default for every technician without their own.
+    // A target is met when completed ≥ target_completed and the on-time
+    // share ≥ target_on_time_pct (each only when set).
+    { sql: `CREATE TABLE IF NOT EXISTS technician_incentive_targets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      period TEXT NOT NULL,
+      employee_id INTEGER REFERENCES employees(id),
+      target_completed INTEGER,
+      target_on_time_pct REAL,
+      reward_amount REAL,
+      reward_note TEXT,
+      created_by INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_by INTEGER REFERENCES employees(id),
+      updated_at DATETIME
+    )` },
+    { sql: `CREATE UNIQUE INDEX IF NOT EXISTS idx_tech_targets_period_emp ON technician_incentive_targets(period, COALESCE(employee_id, 0))` },
     // Work done on a work order by an outside technician or company: who did
     // it, what they did and what it cost us (internal cost — not added to
     // the customer's bill, which is the estimate + parts). With a supplier on
@@ -3559,6 +3577,12 @@ async function _init() {
     // External work cost broken down: labour hours × hourly rate + other
     // charges + GCT on their invoice (cost = the sum); ap_bill_id = the A/P
     // bill raised for a supplier on file.
+    // When a task was marked complete and by whom (Technician Performance:
+    // the period a completed task counts in). Older ones backfilled below.
+    'ALTER TABLE work_order_tasks ADD COLUMN completed_at DATETIME',
+    'ALTER TABLE work_order_tasks ADD COLUMN completed_by INTEGER REFERENCES employees(id)',
+    `UPDATE work_order_tasks SET completed_at = COALESCE((SELECT MAX(ended_at) FROM work_order_task_time_entries WHERE task_id = work_order_tasks.id), created_at)
+       WHERE status = 'complete' AND completed_at IS NULL`,
     'ALTER TABLE work_order_external_work ADD COLUMN labour_hours REAL',
     'ALTER TABLE work_order_external_work ADD COLUMN hourly_rate REAL',
     'ALTER TABLE work_order_external_work ADD COLUMN other_cost REAL',
@@ -4464,6 +4488,9 @@ async function _init() {
       // (2026-11-20) starts with whoever could edit employees, which gated it.
       if (!('employees_staff_accounts' in perms)) { perms.employees_staff_accounts = can(perms, 'employees_edit'); changed = true; }
       if (!('quotations_delete' in perms)) { perms.quotations_delete = can(perms, 'quotations_approve'); changed = true; }
+      // Setting technician incentive targets (2026-11-23) starts with
+      // whoever does supervisor sign-off on work orders.
+      if (!('wo_incentives' in perms)) { perms.wo_incentives = can(perms, 'wo_signoff'); changed = true; }
       // Requesting an (advance) payment from an approved PO (2026-11-02)
       // starts with whoever can create POs.
       if (!('purchasing_request_payment' in perms)) { perms.purchasing_request_payment = can(perms, 'purchasing_create'); changed = true; }

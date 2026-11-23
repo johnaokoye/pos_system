@@ -10,6 +10,7 @@ Object.assign(App, {
     { key: 'cancelled',       label: 'Cancelled' },
     { key: 'not_worth_fixing', label: 'Not Worth Fixing' },
     { key: 'all',             label: 'All' },
+    { key: 'performance',     label: 'Technician Performance' },
   ],
 
   _woStatusLabels: {
@@ -65,6 +66,7 @@ Object.assign(App, {
   async loadWorkOrders() {
     const el = document.getElementById('wo-content');
     if (!el) return;
+    if (this.woTab === 'performance') return this._renderWOPerformance();
     const isQueue = this.woTab === 'assessed';
     const view = this.woTab === 'all' ? '' : this.woTab;
     const workOrders = await this.api('GET', `/work-orders${view ? '?view='+view : ''}`);

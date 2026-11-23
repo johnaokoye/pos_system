@@ -12,7 +12,7 @@ const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 const { syncBinQty } = require('../lib/binSync');
 const { branchStockQty } = require('../lib/branchStock');
 const { takeFromLots, costOn } = require('../lib/stockLots');
-const { storeToday } = require('../lib/storeTime');
+const { storeToday, storeOffsetModifier } = require('../lib/storeTime');
 const { createBill, dueDateFor, PAID_SQL } = require('../lib/payables');
 
 // Statuses a WO can freely log a comment against via PATCH /:id/status without
@@ -280,6 +280,171 @@ router.get('/active-tasks', requirePermission('work_orders'), async (req, res) =
       args: [],
     });
     res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Technician performance & incentive targets ───────────────────────────
+// A task counts in a period by the store day it was completed; incomplete =
+// still open (on a work order that's still live) and created by the period's
+// end. On time = actual clocked time ≤ allotted (tasks with no allotted time
+// are "no time set" and count in neither). Targets are per store month.
+const TASK_ACTUAL_SQL = `(SELECT COALESCE(SUM((julianday(COALESCE(te.ended_at, CURRENT_TIMESTAMP)) - julianday(te.started_at)) * 24 * 60), 0) FROM work_order_task_time_entries te WHERE te.task_id = t.id)`;
+const MONTH_RE = /^\d{4}-\d{2}$/;
+const DAY_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+function monthOf(start, end) {
+  // The month a start/end range covers exactly, else null (no target shown).
+  if (!start || !end || start.slice(0, 7) !== end.slice(0, 7) || start.slice(8) !== '01') return null;
+  const [y, m] = start.split('-').map(Number);
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return Number(end.slice(8)) === last ? start.slice(0, 7) : null;
+}
+
+async function targetsFor(period) {
+  const { rows } = await db.execute({ sql: `SELECT t.*, e.first_name || ' ' || e.last_name as employee_name FROM technician_incentive_targets t
+    LEFT JOIN employees e ON e.id = t.employee_id WHERE t.period = ? ORDER BY t.employee_id IS NOT NULL, employee_name`, args: [period] });
+  return rows;
+}
+
+function targetResult(target, stats) {
+  if (!target) return null;
+  const checks = [];
+  if (target.target_completed != null) checks.push(stats.completed >= target.target_completed);
+  if (target.target_on_time_pct != null) checks.push(stats.on_time_pct != null && stats.on_time_pct >= target.target_on_time_pct);
+  return { ...target, is_default: target.employee_id == null, met: checks.length > 0 && checks.every(Boolean) };
+}
+
+router.get('/task-performance', requirePermission('work_orders'), async (req, res) => {
+  try {
+    const today = storeToday();
+    const start = DAY_ONLY.test(req.query.start || '') ? req.query.start : today.slice(0, 8) + '01';
+    const end = DAY_ONLY.test(req.query.end || '') ? req.query.end : today;
+    if (end < start) return res.status(400).json({ error: 'The end date is before the start date' });
+    const off = storeOffsetModifier();
+    const techId = req.query.technician_id ? parseInt(req.query.technician_id, 10) : null;
+    const branchId = req.query.branch_id ? parseInt(req.query.branch_id, 10) : null;
+    const filters = [];
+    const args = [start, end, end];
+    if (techId) { filters.push('t.technician_id = ?'); args.push(techId); }
+    if (branchId) { filters.push('wo.branch_id = ?'); args.push(branchId); }
+    const { rows } = await db.execute({
+      sql: `SELECT t.id, t.description, t.status, t.allotted_minutes, t.technician_id, t.created_at, t.completed_at,
+              tech.first_name || ' ' || tech.last_name as technician_name,
+              wo.id as work_order_id, wo.wo_number, wo.status as wo_status, wo.description as wo_description, b.name as branch_name,
+              c.first_name || ' ' || c.last_name as customer_name,
+              ${TASK_ACTUAL_SQL} as actual_minutes,
+              (SELECT COUNT(*) FROM work_order_task_time_entries te WHERE te.task_id = t.id AND te.ended_at IS NULL) as running
+            FROM work_order_tasks t
+            JOIN work_orders wo ON wo.id = t.work_order_id
+            LEFT JOIN employees tech ON tech.id = t.technician_id
+            LEFT JOIN branches b ON b.id = wo.branch_id
+            LEFT JOIN customers c ON c.id = wo.customer_id
+            WHERE ((t.status = 'complete' AND date(t.completed_at, '${off}') BETWEEN ? AND ?)
+               OR (t.status != 'complete' AND wo.status NOT IN ('cancelled', 'not_worth_fixing', 'picked_up') AND date(t.created_at, '${off}') <= ?))
+              ${filters.length ? 'AND ' + filters.join(' AND ') : ''}
+            ORDER BY t.status = 'complete', COALESCE(t.completed_at, t.created_at) DESC, t.id DESC`,
+      args,
+    });
+    const tasks = rows.map(t => {
+      const actual = Math.round((Number(t.actual_minutes) || 0) * 10) / 10;
+      const allotted = Number(t.allotted_minutes) || 0;
+      let timing = null;
+      if (t.status === 'complete') timing = allotted > 0 ? (actual <= allotted ? 'on_time' : 'late') : 'no_allotment';
+      else if (allotted > 0 && actual > allotted) timing = 'over';
+      return { ...t, actual_minutes: actual, variance_minutes: allotted > 0 ? Math.round((actual - allotted) * 10) / 10 : null, timing, running: !!t.running };
+    });
+
+    const period = monthOf(start, end);
+    const targets = period ? await targetsFor(period) : [];
+    const defaultTarget = targets.find(t => t.employee_id == null) || null;
+    const byTech = new Map();
+    for (const t of tasks) {
+      const key = t.technician_id || 0;
+      if (!byTech.has(key)) byTech.set(key, { technician_id: t.technician_id, technician_name: t.technician_name || 'Unassigned', completed: 0, on_time: 0, late: 0, no_allotment: 0, incomplete: 0, minutes_worked: 0, minutes_allotted: 0 });
+      const s = byTech.get(key);
+      if (t.status === 'complete') {
+        s.completed++;
+        s[t.timing]++;
+        s.minutes_worked += t.actual_minutes;
+        s.minutes_allotted += Number(t.allotted_minutes) || 0;
+      } else s.incomplete++;
+    }
+    // Technicians with a target of their own still show with nothing done.
+    for (const tg of targets) if (tg.employee_id && !byTech.has(tg.employee_id) && !techId) {
+      byTech.set(tg.employee_id, { technician_id: tg.employee_id, technician_name: tg.employee_name, completed: 0, on_time: 0, late: 0, no_allotment: 0, incomplete: 0, minutes_worked: 0, minutes_allotted: 0 });
+    }
+    const technicians = [...byTech.values()].map(s => {
+      const timed = s.on_time + s.late;
+      const stats = { ...s, minutes_worked: Math.round(s.minutes_worked), on_time_pct: timed ? Math.round(s.on_time / timed * 1000) / 10 : null };
+      const target = s.technician_id ? (targets.find(t => t.employee_id === s.technician_id) || defaultTarget) : null;
+      return { ...stats, target: targetResult(target, stats) };
+    }).sort((a, b) => (a.technician_id ? 0 : 1) - (b.technician_id ? 0 : 1) || b.completed - a.completed || String(a.technician_name).localeCompare(String(b.technician_name)));
+    const totals = technicians.reduce((t, s) => ({ completed: t.completed + s.completed, on_time: t.on_time + s.on_time, late: t.late + s.late, no_allotment: t.no_allotment + s.no_allotment, incomplete: t.incomplete + s.incomplete, minutes_worked: t.minutes_worked + s.minutes_worked }),
+      { completed: 0, on_time: 0, late: 0, no_allotment: 0, incomplete: 0, minutes_worked: 0 });
+    totals.on_time_pct = totals.on_time + totals.late ? Math.round(totals.on_time / (totals.on_time + totals.late) * 1000) / 10 : null;
+    res.json({ start, end, period, tasks, technicians, totals, targets });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/incentive-targets', requirePermission('work_orders'), async (req, res) => {
+  try {
+    const period = MONTH_RE.test(req.query.period || '') ? req.query.period : storeToday().slice(0, 7);
+    res.json({ period, targets: await targetsFor(period) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+function cleanTarget(b) {
+  const period = String(b.period || '').trim();
+  if (!MONTH_RE.test(period)) return { error: 'Pick the month the target is for' };
+  const opt = (v, label, max) => {
+    if (v === '' || v == null) return { v: null };
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < 0 || (max != null && n > max)) return { error: `${label} must be between 0 and ${max ?? 'any amount'}` };
+    return { v: n };
+  };
+  const done = opt(b.target_completed, 'Tasks completed', 100000), pct = opt(b.target_on_time_pct, 'On-time %', 100), reward = opt(b.reward_amount, 'Reward', null);
+  for (const f of [done, pct, reward]) if (f.error) return { error: f.error };
+  if (done.v == null && pct.v == null) return { error: 'Set a tasks-completed target, an on-time % target, or both' };
+  return { period, employee_id: b.employee_id ? parseInt(b.employee_id, 10) : null, target_completed: done.v == null ? null : Math.round(done.v),
+    target_on_time_pct: pct.v, reward_amount: reward.v == null ? null : Math.round(reward.v * 100) / 100, reward_note: String(b.reward_note || '').trim() || null };
+}
+
+router.post('/incentive-targets', requirePermission('wo_incentives'), async (req, res) => {
+  try {
+    const t = cleanTarget(req.body || {});
+    if (t.error) return res.status(400).json({ error: t.error });
+    if (t.employee_id) {
+      const { rows: [emp] } = await db.execute({ sql: 'SELECT id FROM employees WHERE id = ?', args: [t.employee_id] });
+      if (!emp) return res.status(400).json({ error: 'That technician no longer exists' });
+    }
+    const { rows: [dupe] } = await db.execute({ sql: 'SELECT id FROM technician_incentive_targets WHERE period = ? AND COALESCE(employee_id, 0) = ?', args: [t.period, t.employee_id || 0] });
+    if (dupe) return res.status(400).json({ error: `There's already a ${t.employee_id ? "target for this technician" : 'default target'} for ${t.period} — edit that one` });
+    const r = await db.execute({ sql: `INSERT INTO technician_incentive_targets (period, employee_id, target_completed, target_on_time_pct, reward_amount, reward_note, created_by) VALUES (?,?,?,?,?,?,?)`,
+      args: [t.period, t.employee_id, t.target_completed, t.target_on_time_pct, t.reward_amount, t.reward_note, req.employee?.id || null] });
+    const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM technician_incentive_targets WHERE id = ?', args: [Number(r.lastInsertRowid)] });
+    res.status(201).json(row);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.put('/incentive-targets/:id', requirePermission('wo_incentives'), async (req, res) => {
+  try {
+    const { rows: [old] } = await db.execute({ sql: 'SELECT * FROM technician_incentive_targets WHERE id = ?', args: [req.params.id] });
+    if (!old) return res.status(404).json({ error: 'Not found' });
+    // The month and technician stay; only the figures change.
+    const t = cleanTarget({ ...req.body, period: old.period, employee_id: old.employee_id });
+    if (t.error) return res.status(400).json({ error: t.error });
+    await db.execute({ sql: `UPDATE technician_incentive_targets SET target_completed = ?, target_on_time_pct = ?, reward_amount = ?, reward_note = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      args: [t.target_completed, t.target_on_time_pct, t.reward_amount, t.reward_note, req.employee?.id || null, old.id] });
+    const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM technician_incentive_targets WHERE id = ?', args: [old.id] });
+    res.json(row);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/incentive-targets/:id', requirePermission('wo_incentives'), async (req, res) => {
+  try {
+    const r = await db.execute({ sql: 'DELETE FROM technician_incentive_targets WHERE id = ?', args: [req.params.id] });
+    if (!r.rowsAffected) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1079,11 +1244,17 @@ router.patch('/tasks/:id', requirePermission('wo_technician'), async (req, res) 
       const { rows: [openEntry] } = await db.execute({ sql: 'SELECT id FROM work_order_task_time_entries WHERE task_id = ? AND ended_at IS NULL', args: [req.params.id] });
       if (openEntry) return res.status(400).json({ error: 'Clock out of this task before marking it complete' });
     }
-    await db.execute({ sql: 'UPDATE work_order_tasks SET description = ?, allotted_minutes = ?, technician_id = ?, status = ? WHERE id = ?', args: [
+    const newStatus = status || task.status;
+    // completed_at: stamped when it becomes complete, cleared if reopened.
+    const completing = newStatus === 'complete' && task.status !== 'complete';
+    const reopening = newStatus !== 'complete' && task.status === 'complete';
+    await db.execute({ sql: `UPDATE work_order_tasks SET description = ?, allotted_minutes = ?, technician_id = ?, status = ?
+        ${completing ? ', completed_at = CURRENT_TIMESTAMP, completed_by = ?' : reopening ? ', completed_at = NULL, completed_by = NULL' : ''} WHERE id = ?`, args: [
       description != null ? description.trim() : task.description,
       allotted_minutes != null ? parseInt(allotted_minutes) || 0 : task.allotted_minutes,
       technician_id !== undefined ? (technician_id || null) : task.technician_id,
-      status || task.status,
+      newStatus,
+      ...(completing ? [req.employee?.id || null] : []),
       req.params.id,
     ] });
     await syncTaskSkills(req.params.id, skill_ids);
