@@ -2169,6 +2169,29 @@ async function _init() {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
     { sql: 'CREATE INDEX IF NOT EXISTS idx_wo_calls_wo ON work_order_calls(work_order_id)' },
+    // The item's trip store → Warehouse → service center and back (lib/woMovements.js):
+    // a send (from/to, who carried it) or a receive checkpoint at to_location
+    // with photos (work_order_photos.movement_id) and each accessory's condition
+    { sql: `CREATE TABLE IF NOT EXISTS work_order_movements (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      work_order_id INTEGER NOT NULL REFERENCES work_orders(id),
+      kind TEXT NOT NULL,
+      from_location TEXT NOT NULL,
+      to_location TEXT NOT NULL,
+      send_id INTEGER REFERENCES work_order_movements(id),
+      carried_by TEXT,
+      notes TEXT,
+      employee_id INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    { sql: 'CREATE INDEX IF NOT EXISTS idx_wo_movements_wo ON work_order_movements(work_order_id)' },
+    { sql: `CREATE TABLE IF NOT EXISTS work_order_movement_accessories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      movement_id INTEGER NOT NULL REFERENCES work_order_movements(id),
+      accessory_id INTEGER NOT NULL REFERENCES work_order_accessories(id),
+      condition TEXT NOT NULL,
+      note TEXT
+    )` },
     // Documents attached to a work order — a signed service contract or
     // anything else. Local files in uploads/wo-attachments (served only via
     // the authenticated download route), Cloudinary when configured.
@@ -3399,6 +3422,10 @@ async function _init() {
     // Awaiting-pickup job put on the cashier's Hold Recall by hand when the customer comes in to collect
     'ALTER TABLE work_orders ADD COLUMN cashier_hold_at DATETIME',
     'ALTER TABLE work_orders ADD COLUMN cashier_hold_by INTEGER REFERENCES employees(id)',
+    // Checkpoint photos taken when the item is received along its trip
+    'ALTER TABLE work_order_photos ADD COLUMN movement_id INTEGER REFERENCES work_order_movements(id)',
+    // Work orders opened from 2026-11-23 must reach the Warehouse before assessment
+    'ALTER TABLE work_orders ADD COLUMN movement_tracked INTEGER NOT NULL DEFAULT 0',
     // Pickup window now runs 30 days from completion, not from intake — re-date open WOs (no-op once applied)
     "UPDATE work_orders SET pickup_due_date = CASE WHEN completed_at IS NOT NULL THEN date(completed_at,'+30 days') END WHERE status NOT IN ('picked_up','cancelled','not_worth_fixing')",
     // A real catalog part's own tax_rate at the time it was added; a "Q" item
@@ -4528,6 +4555,10 @@ async function _init() {
       // Setting technician incentive targets (2026-11-23) starts with
       // whoever does supervisor sign-off on work orders.
       if (!('wo_incentives' in perms)) { perms.wo_incentives = can(perms, 'wo_signoff'); changed = true; }
+      // Sending/receiving work order items between store, Warehouse and
+      // service center (2026-11-23): whoever has full Work Orders, and
+      // Warehouse staff, who receive the items there.
+      if (!('wo_movements' in perms)) { perms.wo_movements = !!perms.work_orders || can(perms, 'warehouse'); changed = true; }
       // Requesting an (advance) payment from an approved PO (2026-11-02)
       // starts with whoever can create POs.
       if (!('purchasing_request_payment' in perms)) { perms.purchasing_request_payment = can(perms, 'purchasing_create'); changed = true; }

@@ -14,6 +14,7 @@ const { branchStockQty } = require('../lib/branchStock');
 const { takeFromLots, costOn } = require('../lib/stockLots');
 const { storeToday, storeDay, storeOffsetModifier } = require('../lib/storeTime');
 const { createBill, dueDateFor, PAID_SQL } = require('../lib/payables');
+const { movementState, decorateMovements, loadMovements, checkAccessories, locationLabel } = require('../lib/woMovements');
 
 // Statuses a WO can freely log a comment against via PATCH /:id/status without
 // going through a dedicated money-moving endpoint (assessment-paid,
@@ -64,7 +65,7 @@ function decorateFollowUp(wo, today = storeToday()) {
 
 const WO_LIST_SELECT = `SELECT wo.*, c.first_name || ' ' || c.last_name as customer_name, c.phone as customer_phone, c.email as customer_email,
   c.customer_number, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
-  e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name,
+  e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name, b.is_warehouse as branch_is_warehouse,
   cb.first_name || ' ' || cb.last_name as completed_by_name,
   (SELECT first_name || ' ' || last_name FROM employees WHERE id = wo.returned_to_customer_by) as returned_to_customer_by_name,
   (SELECT first_name || ' ' || last_name FROM employees WHERE id = wo.cashier_hold_by) as cashier_hold_by_name,
@@ -96,10 +97,21 @@ const PHOTO_SELECT = `SELECT p.*, CASE WHEN p.stored_name LIKE 'https://%' THEN 
 // until the item's gone back, removed only while the WO is still at intake.
 const INTAKE_LOCKED = ['picked_up', 'cancelled'];
 
+// Saves an uploaded photo (Cloudinary when configured, else uploads/wo-photos) and returns its stored_name
+async function storePhotoFile(woId, file) {
+  const base = `wo${woId}-${Date.now()}-${Math.round(Math.random() * 1e6)}`;
+  const cloud = await cloudUpload(file.buffer, { folder: 'pos-system/wo-photos', public_id: base, resource_type: 'image' });
+  if (cloud) return cloud.secure_url;
+  fs.mkdirSync(photoDir, { recursive: true });
+  const storedName = `${base}${(path.extname(file.originalname) || '.jpg').toLowerCase()}`;
+  fs.writeFileSync(path.join(photoDir, storedName), file.buffer);
+  return storedName;
+}
+
 async function loadIntakeRecord(woId) {
   const { rows: accessories } = await db.execute({ sql: `SELECT a.*, e.first_name || ' ' || e.last_name as returned_by_name FROM work_order_accessories a
     LEFT JOIN employees e ON a.returned_by = e.id WHERE a.work_order_id = ? ORDER BY a.line_no`, args: [woId] });
-  const { rows: photos } = await db.execute({ sql: `${PHOTO_SELECT} WHERE p.work_order_id = ? ORDER BY p.id`, args: [woId] });
+  const { rows: photos } = await db.execute({ sql: `${PHOTO_SELECT} WHERE p.work_order_id = ? AND p.movement_id IS NULL ORDER BY p.id`, args: [woId] });
   for (const a of accessories) a.photos = photos.filter(p => p.accessory_id === a.id);
   return { accessories, photos: photos.filter(p => !p.accessory_id) };
 }
@@ -250,6 +262,8 @@ router.get('/', requirePermission('work_orders'), async (req, res) => {
     if (view === 'active') { sql += " AND wo.status NOT IN ('picked_up','cancelled','not_worth_fixing')"; }
     // Jobs needing a call — filtered after decorateFollowUp below.
     else if (view === 'follow_ups') { sql += " AND wo.status NOT IN ('picked_up','cancelled') AND wo.returned_to_customer_at IS NULL"; }
+    // Items to send or receive along the store → Warehouse → service center trip — filtered after decorateMovements below.
+    else if (view === 'movements') { sql += " AND wo.status != 'picked_up' AND wo.returned_to_customer_at IS NULL"; }
     // Assessment fee (status='intake'), deposit (status='pending_deposit'), or the
     // final balance (status='awaiting_pickup') due — surfaced in the POS Hold
     // Recall list so a cashier can pick it up and take payment there. A
@@ -264,11 +278,17 @@ router.get('/', requirePermission('work_orders'), async (req, res) => {
     // but the assessment queue (status='assessed', paid and waiting for
     // someone to assess it) is a strict first-in-first-out line — whoever
     // assesses next works the oldest-opened item first, oldest at the top.
-    sql += effectiveStatus === 'assessed' || view === 'follow_ups' ? ' ORDER BY wo.created_at ASC' : ' ORDER BY wo.created_at DESC';
-    if (view !== 'follow_ups') { sql += ' LIMIT ?'; params.push(parseInt(limit)); }
+    sql += effectiveStatus === 'assessed' || view === 'follow_ups' || view === 'movements' ? ' ORDER BY wo.created_at ASC' : ' ORDER BY wo.created_at DESC';
+    if (view !== 'follow_ups' && view !== 'movements') { sql += ' LIMIT ?'; params.push(parseInt(limit)); }
     const { rows } = await db.execute({ sql, args: params });
     const today = storeToday();
     rows.forEach(r => decorateFollowUp(r, today));
+    await decorateMovements(db, rows);
+    if (view === 'movements') {
+      // `at`: where the next step happens — the sender's location for a send, the destination for a receive
+      const at = req.query.at;
+      return res.json(rows.filter(r => r.movement.next && (!at || (r.movement.next.kind === 'send' ? r.movement.next.from : r.movement.next.to) === at)));
+    }
     res.json(view === 'follow_ups' ? rows.filter(r => r.follow_up_due) : rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -603,6 +623,8 @@ router.get('/:id', requirePermission('work_orders'), async (req, res) => {
     wo.documents = await loadWoDocuments(wo.id);
     wo.calls = await loadWoCalls(wo.id);
     decorateFollowUp(wo);
+    wo.movements = await loadMovements(db, wo.id);
+    wo.movement = movementState(wo, wo.movements);
     wo.external_cost_total = Math.round(wo.external_work.reduce((t, x) => t + (Number(x.cost) || 0), 0) * 100) / 100;
     res.json(wo);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -862,8 +884,8 @@ router.post('/', requirePermission('wo_intake'), async (req, res) => {
     const tx = await db.transaction('write');
     let committed = false;
     try {
-      const result = await tx.execute({ sql: `INSERT INTO work_orders (wo_number, customer_id, employee_id, branch_id, description, item_label, item_serial, assessment_fee, assessment_fee_product_id, assessment_fee_name, assessment_fee_tax_rate)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)`, args: [wo_number, customer_id, employee_id || null, branch_id || null, description.trim(), item_label || null, String(item_serial || '').trim() || null, assessmentFee, feeProduct.id, feeProduct.name, assessmentFeeTaxRate] });
+      const result = await tx.execute({ sql: `INSERT INTO work_orders (wo_number, customer_id, employee_id, branch_id, description, item_label, item_serial, assessment_fee, assessment_fee_product_id, assessment_fee_name, assessment_fee_tax_rate, movement_tracked)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,1)`, args: [wo_number, customer_id, employee_id || null, branch_id || null, description.trim(), item_label || null, String(item_serial || '').trim() || null, assessmentFee, feeProduct.id, feeProduct.name, assessmentFeeTaxRate] });
       const woId = Number(result.lastInsertRowid);
       for (const a of accessories) await insertAccessory(tx, woId, a, employee_id);
       await logStatus(tx, woId, 'intake', 'Work order opened', employee_id);
@@ -964,15 +986,7 @@ router.post('/:id/photos', requireAnyPermission('work_orders', 'wo_intake'), (re
       if (!a) return res.status(400).json({ error: 'That accessory is not on this work order' });
       accessoryId = a.id;
     }
-    const base = `wo${wo.id}-${Date.now()}-${Math.round(Math.random() * 1e6)}`;
-    const cloud = await cloudUpload(req.file.buffer, { folder: 'pos-system/wo-photos', public_id: base, resource_type: 'image' });
-    let storedName;
-    if (cloud) storedName = cloud.secure_url;
-    else {
-      fs.mkdirSync(photoDir, { recursive: true });
-      storedName = `${base}${(path.extname(req.file.originalname) || '.jpg').toLowerCase()}`;
-      fs.writeFileSync(path.join(photoDir, storedName), req.file.buffer);
-    }
+    const storedName = await storePhotoFile(wo.id, req.file);
     await db.execute({ sql: 'INSERT INTO work_order_photos (work_order_id, accessory_id, stored_name, original_name, mime_type, file_size, uploaded_by) VALUES (?,?,?,?,?,?,?)',
       args: [wo.id, accessoryId, storedName, req.file.originalname, req.file.mimetype, req.file.size, req.employee?.id || null] });
     res.status(201).json(await loadIntakeRecord(wo.id));
@@ -983,10 +997,111 @@ router.delete('/:id/photos/:pid', requireAnyPermission('work_orders', 'wo_intake
   try {
     const { rows: [p] } = await db.execute({ sql: 'SELECT p.*, wo.status FROM work_order_photos p JOIN work_orders wo ON p.work_order_id = wo.id WHERE p.id = ? AND p.work_order_id = ?', args: [req.params.pid, req.params.id] });
     if (!p) return res.status(404).json({ error: 'Not found' });
+    if (p.movement_id) return res.status(400).json({ error: 'Checkpoint photos stay on the record' });
     if (p.status !== 'intake') return res.status(400).json({ error: 'Photos stay on the record once the assessment fee is paid' });
     await removePhotoFile(p);
     await db.execute({ sql: 'DELETE FROM work_order_photos WHERE id = ?', args: [p.id] });
     res.json(await loadIntakeRecord(p.work_order_id));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Item movements: store → Warehouse → service center and back ─────────
+// lib/woMovements.js works out the next step; these record it. A receive is
+// a checkpoint: at least one photo of the item and every accessory marked
+// OK / damaged / missing (a note for the last two), with optional photos each.
+
+async function loadWoForMovement(id) {
+  const { rows: [wo] } = await db.execute({ sql: `SELECT wo.*, b.name as branch_name, b.is_warehouse as branch_is_warehouse FROM work_orders wo LEFT JOIN branches b ON wo.branch_id = b.id WHERE wo.id = ?`, args: [id] });
+  if (!wo) return null;
+  const { rows: moves } = await db.execute({ sql: 'SELECT * FROM work_order_movements WHERE work_order_id = ? ORDER BY id', args: [id] });
+  wo.state = movementState(wo, moves);
+  return wo;
+}
+
+async function assessmentWaitsForWarehouse(wo) {
+  if (!Number(wo.movement_tracked)) return false;
+  const full = await loadWoForMovement(wo.id);
+  return full.state.assessment_blocked;
+}
+
+async function movementResponse(woId) {
+  const { rows: [wo] } = await db.execute({ sql: `${WO_LIST_SELECT} WHERE wo.id = ?`, args: [woId] });
+  wo.movements = await loadMovements(db, woId);
+  wo.movement = movementState(wo, wo.movements);
+  return wo;
+}
+
+router.post('/:id/movements/send', requirePermission('wo_movements'), async (req, res) => {
+  try {
+    const wo = await loadWoForMovement(req.params.id);
+    if (!wo) return res.status(404).json({ error: 'Not found' });
+    const next = wo.state.next;
+    if (!next || next.kind !== 'send') return res.status(400).json({ error: next ? `The item is on its way to the ${locationLabel(next.to, wo)} — receive it there first` : 'There is nothing to send on this work order' });
+    if (req.body.to && req.body.to !== next.to) return res.status(400).json({ error: `The item goes to the ${locationLabel(next.to, wo)} next` });
+    const carriedBy = String(req.body.carried_by || '').trim();
+    if (!carriedBy) return res.status(400).json({ error: 'Who is taking it? Enter the driver or person carrying the item' });
+    const notes = String(req.body.notes || '').trim() || null;
+    const who = req.employee?.id || null;
+    await db.execute({ sql: 'INSERT INTO work_order_movements (work_order_id, kind, from_location, to_location, carried_by, notes, employee_id) VALUES (?,?,?,?,?,?,?)',
+      args: [wo.id, 'send', next.from, next.to, carriedBy, notes, who] });
+    await logStatus(db, wo.id, wo.status, `Item sent from ${locationLabel(next.from, wo)} to ${locationLabel(next.to, wo)} — carried by ${carriedBy}${notes ? ` (${notes})` : ''}`, who);
+    res.status(201).json(await movementResponse(wo.id));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// multipart: `item_photos` (one or more), `acc_photo_<accessory id>` (optional),
+// `accessories` = JSON [{accessory_id, condition, note}], `notes`
+router.post('/:id/movements/receive', requirePermission('wo_movements'), (req, res, next) => {
+  photoUpload.any()(req, res, err => err ? res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'A photo is larger than 15 MB' : err.message }) : next());
+}, async (req, res) => {
+  try {
+    const wo = await loadWoForMovement(req.params.id);
+    if (!wo) return res.status(404).json({ error: 'Not found' });
+    const next = wo.state.next;
+    if (!next || next.kind !== 'receive') return res.status(400).json({ error: 'The item is not on its way anywhere — it has to be sent first' });
+    if (req.body.at && req.body.at !== next.to) return res.status(400).json({ error: `The item is on its way to the ${locationLabel(next.to, wo)}` });
+    const files = req.files || [];
+    const itemPhotos = files.filter(f => f.fieldname === 'item_photos');
+    if (!itemPhotos.length) return res.status(400).json({ error: 'Take at least one photo of the item as it arrived' });
+    const { rows: accessories } = await db.execute({ sql: 'SELECT id, line_no, name FROM work_order_accessories WHERE work_order_id = ? ORDER BY line_no', args: [wo.id] });
+    let given;
+    try { given = typeof req.body.accessories === 'string' ? JSON.parse(req.body.accessories || '[]') : (req.body.accessories || []); }
+    catch(e) { return res.status(400).json({ error: 'The accessory checklist could not be read' }); }
+    const checked = checkAccessories(accessories, given);
+    if (checked.error) return res.status(400).json({ error: checked.error });
+    const accPhotos = files.filter(f => /^acc_photo_\d+$/.test(f.fieldname)).map(f => ({ file: f, accessory_id: Number(f.fieldname.slice(10)) }));
+    if (accPhotos.some(p => !accessories.some(a => a.id === p.accessory_id))) return res.status(400).json({ error: 'A photo is for an accessory that is not on this work order' });
+
+    const stored = [];
+    for (const f of itemPhotos) stored.push({ name: await storePhotoFile(wo.id, f), file: f, accessory_id: null });
+    for (const p of accPhotos) stored.push({ name: await storePhotoFile(wo.id, p.file), file: p.file, accessory_id: p.accessory_id });
+
+    const who = req.employee?.id || null;
+    const notes = String(req.body.notes || '').trim() || null;
+    const tx = await db.transaction('write');
+    let committed = false;
+    try {
+      const r = await tx.execute({ sql: 'INSERT INTO work_order_movements (work_order_id, kind, from_location, to_location, send_id, notes, employee_id) VALUES (?,?,?,?,?,?,?)',
+        args: [wo.id, 'receive', next.from, next.to, wo.state.in_transit.send_id, notes, who] });
+      const movementId = Number(r.lastInsertRowid);
+      for (const c of checked.checks) {
+        await tx.execute({ sql: 'INSERT INTO work_order_movement_accessories (movement_id, accessory_id, condition, note) VALUES (?,?,?,?)', args: [movementId, c.accessory_id, c.condition, c.note] });
+      }
+      for (const p of stored) {
+        await tx.execute({ sql: 'INSERT INTO work_order_photos (work_order_id, accessory_id, movement_id, stored_name, original_name, mime_type, file_size, uploaded_by) VALUES (?,?,?,?,?,?,?,?)',
+          args: [wo.id, p.accessory_id, movementId, p.name, p.file.originalname, p.file.mimetype, p.file.size, who] });
+      }
+      const problems = checked.checks.filter(c => c.condition !== 'ok').map(c => `A${c.line_no} ${c.name} ${c.condition}: ${c.note}`);
+      await logStatus(tx, wo.id, wo.status, `Item received at ${locationLabel(next.to, wo)} — ${itemPhotos.length} photo(s)${checked.checks.length ? `, ${checked.checks.length - problems.length}/${checked.checks.length} accessories OK` : ''}${problems.length ? `; ${problems.join('; ')}` : ''}${notes ? ` (${notes})` : ''}`, who);
+      await tx.commit();
+      committed = true;
+    } finally {
+      if (!committed) {
+        await tx.rollback().catch(() => {});
+        for (const p of stored) await removePhotoFile({ stored_name: p.name });
+      }
+    }
+    res.status(201).json(await movementResponse(wo.id));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1050,6 +1165,7 @@ router.patch('/:id/estimate', requirePermission('wo_assess'), async (req, res) =
     const { rows: [wo] } = await db.execute({ sql: 'SELECT * FROM work_orders WHERE id = ?', args: [req.params.id] });
     if (!wo) return res.status(404).json({ error: 'Not found' });
     if (wo.status !== 'assessed') return res.status(400).json({ error: `This work order is ${wo.status}, not awaiting an estimate` });
+    if (await assessmentWaitsForWarehouse(wo)) return res.status(400).json({ error: 'The item has not been received at the Warehouse yet — it is assessed once the Warehouse checkpoint is done' });
     // Deposit is optional (recent process change) — a $0/blank deposit skips
     // the pending_deposit stop entirely and goes straight to in_progress,
     // the same way a $0 final balance below skips creating a payment

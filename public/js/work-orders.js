@@ -6,6 +6,7 @@ Object.assign(App, {
     { key: 'active',          label: 'Active' },
     { key: 'follow_ups',      label: '📞 Follow-Ups Due' },
     { key: 'assessed',        label: 'Assessment Queue' },
+    { key: 'movements',       label: '🚚 Item Movements' },
     { key: 'awaiting_pickup', label: 'Awaiting Pickup' },
     { key: 'picked_up',       label: 'Picked Up' },
     { key: 'cancelled',       label: 'Cancelled' },
@@ -68,6 +69,7 @@ Object.assign(App, {
     const el = document.getElementById('wo-content');
     if (!el) return;
     if (this.woTab === 'performance') return this._renderWOPerformance();
+    if (this.woTab === 'movements') return this._renderWOMovements();
     const isQueue = this.woTab === 'assessed';
     const view = this.woTab === 'all' ? '' : this.woTab;
     const workOrders = await this.api('GET', `/work-orders${view ? '?view='+view : ''}`);
@@ -87,7 +89,7 @@ Object.assign(App, {
           <td>${this.fmtDate(wo.created_at)}</td>
           <td>${wo.employee_name ? this.escapeAttr(wo.employee_name) : '—'}</td>
           ${isQueue ? `<td>${this._woWaitingLabel(wo.created_at)}</td>` : `<td>${wo.pickup_due_date ? this.fmtDate(wo.pickup_due_date) : '<span style="color:var(--text-muted)">After completion</span>'}${this._woPickupBadge(wo)}</td>`}
-          <td><span class="badge-pill ${this._woStatusBadge[wo.status]||'badge-secondary'}">${this._woStatusLabels[wo.status]||wo.status}</span>${wo.returned_to_customer_at ? '<div style="font-size:11px;color:var(--text-muted)">Returned to customer</div>' : ''}${wo.status === 'awaiting_pickup' && wo.cashier_hold_at ? '<div style="font-size:11px;color:var(--warning)">On hold for cashier</div>' : ''}${this._woFollowUpBadge(wo)}</td>
+          <td><span class="badge-pill ${this._woStatusBadge[wo.status]||'badge-secondary'}">${this._woStatusLabels[wo.status]||wo.status}</span>${wo.returned_to_customer_at ? '<div style="font-size:11px;color:var(--text-muted)">Returned to customer</div>' : ''}${wo.status === 'awaiting_pickup' && wo.cashier_hold_at ? '<div style="font-size:11px;color:var(--warning)">On hold for cashier</div>' : ''}${this._woWhereBadge(wo)}${this._woFollowUpBadge(wo)}</td>
           <td style="text-align:right;white-space:nowrap">
             ${wo.follow_up_due && this.can('work_orders') ? `<button class="btn btn-sm btn-primary" onclick="App.showWOCallModal(${wo.id})">☎ Log Call</button> ` : ''}<button class="btn btn-sm btn-outline" onclick="App.viewWorkOrder(${wo.id})">View</button>
           </td>
@@ -492,6 +494,7 @@ Object.assign(App, {
             <div>${wo.po_number ? this.escapeAttr(wo.po_number) : '<span style="color:var(--text-muted)">None — the Service and Repair Tax Invoice prints a blank line</span>'}</div>
           </div>
           ${this._woIntakeSectionHtml(wo)}
+          ${this._woMovementSectionHtml(wo)}
 
           <div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:13px">
             <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Fees & Estimate</strong>
@@ -559,7 +562,7 @@ Object.assign(App, {
         </div>
         <div class="modal-footer" style="flex-wrap:wrap">
           ${wo.status==='intake' ? `<span class="badge-pill badge-warning" style="align-self:center;padding:6px 10px" title="Collected at the register — open Hold Recall in POS to take payment">On hold — awaiting cashier</span>` : ''}
-          ${wo.status==='assessed' && this.can('wo_assess') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showWOEstimateModal(${wo.id})">Enter Estimate</button>` : ''}
+          ${wo.status==='assessed' && this.can('wo_assess') ? (wo.movement && wo.movement.assessment_blocked ? `<button class="btn btn-primary" disabled title="The Warehouse hasn't received the item yet">Enter Estimate — waiting for the Warehouse</button>` : `<button class="btn btn-primary" onclick="App.closeModal();App.showWOEstimateModal(${wo.id})">Enter Estimate</button>`) : ''}
           ${wo.status==='pending_deposit' ? `<span class="badge-pill badge-warning" style="align-self:center;padding:6px 10px" title="Collected at the register — open Hold Recall in POS to take payment">On hold — awaiting cashier</span>` : ''}
           ${['in_progress','awaiting_signoff','awaiting_parts'].includes(wo.status) && this.can('work_orders') ? `<button class="btn btn-secondary" onclick="App.closeModal();App.showWOStatusCommentModal(${wo.id})">Add Status Update</button>` : ''}
           ${['in_progress','awaiting_signoff'].includes(wo.status) && this.can('wo_signoff') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showWOSignoffModal(${wo.id})">Supervisor Sign-Off</button>` : ''}

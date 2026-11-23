@@ -19,6 +19,8 @@ test('work order invoice lines, GCT, non-refundable assessment deposit, and a si
   const wo = await api(page, 'POST', '/work-orders', { customer_id: cust.id, employee_id: 1, branch_id: main.id, description: 'Grinder sparks', item_label: 'Grinder', assessment_fee_product_id: fee.id });
   const db = testDb();
   await db.execute('PRAGMA busy_timeout = 10000');
+  // The Warehouse checkpoint is covered in wo-movements.spec.js
+  await db.execute({ sql: 'UPDATE work_orders SET movement_tracked = 0 WHERE id = ?', args: [wo.id] });
   await api(page, 'PATCH', `/work-orders/${wo.id}/assessment-paid`, { payment_method: 'cash', employee_id: 1, branch_id: main.id });
   await api(page, 'PATCH', `/work-orders/${wo.id}/estimate`, { estimate_labor: 6000, estimate_consumables: 850, deposit_amount: 0 });
   await db.execute({ sql: 'UPDATE work_orders SET estimate_tax_rate = 15 WHERE id = ?', args: [wo.id] });

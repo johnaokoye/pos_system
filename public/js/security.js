@@ -99,6 +99,7 @@ Object.assign(App, {
       { key: 'wo_technician', label: 'Technician (Tasks & Time Tracking)' },
       { key: 'wo_signoff', label: 'Supervisor Sign-Off' },
       { key: 'wo_incentives', label: 'Set Technician Incentive Targets' },
+      { key: 'wo_movements', label: 'Send & Receive Items (store / Warehouse / service center)' },
     ]},
     { key: 'layaway', label: 'Layaway', subs: [
       { key: 'layaway_create', label: 'Create Layaway Plans' },
