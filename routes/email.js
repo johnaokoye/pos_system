@@ -2612,9 +2612,10 @@ ${print ? PRINT_PAGE_STYLE : ''}
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-top:12px">
         <tr><td style="padding:3px 0">Assessment Fee</td><td style="text-align:right">${fmt(wo.assessment_fee)}${wo.assessment_transaction_id ? ' <span style="color:${BRAND.green};font-size:11px">(paid)</span>' : ''}</td></tr>
         ${assessmentTax > 0 ? `<tr><td style="padding:3px 0;color:#888;font-size:12px">Tax on Assessment Fee</td><td style="text-align:right;color:#888;font-size:12px">${fmt(assessmentTax)}</td></tr>` : ''}
-        ${wo.status !== 'intake' ? `<tr><td style="padding:3px 0">Estimate (labor + consumables)${wo.is_express ? ' — express +25%' : ''}</td><td style="text-align:right">${fmt(estimateTotal)}</td></tr>` : ''}
+        ${wo.status !== 'intake' ? `<tr><td style="padding:3px 0">Labour${wo.is_express ? ' — express +25%' : ''}</td><td style="text-align:right">${fmt(wo.estimate_labor)}</td></tr>` : ''}
+        ${wo.status !== 'intake' && parseFloat(wo.estimate_consumables) > 0 ? `<tr><td style="padding:3px 0">Consumables${wo.is_express ? ' — express +25%' : ''}</td><td style="text-align:right">${fmt(wo.estimate_consumables)}</td></tr>` : ''}
         ${partsTotal > 0 ? `<tr><td style="padding:3px 0">Parts</td><td style="text-align:right">${fmt(partsTotal)}</td></tr>` : ''}
-        ${(estimateTax + partsTax) > 0 ? `<tr><td style="padding:3px 0;color:#888;font-size:12px">Tax (estimate + parts)</td><td style="text-align:right;color:#888;font-size:12px">${fmt(estimateTax + partsTax)}</td></tr>` : ''}
+        ${(estimateTax + partsTax) > 0 ? `<tr><td style="padding:3px 0;color:#888;font-size:12px">Tax (labour, consumables + parts)</td><td style="text-align:right;color:#888;font-size:12px">${fmt(estimateTax + partsTax)}</td></tr>` : ''}
         ${parseFloat(wo.deposit_amount) > 0 ? `<tr><td style="padding:3px 0">Deposit Paid</td><td style="text-align:right">-${fmt(wo.deposit_amount)}${wo.deposit_transaction_id ? ' <span style="color:${BRAND.green};font-size:11px">(paid)</span>' : ''}</td></tr>` : ''}
         <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
         <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">BALANCE DUE</td><td style="font-size:16px;font-weight:700;color:${BRAND.black};text-align:right">${fmt(balanceDue)}${wo.final_transaction_id ? ' <span style="color:${BRAND.green};font-size:11px;font-weight:400">(paid)</span>' : ''}</td></tr>
@@ -3019,9 +3020,10 @@ function workOrderInvoicePdfModel(wo, s) {
     totals: [
       { label: `Assessment Fee${wo.assessment_transaction_id ? ' (paid)' : ''}`, value: fmt(wo.assessment_fee) },
       assessmentTax > 0 ? { label: 'Tax on Assessment Fee', value: fmt(assessmentTax), style: 'muted' } : null,
-      wo.status !== 'intake' ? { label: `Estimate (labor + consumables)${wo.is_express ? ' - express +25%' : ''}`, value: fmt(estimateTotal) } : null,
+      wo.status !== 'intake' ? { label: `Labour${wo.is_express ? ' - express +25%' : ''}`, value: fmt(wo.estimate_labor) } : null,
+      wo.status !== 'intake' && parseFloat(wo.estimate_consumables) > 0 ? { label: `Consumables${wo.is_express ? ' - express +25%' : ''}`, value: fmt(wo.estimate_consumables) } : null,
       partsTotal > 0 ? { label: 'Parts', value: fmt(partsTotal) } : null,
-      (estimateTax + partsTax) > 0 ? { label: 'Tax (estimate + parts)', value: fmt(estimateTax + partsTax), style: 'muted' } : null,
+      (estimateTax + partsTax) > 0 ? { label: 'Tax (labour, consumables + parts)', value: fmt(estimateTax + partsTax), style: 'muted' } : null,
       parseFloat(wo.deposit_amount) > 0 ? { label: `Deposit Paid${wo.deposit_transaction_id ? ' (paid)' : ''}`, value: `-${fmt(wo.deposit_amount)}` } : null,
       { label: `BALANCE DUE${wo.final_transaction_id ? ' (paid)' : ''}`, value: fmt(balanceDue), style: 'grand' },
     ],
