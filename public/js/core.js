@@ -826,14 +826,18 @@ const App = {
     });
   },
 
-  logout() {
-    // Best-effort — destroys the server-side session so the cookie can't be
-    // replayed. Don't block the UI reset on it.
-    this.api('POST', '/employees/logout').catch(() => {});
+  async logout() {
+    // Stop the background polls first, then wait for the server to end the
+    // session before showing the login screen — a poll still answering after
+    // the next person signs in would otherwise write this session's cookie
+    // back over theirs.
     this._stopTransferInbox();
     this._stopShopUseInbox();
     this._stopCollectionsInbox();
     this._stopPayablesInbox();
+    if (this._loggingOut) return;
+    this._loggingOut = true;
+    try { await this.api('POST', '/employees/logout'); } catch (e) {} finally { this._loggingOut = false; }
     this.currentUser = null;
     this.currentDrawerSession = null;
     this._posHasDrawers = false;
@@ -895,6 +899,9 @@ const App = {
   // ─── API ──────────────────────────────────────────────────
   async api(method, url, data) {
     const opts = { method, headers: { 'Content-Type': 'application/json' } };
+    // Who this page thinks is signed in — the server refuses the request if
+    // the session cookie now belongs to someone else (session_user_mismatch).
+    if (this.currentUser?.id) opts.headers['X-Pos-User'] = String(this.currentUser.id);
     if (data) opts.body = JSON.stringify(data);
     const res = await fetch('/api' + url, opts);
     // An error page that isn't JSON (e.g. a proxy's 502) reads as its status.
@@ -911,6 +918,9 @@ const App = {
         this._stopPayablesInbox();
         this.currentUser = null;
         this.showLoginScreen();
+        if (json.code === 'session_user_mismatch') {
+          document.getElementById('login-error').textContent = 'This browser was signed in as someone else (another tab or window). Please sign in again.';
+        }
       }
       const err = new Error(json.error || 'Request failed');
       err.status = res.status;

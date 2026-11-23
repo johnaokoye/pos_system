@@ -427,7 +427,7 @@ router.post('/logout', requireAuth, async (req, res) => {
   try {
     await destroySession(readCookie(req));
     logActivity({ sessionId: req.sessionId || null, employeeId: req.employee?.id || null, kind: 'logout', ip: clientIp(req) });
-    clearSessionCookie(res);
+    clearSessionCookie(req, res);
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

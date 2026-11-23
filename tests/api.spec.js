@@ -22,7 +22,7 @@ async function loginCookie() {
     body: JSON.stringify({ username: 'admin', password: '123456' }),
   });
   const setCookie = r.headers.get('set-cookie') || '';
-  return setCookie.split(';')[0]; // "pos_session=<token>"
+  return setCookie.split(';')[0]; // "pos_session_<port>=<token>"
 }
 
 test.describe('API', () => {
@@ -123,5 +123,20 @@ test.describe('API', () => {
     expect(body.length).toBeGreaterThan(0);
     // Passwords must not be exposed
     expect(body[0]).not.toHaveProperty('password');
+  });
+
+  test('session cookie is named for the port, and a page signed in as someone else is refused', async () => {
+    const cookie = await loginCookie();
+    const port = new URL(BASE).port;
+    expect(cookie.startsWith(`pos_session_${port}=`)).toBe(true);
+    const me = await (await fetch(`${BASE}/api/employees/me`, { headers: { Cookie: cookie } })).json();
+    const same = await fetch(`${BASE}/api/employees/me`, { headers: { Cookie: cookie, 'X-Pos-User': String(me.id) } });
+    expect(same.status).toBe(200);
+    const other = await fetch(`${BASE}/api/employees/me`, { headers: { Cookie: cookie, 'X-Pos-User': String(me.id + 999) } });
+    expect(other.status).toBe(401);
+    expect((await other.json()).code).toBe('session_user_mismatch');
+    // The old shared name no longer signs anyone in.
+    const legacy = await fetch(`${BASE}/api/employees/me`, { headers: { Cookie: cookie.replace(/^pos_session_\d+=/, 'pos_session=') } });
+    expect(legacy.status).toBe(401);
   });
 });
