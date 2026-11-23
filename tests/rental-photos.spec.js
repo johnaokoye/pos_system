@@ -144,6 +144,40 @@ test('security hands over a counter rental with photos and signatures, and sees 
   const issued = await api(page, 'GET', `/rentals/agreements/${counter.id}`);
   expect(issued).toMatchObject({ status: 'active', issue_security_employee_id: guard.id, issued_by: guard.id, issue_customer_name: 'Pat Collector' });
   expect(issued.photos.map(p => [p.stage, !!p.used_at, p.uploaded_by])).toEqual([['issue', true, guard.id]]);
+  // Return: the guard checks it in at the gate (no amounts), the cashier settles.
+  const signInAs = async (u, pw) => {
+    await page.goto('about:blank'); await page.context().clearCookies(); await page.goto('/');
+    await page.fill('#login-user', u); await page.fill('#login-pass', pw); await page.click('button.login-btn');
+    await page.waitForFunction(() => App.currentUser && document.querySelector('#content').innerHTML.length > 0);
+  };
+  await signInAs(`og${s}`, 'pw-123456');
+  expect(await attempt(page, 'PATCH', `/rentals/agreements/${counter.id}/return-checkin`, { items: [{ item_id: issued.items[0].id, quantity: 1 }], security_signature: 'data:image/png;base64,' + PNG.toString('base64') })).toMatch(/photo of the item\(s\) at return/);
+  await page.locator('.card', { hasText: 'Expected Returns' }).locator(`div:has-text("${counter.agreement_number}") >> button:has-text("Check In")`).first().click();
+  await expect(page.locator('.modal')).not.toContainText('$');
+  await page.locator('.gc-cond').first().fill('Scratched casing');
+  await page.locator('#rph-return').locator('..').locator('input[capture]').setInputFiles(photo('in.png'));
+  await expect(page.locator('#rph-return img')).toHaveCount(1);
+  await expect(page.locator('#rph-return-compare img')).toHaveCount(1); // the issue photo, to compare
+  await drawSig(page, 'gc-guard-sig');
+  await page.click('.modal-footer button:has-text("Check In")');
+  await expect(page.locator('.alert-success', { hasText: 'Checked in' }).last()).toBeVisible();
+  await expect(page.locator('#content')).toContainText('waiting for the cashier');
+
+  await signInAs('admin', '123456');
+  let ag = await api(page, 'GET', `/rentals/agreements/${counter.id}`);
+  expect(ag).toMatchObject({ status: 'active', return_checkin_by: guard.id, return_checkin_by_name: `Only Guard ${s}` });
+  await page.evaluate(id => App.showRentalReturnModal(id), counter.id);
+  await expect(page.locator('.modal')).toContainText(`Checked in by Only Guard ${s}`);
+  await expect(page.locator('#rr-security-employee')).toHaveCount(0);
+  await expect(page.locator(`#rr-cond-${issued.items[0].id}`)).toHaveValue('Scratched casing');
+  await expect(page.locator('#rph-return img')).toHaveCount(1);
+  await page.click('button:has-text("Confirm Return")');
+  await expect.poll(async () => (await api(page, 'GET', `/rentals/agreements/${counter.id}`)).status).toMatch(/returned/);
+  ag = await api(page, 'GET', `/rentals/agreements/${counter.id}`);
+  expect(ag).toMatchObject({ return_security_employee_id: guard.id, return_checkin_at: null });
+  expect(ag.return_security_signature).toBeTruthy();
+  expect(ag.items[0].condition_in).toBe('Scratched casing');
+  expect(ag.photos.filter(p => p.stage === 'return').map(p => [!!p.used_at, p.uploaded_by])).toEqual([[true, guard.id]]);
 });
 
 test('ticking the security or driver box does not tick the whole Rentals module', async ({ page }) => {

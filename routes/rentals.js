@@ -94,6 +94,7 @@ router.get('/agreements', requireRentalsManage, async (req, res) => {
       op.first_name || ' ' || op.last_name as operator_name,
       ise.first_name || ' ' || ise.last_name as issue_security_employee_name,
       rse.first_name || ' ' || rse.last_name as return_security_employee_name,
+      rce.first_name || ' ' || rce.last_name as return_checkin_by_name,
       rde.first_name || ' ' || rde.last_name as return_driver_employee_name,
       (SELECT COUNT(*) FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_count,
       (SELECT GROUP_CONCAT(product_name || ' x' || quantity, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_summary,
@@ -116,6 +117,7 @@ router.get('/agreements', requireRentalsManage, async (req, res) => {
       LEFT JOIN employees op ON ra.operator_id = op.id
       LEFT JOIN employees ise ON ra.issue_security_employee_id = ise.id
       LEFT JOIN employees rse ON ra.return_security_employee_id = rse.id
+      LEFT JOIN employees rce ON ra.return_checkin_by = rce.id
       LEFT JOIN employees rde ON ra.return_driver_employee_id = rde.id
       WHERE 1=1`;
     const params = [];
@@ -196,15 +198,20 @@ router.get('/agreements/guard-queue', requireAuth, async (req, res) => {
     const { rows } = await db.execute({ sql: `SELECT ra.id, ra.agreement_number, ra.status, ra.due_date, ra.returned_at, ra.checkout_datetime, ra.created_at, ra.branch_id, b.name as branch_name,
       ra.delivery_required, ra.delivery_driver_confirmed_at, ra.pickup_required,
       ra.issue_security_employee_id, ra.issue_security_confirmed_at, ra.return_security_employee_id, ra.return_security_confirmed_at,
+      ra.is_paused, ra.pickup_confirmed_at, ra.return_checkin_at, ra.return_checkin_by, ce.first_name || ' ' || ce.last_name as return_checkin_by_name,
       c.first_name || ' ' || c.last_name as customer_name,
       (SELECT GROUP_CONCAT(product_name || ' x' || quantity, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_summary,
       (SELECT GROUP_CONCAT(product_name, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NOT NULL) as accessory_summary,
+      (SELECT json_group_array(json_object('id', i.id, 'product_name', i.product_name, 'quantity', i.quantity, 'quantity_returned', i.quantity_returned, 'parent_item_id', i.parent_item_id))
+         FROM rental_agreement_items i WHERE i.agreement_id = ra.id) as items_json,
       CASE WHEN ra.status = 'awaiting_issue' AND ra.delivery_driver_confirmed_at IS NOT NULL THEN 'out_for_delivery'
            WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused'
            WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' ELSE ra.status END as display_status
       FROM rental_agreements ra LEFT JOIN customers c ON ra.customer_id = c.id LEFT JOIN branches b ON b.id = ra.branch_id
+      LEFT JOIN employees ce ON ce.id = ra.return_checkin_by
       WHERE ra.status IN ('awaiting_issue','active') OR (ra.status = 'returned' AND (ra.issue_security_employee_id = ? OR ra.return_security_employee_id = ?) AND ra.returned_at >= datetime('now', '-30 days'))
       ORDER BY ra.created_at DESC LIMIT 300`, args: [req.employee.id, req.employee.id] });
+    for (const r of rows) { r.items = JSON.parse(r.items_json || '[]'); delete r.items_json; }
     res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -252,6 +259,7 @@ router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
       op.first_name || ' ' || op.last_name as operator_name,
       ise.first_name || ' ' || ise.last_name as issue_security_employee_name,
       rse.first_name || ' ' || rse.last_name as return_security_employee_name,
+      rce.first_name || ' ' || rce.last_name as return_checkin_by_name,
       rde.first_name || ' ' || rde.last_name as return_driver_employee_name,
       cne.first_name || ' ' || cne.last_name as credit_note_issued_by_name,
       dre.first_name || ' ' || dre.last_name as deposit_return_recorded_by_name,
@@ -271,6 +279,7 @@ router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
       LEFT JOIN employees op ON ra.operator_id = op.id
       LEFT JOIN employees ise ON ra.issue_security_employee_id = ise.id
       LEFT JOIN employees rse ON ra.return_security_employee_id = rse.id
+      LEFT JOIN employees rce ON ra.return_checkin_by = rce.id
       LEFT JOIN employees rde ON ra.return_driver_employee_id = rde.id
       LEFT JOIN employees cne ON ra.credit_note_issued_by = cne.id
       LEFT JOIN employees dre ON ra.deposit_return_recorded_by = dre.id
@@ -802,7 +811,7 @@ function photoStageError(stage, a, emp) {
     if (!can(p, 'rentals_issue') && !(emp.is_driver && can(p, 'rentals_confirm_pickup') && a.pickup_driver_id === emp.id)) return [403, 'Only the driver assigned to this pickup can add pickup photos'];
   } else {
     if (a.status !== 'active') return [400, `This rental is ${a.status} — nothing to return`];
-    if (!can(p, 'rentals_returns')) return [403, 'Missing permission: rentals_returns'];
+    if (!can(p, 'rentals_returns') && !isGuard(emp)) return [403, 'Missing permission: rentals_returns'];
   }
   return null;
 }
@@ -2042,6 +2051,53 @@ router.patch('/agreements/:id/cancel', requirePermission('rentals_returns'), asy
 
 // ─── Return ─────────────────────────────────────────────────────────────────
 
+// ─── Security return check-in (My Verifications) ─────────────────────────
+// The guard signs the item(s) back in at the gate: what came back and its
+// condition, at least one return photo, their signature. No amounts — the
+// cashier's Process Return then settles it, starting from this (the guard
+// isn't asked for again, and the return time defaults to the check-in).
+router.patch('/agreements/:id/return-checkin', requirePermission('rentals_security_signoff'), async (req, res) => {
+  try {
+    if (!req.employee.is_security) return res.status(403).json({ error: 'Only security employees can check a return in' });
+    const { items, security_signature } = req.body || {};
+    const { rows: [a] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    if (!a) return res.status(404).json({ error: 'Not found' });
+    if (a.status !== 'active') return res.status(400).json({ error: `This rental is ${a.status} — nothing to check in` });
+    if (a.is_paused) return res.status(400).json({ error: 'This rental is paused — the rental desk resumes it before it can come back' });
+    if (a.return_checkin_at) return res.status(400).json({ error: 'Already checked in — waiting for the cashier to process the return' });
+    const { rows: agItems } = await db.execute({ sql: 'SELECT id, product_name, quantity, quantity_returned FROM rental_agreement_items WHERE agreement_id = ?', args: [a.id] });
+    const lines = [];
+    for (const it of Array.isArray(items) ? items : []) {
+      const row = agItems.find(x => x.id === Number(it.item_id));
+      if (!row) return res.status(400).json({ error: 'That item is not on this rental' });
+      const qty = Number(it.quantity) || 0;
+      if (qty < 0 || !Number.isInteger(qty)) return res.status(400).json({ error: `Enter a whole number for ${row.product_name}` });
+      if (qty > row.quantity - row.quantity_returned) return res.status(400).json({ error: `Only ${row.quantity - row.quantity_returned} of ${row.product_name} is still out` });
+      if (qty > 0) lines.push({ item_id: row.id, quantity: qty, condition: String(it.condition || '').trim().slice(0, 300) || null });
+    }
+    if (!lines.length) return res.status(400).json({ error: 'Enter how many of each item came back' });
+    if (!(await pendingPhotoCount(a.id, 'return'))) return res.status(400).json({ error: photoRequiredError('return'), code: 'photos_required' });
+    const sigPath = await uploadSignature(security_signature, `rental-${a.id}-return-guard`);
+    if (!sigPath) return res.status(400).json({ error: 'Your signature is required to check this in' });
+    await db.execute({ sql: 'UPDATE rental_agreements SET return_checkin_at = ?, return_checkin_by = ?, return_checkin_signature = ?, return_checkin_items = ? WHERE id = ?',
+      args: [new Date().toISOString(), req.employee.id, sigPath, JSON.stringify(lines), a.id] });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Undo a check-in made in error, before the return is processed — the guard
+// who made it, or the rental desk.
+router.delete('/agreements/:id/return-checkin', requireAnyPermission('rentals_security_signoff', 'rentals_returns'), async (req, res) => {
+  try {
+    const { rows: [a] } = await db.execute({ sql: 'SELECT id, return_checkin_at, return_checkin_by FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    if (!a) return res.status(404).json({ error: 'Not found' });
+    if (!a.return_checkin_at) return res.status(400).json({ error: 'Not checked in' });
+    if (!can(req.employee.permissions, 'rentals_returns') && a.return_checkin_by !== req.employee.id) return res.status(403).json({ error: 'Only the guard who checked it in, or the rental desk, can undo it' });
+    await db.execute({ sql: 'UPDATE rental_agreements SET return_checkin_at = NULL, return_checkin_by = NULL, return_checkin_signature = NULL, return_checkin_items = NULL WHERE id = ?', args: [a.id] });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.patch('/agreements/:id/return', requirePermission('rentals_returns'), async (req, res) => {
   try {
     const { items, duration_adjustment_override, payment_method, drawer_session_id, pickup_driver_id, returned_at, return_security_employee_id, return_driver_employee_id, security_signature, driver_signature } = req.body;
@@ -2058,8 +2114,11 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
     // the other hand, only makes sense when a driver was actually involved
     // — i.e. the rental paid for pickup service — so it's skipped entirely
     // otherwise (see database.js's migration comment).
-    if (!return_security_employee_id) return res.status(400).json({ error: 'Select the security employee signing this item back in' });
-    if (!security_signature) return res.status(400).json({ error: "The security employee's signature is required to complete this return" });
+    // Security may already have checked it in at the gate (My Verifications →
+    // Check In): their name, signature and time stand, and nothing is asked again.
+    const checkedIn = !!agreement.return_checkin_at;
+    if (!checkedIn && !return_security_employee_id) return res.status(400).json({ error: 'Select the security employee signing this item back in' });
+    if (!checkedIn && !security_signature) return res.status(400).json({ error: "The security employee's signature is required to complete this return" });
     if (agreement.pickup_required) {
       if (!return_driver_employee_id) return res.status(400).json({ error: 'Select the driver confirming pickup' });
       // A driver signature is only required here when the pickup wasn't
@@ -2090,7 +2149,10 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
       // server, plus the datetime-local input's minute-level (no seconds) precision
       // — without it, submitting the untouched "now" default could spuriously fail.
       if (parsed.getTime() > Date.now() + 5 * 60000) return res.status(400).json({ error: 'Return date/time cannot be in the future' });
-      if (parsed < new Date(checkoutDateTime)) return res.status(400).json({ error: 'Return date/time cannot be before checkout' });
+      // The box has no seconds: the same minute as checkout counts as checkout.
+      const out = new Date(checkoutDateTime);
+      if (parsed < out && out - parsed < 60000) parsed.setTime(out.getTime());
+      if (parsed < out) return res.status(400).json({ error: 'Return date/time cannot be before checkout' });
       now = parsed;
     }
 
@@ -2108,8 +2170,10 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
 
     // Uploaded before the write transaction opens — this can be a real
     // network call (Cloudinary), so it shouldn't hold a DB transaction open.
-    const guardSigPath = await uploadSignature(security_signature, `rental-${req.params.id}-return-guard`);
+    const guardSigPath = checkedIn ? agreement.return_checkin_signature : await uploadSignature(security_signature, `rental-${req.params.id}-return-guard`);
     if (!guardSigPath) return res.status(400).json({ error: 'Invalid security signature image' });
+    const securityEmployeeId = checkedIn ? agreement.return_checkin_by : return_security_employee_id;
+    const securityConfirmedAt = checkedIn ? agreement.return_checkin_at : null;
     let driverSigPath = null;
     if (agreement.pickup_required && !agreement.pickup_confirmed_at) {
       driverSigPath = await uploadSignature(driver_signature, `rental-${req.params.id}-return-driver`);
@@ -2274,8 +2338,9 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
         }
       }
 
-      await tx.execute({ sql: `UPDATE rental_agreements SET settlement_transaction_id = ?, deposit_refunded = ?, duration_adjustment_total = duration_adjustment_total + ?, tax_adjustment_total = tax_adjustment_total + ?, damage_fee_total = damage_fee_total + ?, pickup_driver_id = ?, status = ?, returned_at = ?, return_security_employee_id = ?, return_security_confirmed_at = ?, return_security_signature = ?, return_driver_employee_id = ?, return_driver_confirmed_at = ?, return_driver_signature = ?, deposit_return_method = ? WHERE id = ?`, args: [settlementTxId, depositRefunded, durationAdjustmentTotal, taxAdjustmentTotal, damageFeeTotal, pickupDriverId, newStatus, allReturned ? now.toISOString() : agreement.returned_at, return_security_employee_id, now.toISOString(), guardSigPath, returnDriverId, returnDriverConfirmedAt, driverSigPath, depositReturnMethod, req.params.id] });
+      await tx.execute({ sql: `UPDATE rental_agreements SET settlement_transaction_id = ?, deposit_refunded = ?, duration_adjustment_total = duration_adjustment_total + ?, tax_adjustment_total = tax_adjustment_total + ?, damage_fee_total = damage_fee_total + ?, pickup_driver_id = ?, status = ?, returned_at = ?, return_security_employee_id = ?, return_security_confirmed_at = ?, return_security_signature = ?, return_driver_employee_id = ?, return_driver_confirmed_at = ?, return_driver_signature = ?, deposit_return_method = ? WHERE id = ?`, args: [settlementTxId, depositRefunded, durationAdjustmentTotal, taxAdjustmentTotal, damageFeeTotal, pickupDriverId, newStatus, allReturned ? now.toISOString() : agreement.returned_at, securityEmployeeId, securityConfirmedAt || now.toISOString(), guardSigPath, returnDriverId, returnDriverConfirmedAt, driverSigPath, depositReturnMethod, req.params.id] });
       await stampPhotos(tx, agreement.id, 'return', now.toISOString());
+      await tx.execute({ sql: 'UPDATE rental_agreements SET return_checkin_at = NULL, return_checkin_by = NULL, return_checkin_signature = NULL, return_checkin_items = NULL WHERE id = ?', args: [agreement.id] });
       await tx.commit();
       if (checkoutIsCredit) { try { await runCreditCheck(agreement.customer_id); } catch(e) {} }
     } catch(e) {

@@ -1101,8 +1101,9 @@ Object.assign(App, {
           <td>${this._pickupDriverCell(a)}</td>
           <td>${a.operator_required ? (a.operator_name || notAssigned) : none}</td>
           <td>${this._rentalVerificationBadges(a)}</td>
-          <td><span class="badge-pill ${sc[a.display_status]||'badge-secondary'}">${a.display_status === 'returned_unpaid' ? 'returned – not paid' : a.display_status}</span>${a.display_status === 'returned_unpaid' ? `<div style="font-size:11px;color:var(--danger);font-weight:600">${this.fmt(a.balance_due)} owed</div>` : ''}</td>
+          <td><span class="badge-pill ${sc[a.display_status]||'badge-secondary'}">${a.display_status === 'returned_unpaid' ? 'returned – not paid' : a.display_status}</span>${a.display_status === 'returned_unpaid' ? `<div style="font-size:11px;color:var(--danger);font-weight:600">${this.fmt(a.balance_due)} owed</div>` : ''}${a.return_checkin_at && a.status === 'active' ? `<div style="font-size:11px;color:#166534;font-weight:600" title="Checked in by ${this.escapeAttr(a.return_checkin_by_name || 'security')} ${this.fmtDateTime(a.return_checkin_at)}">✓ Back — checked in by security</div>` : ''}</td>
           <td style="text-align:right;white-space:nowrap">
+            ${a.return_checkin_at && a.status === 'active' && !a.is_paused && this.can('rentals_returns') ? `<button class="btn btn-sm btn-primary" style="margin-right:4px" onclick="App.showRentalReturnModal(${a.id})">Process Return</button>` : ''}
             ${a.display_status === 'returned_unpaid' && this.can('pos') ? `<button class="btn btn-sm btn-primary" style="margin-right:4px" onclick="App.showRentalBalanceDueModal(${a.id})">Collect</button>` : ''}
             <button class="btn btn-sm btn-outline" onclick="App.viewRentalAgreement(${a.id})">View</button>
           </td>
@@ -3597,8 +3598,13 @@ Object.assign(App, {
     if (!outstanding.length) { this.alert('All items on this agreement are already returned', 'warning'); return; }
     const drivers = employees.filter(e => e.is_driver);
     const securityEmployees = employees.filter(e => e.is_security);
-    const nowLocal = new Date();
-    const defaultReturnedAt = `${nowLocal.getFullYear()}-${String(nowLocal.getMonth()+1).padStart(2,'0')}-${String(nowLocal.getDate()).padStart(2,'0')}T${String(nowLocal.getHours()).padStart(2,'0')}:${String(nowLocal.getMinutes()).padStart(2,'0')}`;
+    const localStamp = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}T${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+    const maxReturnedAt = localStamp(new Date());
+    // Checked in by security at the gate: their time, quantities and
+    // conditions are the starting point, and they aren't asked for again.
+    const checkin = a.return_checkin_at ? { at: this._toDate(a.return_checkin_at), items: (() => { try { return JSON.parse(a.return_checkin_items || '[]'); } catch (e) { return []; } })() } : null;
+    const checkinLine = id => checkin ? checkin.items.find(x => x.item_id === id) : null;
+    const defaultReturnedAt = checkin ? localStamp(checkin.at) : maxReturnedAt;
     this.showModal(`
       <div class="modal" style="max-width:640px">
         <div class="modal-header">
@@ -3609,9 +3615,11 @@ Object.assign(App, {
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">All outstanding items must be included in this return.</p>
           <div class="form-group" style="margin-bottom:12px">
             <label>Return Date / Time</label>
-            <input type="datetime-local" id="rr-returned-at" value="${defaultReturnedAt}" max="${defaultReturnedAt}">
-            <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Defaults to now — back-date this to when the item actually came back if it sat before being processed. Fees are calculated against this time.</div>
+            <input type="datetime-local" id="rr-returned-at" value="${defaultReturnedAt}" max="${maxReturnedAt}">
+            <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${checkin ? 'Set to when security checked it in' : 'Defaults to now'} — back-date this to when the item actually came back if it sat before being processed. Fees are calculated against this time.</div>
           </div>
+          ${checkin ? `<div style="padding:8px 12px;background:rgba(22,163,74,0.08);border-left:3px solid #16a34a;border-radius:4px;font-size:12px;color:#166534;margin-bottom:12px">✓ Checked in by ${this.escapeAttr(a.return_checkin_by_name || 'security')} on ${this.fmtDateTime(a.return_checkin_at)}${this._sigButton(a.return_checkin_signature, 'View Guard Signature')} — quantities and condition below are what they recorded.
+            ${this.can('rentals_returns') ? `<button type="button" class="btn btn-sm btn-outline" style="margin-left:6px" onclick="App._undoRentalCheckin(${id}, true)">Undo Check-In</button>` : ''}</div>` : ''}
           ${a.closed_day_grace ? `<div style="padding:8px 12px;background:rgba(0,126,55,0.08);border-left:3px solid var(--primary);border-radius:4px;font-size:12px;margin-bottom:12px">${this._closedDayGraceNote(a)}.</div>` : ''}
           ${a.checkout_payment_method === 'credit' ? `<div style="padding:8px 12px;background:rgba(59,130,246,0.08);border-left:3px solid #3b82f6;border-radius:4px;font-size:12px;color:#3b82f6;margin-bottom:12px">This rental was charged to the customer's account. The settlement (duration adjustment, damage fees, and deposit) will be applied directly to their account balance — no cash/card is collected here.</div>` : ''}
           ${outstanding.map(i => {
@@ -3620,11 +3628,11 @@ Object.assign(App, {
             return `<div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:8px">
               <div class="fw-600" style="margin-bottom:6px">${i.product_name}${tag} <span style="font-weight:400;color:var(--text-muted);font-size:12px">(${remaining} outstanding)</span></div>
               <div class="input-row">
-                <div class="form-group"><label style="font-size:11px">Qty Returned</label><input type="number" id="rr-qty-${i.id}" value="${remaining}" min="0" max="${remaining}"></div>
+                <div class="form-group"><label style="font-size:11px">Qty Returned</label><input type="number" id="rr-qty-${i.id}" value="${checkin ? (checkinLine(i.id)?.quantity || 0) : remaining}" min="0" max="${remaining}"></div>
                 <div class="form-group"><label style="font-size:11px">Damage Fee</label><input type="number" id="rr-fee-${i.id}" value="0" min="0" step="0.01"></div>
               </div>
               <div class="input-row">
-                <div class="form-group"><label style="font-size:11px">Condition In</label><input id="rr-cond-${i.id}" placeholder="e.g. Good condition"></div>
+                <div class="form-group"><label style="font-size:11px">Condition In</label><input id="rr-cond-${i.id}" placeholder="e.g. Good condition" value="${this.escapeAttr(checkinLine(i.id)?.condition || '')}"></div>
                 <div class="form-group"><label style="font-size:11px">Damage Notes</label><input id="rr-notes-${i.id}" placeholder="Optional"></div>
               </div>
             </div>`;
@@ -3642,7 +3650,7 @@ Object.assign(App, {
             : this._sigPadHtml('rr-driver-sig', 'Driver Signature', 'required — the driver above signs to confirm collection')}` : ''}
 
           ${this._rentalPhotoPickerHtml(id, 'return')}
-          <div class="form-group" style="border-top:1px solid var(--border);padding-top:12px">
+          ${checkin ? '' : `<div class="form-group" style="border-top:1px solid var(--border);padding-top:12px">
             <label>Security Sign-In <span style="font-weight:400;color:var(--text-muted)">(required — item returning)</span></label>
             <select id="rr-security-employee">
               <option value="">-- Select --</option>
@@ -3650,14 +3658,14 @@ Object.assign(App, {
             </select>
             ${!securityEmployees.length ? `<div style="font-size:11px;color:var(--danger);margin-top:2px">No employees are flagged as Security yet.</div>` : ''}
           </div>
-          ${this._sigPadHtml('rr-guard-sig', 'Guard Signature', 'required — the security employee above signs to confirm')}
+          ${this._sigPadHtml('rr-guard-sig', 'Guard Signature', 'required — the security employee above signs to confirm')}`}
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
           <button class="btn btn-primary" onclick="App.saveRentalReturn(${id}, [${outstanding.map(i=>i.id).join(',')}])">Confirm Return</button>
         </div>
       </div>`);
-    this._sigPadInit('rr-guard-sig');
+    if (!checkin) this._sigPadInit('rr-guard-sig');
     if (a.pickup_required && !a.pickup_confirmed_at) this._sigPadInit('rr-driver-sig');
     this._rentalPhotoLoad(id, 'return');
   },
@@ -3681,9 +3689,10 @@ Object.assign(App, {
       if (hasDriverSigPad && !this._sigPadHasDrawn('rr-driver-sig')) { this.alert("The driver's signature is required to complete this pickup return", 'error'); return; }
     }
     const securityEl = document.getElementById('rr-security-employee');
-    if (!securityEl?.value) { this.alert('Select the security employee signing this item back in', 'error'); return; }
+    const checkedIn = !securityEl; // security checked it in at the gate
+    if (!checkedIn && !securityEl.value) { this.alert('Select the security employee signing this item back in', 'error'); return; }
     if (!this._rentalPhotoReady('return')) return;
-    if (!this._sigPadHasDrawn('rr-guard-sig')) { this.alert("The security employee's signature is required to complete this return", 'error'); return; }
+    if (!checkedIn && !this._sigPadHasDrawn('rr-guard-sig')) { this.alert("The security employee's signature is required to complete this return", 'error'); return; }
     const returnedAtRaw = document.getElementById('rr-returned-at').value;
     if (!returnedAtRaw) { this.alert('Enter a return date/time', 'error'); return; }
     // The datetime-local input has no timezone of its own — new Date() here
@@ -3696,9 +3705,9 @@ Object.assign(App, {
         drawer_session_id: this.currentDrawerSession?.id || null,
         pickup_driver_id: pickupDriverEl ? parseInt(pickupDriverEl.value) || null : null,
         returned_at: returnedAt,
-        return_security_employee_id: parseInt(securityEl.value),
+        return_security_employee_id: checkedIn ? null : parseInt(securityEl.value),
         return_driver_employee_id: pickupDriverEl ? parseInt(pickupDriverEl.value) || null : null,
-        security_signature: this._sigPadDataUrl('rr-guard-sig'),
+        security_signature: checkedIn ? null : this._sigPadDataUrl('rr-guard-sig'),
         driver_signature: hasDriverSigPad ? this._sigPadDataUrl('rr-driver-sig') : null,
       });
       this.closeModal();

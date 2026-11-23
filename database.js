@@ -3883,6 +3883,13 @@ async function _init() {
     'ALTER TABLE purchase_order_items ADD COLUMN closed_short_reason TEXT',
     'ALTER TABLE purchase_order_items ADD COLUMN closed_short_by INTEGER REFERENCES employees(id)',
     'ALTER TABLE purchase_order_items ADD COLUMN closed_short_at DATETIME',
+    // Security's return check-in (My Verifications), waiting for the cashier's
+    // Process Return: when, who, their signature, and per item
+    // [{ item_id, quantity, condition }]. Cleared once the return is processed.
+    'ALTER TABLE rental_agreements ADD COLUMN return_checkin_at DATETIME',
+    'ALTER TABLE rental_agreements ADD COLUMN return_checkin_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE rental_agreements ADD COLUMN return_checkin_signature TEXT',
+    'ALTER TABLE rental_agreements ADD COLUMN return_checkin_items TEXT',
     "INSERT OR IGNORE INTO settings (key, value) VALUES ('staff_discount_pct', '15')",
     "INSERT OR IGNORE INTO settings (key, value) VALUES ('staff_purchase_limit_staff', '45000')",
     "INSERT OR IGNORE INTO settings (key, value) VALUES ('staff_purchase_limit_manager', '150000')",

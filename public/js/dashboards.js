@@ -347,10 +347,18 @@ Object.assign(App, {
       ? `<button class="btn btn-sm btn-primary" onclick="App.showSecuritySignoffModal(${a.id})">Sign Off</button>`
       : `<button class="btn btn-sm btn-primary" onclick="App.showGuardIssueModal(${a.id})">Hand Over</button>`;
 
+    const returnNote = a => a.return_checkin_at
+      ? `<div style="font-size:11px;color:#166534;font-weight:600">✓ Checked in ${this.fmtDateTime(a.return_checkin_at)}${a.return_checkin_by_name ? ` by ${this.escapeAttr(a.return_checkin_by_name)}` : ''} — waiting for the cashier</div>`
+      : a.is_paused ? '<div style="font-size:11px;color:var(--warning)">Paused — the rental desk resumes it first</div>'
+      : a.pickup_required ? `<div style="font-size:11px;color:var(--text-muted)">${a.pickup_confirmed_at ? 'Collected by our driver' : 'Our driver collects it'}</div>` : '';
+    const returnAction = a => !canSign ? ''
+      : a.return_checkin_at ? (a.return_checkin_by === myId ? `<button class="btn btn-sm btn-outline" onclick="App._undoRentalCheckin(${a.id})">Undo</button>` : '')
+      : a.is_paused ? '' : `<button class="btn btn-sm btn-primary" onclick="App.showGuardCheckInModal(${a.id})">Check In</button>`;
+
     document.getElementById('content').innerHTML = `
       <div class="section-header"><h2>My Verifications</h2></div>
       ${this._rentalDashSection('Awaiting Security Check', awaitingCheck.map(a => this._rentalDashRow(a, how(a), action(a), '', canView)), 'Nothing waiting on a security check right now.')}
-      ${this._rentalDashSection('Expected Returns', expectedReturns.map(a => this._rentalDashRow(a, '', '', '', canView)), 'No active rentals outstanding.')}
+      ${this._rentalDashSection('Expected Returns', expectedReturns.map(a => this._rentalDashRow(a, returnNote(a), returnAction(a), '', canView)), 'No active rentals outstanding.')}
       ${this._rentalDashSection('My Recent Verifications', history.map(a => this._rentalDashRow(a, `<div style="font-size:11px;color:var(--text-muted)">${a.display_status}</div>`, '', '', canView)), 'No verifications recorded yet.')}
     `;
   },
@@ -406,6 +414,63 @@ Object.assign(App, {
     this._sigPadInit('gi-guard-sig');
     this._sigPadInit('gi-customer-sig');
     this._rentalPhotoLoad(id, 'issue');
+  },
+
+  // Return check-in at the gate: what came back and its condition, photos,
+  // the guard's signature. The cashier's Process Return settles the money.
+  showGuardCheckInModal(id) {
+    const a = (this._guardDashCache||[]).find(x => x.id === id);
+    if (!a) { this.alert('Agreement not found — refresh and try again', 'error'); return; }
+    const out = (a.items || []).filter(i => i.quantity_returned < i.quantity);
+    this.showModal(`
+      <div class="modal" style="max-width:500px">
+        <div class="modal-header"><span class="modal-title">Check In Return — ${a.agreement_number}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">From ${this.escapeAttr(a.customer_name || '—')} · due ${this.fmtDate(a.due_date)}. Enter how many of each came back and what condition it's in.</div>
+          ${out.map(i => `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:8px">
+              <div class="fw-600" style="font-size:13px">${this.escapeAttr(i.product_name)}${i.parent_item_id ? ' <span class="badge-pill badge-secondary" style="font-size:10px">accessory</span>' : ''} <span style="font-weight:400;color:var(--text-muted);font-size:12px">(${i.quantity - i.quantity_returned} out)</span></div>
+              <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
+                <div class="form-group" style="margin:0;width:90px"><label style="font-size:11px">Back</label><input type="number" class="gc-qty" data-item="${i.id}" value="${i.quantity - i.quantity_returned}" min="0" max="${i.quantity - i.quantity_returned}" step="1"></div>
+                <div class="form-group" style="margin:0;flex:1;min-width:180px"><label style="font-size:11px">Condition</label><input class="gc-cond" data-item="${i.id}" placeholder="e.g. Good, or describe any damage"></div>
+              </div>
+            </div>`).join('')}
+          ${this._rentalPhotoPickerHtml(id, 'return')}
+          ${this._sigPadHtml('gc-guard-sig', 'Guard Signature', 'required — you confirm what came back')}
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.submitGuardCheckIn(${id})">Check In</button>
+        </div>
+      </div>`);
+    this._sigPadInit('gc-guard-sig');
+    this._rentalPhotoLoad(id, 'return');
+  },
+
+  async submitGuardCheckIn(id) {
+    const items = [...document.querySelectorAll('.gc-qty')].map(el => ({
+      item_id: Number(el.dataset.item),
+      quantity: Number(el.value) || 0,
+      condition: document.querySelector(`.gc-cond[data-item="${el.dataset.item}"]`)?.value.trim() || null,
+    }));
+    if (!items.some(i => i.quantity > 0)) { this.alert('Enter how many of each item came back', 'error'); return; }
+    if (!this._rentalPhotoReady('return')) return;
+    if (!this._sigPadHasDrawn('gc-guard-sig')) { this.alert('Your signature is required', 'error'); return; }
+    try {
+      await this.api('PATCH', `/rentals/agreements/${id}/return-checkin`, { items, security_signature: this._sigPadDataUrl('gc-guard-sig') });
+      this.closeModal();
+      this.alert('Checked in — the cashier will process the return');
+      this.renderGuardDashboard();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async _undoRentalCheckin(id, fromReturnModal = false) {
+    if (!confirm('Undo this check-in? The item(s) will show as still out until checked in again.')) return;
+    try {
+      await this.api('DELETE', `/rentals/agreements/${id}/return-checkin`);
+      this.alert('Check-in undone');
+      if (fromReturnModal) { this.closeModal(); this.showRentalReturnModal(id); }
+      else if (this.section === 'guard-dashboard') this.renderGuardDashboard();
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   async submitGuardIssue(id) {
