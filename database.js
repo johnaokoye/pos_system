@@ -3853,6 +3853,21 @@ async function _init() {
     // store days; NULL on older rows = created_at / issued_at.
     'ALTER TABLE shop_use_requests ADD COLUMN requested_date TEXT',
     'ALTER TABLE shop_use_issues ADD COLUMN transaction_date TEXT',
+    // PO receiving substitutes and close short (2026-11-23). A substitute is
+    // its own PO line (another SKU sent in place of part of a line) made at
+    // receipt `substitute_receipt_id`; the original line's quantity_ordered
+    // and amounts drop by what it took and `quantity_substituted` records it.
+    // Close short takes the rest of a line off the PO (amounts kept to undo).
+    'ALTER TABLE purchase_order_items ADD COLUMN substitute_for_item_id INTEGER REFERENCES purchase_order_items(id)',
+    'ALTER TABLE purchase_order_items ADD COLUMN substitute_receipt_id INTEGER REFERENCES po_receipts(id)',
+    'ALTER TABLE purchase_order_items ADD COLUMN quantity_substituted REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE purchase_order_items ADD COLUMN quantity_closed_short REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE purchase_order_items ADD COLUMN closed_short_total REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE purchase_order_items ADD COLUMN closed_short_tax REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE purchase_order_items ADD COLUMN closed_short_discount REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE purchase_order_items ADD COLUMN closed_short_reason TEXT',
+    'ALTER TABLE purchase_order_items ADD COLUMN closed_short_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE purchase_order_items ADD COLUMN closed_short_at DATETIME',
     "INSERT OR IGNORE INTO settings (key, value) VALUES ('staff_discount_pct', '15')",
     "INSERT OR IGNORE INTO settings (key, value) VALUES ('staff_purchase_limit_staff', '45000')",
     "INSERT OR IGNORE INTO settings (key, value) VALUES ('staff_purchase_limit_manager', '150000')",

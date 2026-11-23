@@ -854,3 +854,4 @@ router.delete('/:id/attachments/:aid', requirePermission('payables_requests'), a
 module.exports = router;
 module.exports.loadRequest = loadRequest;
 module.exports.reopenAfterVoid = reopenAfterVoid;
+module.exports.poAdvanceRoom = poAdvanceRoom;

@@ -1756,7 +1756,7 @@ Object.assign(App, {
               <thead><tr><th>Product</th><th>SKU</th><th>Ordered</th><th>Unit</th><th>Received</th><th>Damaged</th><th>Unit Cost</th><th>Vendor Disc.</th><th>Tax</th><th>Total</th></tr></thead>
               <tbody>
                 ${po.items.map(i => `<tr>
-                  <td>${this._orderLineUnit(i).name}${i.item_type === 'service' ? ' <span class="badge-pill badge-info" style="font-size:10px">Service</span>' : ''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on the originating quote line">-${this._fmtPO(i.discount_amount, po)} quoted</span>` : ''}${i.notes ? `<div style="font-size:11px;color:var(--text-muted);max-width:280px">${this.escapeAttr(i.notes)}</div>` : ''}${i.product_url ? `<div style="font-size:11px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="${this.escapeAttr(i.product_url)}" target="_blank" rel="noopener" style="color:var(--primary)">🔗 ${this.escapeAttr(i.product_url)}</a></div>` : ''}${itemLinkBadges(i)}${(!i.product_id && i.item_type !== 'service' && i.quantity_received>0) ? `<br><button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="App.showLinkToInventory(${po.id},${i.id})">+ Add to Inventory</button>` : ''}</td>
+                  <td>${this._orderLineUnit(i).name}${i.item_type === 'service' ? ' <span class="badge-pill badge-info" style="font-size:10px">Service</span>' : ''}${i.discount_amount > 0 ? ` <span class="badge-pill badge-purple" style="font-size:10px" title="Discount given on the originating quote line">-${this._fmtPO(i.discount_amount, po)} quoted</span>` : ''}${i.notes ? `<div style="font-size:11px;color:var(--text-muted);max-width:280px">${this.escapeAttr(i.notes)}</div>` : ''}${i.product_url ? `<div style="font-size:11px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="${this.escapeAttr(i.product_url)}" target="_blank" rel="noopener" style="color:var(--primary)">🔗 ${this.escapeAttr(i.product_url)}</a></div>` : ''}${itemLinkBadges(i)}${(!i.product_id && i.item_type !== 'service' && i.quantity_received>0) ? `<br><button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="App.showLinkToInventory(${po.id},${i.id})">+ Add to Inventory</button>` : ''}${this._poLineChangeHtml(po, i)}</td>
                   <td>${i.sku||'-'}</td>
                   <td>${i.quantity_ordered}${i.authorized_qty != null ? `<div style="font-size:11px;color:${i.quantity_ordered > i.authorized_qty ? 'var(--danger)' : 'var(--text-muted)'}">${i.quantity_ordered > i.authorized_qty ? '⚠️ ' : ''}max ${i.authorized_qty}</div>` : ''}</td>
                   <td>${this.escapeAttr(this._orderLineUnit(i).unit)}</td>
@@ -1909,6 +1909,7 @@ Object.assign(App, {
         </div>
       </div>`);
     this._viewingPOId = po.id;
+    this._viewingPO = po;
   },
 
   async showFreightForm(poId) {
@@ -2339,6 +2340,7 @@ Object.assign(App, {
     const pendingItems = po.items.filter(i => (i.quantity_received||0) < i.quantity_ordered);
     if (!pendingItems.length) { this.alert('All items already received', 'warning'); return; }
     this._recvPO = po;
+    this._recvSubs = [];
     const canPrice = this.can('inventory_edit');
     const canRaise = this.can('purchasing_approve');
     const step = n => (Number.isInteger(n) ? '1' : 'any');
@@ -2366,7 +2368,8 @@ Object.assign(App, {
               const hasPrice = !service && i.sell_price != null;
               return `<tr>
                 <td><div class="fw-600">${this.escapeAttr(ul.name)}${i.item_type === 'service' ? ' <span class="badge-pill badge-info" style="font-size:10px">Service</span>' : ''}</div>
-                  <div style="font-size:12px;color:var(--text-muted)">${ul.unit !== 'Each' ? `${this.escapeAttr(ul.unit)} · ` : ''}Ordered ${i.quantity_ordered} · Received ${i.quantity_received || 0} · Pending ${pending}${i.item_type === 'service' ? ' · no stock change' : ''}</div></td>
+                  <div style="font-size:12px;color:var(--text-muted)">${ul.unit !== 'Each' ? `${this.escapeAttr(ul.unit)} · ` : ''}Ordered ${i.quantity_ordered} · Received ${i.quantity_received || 0} · Pending ${pending}${i.item_type === 'service' ? ' · no stock change' : ''}</div>
+                  ${service ? '' : `<div id="recv-subs-${i.id}"></div><button class="btn btn-sm btn-outline" style="margin-top:4px" title="The supplier sent a different item (another colour, size…) in place of some of these" onclick="App._recvAddSub(${i.id})">+ Substitute</button>`}</td>
                 <td style="text-align:right"><input id="recv-${i.id}" type="number" min="0" step="any" value="${pending}" style="width:80px;text-align:right" placeholder="Qty"></td>
                 <td style="text-align:right"><input id="recv-cost-${i.id}" type="number" min="0" step="0.01" value="${Number(i.unit_cost || 0).toFixed(2)}" data-orig="${Number(i.unit_cost || 0)}" style="width:110px;text-align:right" ${lockedCost ? `disabled title="Already part-received at this cost — it can't change now"` : ''} oninput="App._recvLineCalc(${i.id})">
                   <div id="recv-cost-note-${i.id}" style="font-size:11px;color:var(--text-muted)">${lockedCost ? 'part-received' : `PO ${this._fmtPO(i.unit_cost, po)}`}</div></td>
@@ -2383,6 +2386,145 @@ Object.assign(App, {
         </div>
       </div>`);
     pendingItems.forEach(i => this._recvLineCalc(i.id));
+  },
+
+  // A line's receiving changes on the PO view: a substitute sent in its
+  // place, part of it substituted, the rest closed short — with Close Short
+  // for what's still to come and Reopen for a closed line.
+  _poLineChangeHtml(po, i) {
+    const esc = v => this.escapeAttr(v);
+    const notes = [];
+    if (i.substitute_for_item_id) notes.push(`↳ Substitute for ${esc(i.substitute_for_name || 'another item')}`);
+    if (Number(i.quantity_substituted) > 0) notes.push(`${Number(i.quantity_substituted)} replaced by a substitute`);
+    if (Number(i.quantity_closed_short) > 0) notes.push(`${Number(i.quantity_closed_short)} closed short${i.closed_short_by_name ? ` by ${esc(i.closed_short_by_name)}` : ''}${i.closed_short_at ? ` on ${this.fmtDate(i.closed_short_at)}` : ''}${i.closed_short_reason ? ` — ${esc(i.closed_short_reason)}` : ''}`);
+    const left = Math.round(((Number(i.quantity_ordered) || 0) - (Number(i.quantity_received) || 0)) * 1000) / 1000;
+    const canAct = this.can('purchasing_receive');
+    const close = canAct && left > 0 && ['approved', 'partial'].includes(po.status)
+      ? `<button class="btn btn-sm btn-outline" style="margin-top:4px" title="The supplier won't send the rest — take it off the PO" onclick="App.showClosePOLineShort(${po.id}, ${i.id})">Close Short (${left})</button>` : '';
+    const reopen = canAct && Number(i.quantity_closed_short) > 0 && ['approved', 'partial', 'received'].includes(po.status)
+      ? `<button class="btn btn-sm btn-outline" style="margin-top:4px" onclick="App.reopenPOLineShort(${po.id}, ${i.id})">Reopen</button>` : '';
+    if (!notes.length && !close && !reopen) return '';
+    return `${notes.map(n => `<div style="font-size:11px;color:#b45309;max-width:300px">${n}</div>`).join('')}${close || reopen ? `<div style="display:flex;gap:6px">${close}${reopen}</div>` : ''}`;
+  },
+
+  showClosePOLineShort(poId, itemId) {
+    const i = (this._viewingPO?.id === poId ? this._viewingPO.items : []).find(x => x.id === itemId);
+    const left = i ? Math.round(((Number(i.quantity_ordered) || 0) - (Number(i.quantity_received) || 0)) * 1000) / 1000 : null;
+    this.showSecondaryModal(`
+      <div class="modal" style="max-width:480px">
+        <div class="modal-header"><span class="modal-title">Close Short${i ? ` — ${this.escapeAttr(i.product_name)}` : ''}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;color:var(--text-muted);margin-top:0">${left != null ? `The <strong>${left}</strong> still to come` : 'What is still to come'} comes off the PO — its quantity, amount and GCT — so the PO can finish as received and isn't billed for it. You can reopen it later.</p>
+          <div class="form-group"><label>Reason *</label><input id="po-close-short-reason" type="text" maxlength="500" placeholder="e.g. Supplier out of stock — not sending the rest"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeSecondaryModal()">Back</button>
+          <button class="btn btn-primary" onclick="App.confirmClosePOLineShort(${poId}, ${itemId})">Close Short</button>
+        </div>
+      </div>`);
+    setTimeout(() => document.getElementById('po-close-short-reason')?.focus(), 50);
+  },
+
+  async confirmClosePOLineShort(poId, itemId) {
+    const reason = document.getElementById('po-close-short-reason')?.value.trim();
+    if (!reason) return this.alert('Enter why the rest is not coming', 'error');
+    try {
+      const r = await this.api('POST', `/purchase-orders/${poId}/items/${itemId}/close-short`, { reason });
+      this.closeSecondaryModal();
+      this.alert(`${r.closed} closed short${r.status === 'received' ? ' — the PO is now fully received' : ''}`);
+      if (r.advance_excess) this.alert(`Advances paid or requested on this PO are now ${this.fmt(r.advance_excess)} more than it's worth — let Accounts Payable know`, 'warning');
+      this.closeModal();
+      this.viewPO(poId);
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  async reopenPOLineShort(poId, itemId) {
+    if (!confirm('Put the closed-short quantity back on this PO as still to come?')) return;
+    try {
+      await this.api('DELETE', `/purchase-orders/${poId}/items/${itemId}/close-short`);
+      this.closeModal();
+      this.viewPO(poId);
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  // ── Substitutes at receiving ──────────────────────────────
+  // Another item sent in place of some of a line: picked here, it becomes its
+  // own PO line on the server at the original line's cost (PATCH /receive
+  // `substitutes`). Adding one moves one off the line's receive quantity.
+  async _recvAddSub(itemId) {
+    const i = (this._recvPO?.items || []).find(x => x.id === itemId);
+    if (!i) return;
+    if (!this._recvProducts) {
+      try {
+        this._recvProducts = (await this.api('GET', '/products')).filter(p => p.active !== 0 && !p.is_service && !p.is_rental && !(p.has_variations > 0));
+      } catch (e) { return this.alert(e.message, 'error'); }
+    }
+    const qtyEl = document.getElementById(`recv-${itemId}`);
+    if (qtyEl && Number(qtyEl.value) >= 1) qtyEl.value = Math.round((Number(qtyEl.value) - 1) * 1000) / 1000;
+    const key = (this._recvSubSeq = (this._recvSubSeq || 0) + 1);
+    this._recvSubs.push({ key, itemId, product: null, qty: 1 });
+    this._recvRenderSubs(itemId);
+    const input = document.getElementById(`recv-sub-q-${key}`);
+    if (input) {
+      // Start from the ordered item's first word, where the other colours/sizes usually are.
+      input.value = String(i.product_name || '').split(/\s+/)[0] || '';
+      input.focus();
+      this._recvSubSearch(key, input.value);
+    }
+  },
+
+  _recvRenderSubs(itemId) {
+    const box = document.getElementById(`recv-subs-${itemId}`);
+    if (!box) return;
+    const esc = v => this.escapeAttr(v);
+    box.innerHTML = this._recvSubs.filter(x => x.itemId === itemId).map(x => `
+      <div style="display:flex;align-items:center;gap:6px;margin-top:6px;padding:6px 8px;border:1px dashed #f59e0b;border-radius:6px;background:#fffbeb;position:relative">
+        <span style="font-size:12px;color:#b45309;white-space:nowrap">↳ Instead:</span>
+        ${x.product
+          ? `<span style="flex:1;font-size:13px"><strong>${esc(x.product.name)}</strong>${x.product.sku ? ` <span style="color:var(--text-muted);font-size:11px">${esc(x.product.sku)}</span>` : ''}</span>`
+          : `<span style="flex:1;position:relative"><input id="recv-sub-q-${x.key}" type="search" autocomplete="off" placeholder="Item sent instead — name, SKU or barcode" style="width:100%" oninput="App._recvSubSearch(${x.key}, this.value)">
+              <div id="recv-sub-dd-${x.key}" style="display:none;position:absolute;z-index:30;left:0;right:0;max-height:220px;overflow:auto;background:var(--card-bg,#fff);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 14px rgba(0,0,0,.15)"></div></span>`}
+        <input type="number" min="0" step="any" value="${x.qty}" title="Quantity sent instead" style="width:70px;text-align:right" oninput="App._recvSubQty(${x.key}, this.value)">
+        <button class="btn btn-sm btn-outline" title="Remove" onclick="App._recvSubRemove(${x.key})">✕</button>
+      </div>`).join('');
+  },
+
+  _recvSubSearch(key, query) {
+    const dd = document.getElementById(`recv-sub-dd-${key}`);
+    const sub = this._recvSubs.find(x => x.key === key);
+    if (!dd || !sub) return;
+    const q = String(query || '').trim().toLowerCase();
+    if (!q) { dd.style.display = 'none'; return; }
+    const orig = (this._recvPO?.items || []).find(x => x.id === sub.itemId);
+    const exact = (this._recvProducts || []).find(p => p.id !== orig?.product_id && [p.sku, p.barcode].some(v => v && String(v).toLowerCase() === q));
+    if (exact) return this._recvSubPick(key, exact.id);
+    const matches = (this._recvProducts || []).filter(p => p.id !== orig?.product_id && `${p.name} ${p.sku || ''} ${p.barcode || ''}`.toLowerCase().includes(q)).slice(0, 30);
+    dd.innerHTML = matches.length ? matches.map(p => `
+      <div class="nav-item" style="padding:7px 10px;cursor:pointer;color:var(--text)" onclick="App._recvSubPick(${key}, ${p.id})">
+        <strong>${this.escapeAttr(p.name)}</strong>
+        <div style="font-size:11px;color:var(--text-muted)">${p.sku ? this.escapeAttr(p.sku) + ' · ' : ''}on hand ${p.stock_qty ?? 0}</div>
+      </div>`).join('') : '<div style="padding:10px;color:var(--text-muted);font-size:13px">No stocked item matches — add it in Inventory first</div>';
+    dd.style.display = '';
+  },
+
+  _recvSubPick(key, productId) {
+    const sub = this._recvSubs.find(x => x.key === key);
+    const p = (this._recvProducts || []).find(x => x.id === productId);
+    if (!sub || !p) return;
+    sub.product = p;
+    this._recvRenderSubs(sub.itemId);
+  },
+
+  _recvSubQty(key, value) {
+    const sub = this._recvSubs.find(x => x.key === key);
+    if (sub) sub.qty = Number(value) || 0;
+  },
+
+  _recvSubRemove(key) {
+    const sub = this._recvSubs.find(x => x.key === key);
+    if (!sub) return;
+    this._recvSubs = this._recvSubs.filter(x => x.key !== key);
+    this._recvRenderSubs(sub.itemId);
   },
 
   // Net cost per line unit in base currency (after the vendor discount) for the margin.
@@ -2438,8 +2580,16 @@ Object.assign(App, {
       if (l.qty > 0 && l.price != null && !(l.price >= 0)) return this.alert(`Enter a valid selling price for ${l.i.product_name}`, 'error');
       if (l.qty > 0 && l.costChanged && l.cost > l.i.unit_cost && !this.can('purchasing_approve')) return this.alert(`Raising the cost of ${l.i.product_name} needs someone who can approve POs`, 'error');
     }
+    const subs = (this._recvSubs || []).filter(x => itemIds.includes(x.itemId) && x.qty > 0);
+    if (subs.some(x => !x.product)) return this.alert('Pick the item that was sent instead on each substitute, or remove it', 'error');
+    for (const l of lines) {
+      l.subs = subs.filter(x => x.itemId === l.i.id);
+      l.subQty = Math.round(l.subs.reduce((t, x) => t + x.qty, 0) * 1000) / 1000;
+      if (l.subQty > 0 && l.qty + l.subQty > l.pending + 0.0005) return this.alert(`${l.i.product_name}: receiving ${l.qty} plus ${l.subQty} substituted is more than the ${l.pending} still to come`, 'error');
+    }
     const items = lines.filter(l => l.qty > 0).map(l => ({ item_id: l.i.id, quantity_received: l.qty, ...(l.costChanged ? { unit_cost: l.cost } : {}), ...(l.priceChanged ? { selling_price: l.price } : {}) }));
-    if (!items.length) { this.alert('Enter at least one quantity', 'error'); return; }
+    const substitutes = subs.map(x => ({ item_id: x.itemId, product_id: x.product.id, quantity: x.qty }));
+    if (!items.length && !substitutes.length) { this.alert('Enter at least one quantity', 'error'); return; }
     const todayDay = this._storeDay(new Date());
     const received_date = document.getElementById('recv-date')?.value || '';
     const vendor_invoice_number = document.getElementById('recv-invoice')?.value.trim() || '';
@@ -2447,10 +2597,10 @@ Object.assign(App, {
     if (!received_date) return this.alert('Enter the date the items were received', 'error');
     if (received_date > todayDay) return this.alert("The date received can't be in the future", 'error');
     if (invoice_date && invoice_date > todayDay) return this.alert("The invoice date can't be in the future", 'error');
-    this._pendingPOReceipt = { poId, items, received_date, vendor_invoice_number, invoice_date };
-    const flag = l => l.qty <= 0 ? '<span class="badge-pill badge-warning" style="font-size:10px">Not receiving</span>'
-      : l.qty > l.pending ? `<span class="badge-pill badge-danger" style="font-size:10px">Over by ${Math.round((l.qty - l.pending) * 1000) / 1000}</span>`
-      : l.qty < l.pending ? `<span class="badge-pill badge-info" style="font-size:10px">Short ${Math.round((l.pending - l.qty) * 1000) / 1000}</span>` : '';
+    this._pendingPOReceipt = { poId, items, substitutes, received_date, vendor_invoice_number, invoice_date };
+    const flag = l => { const got = l.qty + l.subQty; return got <= 0 ? '<span class="badge-pill badge-warning" style="font-size:10px">Not receiving</span>'
+      : got > l.pending ? `<span class="badge-pill badge-danger" style="font-size:10px">Over by ${Math.round((got - l.pending) * 1000) / 1000}</span>`
+      : got < l.pending ? `<span class="badge-pill badge-info" style="font-size:10px" title="Stays on the PO as still to come — use Close Short on the PO if the supplier won't send it">Short ${Math.round((l.pending - got) * 1000) / 1000}</span>` : ''; };
     const changes = lines.filter(l => l.qty > 0 && (l.costChanged || l.priceChanged));
     this.showSecondaryModal(`
       <div class="modal" style="max-width:700px">
@@ -2465,11 +2615,13 @@ Object.assign(App, {
           ${vendor_invoice_number ? '' : '<p style="font-size:12px;color:var(--warning,#b7791f);margin:0 0 10px">No supplier invoice number entered — A/P will need it to match the bill.</p>'}
           <table class="data-table" style="width:100%">
             <thead><tr><th>Item</th><th style="text-align:right">Pending</th><th style="text-align:right">Receiving</th><th></th></tr></thead>
-            <tbody>${lines.map(l => `<tr${l.qty <= 0 ? ' style="opacity:.6"' : ''}>
+            <tbody>${lines.map(l => `<tr${l.qty + l.subQty <= 0 ? ' style="opacity:.6"' : ''}>
               <td>${this.escapeAttr(l.i.product_name)}${l.i.purchase_unit ? ` <span style="font-size:11px;color:var(--text-muted)">(${this.escapeAttr(l.i.purchase_unit)})</span>` : ''}</td>
               <td style="text-align:right">${l.pending}</td>
               <td style="text-align:right;font-weight:700">${l.qty}</td>
-              <td>${flag(l)}</td></tr>`).join('')}</tbody>
+              <td>${flag(l)}</td></tr>${l.subs.map(x => `<tr style="background:#fffbeb">
+              <td style="padding-left:22px">↳ <strong>${this.escapeAttr(x.product.name)}</strong>${x.product.sku ? ` <span style="font-size:11px;color:var(--text-muted)">${this.escapeAttr(x.product.sku)}</span>` : ''} <span class="badge-pill badge-warning" style="font-size:10px">Substitute</span></td>
+              <td></td><td style="text-align:right;font-weight:700">${x.qty}</td><td style="font-size:11px;color:var(--text-muted)">at the ordered item's cost</td></tr>`).join('')}`).join('')}</tbody>
           </table>
           ${changes.length ? `<div style="margin-top:14px;font-weight:700;font-size:13px">Price changes</div>
           <table class="data-table" style="width:100%;margin-top:6px">
@@ -2490,12 +2642,14 @@ Object.assign(App, {
   },
 
   async submitReceivePO() {
-    const { poId, items, received_date, vendor_invoice_number, invoice_date } = this._pendingPOReceipt || {};
+    const { poId, items, substitutes, received_date, vendor_invoice_number, invoice_date } = this._pendingPOReceipt || {};
     if (!poId) return;
     try {
-      await this.api('PATCH', `/purchase-orders/${poId}/receive`, { items, received_date, vendor_invoice_number: vendor_invoice_number || null, invoice_date: invoice_date || null });
+      await this.api('PATCH', `/purchase-orders/${poId}/receive`, { items, substitutes: substitutes || [], received_date, vendor_invoice_number: vendor_invoice_number || null, invoice_date: invoice_date || null });
       this._pendingPOReceipt = null;
       this._recvPO = null;
+      this._recvSubs = [];
+      this._recvProducts = null;
       this.closeSecondaryModal();
       this.closeModal();
       const changed = items.filter(i => i.unit_cost !== undefined || i.selling_price !== undefined).length;

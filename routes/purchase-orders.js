@@ -24,17 +24,23 @@ const { allocateTicketDiscount } = require('../lib/ticketDiscount');
 // sell_price: what the line's unit sells for now — the product price for a
 // stock-unit line, the alternate unit's own price otherwise (NULL = an
 // order-only unit) — offered for editing when the line is received.
+// A substitute line folded back by a receipt reversal (nothing ordered or
+// received) stays for the receipt's history but is left off the PO.
+const LIVE_LINE_SQL = 'NOT (poi.substitute_for_item_id IS NOT NULL AND poi.quantity_ordered = 0 AND COALESCE(poi.quantity_received, 0) = 0)';
 const PO_ITEMS_SELECT = `SELECT poi.*, q.quote_number, q.id as quotation_id, wo.wo_number, wo.id as work_order_id,
     CASE WHEN poi.uom_id IS NULL OR poi.uom_id = pr.base_unit_id THEN pr.price ELSE pu.price END AS sell_price,
-    pr.price AS product_price, pr.cost AS product_cost
+    pr.price AS product_price, pr.cost AS product_cost,
+    so.product_name AS substitute_for_name, ecs.first_name || ' ' || ecs.last_name AS closed_short_by_name
   FROM purchase_order_items poi
+  LEFT JOIN purchase_order_items so ON so.id = poi.substitute_for_item_id
+  LEFT JOIN employees ecs ON ecs.id = poi.closed_short_by
   LEFT JOIN products pr ON pr.id = poi.product_id
   LEFT JOIN product_units pu ON pu.product_id = poi.product_id AND pu.unit_id = poi.uom_id
   LEFT JOIN quotation_items qi ON poi.quotation_item_id = qi.id
   LEFT JOIN quotations q ON qi.quote_id = q.id
   LEFT JOIN work_order_items woi ON poi.work_order_item_id = woi.id
   LEFT JOIN work_orders wo ON woi.work_order_id = wo.id
-  WHERE poi.po_id = ?`;
+  WHERE poi.po_id = ? AND ${LIVE_LINE_SQL}`;
 
 const PO_DETAIL_SELECT = `SELECT po.*, s.name as supplier_name, s.contact_name as supplier_contact, s.email as supplier_email, s.email2 as supplier_email2,
   b.name as branch_name, e.first_name || ' ' || e.last_name as employee_name,
@@ -453,18 +459,53 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
     try {
       let receiptValue = 0, receiptTax = 0, receiptId = null, receiptNumber = null, repriced = false;
       const priceChanges = [];
+      // Logged as one receipt so it can be reversed as a unit later.
+      const ensureReceipt = async () => {
+        if (receiptId) return;
+        const receipt_number = await nextNumber(tx, 'po_receipts', 'receipt_number', 'RCV-', 6);
+        const r = await tx.execute({ sql: 'INSERT INTO po_receipts (receipt_number, po_id, branch_id, received_by, received_date, vendor_invoice_number, invoice_date) VALUES (?,?,?,?,?,?,?)', args: [receipt_number, po.id, po.branch_id || null, req.employee?.id || null, receivedDate, vendorInvoice, invoiceDate] });
+        receiptId = Number(r.lastInsertRowid);
+        receiptNumber = receipt_number;
+      };
+      // Puts `qty` of a PO line on hand: the line's received count, stock at
+      // the PO's branch and overall, the item's cost, and the receipt's value
+      // for the A/P bill.
+      const receiveQty = async (item, qty) => {
+        const value = receivedValue(item, qty);
+        receiptValue += value.goods;
+        receiptTax += value.tax;
+        // Stock is costed at what was actually paid per unit — after the vendor's discount, before tax.
+        const netUnitCost = (item.quantity_ordered ? (Number(item.total) || 0) / item.quantity_ordered : (Number(item.unit_cost) || 0)) * rate;
+        const newReceived = (item.quantity_received || 0) + qty;
+        await tx.execute({ sql: 'UPDATE purchase_order_items SET quantity_received = ? WHERE id = ?', args: [newReceived, item.id] });
+        let singles = 0, prevCost = null, newCost = null;
+        if (item.product_id) {
+          // A line in another unit (lib/units.js) receives quantity × its size
+          // in stock units; stock and cost are per stock unit.
+          const per = Number(item.units_per) || 1;
+          singles = stockUnits(qty, per);
+          const { rows: [prod] } = await tx.execute({ sql: 'SELECT cost FROM products WHERE id = ?', args: [item.product_id] });
+          prevCost = prod ? prod.cost : null;
+          await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [singles, item.product_id] });
+          if (netUnitCost > 0) {
+            newCost = parseFloat((netUnitCost / per).toFixed(4));
+            await tx.execute({ sql: 'UPDATE products SET cost = ? WHERE id = ?', args: [newCost, item.product_id] });
+          }
+          if (po.branch_id) {
+            await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, po.branch_id, singles, item.product_id, singles] });
+            await syncBinQty(tx, item.product_id, po.branch_id, singles);
+            // A dated owned receipt for oldest-first selling (lib/stockLots.js), once tracking has started.
+            await addOwnedLot(tx, { product_id: item.product_id, branch_id: po.branch_id, source_type: 'po_receipt', source_id: receiptId, source_number: receiptNumber, qty: singles, unit_cost: newCost, employee_id: req.employee?.id || null });
+          }
+        }
+        await tx.execute({ sql: 'INSERT INTO po_receipt_items (receipt_id, po_item_id, product_id, quantity, stock_units, prev_cost, new_cost) VALUES (?,?,?,?,?,?,?)', args: [receiptId, item.id, item.product_id || null, qty, singles, prevCost, newCost] });
+      };
       for (const { item_id, quantity_received, unit_cost: newCostRaw, selling_price: newPriceRaw } of (items || [])) {
         const qty = Math.round((Number(quantity_received) || 0) * 1000) / 1000; // part quantities for measured units
         if (!qty || qty <= 0) continue;
         let { rows: [item] } = await tx.execute({ sql: 'SELECT * FROM purchase_order_items WHERE id = ? AND po_id = ?', args: [item_id, req.params.id] });
         if (!item) continue;
-        // Logged as one receipt so it can be reversed as a unit later.
-        if (!receiptId) {
-          const receipt_number = await nextNumber(tx, 'po_receipts', 'receipt_number', 'RCV-', 6);
-          const r = await tx.execute({ sql: 'INSERT INTO po_receipts (receipt_number, po_id, branch_id, received_by, received_date, vendor_invoice_number, invoice_date) VALUES (?,?,?,?,?,?,?)', args: [receipt_number, po.id, po.branch_id || null, req.employee?.id || null, receivedDate, vendorInvoice, invoiceDate] });
-          receiptId = Number(r.lastInsertRowid);
-          receiptNumber = receipt_number;
-        }
+        await ensureReceipt();
         // A new unit cost (in the PO's currency, per the line's unit) reprices
         // the PO line before it's received — the vendor dropped the price after
         // the PO went out. The line keeps its vendor discount and the GCT rate
@@ -506,34 +547,44 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
             else priceChanges.push({ item, old_price: oldPrice, new_price: newPrice });
           }
         }
-        const value = receivedValue(item, qty);
-        receiptValue += value.goods;
-        receiptTax += value.tax;
-        // Stock is costed at what was actually paid per unit — after the vendor's discount, before tax.
-        const netUnitCost = (item.quantity_ordered ? (Number(item.total) || 0) / item.quantity_ordered : (Number(item.unit_cost) || 0)) * rate;
-        const newReceived = (item.quantity_received || 0) + qty;
-        await tx.execute({ sql: 'UPDATE purchase_order_items SET quantity_received = ? WHERE id = ?', args: [newReceived, item_id] });
-        let singles = 0, prevCost = null, newCost = null;
-        if (item.product_id) {
-          // A line in another unit (lib/units.js) receives quantity × its size
-          // in stock units; stock and cost are per stock unit.
-          const per = Number(item.units_per) || 1;
-          singles = stockUnits(qty, per);
-          const { rows: [prod] } = await tx.execute({ sql: 'SELECT cost FROM products WHERE id = ?', args: [item.product_id] });
-          prevCost = prod ? prod.cost : null;
-          await tx.execute({ sql: 'UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?', args: [singles, item.product_id] });
-          if (netUnitCost > 0) {
-            newCost = parseFloat((netUnitCost / per).toFixed(4));
-            await tx.execute({ sql: 'UPDATE products SET cost = ? WHERE id = ?', args: [newCost, item.product_id] });
-          }
-          if (po.branch_id) {
-            await tx.execute({ sql: `INSERT INTO branch_inventory (product_id, branch_id, stock_qty, min_stock, updated_at) VALUES (?, ?, ?, (SELECT min_stock FROM products WHERE id = ?), CURRENT_TIMESTAMP) ON CONFLICT(product_id, branch_id) DO UPDATE SET stock_qty = stock_qty + ?, updated_at = CURRENT_TIMESTAMP`, args: [item.product_id, po.branch_id, singles, item.product_id, singles] });
-            await syncBinQty(tx, item.product_id, po.branch_id, singles);
-            // A dated owned receipt for oldest-first selling (lib/stockLots.js), once tracking has started.
-            await addOwnedLot(tx, { product_id: item.product_id, branch_id: po.branch_id, source_type: 'po_receipt', source_id: receiptId, source_number: receiptNumber, qty: singles, unit_cost: newCost, employee_id: req.employee?.id || null });
-          }
-        }
-        await tx.execute({ sql: 'INSERT INTO po_receipt_items (receipt_id, po_item_id, product_id, quantity, stock_units, prev_cost, new_cost) VALUES (?,?,?,?,?,?,?)', args: [receiptId, item.id, item.product_id || null, qty, singles, prevCost, newCost] });
+        await receiveQty(item, qty);
+      }
+      // Substitutes: the supplier sent another item (another colour/size SKU)
+      // in place of part of a line. It becomes its own PO line, taking that
+      // share of the original line's quantity and amounts at the same cost
+      // (so the PO total and the bill stay as ordered), and is received here.
+      for (const sub of (Array.isArray(req.body.substitutes) ? req.body.substitutes : [])) {
+        const qty = Math.round((Number(sub.quantity) || 0) * 1000) / 1000;
+        if (!(qty > 0)) continue;
+        const { rows: [orig] } = await tx.execute({ sql: 'SELECT * FROM purchase_order_items WHERE id = ? AND po_id = ?', args: [sub.item_id, po.id] });
+        if (!orig) throw new Error('That PO line was not found');
+        if (orig.substitute_for_item_id) throw new Error(`"${orig.product_name}" is already a substitute — substitute against the line it replaced`);
+        if (!orig.product_id || orig.item_type === 'service') throw new Error(`"${orig.product_name}" isn't a stocked item, so it can't be substituted`);
+        const outstanding = Math.round(((Number(orig.quantity_ordered) || 0) - (Number(orig.quantity_received) || 0)) * 1000) / 1000;
+        if (qty > outstanding + 0.0005) throw new Error(`Only ${Math.max(0, outstanding)} of "${orig.product_name}" is still to come — a substitute can't be for more than that`);
+        const { rows: [prod] } = await tx.execute({ sql: 'SELECT id, name, sku, is_rental, is_service FROM products WHERE id = ?', args: [sub.product_id] });
+        if (!prod) throw new Error('Pick the item that was sent instead');
+        if (prod.id === orig.product_id) throw new Error(`Pick a different item than "${orig.product_name}" — receive the same item on its own line`);
+        if (prod.is_rental) throw new Error(`"${prod.name}" is a rental item — substitutes must be retail stock`);
+        if (prod.is_service) throw new Error(`"${prod.name}" is a service, not stock`);
+        await ensureReceipt();
+        const ordered = Number(orig.quantity_ordered) || 0;
+        const whole = Math.abs(qty - ordered) < 0.0005;
+        const share = k => whole ? (Number(orig[k]) || 0) : round2((Number(orig[k]) || 0) * qty / ordered);
+        const subTotal = share('total'), subTax = share('tax_amount'), subDisc = share('vendor_discount');
+        const ins = await tx.execute({
+          sql: `INSERT INTO purchase_order_items (po_id, product_id, product_name, sku, quantity_ordered, quantity_received, unit_cost, total, tax_option, tax_rate, tax_amount,
+                  vendor_discount, vendor_discount_percent, item_type, purchase_unit, units_per, uom_id, substitute_for_item_id, substitute_receipt_id)
+                VALUES (?,?,?,?,?,0,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          args: [po.id, prod.id, prod.name, prod.sku || null, qty, orig.unit_cost, subTotal, orig.tax_option || 'none', orig.tax_rate || 0, subTax,
+            subDisc, orig.vendor_discount_percent ?? null, orig.item_type || null, orig.purchase_unit || null, orig.units_per || 1, orig.uom_id ?? null, orig.id, receiptId],
+        });
+        await tx.execute({
+          sql: `UPDATE purchase_order_items SET quantity_ordered = ?, total = ?, tax_amount = ?, vendor_discount = ?, quantity_substituted = COALESCE(quantity_substituted, 0) + ? WHERE id = ?`,
+          args: [Math.round((ordered - qty) * 1000) / 1000, round2((Number(orig.total) || 0) - subTotal), round2((Number(orig.tax_amount) || 0) - subTax), round2((Number(orig.vendor_discount) || 0) - subDisc), qty, orig.id],
+        });
+        const { rows: [line] } = await tx.execute({ sql: 'SELECT * FROM purchase_order_items WHERE id = ?', args: [Number(ins.lastInsertRowid)] });
+        await receiveQty(line, qty);
       }
       if (!receiptId) throw new Error('Enter at least one quantity to receive');
       for (const c of priceChanges) {
@@ -588,7 +639,7 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
     }
 
     const { rows: [updated] } = await db.execute({ sql: `SELECT po.*, s.name as supplier_name, b.name as branch_name FROM purchase_orders po LEFT JOIN suppliers s ON po.supplier_id = s.id LEFT JOIN branches b ON po.branch_id = b.id WHERE po.id = ?`, args: [req.params.id] });
-    const { rows: updatedItems } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ?', args: [req.params.id] });
+    const { rows: updatedItems } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ? AND NOT (substitute_for_item_id IS NOT NULL AND quantity_ordered = 0 AND COALESCE(quantity_received, 0) = 0)', args: [req.params.id] });
     updated.items = updatedItems;
     res.json(updated);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -744,6 +795,111 @@ async function reverseReceivedLines(tx, po, lines, reference, reason) {
   }
 }
 
+async function foldBackSubstitutes(tx, receiptId) {
+  const { rows: subs } = await tx.execute({ sql: 'SELECT * FROM purchase_order_items WHERE substitute_receipt_id = ? AND quantity_ordered > 0', args: [receiptId] });
+  for (const sub of subs) {
+    await tx.execute({
+      sql: `UPDATE purchase_order_items SET quantity_ordered = quantity_ordered + ?, total = ROUND(total + ?, 2), tax_amount = ROUND(tax_amount + ?, 2),
+              vendor_discount = ROUND(vendor_discount + ?, 2), quantity_substituted = MAX(0, COALESCE(quantity_substituted, 0) - ?) WHERE id = ?`,
+      args: [sub.quantity_ordered, Number(sub.total) || 0, Number(sub.tax_amount) || 0, Number(sub.vendor_discount) || 0, sub.quantity_ordered, sub.substitute_for_item_id],
+    });
+    await tx.execute({ sql: 'UPDATE purchase_order_items SET quantity_ordered = 0, total = 0, tax_amount = 0, vendor_discount = 0 WHERE id = ?', args: [sub.id] });
+  }
+}
+
+// PO status after lines change: received once every line is in (and
+// something was), partial when some is, else approved. A PR converted into
+// the PO follows it to/from received.
+async function refreshPoStatus(tx, po) {
+  const { rows: poItems } = await tx.execute({ sql: 'SELECT quantity_ordered, quantity_received FROM purchase_order_items WHERE po_id = ?', args: [po.id] });
+  const anyReceived = poItems.some(i => (i.quantity_received || 0) > 0);
+  const allReceived = anyReceived && poItems.every(i => (i.quantity_received || 0) >= i.quantity_ordered);
+  const status = allReceived ? 'received' : anyReceived ? 'partial' : 'approved';
+  await tx.execute({ sql: 'UPDATE purchase_orders SET status = ?, received_at = ? WHERE id = ?', args: [status, allReceived ? (po.received_at || new Date().toISOString()) : null, po.id] });
+  if (allReceived) await tx.execute({ sql: `UPDATE purchase_requests SET status = 'received' WHERE converted_to_po_id = ? AND status != 'received'`, args: [po.id] });
+  else await tx.execute({ sql: `UPDATE purchase_requests SET status = 'converted' WHERE converted_to_po_id = ? AND status = 'received'`, args: [po.id] });
+  return status;
+}
+
+async function retotalPo(tx, poId) {
+  const { rows: [t] } = await tx.execute({ sql: 'SELECT COALESCE(SUM(total), 0) AS sub, COALESCE(SUM(tax_amount), 0) AS tax FROM purchase_order_items WHERE po_id = ?', args: [poId] });
+  const sub = round2(t.sub), tax = round2(t.tax);
+  await tx.execute({ sql: 'UPDATE purchase_orders SET subtotal = ?, tax_amount = ?, total = ? WHERE id = ?', args: [sub, tax, round2(sub + tax), poId] });
+}
+
+// ── Close short ─────────────────────────────────────────────
+// The supplier won't send the rest of a line: what's still to come comes off
+// the PO (quantity, amount and GCT), so the PO can finish as received and
+// isn't billed or advanced for it. Undone with DELETE while the PO is live.
+router.post('/:id/items/:itemId/close-short', requirePermission('purchasing_receive'), async (req, res) => {
+  try {
+    const reason = String(req.body.reason || '').trim().slice(0, 500);
+    if (!reason) return res.status(400).json({ error: 'Enter why the rest of this line is not coming' });
+    const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });
+    if (!po) return res.status(404).json({ error: 'Not found' });
+    if (!['approved', 'partial'].includes(po.status)) return res.status(400).json({ error: `Only an approved or part-received PO can have a line closed short (this one is ${po.status})` });
+    let result;
+    const tx = await db.transaction('write');
+    try {
+      const { rows: [item] } = await tx.execute({ sql: 'SELECT * FROM purchase_order_items WHERE id = ? AND po_id = ?', args: [req.params.itemId, po.id] });
+      if (!item) throw Object.assign(new Error('Line not found'), { status: 404 });
+      const ordered = Number(item.quantity_ordered) || 0, received = Number(item.quantity_received) || 0;
+      const left = Math.round((ordered - received) * 1000) / 1000;
+      if (!(left > 0)) throw new Error(`Nothing is still to come on "${item.product_name}"`);
+      const whole = received <= 0;
+      const share = k => whole ? (Number(item[k]) || 0) : round2((Number(item[k]) || 0) * left / ordered);
+      const cTotal = share('total'), cTax = share('tax_amount'), cDisc = share('vendor_discount');
+      await tx.execute({
+        sql: `UPDATE purchase_order_items SET quantity_ordered = ?, total = ROUND(total - ?, 2), tax_amount = ROUND(tax_amount - ?, 2), vendor_discount = ROUND(vendor_discount - ?, 2),
+                quantity_closed_short = COALESCE(quantity_closed_short, 0) + ?, closed_short_total = COALESCE(closed_short_total, 0) + ?, closed_short_tax = COALESCE(closed_short_tax, 0) + ?,
+                closed_short_discount = COALESCE(closed_short_discount, 0) + ?, closed_short_reason = ?, closed_short_by = ?, closed_short_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        args: [received, cTotal, cTax, cDisc, left, cTotal, cTax, cDisc, reason, req.employee?.id || null, item.id],
+      });
+      const { rows: [live] } = await tx.execute({ sql: 'SELECT COUNT(*) AS n FROM purchase_order_items WHERE po_id = ? AND (quantity_ordered > 0 OR COALESCE(quantity_received, 0) > 0)', args: [po.id] });
+      if (!Number(live.n)) throw new Error('Nothing would be left on this PO — cancel the PO instead');
+      await retotalPo(tx, po.id);
+      const status = await refreshPoStatus(tx, po);
+      result = { closed: left, status };
+      await tx.commit();
+    } catch (e) {
+      await tx.rollback();
+      return res.status(e.status || 400).json({ error: e.message });
+    }
+    // Advances already paid or requested on the PO may now be more than it's worth — A/P's to sort out.
+    const room = await require('./payment-requests').poAdvanceRoom(db, po.id);
+    if (room && room.paid + room.requested > room.total_base + 0.005) result.advance_excess = round2(room.paid + room.requested - room.total_base);
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/:id/items/:itemId/close-short', requirePermission('purchasing_receive'), async (req, res) => {
+  try {
+    const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });
+    if (!po) return res.status(404).json({ error: 'Not found' });
+    if (!['approved', 'partial', 'received'].includes(po.status)) return res.status(400).json({ error: `This PO is ${po.status} — a closed line can only be reopened on an approved or received PO` });
+    let status;
+    const tx = await db.transaction('write');
+    try {
+      const { rows: [item] } = await tx.execute({ sql: 'SELECT * FROM purchase_order_items WHERE id = ? AND po_id = ?', args: [req.params.itemId, po.id] });
+      if (!item) throw Object.assign(new Error('Line not found'), { status: 404 });
+      if (!(Number(item.quantity_closed_short) > 0)) throw new Error(`"${item.product_name}" wasn't closed short`);
+      await tx.execute({
+        sql: `UPDATE purchase_order_items SET quantity_ordered = quantity_ordered + quantity_closed_short, total = ROUND(total + closed_short_total, 2), tax_amount = ROUND(tax_amount + closed_short_tax, 2),
+                vendor_discount = ROUND(vendor_discount + closed_short_discount, 2), quantity_closed_short = 0, closed_short_total = 0, closed_short_tax = 0, closed_short_discount = 0,
+                closed_short_reason = NULL, closed_short_by = NULL, closed_short_at = NULL WHERE id = ?`,
+        args: [item.id],
+      });
+      await retotalPo(tx, po.id);
+      status = await refreshPoStatus(tx, po);
+      await tx.commit();
+    } catch (e) {
+      await tx.rollback();
+      return res.status(e.status || 400).json({ error: e.message });
+    }
+    res.json({ success: true, status });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 async function loadReversiblePO(id) {
   const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [id] });
   if (!po) return { error: [404, 'Not found'] };
@@ -824,6 +980,11 @@ router.post('/:id/receipts/:rid/reverse', requirePermission('purchasing_receive'
         const { rows: [item] } = await tx.execute({ sql: 'SELECT * FROM purchase_order_items WHERE id = ?', args: [ri.po_item_id] });
         if (item) lines.push({ item, qty: ri.quantity, prevCost: ri.product_id ? ri.prev_cost : null, newCost: ri.product_id ? ri.new_cost : null });
       }
+      // Substitutes made at this receipt go back into the lines they came
+      // from, so that quantity is outstanding on the original item again.
+      // The substitute line stays (its receipt history points at it) with
+      // nothing ordered; the PO's line lists leave it out.
+      await foldBackSubstitutes(tx, receipt.id);
       await reverseReceivedLines(tx, po, lines, receipt.receipt_number, reason);
       await tx.execute({ sql: "UPDATE po_receipts SET status = 'reversed', reversed_by = ?, reversed_at = CURRENT_TIMESTAMP, reverse_reason = ? WHERE id = ?", args: [req.employee?.id || null, reason, receipt.id] });
       await tx.commit();
@@ -1018,7 +1179,7 @@ router.patch('/:id/damage', requirePermission('purchasing_receive'), async (req,
     }
 
     const { rows: [updated] } = await db.execute({ sql: `SELECT po.*, s.name as supplier_name, b.name as branch_name FROM purchase_orders po LEFT JOIN suppliers s ON po.supplier_id = s.id LEFT JOIN branches b ON po.branch_id = b.id WHERE po.id = ?`, args: [req.params.id] });
-    const { rows: updatedItems } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ?', args: [req.params.id] });
+    const { rows: updatedItems } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ? AND NOT (substitute_for_item_id IS NOT NULL AND quantity_ordered = 0 AND COALESCE(quantity_received, 0) = 0)', args: [req.params.id] });
     updated.items = updatedItems;
     res.json(updated);
   } catch(e) { res.status(500).json({ error: e.message }); }

@@ -1461,7 +1461,7 @@ function buildGrnHtml(po, s) {
     const good = (i.quantity_received || 0) - damaged;
     return `
     <tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${orderLineUnit(i).name}${i.item_type === 'service' ? ' <span style="color:#888;font-size:11px">(service)</span>' : ''}<br><span style="color:#888;font-size:11px">${i.sku || ''}</span>${i.notes ? `<div style="color:#555;font-size:11px;margin-top:2px">${i.notes}</div>` : ''}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${orderLineUnit(i).name}${i.item_type === 'service' ? ' <span style="color:#888;font-size:11px">(service)</span>' : ''}<br><span style="color:#888;font-size:11px">${i.sku || ''}</span>${i.notes ? `<div style="color:#555;font-size:11px;margin-top:2px">${i.notes}</div>` : ''}${poLineChangeNote(i, po.items) ? `<div style="color:#b45309;font-size:11px;margin-top:2px">${esc(poLineChangeNote(i, po.items))}</div>` : ''}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${i.quantity_ordered}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${orderLineUnit(i).unit}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${i.quantity_received || 0}</td>
@@ -1625,7 +1625,7 @@ async function loadPoDocument(id) {
     LEFT JOIN employees ea ON po.approved_by = ea.id
     WHERE po.id = ?`, args: [id] });
   if (!po) return null;
-  po.items = (await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ?', args: [id] })).rows;
+  po.items = (await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ? AND NOT (substitute_for_item_id IS NOT NULL AND quantity_ordered = 0 AND COALESCE(quantity_received, 0) = 0)', args: [id] })).rows;
   return po;
 }
 
@@ -2247,7 +2247,7 @@ router.post('/send-grn/:id', requireAuth, async (req, res) => {
       WHERE po.id = ?`, args: [req.params.id] });
     if (!po) return res.status(404).json({ error: 'Purchase order not found' });
     if (po.status !== 'received' && po.status !== 'partial') return res.status(400).json({ error: 'No items have been received on this order yet' });
-    const { rows: items } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ?', args: [req.params.id] });
+    const { rows: items } = await db.execute({ sql: 'SELECT * FROM purchase_order_items WHERE po_id = ? AND NOT (substitute_for_item_id IS NOT NULL AND quantity_ordered = 0 AND COALESCE(quantity_received, 0) = 0)', args: [req.params.id] });
     po.items = items;
 
     const s = await getSettings();
@@ -2886,6 +2886,19 @@ function poPdfModel(po, s) {
 }
 
 // Same content as buildGrnHtml — ordered / received / damaged / good per line.
+// What happened to a PO line at receiving, for the GRN: a substitute sent in
+// its place, part of it substituted, or the rest closed short.
+function poLineChangeNote(i, items) {
+  const parts = [];
+  if (i.substitute_for_item_id) {
+    const o = (items || []).find(x => x.id === i.substitute_for_item_id);
+    parts.push(`Substitute for ${o ? orderLineUnit(o).name : 'another item'}`);
+  }
+  if (Number(i.quantity_substituted) > 0) parts.push(`${Number(i.quantity_substituted)} substituted with another item`);
+  if (Number(i.quantity_closed_short) > 0) parts.push(`${Number(i.quantity_closed_short)} closed short${i.closed_short_reason ? ` (${i.closed_short_reason})` : ''}`);
+  return parts.join(' · ');
+}
+
 function grnPdfModel(po, s) {
   return {
     store: pdfStore(s),
@@ -2895,7 +2908,7 @@ function grnPdfModel(po, s) {
     tables: [{ columns: [{ label: 'Item', width: 3.4 }, { label: 'Ordered', width: 1, align: 'center' }, { label: 'Unit', width: 1.1, align: 'center' }, { label: 'Received', width: 1, align: 'center' }, { label: 'Damaged', width: 1, align: 'center' }, { label: 'Good', width: 1, align: 'center' }],
       rows: (po.items || []).map(i => {
         const damaged = i.quantity_damaged || 0;
-        return { cells: [orderLineUnit(i).name, i.quantity_ordered, orderLineUnit(i).unit, i.quantity_received || 0, damaged, (i.quantity_received || 0) - damaged], sub: i.sku || '' };
+        return { cells: [orderLineUnit(i).name, i.quantity_ordered, orderLineUnit(i).unit, i.quantity_received || 0, damaged, (i.quantity_received || 0) - damaged], sub: [i.sku || '', poLineChangeNote(i, po.items)].filter(Boolean).join(' · ') };
       }) }],
     notes: [po.notes ? `Notes: ${po.notes}` : ''],
   };
