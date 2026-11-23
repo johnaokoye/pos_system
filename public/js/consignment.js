@@ -729,11 +729,11 @@ Object.assign(App, {
         <div class="modal-header"><span class="modal-title">${after ? 'Record Supplier-Owned Stock Found On Hand' : 'Start Consignment Tracking'}</span><button class="modal-close">✕</button></div>
         <div class="modal-body" style="font-size:13px">
           ${after
-            ? '<p style="margin-top:0">For units that were recorded as Total Tools\' stock when tracking started but really belong to a supplier. They move to the supplier\'s ownership, dated when tracking started, and the reason is kept. The stock figures don\'t change.</p>'
+            ? '<p style="margin-top:0">For units that were recorded as Total Tools\' stock when tracking started but really belong to a supplier — add a line per agreement, item and branch. They move to the supplier\'s ownership, dated when tracking started, and the reason is kept. The stock figures don\'t change.</p>'
             : '<p style="margin-top:0">Everything on hand is recorded as of now. First list any stock on hand that already belongs to a supplier under an approved agreement — it becomes that supplier\'s. All the rest becomes one Total Tools-owned receipt dated today, so it sells before consignment stock received later. This is done once and can\'t be undone.</p>'}
           <div style="font-weight:600;margin:10px 0 6px">Supplier-owned stock on hand</div>
           ${data.rows.length ? `<div id="cons-open-lines" style="display:grid;gap:6px"></div>
-            ${after ? '' : '<button class="btn btn-sm btn-outline" style="margin-top:6px" onclick="App._consOpeningAddLine()">+ Add line</button>'}`
+            <button class="btn btn-sm btn-outline" style="margin-top:6px" onclick="App._consOpeningAddLine()">+ Add line</button>`
             : `<p style="color:var(--text-muted)">No stock on hand is on an approved agreement, so there's nothing to list${after ? '' : ' — everything will be Total Tools-owned'}. An agreement has to be approved before its stock can be recorded here.</p>`}
           ${after ? '<div class="form-group" style="margin-top:10px"><label>Reason *</label><input id="cons-open-note" placeholder="e.g. delivery note CPT-DN-4101 shows these were left on consignment"></div>'
             : `<div class="form-group" style="margin-top:12px"><label>Type START to confirm</label><input id="cons-open-confirm" autocomplete="off" style="max-width:160px"></div>`}
@@ -753,7 +753,7 @@ Object.assign(App, {
     row.innerHTML = `<select class="cons-open-pick" style="flex:1;min-width:260px"><option value="">— Agreement · item · branch —</option>${this._consOpeningCands.map((c, i) =>
       `<option value="${i}">${this.escapeAttr(c.supplier_name)} ${c.agreement_number} · ${this.escapeAttr(c.product_name)} · ${this.escapeAttr(c.branch_name)} (${Number(c.available)} ${this._consOpeningAfter ? "Total Tools'" : 'on hand'})</option>`).join('')}</select>
       <input class="cons-open-qty" type="number" min="0" step="any" placeholder="Qty" style="width:90px">
-      ${this._consOpeningAfter ? '' : '<button class="btn btn-sm btn-outline" title="Remove" onclick="this.parentElement.remove()">✕</button>'}`;
+      <button class="btn btn-sm btn-outline" title="Remove" onclick="this.parentElement.remove()">✕</button>`;
     box.appendChild(row);
   },
 
@@ -766,9 +766,9 @@ Object.assign(App, {
     try {
       if (this._consOpeningAfter) {
         if (!lines.length) { this.alert('Choose the agreement, item and branch and enter the quantity', 'warning'); return; }
-        await this.api('POST', '/consignment/opening-stock', { ...lines[0], note: document.getElementById('cons-open-note').value });
+        const out = await this.api('POST', '/consignment/opening-stock', { lines, note: document.getElementById('cons-open-note').value });
         this.closeModal();
-        this.alert('Recorded as the supplier\'s stock', 'success');
+        this.alert(`${out.recorded.length} line${out.recorded.length === 1 ? '' : 's'} recorded as the supplier's stock`, 'success');
       } else {
         const out = await this.api('POST', '/consignment/go-live', { confirm: document.getElementById('cons-open-confirm').value.trim(), opening: lines });
         this.closeModal();

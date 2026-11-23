@@ -29,7 +29,7 @@ test('consignment items listed apart: stock tab filters and CSV, inventory badge
   await api(page, 'PATCH', `/products/${consigned.id}/stock`, { adjustment: 1, reason: 'owned', branch_id: main.id });
 
   const sup = await api(page, 'POST', '/suppliers', { name: `Listing Supplier ${s}` });
-  const a = await api(page, 'POST', '/consignment/agreements', { supplier_id: sup.id, start_date: '2026-01-01', ownership_terms: "Supplier's until sold", items: [{ product_id: consigned.id, cost: 75 }], submit: true });
+  const a = await api(page, 'POST', '/consignment/agreements', { supplier_id: sup.id, start_date: '2026-01-01', ownership_terms: "Supplier's until sold", items: [{ product_id: consigned.id, cost: 75 }, { product_id: owned.id, cost: 50 }], submit: true });
   await login(page, finance);
   await api(page, 'POST', `/consignment/agreements/${a.id}/finance`, { revenue_treatment: 'principal', output_gct_treatment: 'Standard' });
   await api(page, 'POST', `/consignment/agreements/${a.id}/approve`, { signature: SIG });
@@ -76,4 +76,28 @@ test('consignment items listed apart: stock tab filters and CSV, inventory badge
   await page.locator('#inv-owner-filter').selectOption('1');
   await expect(page.locator(`#inv-row-${owned.id}`)).toHaveCount(0);
   await expect(page.locator(`#inv-row-${consigned.id}`)).toBeVisible();
+
+  // Record supplier-owned stock found on hand: several lines at once, all or none.
+  const line = (p, qty) => ({ agreement_id: a.id, product_id: p.id, branch_id: main.id, qty });
+  expect(await page.evaluate(b => App.api('POST', '/consignment/opening-stock', b).then(() => 'accepted', e => e.message),
+    { lines: [line(owned, 1), line(consigned, 5)], note: 'x' })).toMatch(/^Line 2:/);
+  expect((await api(page, 'GET', `/products?search=${s}&consignment=1`)).map(p => p.id)).toEqual([consigned.id]); // line 1 rolled back
+  await page.evaluate(() => App.renderConsignment('stock'));
+  await page.click('button:has-text("+ Record supplier-owned stock")');
+  const pick = async (i, p, qty) => {
+    const row = page.locator('.cons-open-line').nth(i);
+    const value = await row.locator('.cons-open-pick option').filter({ hasText: `${p.name} · ${main.name}` }).getAttribute('value');
+    await row.locator('.cons-open-pick').selectOption(value);
+    await row.locator('.cons-open-qty').fill(String(qty));
+  };
+  await pick(0, owned, 2);
+  await page.click('.modal button:has-text("+ Add line")');
+  await pick(1, consigned, 1);
+  await page.fill('#cons-open-note', 'Delivery notes show both were left on consignment');
+  await page.click('.modal-footer button:has-text("Record")');
+  await expect(page.locator('.alert-success', { hasText: '2 lines recorded' }).last()).toBeVisible();
+  const after = await api(page, 'GET', `/products?search=${s}&branch_id=${main.id}`);
+  expect(after.map(p => [p.id, p.consignment_qty, p.stock_qty]).sort()).toEqual([[consigned.id, 4, 4], [owned.id, 2, 4]].sort());
+  const log = (await api(page, 'GET', '/consignment/opening-stock')).filter(o => o.agreement_id === a.id);
+  expect(log.map(o => [o.product_id, o.qty, o.note]).sort()).toEqual([[consigned.id, 1, 'Delivery notes show both were left on consignment'], [owned.id, 2, 'Delivery notes show both were left on consignment']].sort());
 });

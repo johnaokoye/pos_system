@@ -85,15 +85,24 @@ router.get('/opening-stock', canView, async (req, res) => {
 });
 
 // After go-live: units recorded as Total Tools' that are really a supplier's.
-// Needs consignment_opening_record; { agreement_id, product_id, branch_id, qty, note }.
+// Needs consignment_opening_record; { lines: [{ agreement_id, product_id,
+// branch_id, qty }], note } — all or none, one reason for the lot — or a
+// single line's fields at the top level. Returns { recorded: [...] }.
 router.post('/opening-stock', requirePermission('consignment_opening_record'), async (req, res) => {
+  const body = req.body || {};
+  const lines = Array.isArray(body.lines) ? body.lines : [body];
+  if (!lines.length) return res.status(400).json({ error: 'Enter the agreement, item, branch and quantity' });
   const tx = await db.transaction('write');
   let committed = false;
   try {
-    const out = await reclassifyToConsignment(tx, req.body || {}, req.body?.note, req.employee?.id || null);
+    const recorded = [];
+    for (const [i, line] of lines.entries()) {
+      try { recorded.push(await reclassifyToConsignment(tx, line || {}, body.note, req.employee?.id || null)); }
+      catch (e) { if (lines.length > 1) e.message = `Line ${i + 1}: ${e.message}`; throw e; }
+    }
     await tx.commit();
     committed = true;
-    res.status(201).json(out);
+    res.status(201).json(Array.isArray(body.lines) ? { recorded } : recorded[0]);
   } catch (e) {
     if (!committed) await tx.rollback().catch(() => {});
     send(res, e);
