@@ -557,6 +557,7 @@ router.get('/:id', requirePermission('work_orders'), async (req, res) => {
     wo.tasks = tasks;
     Object.assign(wo, await loadIntakeRecord(wo.id));
     wo.external_work = await loadExternalWork(wo.id);
+    wo.documents = await loadWoDocuments(wo.id);
     wo.external_cost_total = Math.round(wo.external_work.reduce((t, x) => t + (Number(x.cost) || 0), 0) * 100) / 100;
     res.json(wo);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -1114,6 +1115,86 @@ async function syncTaskSkills(taskId, skillIds) {
     await db.execute({ sql: 'INSERT OR IGNORE INTO work_order_task_skills (task_id, skill_id) VALUES (?,?)', args: [taskId, skillId] });
   }
 }
+
+// ─── Documents (signed contract etc.) ─────────────────────────────────────
+// Same pattern as quote attachments: download only through the route below.
+// Anyone on work orders (or intake) can attach; removing a signed contract
+// needs supervisor sign-off (wo_signoff) since it's the customer's agreement.
+const woDocDir = path.join(__dirname, '../uploads/wo-attachments');
+const WO_DOC_TYPES = { signed_contract: 'Signed contract', other: 'Other' };
+const woDocUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => cb(null, ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/heic',
+    'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'].includes(file.mimetype)),
+});
+const WO_DOC_SELECT = `SELECT a.*, e.first_name || ' ' || e.last_name as uploaded_by_name FROM work_order_attachments a LEFT JOIN employees e ON e.id = a.uploaded_by`;
+
+async function loadWoDocuments(woId) {
+  const { rows } = await db.execute({ sql: `${WO_DOC_SELECT} WHERE a.work_order_id = ? ORDER BY a.uploaded_at DESC, a.id DESC`, args: [woId] });
+  return rows;
+}
+
+router.get('/:id/attachments', requireAnyPermission('work_orders', 'wo_intake'), async (req, res) => {
+  try { res.json(await loadWoDocuments(req.params.id)); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/:id/attachments', requireAnyPermission('work_orders', 'wo_intake'), (req, res, next) => {
+  woDocUpload.single('file')(req, res, err => err ? res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'File is larger than 20 MB' : err.message }) : next());
+}, async (req, res) => {
+  try {
+    const { rows: [wo] } = await db.execute({ sql: 'SELECT id, status FROM work_orders WHERE id = ?', args: [req.params.id] });
+    if (!wo) return res.status(404).json({ error: 'Not found' });
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded, or that file type isn\'t allowed (PDF, image or Word document)' });
+    const docType = WO_DOC_TYPES[req.body.document_type] ? req.body.document_type : 'other';
+    const cloud = await cloudUpload(req.file.buffer, { folder: 'pos-system/wo-attachments', public_id: `${Date.now()}-${Math.round(Math.random() * 1e6)}`, resource_type: 'auto' });
+    let storedName;
+    if (cloud) storedName = cloud.secure_url;
+    else {
+      fs.mkdirSync(woDocDir, { recursive: true });
+      storedName = `${Date.now()}-${Math.round(Math.random() * 1e6)}${path.extname(req.file.originalname)}`;
+      fs.writeFileSync(path.join(woDocDir, storedName), req.file.buffer);
+    }
+    const who = req.employee?.id || null;
+    const r = await db.execute({ sql: 'INSERT INTO work_order_attachments (work_order_id, document_type, original_name, stored_name, mime_type, file_size, notes, uploaded_by) VALUES (?,?,?,?,?,?,?,?)',
+      args: [wo.id, docType, req.file.originalname, storedName, req.file.mimetype, req.file.size, String(req.body.notes || '').trim() || null, who] });
+    await logStatus(db, wo.id, wo.status, `${WO_DOC_TYPES[docType]} attached: ${req.file.originalname}`, who);
+    const { rows: [row] } = await db.execute({ sql: `${WO_DOC_SELECT} WHERE a.id = ?`, args: [Number(r.lastInsertRowid)] });
+    res.status(201).json(row);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/:id/attachments/:aid/download', requireAnyPermission('work_orders', 'wo_intake'), async (req, res) => {
+  try {
+    const { rows: [att] } = await db.execute({ sql: 'SELECT * FROM work_order_attachments WHERE id = ? AND work_order_id = ?', args: [req.params.aid, req.params.id] });
+    if (!att) return res.status(404).json({ error: 'Not found' });
+    if (att.stored_name.startsWith('https://')) return res.redirect(att.stored_name.replace('/upload/', '/upload/fl_attachment/'));
+    const filePath = path.join(woDocDir, att.stored_name);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File missing on server' });
+    res.setHeader('Content-Type', att.mime_type || 'application/octet-stream');
+    // Open PDFs/images in the browser; anything else downloads.
+    if (/^(application\/pdf|image\/)/.test(att.mime_type || '')) res.setHeader('Content-Disposition', `inline; filename="${att.original_name.replace(/"/g, '')}"`);
+    else res.attachment(att.original_name);
+    res.sendFile(filePath);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/:id/attachments/:aid', requireAnyPermission('work_orders', 'wo_intake'), async (req, res) => {
+  try {
+    const { rows: [att] } = await db.execute({ sql: 'SELECT * FROM work_order_attachments WHERE id = ? AND work_order_id = ?', args: [req.params.aid, req.params.id] });
+    if (!att) return res.status(404).json({ error: 'Not found' });
+    if (att.document_type === 'signed_contract' && !req.apiKey && !can(req.employee && req.employee.permissions, 'wo_signoff'))
+      return res.status(403).json({ error: 'Only a supervisor (Supervisor Sign-Off) can remove a signed contract' });
+    if (att.stored_name.startsWith('https://')) {
+      const resourceType = (att.stored_name.match(/\/(image|raw|video)\/upload\//) || [])[1] || 'raw';
+      await cloudDestroy(att.stored_name, resourceType);
+    } else { try { fs.unlinkSync(path.join(woDocDir, att.stored_name)); } catch (e) {} }
+    await db.execute({ sql: 'DELETE FROM work_order_attachments WHERE id = ?', args: [att.id] });
+    const { rows: [wo] } = await db.execute({ sql: 'SELECT status FROM work_orders WHERE id = ?', args: [att.work_order_id] });
+    await logStatus(db, att.work_order_id, wo.status, `${WO_DOC_TYPES[att.document_type] || 'Document'} removed: ${att.original_name}`, req.employee?.id || null);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 router.post('/:id/external-work', requireAnyPermission('wo_technician', 'wo_assess'), async (req, res) => {
   try {

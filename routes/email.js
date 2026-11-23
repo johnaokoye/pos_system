@@ -2532,33 +2532,63 @@ const WO_STATUS_LABELS = {
   awaiting_pickup: 'Awaiting Pickup', picked_up: 'Picked Up', cancelled: 'Cancelled', not_worth_fixing: 'Not Worth Fixing',
 };
 
+// The invoice's figures, shared by the HTML and PDF versions: service lines
+// (assessment fee, labour, consumables), then each part, with GCT per line —
+// labour/consumables at the snapshotted estimate_tax_rate, each part at its
+// own tax_rate, the assessment fee at assessment_fee_tax_rate. The
+// assessment fee is a non-refundable deposit: charged as a line and, once
+// paid, taken off as a deposit, so the balance due matches PATCH
+// /work-orders/:id/final-payment (estimate + parts + their GCT − deposit).
+function workOrderInvoiceFigures(wo) {
+  const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
+  const est = (parseFloat(wo.estimate_tax_rate) || 0) / 100;
+  const services = [];
+  const fee = parseFloat(wo.assessment_fee) || 0;
+  if (fee > 0) services.push({ name: 'Assessment Fee (non-refundable deposit)', sub: wo.assessment_fee_name || '', qty: 1, unit: fee, gct: r2(fee * (parseFloat(wo.assessment_fee_tax_rate) || 0) / 100), total: fee });
+  if (wo.status !== 'intake') {
+    const labour = parseFloat(wo.estimate_labor) || 0, consumables = parseFloat(wo.estimate_consumables) || 0;
+    services.push({ name: 'Labour', sub: wo.is_express ? 'Express same-day service, +25%' : '', qty: 1, unit: labour, gct: r2(labour * est), total: labour });
+    if (consumables > 0) services.push({ name: 'Consumables', sub: wo.is_express ? 'Express same-day service, +25%' : '', qty: 1, unit: consumables, gct: r2(consumables * est), total: consumables });
+  }
+  const parts = (wo.items || []).map(i => ({ name: i.product_name, sub: [i.sku, i.is_customer_supplied ? 'Supplied by customer' : ''].filter(Boolean).join(' · '),
+    qty: i.quantity, unit: parseFloat(i.unit_price) || 0, gct: r2((parseFloat(i.total) || 0) * (parseFloat(i.tax_rate) || 0) / 100), total: parseFloat(i.total) || 0 }));
+  const sum = (list, k) => r2(list.reduce((t, l) => t + l[k], 0));
+  const servicesTotal = sum(services, 'total'), partsTotal = sum(parts, 'total');
+  const partsGct = sum(parts, 'gct');
+  const gct = r2(sum(services, 'gct') + partsGct);
+  const total = r2(servicesTotal + partsTotal + gct);
+  const assessmentPaid = fee > 0 && wo.assessment_transaction_id ? r2(fee + (services[0]?.gct || 0)) : 0;
+  const deposit = parseFloat(wo.deposit_amount) || 0;
+  const balanceDue = Math.max(0, r2(total - assessmentPaid - deposit));
+  return { services, parts, servicesTotal, partsTotal, partsGct, gct, total, assessmentPaid, deposit, balanceDue };
+}
+
 function buildWorkOrderInvoiceHtml(wo, s, { print = false } = {}) {
   const storeName = s.store_name || 'My Store';
   const storeAddr = s.store_address || '';
   const storePhone = s.store_phone || '';
   const footer = footerHtml(s);
-
-  // Same balance-due math as the frontend's viewWorkOrder()/
-  // showWOFinalPaymentModal() — kept in sync manually since there's no
-  // shared module between routes/ and public/js/.
-  const estimateTotal = (parseFloat(wo.estimate_labor) || 0) + (parseFloat(wo.estimate_consumables) || 0);
-  const estimateTax = parseFloat((estimateTotal * (parseFloat(wo.estimate_tax_rate) || 0) / 100).toFixed(2));
-  const partsTotal = (wo.items || []).reduce((sum, i) => sum + (parseFloat(i.total) || 0), 0);
-  const partsTax = (wo.items || []).reduce((sum, i) => sum + (parseFloat(i.total) || 0) * (parseFloat(i.tax_rate) || 0) / 100, 0);
-  // Assessment fee tax is shown as its own line but never folded into
-  // Balance Due — that fee is always already paid before a WO can reach any
-  // status this invoice covers (see PATCH .../assessment-paid), so it's
-  // settled separately, not part of what's still outstanding.
-  const assessmentTax = parseFloat(((parseFloat(wo.assessment_fee) || 0) * (parseFloat(wo.assessment_fee_tax_rate) || 0) / 100).toFixed(2));
-  const balanceDue = Math.max(0, estimateTotal + partsTotal + estimateTax + partsTax - (parseFloat(wo.deposit_amount) || 0));
-
-  const partRows = (wo.items || []).map(i => `
+  const f = workOrderInvoiceFigures(wo);
+  const th = (label, align = 'left') => `<th style="padding:8px;text-align:${align};font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">${label}</th>`;
+  const lineRow = l => `
     <tr>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku || ''}</span></td>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${i.quantity}</td>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${fmt(i.unit_price)}</td>
-      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(i.total)}</td>
-    </tr>`).join('');
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${l.name}${l.sub ? `<br><span style="color:#888;font-size:11px">${l.sub}</span>` : ''}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:center">${l.qty}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${fmt(l.unit)}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${l.gct > 0 ? fmt(l.gct) : '—'}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${fmt(l.total)}</td>
+    </tr>`;
+  const lineTable = (title, lines, footRows) => `<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px;margin-bottom:12px">
+        <thead><tr style="background:#f9fafb">${th(title)}${th('Qty', 'center')}${th('Unit Price', 'right')}${th('GCT', 'right')}${th('Total', 'right')}</tr></thead>
+        <tbody>${lines.map(lineRow).join('')}${footRows || ''}</tbody>
+      </table>`;
+  const servicesTable = f.services.length ? lineTable('Service', f.services) : '';
+  const partsTable = f.parts.length ? lineTable('Part', f.parts, `
+    <tr style="background:#f9fafb">
+      <td colspan="3" style="padding:8px;font-weight:700">Parts Total</td>
+      <td style="padding:8px;text-align:right;font-weight:600">${f.partsGct > 0 ? fmt(f.partsGct) : '—'}</td>
+      <td style="padding:8px;text-align:right;font-weight:700">${fmt(f.partsTotal)}</td>
+    </tr>`) : '';
 
   return `<!DOCTYPE html>
 <html>
@@ -2600,26 +2630,19 @@ ${print ? PRINT_PAGE_STYLE : ''}
           <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${a.serial_number || '—'}</td>
         </tr>`).join('')}</tbody>
       </table>` : ''}
-      ${partRows ? `<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px">
-        <thead><tr style="background:#f9fafb">
-          <th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Part</th>
-          <th style="padding:8px;text-align:center;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Qty</th>
-          <th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Unit Price</th>
-          <th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Total</th>
-        </tr></thead>
-        <tbody>${partRows}</tbody>
-      </table>` : ''}
+      ${servicesTable}
+      ${partsTable}
       <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-top:12px">
-        <tr><td style="padding:3px 0">Assessment Fee</td><td style="text-align:right">${fmt(wo.assessment_fee)}${wo.assessment_transaction_id ? ' <span style="color:${BRAND.green};font-size:11px">(paid)</span>' : ''}</td></tr>
-        ${assessmentTax > 0 ? `<tr><td style="padding:3px 0;color:#888;font-size:12px">Tax on Assessment Fee</td><td style="text-align:right;color:#888;font-size:12px">${fmt(assessmentTax)}</td></tr>` : ''}
-        ${wo.status !== 'intake' ? `<tr><td style="padding:3px 0">Labour${wo.is_express ? ' — express +25%' : ''}</td><td style="text-align:right">${fmt(wo.estimate_labor)}</td></tr>` : ''}
-        ${wo.status !== 'intake' && parseFloat(wo.estimate_consumables) > 0 ? `<tr><td style="padding:3px 0">Consumables${wo.is_express ? ' — express +25%' : ''}</td><td style="text-align:right">${fmt(wo.estimate_consumables)}</td></tr>` : ''}
-        ${partsTotal > 0 ? `<tr><td style="padding:3px 0">Parts</td><td style="text-align:right">${fmt(partsTotal)}</td></tr>` : ''}
-        ${(estimateTax + partsTax) > 0 ? `<tr><td style="padding:3px 0;color:#888;font-size:12px">Tax (labour, consumables + parts)</td><td style="text-align:right;color:#888;font-size:12px">${fmt(estimateTax + partsTax)}</td></tr>` : ''}
-        ${parseFloat(wo.deposit_amount) > 0 ? `<tr><td style="padding:3px 0">Deposit Paid</td><td style="text-align:right">-${fmt(wo.deposit_amount)}${wo.deposit_transaction_id ? ' <span style="color:${BRAND.green};font-size:11px">(paid)</span>' : ''}</td></tr>` : ''}
+        ${f.services.length ? `<tr><td style="padding:3px 0">Services</td><td style="text-align:right">${fmt(f.servicesTotal)}</td></tr>` : ''}
+        ${f.parts.length ? `<tr><td style="padding:3px 0">Parts</td><td style="text-align:right">${fmt(f.partsTotal)}</td></tr>` : ''}
+        <tr><td style="padding:3px 0">GCT</td><td style="text-align:right">${fmt(f.gct)}</td></tr>
+        <tr><td style="padding:3px 0;font-weight:700">Total</td><td style="text-align:right;font-weight:700">${fmt(f.total)}</td></tr>
+        ${f.assessmentPaid > 0 ? `<tr><td style="padding:3px 0">Less Non-Refundable Deposit Paid (assessment fee)</td><td style="text-align:right">-${fmt(f.assessmentPaid)}</td></tr>` : ''}
+        ${f.deposit > 0 ? `<tr><td style="padding:3px 0">Less Deposit${wo.deposit_transaction_id ? ' Paid' : ''}</td><td style="text-align:right">-${fmt(f.deposit)}</td></tr>` : ''}
         <tr><td colspan="2"><hr style="border:none;border-top:2px solid #111;margin:8px 0"></td></tr>
-        <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">BALANCE DUE</td><td style="font-size:16px;font-weight:700;color:${BRAND.black};text-align:right">${fmt(balanceDue)}${wo.final_transaction_id ? ' <span style="color:${BRAND.green};font-size:11px;font-weight:400">(paid)</span>' : ''}</td></tr>
+        <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">BALANCE DUE</td><td style="font-size:16px;font-weight:700;color:${BRAND.black};text-align:right">${fmt(f.balanceDue)}${wo.final_transaction_id ? ' <span style="color:${BRAND.green};font-size:11px;font-weight:400">(paid)</span>' : ''}</td></tr>
       </table>
+      ${f.assessmentPaid > 0 || (wo.status === 'intake' && parseFloat(wo.assessment_fee) > 0) ? `<div style="margin-top:10px;font-size:11px;color:#666">The assessment fee is a non-refundable deposit.</div>` : ''}
       ${wo.estimate_notes ? `<div style="margin-top:16px;font-size:13px;color:#444"><strong>Estimate Notes:</strong> ${wo.estimate_notes}</div>` : ''}
       ${signatureLinesHtml(blankSignatureLabels())}
       <div style="text-align:center;margin-top:20px;font-size:13px;color:#666;font-style:italic">${footer}</div>
@@ -2999,13 +3022,10 @@ function rentalInvoicePdfModel(agreement, tx, s) {
 }
 
 function workOrderInvoicePdfModel(wo, s) {
-  // Same balance-due math as buildWorkOrderInvoiceHtml above.
-  const estimateTotal = (parseFloat(wo.estimate_labor) || 0) + (parseFloat(wo.estimate_consumables) || 0);
-  const estimateTax = parseFloat((estimateTotal * (parseFloat(wo.estimate_tax_rate) || 0) / 100).toFixed(2));
-  const partsTotal = (wo.items || []).reduce((sum, i) => sum + (parseFloat(i.total) || 0), 0);
-  const partsTax = (wo.items || []).reduce((sum, i) => sum + (parseFloat(i.total) || 0) * (parseFloat(i.tax_rate) || 0) / 100, 0);
-  const assessmentTax = parseFloat(((parseFloat(wo.assessment_fee) || 0) * (parseFloat(wo.assessment_fee_tax_rate) || 0) / 100).toFixed(2));
-  const balanceDue = Math.max(0, estimateTotal + partsTotal + estimateTax + partsTax - (parseFloat(wo.deposit_amount) || 0));
+  // Same figures as buildWorkOrderInvoiceHtml (workOrderInvoiceFigures).
+  const f = workOrderInvoiceFigures(wo);
+  const cols = title => [{ label: title, width: 3.6 }, { label: 'Qty', width: 0.7, align: 'center' }, { label: 'Unit Price', width: 1.3, align: 'right' }, { label: 'GCT', width: 1.1, align: 'right' }, { label: 'Total', width: 1.3, align: 'right' }];
+  const row = l => ({ cells: [l.name, l.qty, fmt(l.unit), l.gct > 0 ? fmt(l.gct) : '-', fmt(l.total)], sub: l.sub || '' });
   return {
     store: pdfStore(s, { branch_name: wo.branch_name }),
     title: 'SERVICE AND REPAIR TAX INVOICE', number: wo.wo_number,
@@ -3015,19 +3035,19 @@ function workOrderInvoicePdfModel(wo, s) {
     tables: [
       { heading: 'Accessories Handed In', columns: [{ label: 'Accessory', width: 4 }, { label: 'Item #', width: 1.8 }],
         rows: (wo.accessories || []).map(a => ({ cells: [`A${a.line_no}  ${a.name}`, a.serial_number || '-'], sub: a.description })) },
-      { heading: 'Parts', columns: [{ label: 'Part', width: 4 }, ...ITEM_COLUMNS.slice(1)], rows: (wo.items || []).map(i => ({ cells: [i.product_name, i.quantity, fmt(i.unit_price), fmt(i.total)], sub: i.sku || '' })) },
+      { heading: 'Services', columns: cols('Service'), rows: f.services.map(row) },
+      { heading: 'Parts', columns: cols('Part'), rows: f.parts.length ? [...f.parts.map(row), { cells: ['Parts Total', '', '', f.partsGct > 0 ? fmt(f.partsGct) : '-', fmt(f.partsTotal)] }] : [] },
     ],
     totals: [
-      { label: `Assessment Fee${wo.assessment_transaction_id ? ' (paid)' : ''}`, value: fmt(wo.assessment_fee) },
-      assessmentTax > 0 ? { label: 'Tax on Assessment Fee', value: fmt(assessmentTax), style: 'muted' } : null,
-      wo.status !== 'intake' ? { label: `Labour${wo.is_express ? ' - express +25%' : ''}`, value: fmt(wo.estimate_labor) } : null,
-      wo.status !== 'intake' && parseFloat(wo.estimate_consumables) > 0 ? { label: `Consumables${wo.is_express ? ' - express +25%' : ''}`, value: fmt(wo.estimate_consumables) } : null,
-      partsTotal > 0 ? { label: 'Parts', value: fmt(partsTotal) } : null,
-      (estimateTax + partsTax) > 0 ? { label: 'Tax (labour, consumables + parts)', value: fmt(estimateTax + partsTax), style: 'muted' } : null,
-      parseFloat(wo.deposit_amount) > 0 ? { label: `Deposit Paid${wo.deposit_transaction_id ? ' (paid)' : ''}`, value: `-${fmt(wo.deposit_amount)}` } : null,
-      { label: `BALANCE DUE${wo.final_transaction_id ? ' (paid)' : ''}`, value: fmt(balanceDue), style: 'grand' },
+      f.services.length ? { label: 'Services', value: fmt(f.servicesTotal) } : null,
+      f.parts.length ? { label: 'Parts', value: fmt(f.partsTotal) } : null,
+      { label: 'GCT', value: fmt(f.gct) },
+      { label: 'Total', value: fmt(f.total) },
+      f.assessmentPaid > 0 ? { label: 'Less Non-Refundable Deposit Paid (assessment fee)', value: `-${fmt(f.assessmentPaid)}` } : null,
+      f.deposit > 0 ? { label: `Less Deposit${wo.deposit_transaction_id ? ' Paid' : ''}`, value: `-${fmt(f.deposit)}` } : null,
+      { label: `BALANCE DUE${wo.final_transaction_id ? ' (paid)' : ''}`, value: fmt(f.balanceDue), style: 'grand' },
     ],
-    notes: [wo.estimate_notes ? `Estimate Notes: ${wo.estimate_notes}` : ''],
+    notes: [parseFloat(wo.assessment_fee) > 0 ? 'The assessment fee is a non-refundable deposit.' : '', wo.estimate_notes ? `Estimate Notes: ${wo.estimate_notes}` : ''],
     signatures: blankSignatureLabels().map(label => ({ label })),
     footer: s.receipt_footer || 'Thank you for your business!',
   };

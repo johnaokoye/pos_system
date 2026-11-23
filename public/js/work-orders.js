@@ -489,7 +489,7 @@ Object.assign(App, {
 
           <div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:13px">
             <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Fees & Estimate</strong>
-            <div style="display:flex;justify-content:space-between;margin-top:4px"><span>Assessment Fee</span><span>${this.fmt(wo.assessment_fee)} ${wo.assessment_transaction_id ? '<span class="badge-pill badge-success" style="font-size:10px">Paid</span>' : '<span style="color:var(--text-muted)">Unpaid</span>'}</span></div>
+            <div style="display:flex;justify-content:space-between;margin-top:4px"><span>Assessment Fee <span style="color:var(--text-muted);font-size:11px">(non-refundable deposit)</span></span><span>${this.fmt(wo.assessment_fee)} ${wo.assessment_transaction_id ? '<span class="badge-pill badge-success" style="font-size:10px">Paid</span>' : '<span style="color:var(--text-muted)">Unpaid</span>'}</span></div>
             ${assessmentTax > 0 ? `<div style="display:flex;justify-content:space-between;color:var(--text-muted);font-size:12px"><span>Tax on Assessment Fee</span><span>${this.fmt(assessmentTax)}</span></div>` : ''}
             ${wo.status !== 'intake' ? `<div style="display:flex;justify-content:space-between"><span>Labour${wo.is_express ? ' <span class="badge-pill badge-danger" style="font-size:10px">Express +25%</span>' : ''}</span><span>${this.fmt(wo.estimate_labor)}</span></div>` : ''}
             ${wo.status !== 'intake' && parseFloat(wo.estimate_consumables) > 0 ? `<div style="display:flex;justify-content:space-between"><span>Consumables${wo.is_express ? ' <span class="badge-pill badge-danger" style="font-size:10px">Express +25%</span>' : ''}</span><span>${this.fmt(wo.estimate_consumables)}</span></div>` : ''}
@@ -517,6 +517,7 @@ Object.assign(App, {
             <p style="font-size:11px;color:var(--text-muted);margin:6px 0 0">Save Parts records what's needed; Confirm Parts is what actually creates the branch transfer or purchase request for anything not in stock here.</p>` : ''}
           </div>` : ''}
 
+          ${this._woDocumentsSectionHtml(wo)}
           ${this._woExternalSectionHtml(wo)}
 
           ${tasksSectionVisible ? `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px">
@@ -564,6 +565,58 @@ Object.assign(App, {
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
+  },
+
+  // Documents on the job — the customer's signed contract, or anything else.
+  _woDocumentsSectionHtml(wo) {
+    const docs = wo.documents || [];
+    const esc = v => this.escapeAttr(v || '');
+    const canAdd = this.can('work_orders') || this.can('wo_intake');
+    const hasContract = docs.some(d => d.document_type === 'signed_contract');
+    const size = n => n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round((n || 0) / 1024))} KB`;
+    return `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Documents</strong>
+        ${hasContract ? '<span class="badge-pill badge-success" style="font-size:10px">✓ Signed contract on file</span>' : '<span class="badge-pill badge-warning" style="font-size:10px">No signed contract</span>'}
+      </div>
+      <div style="margin-top:6px">${docs.length ? docs.map(d => `<div class="wo-doc-row" data-doc-id="${d.id}" style="display:flex;justify-content:space-between;align-items:center;gap:8px;border-top:1px solid var(--border);padding:5px 0;font-size:12px">
+        <div>
+          <a href="/api/work-orders/${wo.id}/attachments/${d.id}/download" target="_blank" rel="noopener">${esc(d.original_name)}</a>
+          <span class="badge-pill ${d.document_type === 'signed_contract' ? 'badge-success' : 'badge-secondary'}" style="font-size:10px;margin-left:4px">${d.document_type === 'signed_contract' ? 'Signed contract' : 'Other'}</span>
+          <div style="color:var(--text-muted);font-size:11px">${size(d.file_size)} · ${this.fmtDateTime(d.uploaded_at)}${d.uploaded_by_name ? ` by ${esc(d.uploaded_by_name)}` : ''}${d.notes ? ` · ${esc(d.notes)}` : ''}</div>
+        </div>
+        ${canAdd && (d.document_type !== 'signed_contract' || this.can('wo_signoff')) ? `<button class="btn btn-sm btn-outline" onclick="App.deleteWODocument(${wo.id}, ${d.id})">Remove</button>` : ''}
+      </div>`).join('') : '<div style="color:var(--text-muted);font-size:12px">No documents attached</div>'}</div>
+      ${canAdd ? `<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px">
+        <select id="wo-doc-type" style="width:auto"><option value="signed_contract">Signed contract</option><option value="other">Other</option></select>
+        <input id="wo-doc-notes" placeholder="Note (optional)" style="flex:1;min-width:120px">
+        <input type="file" id="wo-doc-file" accept="application/pdf,image/*,.doc,.docx" style="display:none" onchange="App.uploadWODocument(${wo.id}, this)">
+        <button type="button" class="btn btn-sm btn-outline" onclick="document.getElementById('wo-doc-file').click()">📎 Attach</button>
+      </div>
+      <p style="font-size:11px;color:var(--text-muted);margin:4px 0 0">PDF, photo or Word document, up to 20 MB — scan or photograph the signed contract.</p>` : ''}
+    </div>`;
+  },
+
+  async uploadWODocument(woId, input) {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('document_type', document.getElementById('wo-doc-type').value);
+    fd.append('notes', document.getElementById('wo-doc-notes').value.trim());
+    try {
+      const res = await fetch(`/api/work-orders/${woId}/attachments`, { method: 'POST', body: fd, credentials: 'same-origin' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Upload failed (${res.status})`);
+      this.alert('Document attached', 'success');
+      await this.viewWorkOrder(woId);
+    } catch (e) { this.alert(e.message, 'error'); input.value = ''; }
+  },
+
+  async deleteWODocument(woId, docId) {
+    if (!confirm('Remove this document from the work order?')) return;
+    try { await this.api('DELETE', `/work-orders/${woId}/attachments/${docId}`); await this.viewWorkOrder(woId); }
+    catch (e) { this.alert(e.message, 'error'); }
   },
 
   // External Work: outside technicians/companies who did part of the job and

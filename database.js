@@ -2150,6 +2150,21 @@ async function _init() {
       posted_at DATETIME,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // Documents attached to a work order — a signed service contract or
+    // anything else. Local files in uploads/wo-attachments (served only via
+    // the authenticated download route), Cloudinary when configured.
+    { sql: `CREATE TABLE IF NOT EXISTS work_order_attachments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      work_order_id INTEGER NOT NULL REFERENCES work_orders(id),
+      document_type TEXT NOT NULL DEFAULT 'other',
+      original_name TEXT NOT NULL,
+      stored_name TEXT NOT NULL,
+      mime_type TEXT,
+      file_size INTEGER,
+      notes TEXT,
+      uploaded_by INTEGER REFERENCES employees(id),
+      uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     // Technician incentive targets per store-clock month (period YYYY-MM):
     // employee_id NULL = the default for every technician without their own.
     // A target is met when completed ≥ target_completed and the on-time
