@@ -576,14 +576,19 @@ router.post('/grns/:id/reject', requirePermission('consignment_grn_approve'), as
 // kept apart from Total Tools' inventory value.
 router.get('/stock', canView, async (req, res) => {
   try {
-    const { supplier_id, agreement_id, branch_id } = req.query;
+    const { supplier_id, agreement_id, branch_id, q } = req.query;
     const where = ["l.owner = 'consignment'", 'l.qty_on_hand > 0'];
     const args = [];
+    if (q && String(q).trim()) {
+      const like = `%${String(q).trim()}%`;
+      where.push('(p.name LIKE ? OR p.sku LIKE ? OR p.barcode LIKE ? OR s.name LIKE ? OR a.agreement_number LIKE ?)');
+      args.push(like, like, like, like, like);
+    }
     if (supplier_id) { where.push('l.supplier_id = ?'); args.push(supplier_id); }
     if (agreement_id) { where.push('l.agreement_id = ?'); args.push(agreement_id); }
     if (branch_id) { where.push('l.branch_id = ?'); args.push(branch_id); }
     const { rows } = await db.execute({
-      sql: `SELECT l.supplier_id, s.name AS supplier_name, l.agreement_id, a.agreement_number, l.branch_id, b.name AS branch_name, l.product_id, p.name AS product_name, p.sku,
+      sql: `SELECT l.supplier_id, s.name AS supplier_name, l.agreement_id, a.agreement_number, l.branch_id, b.name AS branch_name, l.product_id, p.name AS product_name, p.sku, p.barcode,
               SUM(l.qty_on_hand) AS qty_on_hand, SUM(l.qty_reserved) AS qty_reserved, MIN(l.received_at) AS oldest_receipt
             FROM stock_lots l JOIN suppliers s ON s.id = l.supplier_id JOIN consignment_agreements a ON a.id = l.agreement_id
             JOIN branches b ON b.id = l.branch_id JOIN products p ON p.id = l.product_id

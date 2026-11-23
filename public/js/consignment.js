@@ -583,24 +583,125 @@ Object.assign(App, {
   },
 
   // ── Stock ──
+  // Filters kept while moving between tabs; the table reloads on each change.
   async _consStockTab() {
-    const data = await this.api('GET', '/consignment/stock');
+    const f = this._consStockFilters || (this._consStockFilters = { supplier_id: '', agreement_id: '', branch_id: '', q: '' });
+    const [agreements, branches] = await Promise.all([this.api('GET', '/consignment/agreements'), this.api('GET', '/branches')]);
     const el = document.getElementById('cons-body');
     if (!el) return;
+    const esc = v => this.escapeAttr(v == null ? '' : String(v));
+    const suppliers = [...new Map(agreements.map(a => [a.supplier_id, a.supplier_name])).entries()].sort((a, b) => String(a[1]).localeCompare(String(b[1])));
+    this._consStockAgreements = agreements;
     el.innerHTML = `
-      ${data.go_live ? `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px"><div style="font-size:12px;color:var(--text-muted);flex:1">Stock receipts tracked since ${this.fmtDateTime(data.go_live)}. Supplier-owned stock is not part of Total Tools' inventory value.</div>
+      <div id="cons-stock-head"></div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+        <input type="search" id="cs-q" placeholder="Search item, SKU, barcode, supplier…" value="${esc(f.q)}" style="width:240px">
+        <select id="cs-supplier" style="width:auto;min-width:150px"><option value="">All Suppliers</option>${suppliers.map(([id, name]) => `<option value="${id}" ${String(f.supplier_id) === String(id) ? 'selected' : ''}>${esc(name)}</option>`).join('')}</select>
+        <select id="cs-agreement" style="width:auto;min-width:150px"></select>
+        <select id="cs-branch" style="width:auto;min-width:130px"><option value="">All Branches</option>${branches.map(b => `<option value="${b.id}" ${String(f.branch_id) === String(b.id) ? 'selected' : ''}>${esc(b.name)}</option>`).join('')}</select>
+        <div style="flex:1"></div>
+        <button class="btn btn-sm btn-secondary" onclick="App._consStockPrint()">🖨 Print</button>
+        <button class="btn btn-sm btn-secondary" onclick="App._consStockCsv()">&#8659; CSV</button>
+      </div>
+      <div id="cons-stock-table"><div class="card"><p class="empty-state">Loading…</p></div></div>`;
+    this._consStockAgreementOptions();
+    const reload = () => {
+      f.q = document.getElementById('cs-q').value.trim();
+      f.supplier_id = document.getElementById('cs-supplier').value;
+      f.agreement_id = document.getElementById('cs-agreement').value;
+      f.branch_id = document.getElementById('cs-branch').value;
+      this._consStockLoad();
+    };
+    let t;
+    document.getElementById('cs-q').addEventListener('input', () => { clearTimeout(t); t = setTimeout(reload, 250); });
+    document.getElementById('cs-supplier').addEventListener('change', () => { this._consStockAgreementOptions(); reload(); });
+    document.getElementById('cs-agreement').addEventListener('change', reload);
+    document.getElementById('cs-branch').addEventListener('change', reload);
+    await this._consStockLoad();
+  },
+
+  // Agreement box lists only the chosen supplier's agreements.
+  _consStockAgreementOptions() {
+    const f = this._consStockFilters, sel = document.getElementById('cs-agreement');
+    if (!sel) return;
+    const sup = document.getElementById('cs-supplier').value;
+    const list = (this._consStockAgreements || []).filter(a => !sup || String(a.supplier_id) === String(sup));
+    if (!list.some(a => String(a.id) === String(f.agreement_id))) f.agreement_id = '';
+    sel.innerHTML = `<option value="">All Agreements</option>${list.map(a => `<option value="${a.id}" ${String(f.agreement_id) === String(a.id) ? 'selected' : ''}>${this.escapeAttr(a.agreement_number)}${sup ? '' : ` — ${this.escapeAttr(a.supplier_name || '')}`}</option>`).join('')}`;
+  },
+
+  async _consStockLoad() {
+    const f = this._consStockFilters;
+    const qs = Object.entries(f).filter(([, v]) => v).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+    const seq = this._consStockSeq = (this._consStockSeq || 0) + 1;
+    const data = await this.api('GET', `/consignment/stock${qs ? `?${qs}` : ''}`);
+    if (seq !== this._consStockSeq) return;
+    this._consStockData = data;
+    const head = document.getElementById('cons-stock-head'), el = document.getElementById('cons-stock-table');
+    if (!el) return;
+    const filtered = Object.values(f).some(v => v);
+    if (head) head.innerHTML = data.go_live ? `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px"><div style="font-size:12px;color:var(--text-muted);flex:1">Stock receipts tracked since ${this.fmtDateTime(data.go_live)}. Supplier-owned stock is not part of Total Tools' inventory value.</div>
           <button class="btn btn-sm btn-outline" onclick="App.showConsOpeningLog()">Supplier stock found on hand</button>${this.can('consignment_opening_record') ? '<button class="btn btn-sm btn-outline" onclick="App.showConsOpeningStock()">+ Record supplier-owned stock</button>' : ''}</div>`
         : `<div class="card" style="border-color:var(--warning, #d97706);margin-bottom:12px"><strong>Consignment tracking hasn't started.</strong>
             <div style="font-size:13px;margin:4px 0 8px">Starting it records the stock on hand now: anything you list as already belonging to a supplier becomes theirs, and the rest one Total Tools-owned receipt dated today, so it sells before any consignment stock received later. Consignment GRNs can be approved after that. It can't be undone.</div>
-            ${this.can('consignment_go_live') ? '<button class="btn btn-sm btn-primary" onclick="App._consGoLive()">Start Consignment Tracking</button>' : '<span style="font-size:12px;color:var(--text-muted)">Started by someone with the Start Consignment Tracking permission.</span>'}</div>`}
-      <div class="card"><div class="table-wrap"><table>
-        <thead><tr><th>Supplier</th><th>Agreement</th><th>Branch</th><th>Item</th><th style="text-align:right">On hand</th><th style="text-align:right">Reserved</th><th style="text-align:right">Agreed cost</th><th style="text-align:right">Value at cost</th><th>Oldest receipt</th></tr></thead>
-        <tbody>${data.rows.length ? data.rows.map(r => `<tr><td>${this.escapeAttr(r.supplier_name)}</td><td>${r.agreement_number}</td><td>${this.escapeAttr(r.branch_name)}</td><td>${this.escapeAttr(r.product_name)}</td>
+            ${this.can('consignment_go_live') ? '<button class="btn btn-sm btn-primary" onclick="App._consGoLive()">Start Consignment Tracking</button>' : '<span style="font-size:12px;color:var(--text-muted)">Started by someone with the Start Consignment Tracking permission.</span>'}</div>`;
+    const units = data.rows.reduce((t, r) => t + Number(r.qty_on_hand || 0), 0);
+    el.innerHTML = `<div class="card"><div class="table-wrap"><table>
+        <thead><tr><th>Supplier</th><th>Agreement</th><th>Branch</th><th>SKU</th><th>Item</th><th style="text-align:right">On hand</th><th style="text-align:right">Reserved</th><th style="text-align:right">Agreed cost</th><th style="text-align:right">Value at cost</th><th>Oldest receipt</th></tr></thead>
+        <tbody>${data.rows.length ? data.rows.map(r => `<tr><td>${this.escapeAttr(r.supplier_name)}</td><td>${r.agreement_number}</td><td>${this.escapeAttr(r.branch_name)}</td><td style="font-family:monospace;font-size:12px">${this.escapeAttr(r.sku || '')}</td><td>${this.escapeAttr(r.product_name)}</td>
           <td style="text-align:right" class="fw-600">${r.qty_on_hand}</td><td style="text-align:right">${r.qty_reserved || 0}</td><td style="text-align:right">${r.agreed_cost != null ? this.fmt(r.agreed_cost) : '—'}</td>
           <td style="text-align:right">${r.value != null ? this.fmt(r.value) : '—'}</td><td>${this.fmtDate(r.oldest_receipt)}</td></tr>`).join('')
-          : '<tr><td colspan="9" class="empty-state">No supplier-owned stock on hand</td></tr>'}</tbody>
-        ${data.rows.length ? `<tfoot><tr><td colspan="7" style="text-align:right" class="fw-600">Total at agreed cost</td><td style="text-align:right" class="fw-600">${this.fmt(data.total_value)}</td><td></td></tr></tfoot>` : ''}
+          : `<tr><td colspan="10" class="empty-state">${filtered ? 'No supplier-owned stock matches these filters' : 'No supplier-owned stock on hand'}</td></tr>`}</tbody>
+        ${data.rows.length ? `<tfoot><tr><td colspan="5" style="text-align:right" class="fw-600">${data.rows.length} line${data.rows.length === 1 ? '' : 's'} · total</td><td style="text-align:right" class="fw-600">${units}</td><td colspan="2" style="text-align:right" class="fw-600">At agreed cost</td><td style="text-align:right" class="fw-600">${this.fmt(data.total_value)}</td><td></td></tr></tfoot>` : ''}
       </table></div></div>`;
+  },
+
+  // What the filters say, for the printout and the CSV file name.
+  _consStockFilterLabel() {
+    const pick = id => { const s = document.getElementById(id); return s && s.value ? s.options[s.selectedIndex].text : ''; };
+    const parts = [pick('cs-supplier'), pick('cs-agreement'), pick('cs-branch')].filter(Boolean);
+    const q = (this._consStockFilters || {}).q;
+    if (q) parts.push(`matching "${q}"`);
+    return parts.join(' · ');
+  },
+
+  _consStockCsv() {
+    const d = this._consStockData;
+    if (!d) return;
+    const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const head = ['supplier', 'agreement', 'branch', 'sku', 'barcode', 'item', 'on_hand', 'reserved', 'agreed_cost', 'value_at_cost', 'oldest_receipt'];
+    const lines = [head.join(',')].concat(d.rows.map(r => [r.supplier_name, r.agreement_number, r.branch_name, r.sku, r.barcode, r.product_name, r.qty_on_hand, r.qty_reserved || 0, r.agreed_cost ?? '', r.value ?? '', r.oldest_receipt ? this.fmtDate(r.oldest_receipt) : ''].map(q).join(',')));
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `consignment-stock-${this._storeDay()}.csv`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  },
+
+  _consStockPrint() {
+    const d = this._consStockData;
+    if (!d) return;
+    const win = window.open('', '_blank', 'width=1000,height=800');
+    if (!win) { this.alert('Your browser blocked the print popup — allow popups for this site and try again', 'warning'); return; }
+    const esc = v => this.escapeAttr(v == null ? '' : String(v));
+    const td = 'padding:5px 6px;border-bottom:1px solid #e5e5e5';
+    const units = d.rows.reduce((t, r) => t + Number(r.qty_on_hand || 0), 0);
+    const label = this._consStockFilterLabel();
+    win.document.write(`<!DOCTYPE html><html><head><title>Consignment Stock</title>
+      <style>body{font-family:Arial,sans-serif;font-size:12px;margin:0;padding:32px;color:#111}h1{font-size:18px;margin:0 0 4px}
+      table{width:100%;border-collapse:collapse;margin-top:14px}th{text-align:left;font-size:11px;color:#555;border-bottom:2px solid #333;padding:5px 6px}
+      .r{text-align:right}tfoot td{font-weight:700;border-top:2px solid #333;padding:6px}@media print{body{padding:12px}}</style></head><body>
+      ${this._printLogoTag(40)}
+      <h1>Consignment Stock — supplier-owned items on hand</h1>
+      <div style="color:#555">${esc(this.settings?.store_name || '')} · ${esc(this._storeDateTime ? this._storeDateTime(new Date().toISOString()) : new Date().toLocaleString())}${label ? ` · ${esc(label)}` : ''}</div>
+      <div style="color:#555;margin-top:2px">Not part of Total Tools' inventory value. Value at the agreed cost in effect today.</div>
+      <table><thead><tr><th>Supplier</th><th>Agreement</th><th>Branch</th><th>SKU</th><th>Item</th><th class="r">On hand</th><th class="r">Reserved</th><th class="r">Agreed cost</th><th class="r">Value</th><th>Oldest receipt</th></tr></thead>
+      <tbody>${d.rows.map(r => `<tr><td style="${td}">${esc(r.supplier_name)}</td><td style="${td}">${esc(r.agreement_number)}</td><td style="${td}">${esc(r.branch_name)}</td><td style="${td};font-family:monospace">${esc(r.sku)}</td><td style="${td}">${esc(r.product_name)}</td>
+        <td style="${td}" class="r">${r.qty_on_hand}</td><td style="${td}" class="r">${r.qty_reserved || 0}</td><td style="${td}" class="r">${r.agreed_cost != null ? this.fmt(r.agreed_cost) : '—'}</td><td style="${td}" class="r">${r.value != null ? this.fmt(r.value) : '—'}</td><td style="${td}">${this.fmtDate(r.oldest_receipt)}</td></tr>`).join('') || `<tr><td colspan="10" style="${td};text-align:center;color:#777">No supplier-owned stock on hand</td></tr>`}</tbody>
+      ${d.rows.length ? `<tfoot><tr><td colspan="5" class="r">${d.rows.length} line${d.rows.length === 1 ? '' : 's'} · total</td><td class="r">${units}</td><td colspan="2"></td><td class="r">${this.fmt(d.total_value)}</td><td></td></tr></tfoot>` : ''}
+      </table><script>window.onload=()=>{window.print()}<\/script></body></html>`);
+    win.document.close();
   },
   // Start Consignment Tracking: supplier-owned stock already on hand is
   // listed first; everything else becomes one Total Tools-owned receipt.

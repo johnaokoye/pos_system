@@ -12,6 +12,7 @@ Object.assign(App, {
       category: val('inv-cat-filter'),
       brand: val('inv-brand-filter'),
       branchId: val('inv-branch-filter') || (fallback.branchId ? String(fallback.branchId) : ''),
+      owner: val('inv-owner-filter'),
     };
   },
 
@@ -28,7 +29,7 @@ Object.assign(App, {
 
     if (tab === 'non-inventory') return this.renderNonInventoryTab(tabsHtml, filters);
 
-    const hasFilters = !!(filters && (filters.search || filters.category || filters.brand || filters.branchId));
+    const hasFilters = !!(filters && (filters.search || filters.category || filters.brand || filters.branchId || filters.owner));
     const [products, categories, brands, movements, branches] = await Promise.all([
       // Re-rendering onto saved filters: refilter() below fetches the
       // filtered list, so don't pull the whole catalogue first.
@@ -59,6 +60,11 @@ Object.assign(App, {
         <select id="inv-branch-filter" style="width:auto;min-width:130px">
           <option value="">All Branches</option>
           ${branches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
+        </select>
+        <select id="inv-owner-filter" style="width:auto;min-width:150px" title="Consignment items have stock on hand that belongs to a supplier (at the branch picked, else anywhere)">
+          <option value="">All Stock</option>
+          <option value="1">Consignment items</option>
+          <option value="0">No consignment stock</option>
         </select>
         <div style="flex:1"></div>
         ${this.can('reports') || this._canSeeInventoryCost() ? `<button class="btn btn-secondary btn-sm" onclick="App.showSection('reports-inventory')" title="Inventory reports — items sold over a period">📊 Reports</button>` : ''}
@@ -110,6 +116,8 @@ Object.assign(App, {
       if (cat) url += `category=${cat}&`;
       if (brand) url += `brand=${encodeURIComponent(brand)}&`;
       if (branchId) url += `branch_id=${branchId}&`;
+      const owner = document.getElementById('inv-owner-filter').value;
+      if (owner) url += `consignment=${owner}&`;
       const filtered = await this.api('GET', url);
       if (seq !== refilterSeq || this.section !== 'inventory') return;
       const branchName = branchId ? (branches.find(b => b.id == branchId) || {}).name || '' : '';
@@ -125,12 +133,14 @@ Object.assign(App, {
     document.getElementById('inv-cat-filter').addEventListener('change', refilter);
     document.getElementById('inv-brand-filter').addEventListener('change', refilter);
     document.getElementById('inv-branch-filter').addEventListener('change', () => { refilter(); refilterHistory(); });
+    document.getElementById('inv-owner-filter').addEventListener('change', refilter);
 
-    if (filters && (filters.search || filters.category || filters.brand || filters.branchId)) {
+    if (hasFilters) {
       document.getElementById('inv-search').value = filters.search || '';
       document.getElementById('inv-cat-filter').value = filters.category || '';
       document.getElementById('inv-brand-filter').value = filters.brand || '';
       document.getElementById('inv-branch-filter').value = filters.branchId || '';
+      document.getElementById('inv-owner-filter').value = filters.owner || '';
       await refilter();
       if (filters.branchId) await refilterHistory();
     }
@@ -444,6 +454,8 @@ Object.assign(App, {
     if (q) url += `search=${encodeURIComponent(q)}&`;
     if (cat) url += `category=${encodeURIComponent(cat)}&`;
     if (branchId) url += `branch_id=${encodeURIComponent(branchId)}&`;
+    const owner = (document.getElementById('inv-owner-filter') || {}).value || '';
+    if (owner) url += `consignment=${encodeURIComponent(owner)}&`;
     const a = document.createElement('a');
     a.href = url;
     a.download = '';
@@ -508,7 +520,7 @@ Object.assign(App, {
         ${products.map(p => `<tr id="inv-row-${p.id}">
           <td style="width:52px">${p.image_path ? `<img src="${p.image_path}" class="prod-img-thumb" alt="" loading="lazy" decoding="async">` : `<div class="prod-img-placeholder"${canEdit ? ` onclick="App.showProductForm(${p.id})"` : ''}>📷</div>`}</td>
           <td style="font-family:monospace;font-size:12px">${p.sku}</td>
-          <td class="fw-600">${p.name}${p.has_variations > 0 ? `<span class="has-vars-badge">${p.has_variations} var</span>` : ''}${p.used_of_product_id ? `<span class="badge-pill badge-purple" style="font-size:10px;margin-left:6px">Used</span>` : ''}${p.merged_into_product_id ? `<span class="badge-pill badge-secondary" style="font-size:10px;margin-left:6px" title="Merged into ${p.merged_into_sku||''}">Merged → ${p.merged_into_sku||'?'}</span>` : ''}</td>
+          <td class="fw-600">${p.name}${p.has_variations > 0 ? `<span class="has-vars-badge">${p.has_variations} var</span>` : ''}${p.used_of_product_id ? `<span class="badge-pill badge-purple" style="font-size:10px;margin-left:6px">Used</span>` : ''}${p.merged_into_product_id ? `<span class="badge-pill badge-secondary" style="font-size:10px;margin-left:6px" title="Merged into ${p.merged_into_sku||''}">Merged → ${p.merged_into_sku||'?'}</span>` : ''}${Number(p.consignment_qty) > 0 ? `<span class="badge-pill badge-warning" style="font-size:10px;margin-left:6px" title="${p.consignment_qty} of the stock${branchName ? ` at ${this.escapeAttr(branchName)}` : ''} belongs to a supplier (consignment)">Consignment ${Number(p.consignment_qty)}</span>` : ''}</td>
           <td style="color:var(--text-muted)">${p.category_name || '—'}</td>
           <td>${this.fmt(p.price)}</td>
           ${showCost ? `<td style="color:var(--text-muted)">${this.fmt(p.cost)}</td>` : ''}

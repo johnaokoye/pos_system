@@ -146,9 +146,23 @@ const upload = multer({
 // services, rentals, PO/transfer forms, ecommerce API key), not just the
 // Inventory management screen.
 // GET all products
+// Supplier-owned (consignment) stock on hand per item — at the branch on the
+// branch-scoped list (matched on its branches JOIN, so no extra ?), else
+// every branch. Retail Inventory shows it as a badge.
+const consignmentQtyExpr = (branchScoped) => `(SELECT COALESCE(SUM(l.qty_on_hand), 0) FROM stock_lots l
+  WHERE l.product_id = p.id AND l.owner = 'consignment' AND l.qty_on_hand > 0${branchScoped ? ' AND l.branch_id = b.id' : ''}) as consignment_qty`;
+// ?consignment=1 → only items with supplier-owned stock on hand (at the
+// branch when one is given), 0 → only items with none.
+function consignmentFilter(consignment, branchId, params) {
+  if (consignment !== '1' && consignment !== '0') return '';
+  let sub = `SELECT 1 FROM stock_lots l WHERE l.product_id = p.id AND l.owner = 'consignment' AND l.qty_on_hand > 0`;
+  if (branchId) { sub += ' AND l.branch_id = ?'; params.push(branchId); }
+  return ` AND ${consignment === '1' ? '' : 'NOT '}EXISTS (${sub})`;
+}
+
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const { search, category, brand, active, low_stock, branch_id, supplier_id, is_service, is_rental, is_accessory, is_layaway_eligible, is_non_inventory, online, for_sale } = req.query;
+    const { search, category, brand, active, low_stock, branch_id, supplier_id, is_service, is_rental, is_accessory, is_layaway_eligible, is_non_inventory, online, for_sale, consignment } = req.query;
     const params = [];
     let sql;
 
@@ -224,7 +238,8 @@ router.get('/', requireAuth, async (req, res) => {
         (SELECT COUNT(*) FROM product_variations WHERE product_id = p.id AND active = 1) as has_variations,
         p.merged_into_product_id,
         (SELECT sku FROM products mp WHERE mp.id = p.merged_into_product_id) as merged_into_sku,
-        ${rentalOutstandingExpr(true)}
+        ${rentalOutstandingExpr(true)},
+        ${consignmentQtyExpr(true)}
         FROM products p
         LEFT JOIN categories c ON p.category_id = c.id
         LEFT JOIN branch_inventory bi ON p.id = bi.product_id AND bi.branch_id = ?
@@ -240,7 +255,8 @@ router.get('/', requireAuth, async (req, res) => {
         CASE WHEN p.is_rental = 1 AND p.is_accessory = 1 THEN (SELECT json_group_array(json_object('branch_id', bi.branch_id, 'branch_name', b.name, 'stock_qty', bi.stock_qty))
           FROM branch_inventory bi JOIN branches b ON bi.branch_id = b.id WHERE bi.product_id = p.id) END as branch_stock,
         (SELECT sku FROM products mp WHERE mp.id = p.merged_into_product_id) as merged_into_sku,
-        ${BRANCH_TOTAL_SQL} as branch_total_qty
+        ${BRANCH_TOTAL_SQL} as branch_total_qty,
+        ${consignmentQtyExpr(false)}
         FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE 1=1`;
     }
 
@@ -270,6 +286,7 @@ router.get('/', requireAuth, async (req, res) => {
         sql += ` AND COALESCE(${BRANCH_TOTAL_SQL}, p.stock_qty) <= p.min_stock`;
       }
     }
+    sql += consignmentFilter(consignment, branch_id, params);
     sql += ` ORDER BY p.name`;
 
     const { rows } = await db.execute({ sql, args: params });
@@ -319,7 +336,7 @@ router.get('/movements', requirePermission('inventory'), async (req, res) => {
 // GET export filtered products as CSV
 router.get('/export', requirePermission('inventory_export'), async (req, res) => {
   try {
-    const { search, category, active, low_stock, branch_id, supplier_id, is_rental, is_service, is_non_inventory } = req.query;
+    const { search, category, active, low_stock, branch_id, supplier_id, is_rental, is_service, is_non_inventory, consignment } = req.query;
     const params = [];
     let sql;
 
@@ -328,7 +345,8 @@ router.get('/export', requirePermission('inventory_export'), async (req, res) =>
         COALESCE(bi.stock_qty, 0) as stock_qty,
         COALESCE(bi.min_stock, p.min_stock) as min_stock,
         p.stock_qty as global_stock_qty,
-        c.name as category_name, s.name as supplier_name
+        c.name as category_name, s.name as supplier_name,
+        (SELECT COALESCE(SUM(l.qty_on_hand), 0) FROM stock_lots l WHERE l.product_id = p.id AND l.owner = 'consignment' AND l.qty_on_hand > 0 AND l.branch_id = bi.branch_id) as consignment_qty
         FROM products p
         LEFT JOIN categories c ON p.category_id = c.id
         LEFT JOIN suppliers s ON p.supplier_id = s.id
@@ -336,7 +354,7 @@ router.get('/export', requirePermission('inventory_export'), async (req, res) =>
         WHERE 1=1`;
       params.push(branch_id);
     } else {
-      sql = `SELECT p.*, c.name as category_name, s.name as supplier_name, ${BRANCH_TOTAL_SQL} as branch_total_qty
+      sql = `SELECT p.*, c.name as category_name, s.name as supplier_name, ${BRANCH_TOTAL_SQL} as branch_total_qty, ${consignmentQtyExpr(false)}
         FROM products p
         LEFT JOIN categories c ON p.category_id = c.id
         LEFT JOIN suppliers s ON p.supplier_id = s.id
@@ -360,6 +378,7 @@ router.get('/export', requirePermission('inventory_export'), async (req, res) =>
         sql += ` AND COALESCE(${BRANCH_TOTAL_SQL}, p.stock_qty) <= p.min_stock`;
       }
     }
+    sql += consignmentFilter(consignment, branch_id, params);
     sql += ` ORDER BY p.name`;
 
     const { rows: products } = await db.execute({ sql, args: params });
@@ -371,7 +390,7 @@ router.get('/export', requirePermission('inventory_export'), async (req, res) =>
       return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
     };
 
-    const headers = ['sku','barcode','name','description','long_description','category_name','price','cost','tax_rate','stock_qty','min_stock','active','supplier_name'].filter(h => h !== 'cost' || !exportHidesCost(req));
+    const headers = ['sku','barcode','name','description','long_description','category_name','price','cost','tax_rate','stock_qty','consignment_qty','min_stock','active','supplier_name'].filter(h => h !== 'cost' || !exportHidesCost(req));
     const csvRows = [headers.join(',')];
     for (const p of products) {
       csvRows.push(headers.map(h => escape(p[h])).join(','));
