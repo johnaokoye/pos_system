@@ -679,7 +679,7 @@ Object.assign(App, {
   async viewBill(id) {
     const b = await this.api('GET', `/payables/bills/${id}`);
     const methodLabel = { ...Object.fromEntries(this._apMethods), ...this._apMethodNames };
-    const sourceLabel = { receipt: 'Created automatically when the PO was received', direct_receipt: 'Created automatically when goods were received without a PO', po: 'Entered from a purchase order', manual: 'Entered manually', consignment_settlement: 'Supplier invoice matched to a consignment settlement' };
+    const sourceLabel = { receipt: 'Created automatically when the PO was received', direct_receipt: 'Created automatically when goods were received without a PO', po: 'Entered from a purchase order', manual: 'Entered manually', consignment_settlement: 'Supplier invoice matched to a consignment settlement', work_order: 'Created from external work recorded on a work order' };
     this.showModal(`
       <div class="modal" style="max-width:620px">
         <div class="modal-header">

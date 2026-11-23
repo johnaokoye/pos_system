@@ -564,24 +564,38 @@ Object.assign(App, {
   },
 
   // External Work: outside technicians/companies who did part of the job and
-  // what they cost us. Internal only — never on the customer's invoice.
+  // what they cost us (hours × rate + other charges + GCT). Internal only —
+  // never on the customer's invoice. A supplier on file gets an A/P bill.
   _woExternalSectionHtml(wo) {
     const list = wo.external_work || [];
     const editable = this.can('wo_technician') || this.can('wo_assess');
     this._woExternalRows = list;
     const esc = v => this.escapeAttr(v || '');
+    const breakdown = x => [
+      x.labour_hours != null ? `Labour ${+x.labour_hours} h × ${this.fmt(x.hourly_rate)} = ${this.fmt(x.labour_hours * x.hourly_rate)}` : '',
+      x.other_cost ? `Other ${this.fmt(x.other_cost)}` : '',
+      x.tax_amount > 0 ? `GCT ${this.fmt(x.tax_amount)}` : '',
+    ].filter(Boolean).join(' · ');
+    const billBadge = x => {
+      if (!x.ap_bill_id) return x.supplier_id ? '<span style="color:var(--text-muted)">No A/P bill</span>' : '';
+      if (x.ap_bill_status === 'void') return `<span class="badge-pill badge-secondary" style="font-size:10px">A/P bill ${esc(x.ap_bill_number)} void</span>`;
+      const paid = Number(x.ap_bill_paid) || 0;
+      return `<span class="badge-pill ${paid >= x.cost - 0.005 ? 'badge-success' : 'badge-info'}" style="font-size:10px" title="Accounts Payable bill for this cost">A/P bill ${esc(x.ap_bill_number)}${paid > 0 ? (paid >= x.cost - 0.005 ? ' · paid' : ` · ${this.fmt(paid)} paid`) : ''}</span>`;
+    };
     const rows = list.map(x => `<div class="wo-ext-row" data-ext-id="${x.id}" style="border-top:1px solid var(--border);padding:6px 0;font-size:12px">
       <div style="display:flex;justify-content:space-between;gap:8px">
         <strong>${esc(x.company_name || x.technician_name)}${x.company_name && x.technician_name ? ` <span style="font-weight:normal">— ${esc(x.technician_name)}</span>` : ''}</strong>
         <strong>${this.fmt(x.cost)}</strong>
       </div>
       <div>${esc(x.description)}</div>
+      ${breakdown(x) ? `<div style="color:var(--text-muted)">${breakdown(x)}</div>` : ''}
       <div style="color:var(--text-muted)">${[
         x.phone ? `☎ ${esc(x.phone)}` : '', x.email ? `✉ ${esc(x.email)}` : '',
         x.reference ? `Their invoice # ${esc(x.reference)}` : '',
         x.sent_date ? `Sent ${this.fmtDate(x.sent_date)}` : '', x.returned_date ? `Back ${this.fmtDate(x.returned_date)}` : '',
       ].filter(Boolean).join(' · ')}</div>
       ${x.notes ? `<div style="color:var(--text-muted)">${esc(x.notes)}</div>` : ''}
+      <div style="margin-top:2px">${billBadge(x)}</div>
       <div style="color:var(--text-muted);font-size:11px">Added ${this.fmtDateTime(x.created_at)}${x.created_by_name ? ` by ${esc(x.created_by_name)}` : ''}${x.updated_at ? ` · edited ${this.fmtDateTime(x.updated_at)}${x.updated_by_name ? ` by ${esc(x.updated_by_name)}` : ''}` : ''}</div>
       ${editable ? `<div style="margin-top:4px;display:flex;gap:6px">
         <button class="btn btn-sm btn-outline" onclick="App._woExternalForm(${wo.id}, ${x.id})">Edit</button>
@@ -596,7 +610,7 @@ Object.assign(App, {
       <div style="margin-top:6px">${rows || '<div style="color:var(--text-muted);font-size:12px">No outside technician or company on this job</div>'}</div>
       <div id="wo-ext-form" style="display:none;margin-top:8px;border-top:1px dashed var(--border);padding-top:8px"></div>
       ${editable ? `<button type="button" id="wo-ext-add" class="btn btn-sm btn-outline" style="margin-top:8px" onclick="App._woExternalForm(${wo.id})">+ Add External Work</button>` : ''}
-      <p style="font-size:11px;color:var(--text-muted);margin:6px 0 0">Our cost only — not added to the customer's bill.</p>
+      <p style="font-size:11px;color:var(--text-muted);margin:6px 0 0">Our cost only — not added to the customer's bill. Pick a supplier on file to send the cost to Accounts Payable as a bill.</p>
     </div>`;
   },
 
@@ -606,12 +620,14 @@ Object.assign(App, {
       try { this._woSuppliers = (await this.api('GET', '/suppliers')) || []; } catch (e) { this._woSuppliers = []; }
     }
     const esc = v => this.escapeAttr(v || '');
+    const val = v => v != null ? v : '';
     const box = document.getElementById('wo-ext-form');
     if (!box) return;
+    const billLocked = x.ap_bill_id && x.ap_bill_status !== 'void' && Number(x.ap_bill_paid) > 0;
     box.innerHTML = `
       <div class="input-row" style="margin-bottom:6px">
         <div class="form-group"><label style="font-size:11px">Company</label>
-          <input id="wo-ext-company" list="wo-ext-suppliers" placeholder="Outside company (or pick a supplier)" value="${esc(x.company_name)}">
+          <input id="wo-ext-company" list="wo-ext-suppliers" placeholder="Outside company (or pick a supplier)" value="${esc(x.company_name)}" oninput="App._woExtUpdate()">
           <datalist id="wo-ext-suppliers">${this._woSuppliers.map(s => `<option value="${esc(s.name)}">`).join('')}</datalist></div>
         <div class="form-group"><label style="font-size:11px">Technician</label><input id="wo-ext-tech" placeholder="Technician's name" value="${esc(x.technician_name)}"></div>
       </div>
@@ -621,19 +637,57 @@ Object.assign(App, {
       </div>
       <div class="form-group" style="margin-bottom:6px"><label style="font-size:11px">Work done *</label><textarea id="wo-ext-desc" rows="2" placeholder="What they did">${esc(x.description)}</textarea></div>
       <div class="input-row" style="margin-bottom:6px">
-        <div class="form-group"><label style="font-size:11px">Cost to us *</label><input id="wo-ext-cost" type="number" min="0" step="0.01" value="${x.cost != null ? x.cost : ''}"></div>
+        <div class="form-group"><label style="font-size:11px">Labour hours</label><input id="wo-ext-hours" type="number" min="0" step="0.25" value="${val(x.labour_hours)}" oninput="App._woExtUpdate()"></div>
+        <div class="form-group"><label style="font-size:11px">Hourly rate</label><input id="wo-ext-rate" type="number" min="0" step="0.01" value="${val(x.hourly_rate)}" oninput="App._woExtUpdate()"></div>
+      </div>
+      <div class="input-row" style="margin-bottom:6px">
+        <div class="form-group"><label style="font-size:11px" title="Parts, call-out fee, transport — anything that isn't hourly labour">Other charges</label><input id="wo-ext-other" type="number" min="0" step="0.01" value="${val(x.other_cost)}" oninput="App._woExtUpdate()"></div>
+        <div class="form-group"><label style="font-size:11px">GCT on their invoice</label><input id="wo-ext-gct" type="number" min="0" step="0.01" value="${x.tax_amount ? x.tax_amount : ''}" oninput="App._woExtUpdate()"></div>
+      </div>
+      <div id="wo-ext-total" style="font-size:12px;margin-bottom:6px"></div>
+      <div class="input-row" style="margin-bottom:6px">
         <div class="form-group"><label style="font-size:11px">Their invoice / ref #</label><input id="wo-ext-ref" value="${esc(x.reference)}"></div>
+        <div class="form-group"></div>
       </div>
       <div class="input-row" style="margin-bottom:6px">
         <div class="form-group"><label style="font-size:11px">Sent to them</label><input id="wo-ext-sent" type="date" value="${esc(x.sent_date)}"></div>
         <div class="form-group"><label style="font-size:11px">Back from them</label><input id="wo-ext-back" type="date" value="${esc(x.returned_date)}"></div>
       </div>
       <div class="form-group" style="margin-bottom:6px"><label style="font-size:11px">Notes</label><input id="wo-ext-notes" value="${esc(x.notes)}"></div>
+      <label id="wo-ext-bill-wrap" style="display:none;font-size:12px;margin-bottom:8px;align-items:center;gap:6px">
+        <input type="checkbox" id="wo-ext-bill" ${!xid || (x.ap_bill_id && x.ap_bill_status !== 'void') ? 'checked' : ''} ${billLocked ? 'disabled' : ''}>
+        <span id="wo-ext-bill-label">Create an A/P bill for this supplier</span>
+      </label>
       <button class="btn btn-sm btn-primary" onclick="App.saveWOExternal(${woId}, ${xid || 'null'})">${xid ? 'Save Changes' : 'Add'}</button>
       <button class="btn btn-sm btn-secondary" onclick="App._woExternalCancel()">Cancel</button>`;
     box.style.display = 'block';
+    this._woExtEditing = x;
     const add = document.getElementById('wo-ext-add'); if (add) add.style.display = 'none';
+    this._woExtUpdate();
     document.getElementById('wo-ext-company').focus();
+  },
+
+  _woExtSupplier() {
+    const company = (document.getElementById('wo-ext-company')?.value || '').trim().toLowerCase();
+    return company ? (this._woSuppliers || []).find(s => (s.name || '').trim().toLowerCase() === company) : null;
+  },
+
+  // Live total and whether the A/P bill box applies (a supplier on file).
+  _woExtUpdate() {
+    const n = id => { const v = document.getElementById(id)?.value; return v === '' || v == null ? null : parseFloat(v); };
+    const hours = n('wo-ext-hours'), rate = n('wo-ext-rate'), other = n('wo-ext-other') || 0, gct = n('wo-ext-gct') || 0;
+    const labour = hours != null && rate != null ? Math.round(hours * rate * 100) / 100 : 0;
+    const total = labour + other + gct;
+    const t = document.getElementById('wo-ext-total');
+    if (t) t.innerHTML = `Labour ${this.fmt(labour)} + other ${this.fmt(other)} + GCT ${this.fmt(gct)} = <strong>Cost to us ${this.fmt(total)}</strong>`;
+    const sup = this._woExtSupplier();
+    const wrap = document.getElementById('wo-ext-bill-wrap');
+    if (wrap) wrap.style.display = sup ? 'flex' : 'none';
+    const x = this._woExtEditing || {};
+    const label = document.getElementById('wo-ext-bill-label');
+    if (label && sup) label.textContent = x.ap_bill_id && x.ap_bill_status !== 'void'
+      ? `A/P bill ${x.ap_bill_number} for ${sup.name} — kept in step with this cost (untick to void it)`
+      : `Create an A/P bill for ${sup.name}`;
   },
 
   _woExternalCancel() {
@@ -644,16 +698,18 @@ Object.assign(App, {
 
   async saveWOExternal(woId, xid) {
     const v = id => document.getElementById(id).value.trim();
-    const company = v('wo-ext-company');
-    const sup = (this._woSuppliers || []).find(s => (s.name || '').trim().toLowerCase() === company.toLowerCase());
+    const sup = this._woExtSupplier();
     const body = {
-      company_name: company, supplier_id: sup ? sup.id : null, technician_name: v('wo-ext-tech'),
-      phone: v('wo-ext-phone'), email: v('wo-ext-email'), description: v('wo-ext-desc'), cost: v('wo-ext-cost'),
+      company_name: v('wo-ext-company'), supplier_id: sup ? sup.id : null, technician_name: v('wo-ext-tech'),
+      phone: v('wo-ext-phone'), email: v('wo-ext-email'), description: v('wo-ext-desc'),
+      labour_hours: v('wo-ext-hours'), hourly_rate: v('wo-ext-rate'), other_cost: v('wo-ext-other'), tax_amount: v('wo-ext-gct'),
       reference: v('wo-ext-ref'), sent_date: v('wo-ext-sent'), returned_date: v('wo-ext-back'), notes: v('wo-ext-notes'),
+      create_bill: !!document.getElementById('wo-ext-bill')?.checked,
     };
     if (!body.company_name && !body.technician_name) { this.alert('Enter the outside company or the technician\'s name', 'error'); return; }
     if (!body.description) { this.alert('Describe the work they did', 'error'); return; }
-    if (body.cost === '') { this.alert('Enter what it cost (0 if nothing)', 'error'); return; }
+    if ((body.labour_hours === '') !== (body.hourly_rate === '')) { this.alert('Enter both the hours and the hourly rate (or neither)', 'error'); return; }
+    if (body.labour_hours === '' && body.other_cost === '') { this.alert('Enter the labour hours and hourly rate, or the other charges (0 if nothing)', 'error'); return; }
     try {
       if (xid) await this.api('PUT', `/work-orders/${woId}/external-work/${xid}`, body);
       else await this.api('POST', `/work-orders/${woId}/external-work`, body);
@@ -663,7 +719,8 @@ Object.assign(App, {
 
   async deleteWOExternal(woId, xid) {
     const x = (this._woExternalRows || []).find(r => r.id === xid);
-    if (!confirm(`Remove the external work by ${x ? (x.company_name || x.technician_name) : 'this party'}?`)) return;
+    const bill = x && x.ap_bill_id && x.ap_bill_status !== 'void' ? ` Its A/P bill ${x.ap_bill_number} will be voided.` : '';
+    if (!confirm(`Remove the external work by ${x ? (x.company_name || x.technician_name) : 'this party'}?${bill}`)) return;
     try { await this.api('DELETE', `/work-orders/${woId}/external-work/${xid}`); await this.viewWorkOrder(woId); }
     catch (e) { this.alert(e.message, 'error'); }
   },

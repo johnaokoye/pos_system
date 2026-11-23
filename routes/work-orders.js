@@ -13,6 +13,7 @@ const { syncBinQty } = require('../lib/binSync');
 const { branchStockQty } = require('../lib/branchStock');
 const { takeFromLots, costOn } = require('../lib/stockLots');
 const { storeToday } = require('../lib/storeTime');
+const { createBill, dueDateFor, PAID_SQL } = require('../lib/payables');
 
 // Statuses a WO can freely log a comment against via PATCH /:id/status without
 // going through a dedicated money-moving endpoint (assessment-paid,
@@ -106,12 +107,16 @@ async function recordAccessoryHandBack(executor, woId, status, check, employeeId
 }
 
 // ─── External work (outside technicians / companies) ─────────────────────
-// Internal cost record only: what the outside party did and what they
-// charged us. The customer is still billed from the estimate + parts.
+// Internal cost: what the outside party did and what they charged us
+// (labour hours × hourly rate + other charges + GCT). The customer is still
+// billed from the estimate + parts. With a supplier on file, the cost goes
+// to Accounts Payable as a bill (source 'work_order') kept in step with it.
 const EXTERNAL_SELECT = `SELECT x.*, s.name as supplier_name,
+    b.bill_number as ap_bill_number, b.status as ap_bill_status,
+    CASE WHEN b.id IS NULL THEN 0 ELSE (SELECT COALESCE(SUM(a.amount), 0) FROM ap_payment_allocations a JOIN ap_payments p ON p.id = a.payment_id AND p.status = 'posted' WHERE a.bill_id = b.id) END as ap_bill_paid,
     (SELECT first_name || ' ' || last_name FROM employees WHERE id = x.created_by) as created_by_name,
     (SELECT first_name || ' ' || last_name FROM employees WHERE id = x.updated_by) as updated_by_name
-  FROM work_order_external_work x LEFT JOIN suppliers s ON x.supplier_id = s.id`;
+  FROM work_order_external_work x LEFT JOIN suppliers s ON x.supplier_id = s.id LEFT JOIN ap_bills b ON b.id = x.ap_bill_id`;
 
 async function loadExternalWork(woId) {
   const { rows } = await db.execute({ sql: `${EXTERNAL_SELECT} WHERE x.work_order_id = ? ORDER BY x.id`, args: [woId] });
@@ -119,30 +124,80 @@ async function loadExternalWork(woId) {
 }
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
 async function cleanExternalWork(b) {
   const str = v => { const t = String(v ?? '').trim(); return t || null; };
+  const num = (v, label) => {
+    if (v === '' || v == null) return { v: null };
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < 0) return { error: `${label} must be 0 or more` };
+    return { v: n };
+  };
   let supplierId = b.supplier_id ? parseInt(b.supplier_id, 10) : null;
   let company = str(b.company_name);
+  let terms = null;
   if (supplierId) {
-    const { rows: [sup] } = await db.execute({ sql: 'SELECT id, name FROM suppliers WHERE id = ?', args: [supplierId] });
+    const { rows: [sup] } = await db.execute({ sql: 'SELECT id, name, payment_terms FROM suppliers WHERE id = ?', args: [supplierId] });
     if (!sup) return { error: 'That supplier no longer exists' };
     company = company || sup.name;
+    terms = sup.payment_terms;
   }
   const technician = str(b.technician_name);
   if (!company && !technician) return { error: 'Enter the outside company or the technician\'s name' };
   const description = str(b.description);
   if (!description) return { error: 'Describe the work they did' };
-  const cost = b.cost === '' || b.cost == null ? 0 : Number(b.cost);
-  if (!Number.isFinite(cost) || cost < 0) return { error: 'Cost must be 0 or more' };
+  const hours = num(b.labour_hours, 'Hours'), rate = num(b.hourly_rate, 'Hourly rate'), other = num(b.other_cost, 'Other charges'), gct = num(b.tax_amount, 'GCT');
+  for (const f of [hours, rate, other, gct]) if (f.error) return { error: f.error };
+  if ((hours.v != null) !== (rate.v != null)) return { error: 'Enter both the hours and the hourly rate (or neither)' };
+  const labour = hours.v != null ? r2(hours.v * rate.v) : 0;
+  // Older callers send just `cost` — it becomes the other charges.
+  let otherCost = other.v;
+  if (otherCost == null && hours.v == null && b.cost !== '' && b.cost != null) {
+    const c = num(b.cost, 'Cost'); if (c.error) return { error: c.error }; otherCost = c.v;
+  }
+  if (hours.v == null && otherCost == null) return { error: 'Enter the labour hours and hourly rate, or the cost' };
+  const tax = r2(gct.v || 0);
+  const cost = r2(labour + (otherCost || 0) + tax);
   const sent = str(b.sent_date), back = str(b.returned_date);
   if (sent && !DAY_RE.test(sent)) return { error: 'Sent date is not a valid date' };
   if (back && !DAY_RE.test(back)) return { error: 'Returned date is not a valid date' };
   if (sent && back && back < sent) return { error: 'Returned date is before the sent date' };
-  return { supplier_id: supplierId, company_name: company, technician_name: technician, phone: str(b.phone), email: str(b.email),
-    description, cost: Math.round(cost * 100) / 100, reference: str(b.reference), sent_date: sent, returned_date: back, notes: str(b.notes) };
+  return { supplier_id: supplierId, payment_terms: terms, company_name: company, technician_name: technician, phone: str(b.phone), email: str(b.email),
+    description, labour_hours: hours.v, hourly_rate: rate.v, other_cost: otherCost == null ? null : r2(otherCost), tax_amount: tax, cost,
+    reference: str(b.reference), sent_date: sent, returned_date: back, notes: str(b.notes), create_bill: b.create_bill !== false && b.create_bill !== 0 && b.create_bill !== '0' };
 }
 
 function externalLabel(x) { return [x.company_name, x.technician_name].filter(Boolean).join(' — '); }
+
+// The linked bill and whether money is already moving on it (paid, or on a
+// payment request in the works) — then its vendor/amount are fixed here.
+async function externalBillState(executor, billId) {
+  if (!billId) return null;
+  const { rows: [bill] } = await executor.execute({ sql: `SELECT b.*, ${PAID_SQL} as paid FROM ap_bills b WHERE b.id = ?`, args: [billId] });
+  if (!bill || bill.status === 'void') return null;
+  const { rows: [req] } = await executor.execute({ sql: `SELECT r.request_number FROM payment_request_lines l JOIN payment_requests r ON r.id = l.request_id
+    WHERE l.bill_id = ? AND r.status IN ('submitted', 'approved') LIMIT 1`, args: [billId] });
+  return { bill, locked: r2(bill.paid) > 0 ? `has ${r2(bill.paid).toFixed(2)} paid on it` : (req ? `is on payment request ${req.request_number}` : null) };
+}
+
+async function externalInvoiceClash(executor, supplierId, invoiceNo, billId) {
+  if (!supplierId || !invoiceNo) return null;
+  const { rows: [dupe] } = await executor.execute({
+    sql: "SELECT bill_number FROM ap_bills WHERE supplier_id = ? AND LOWER(vendor_invoice_number) = LOWER(?) AND status != 'void' AND id != ?",
+    args: [supplierId, invoiceNo, billId || 0] });
+  return dupe ? `Their invoice ${invoiceNo} is already entered in A/P as bill ${dupe.bill_number}` : null;
+}
+
+function externalBillFields(wo, x) {
+  const billDate = x.returned_date || storeToday();
+  return {
+    supplier_id: x.supplier_id, vendor_invoice_number: x.reference, branch_id: wo.branch_id, bill_date: billDate,
+    due_date: dueDateFor(x.payment_terms, billDate), amount: x.cost, tax_amount: x.tax_amount,
+    description: `${wo.wo_number} external work: ${x.description}`.slice(0, 500),
+  };
+}
+
+const VOID_BILL_SQL = "UPDATE ap_bills SET status = 'void', void_reason = ?, voided_by = ?, voided_at = CURRENT_TIMESTAMP WHERE id = ?";
 
 async function removePhotoFile(photo) {
   if (photo.stored_name.startsWith('https://')) await cloudDestroy(photo.stored_name, 'image');
@@ -897,16 +952,29 @@ async function syncTaskSkills(taskId, skillIds) {
 
 router.post('/:id/external-work', requireAnyPermission('wo_technician', 'wo_assess'), async (req, res) => {
   try {
-    const { rows: [wo] } = await db.execute({ sql: 'SELECT id FROM work_orders WHERE id = ?', args: [req.params.id] });
+    const { rows: [wo] } = await db.execute({ sql: 'SELECT id, wo_number, branch_id, status FROM work_orders WHERE id = ?', args: [req.params.id] });
     if (!wo) return res.status(404).json({ error: 'Not found' });
     const x = await cleanExternalWork(req.body || {});
     if (x.error) return res.status(400).json({ error: x.error });
+    const wantBill = x.supplier_id && x.create_bill && x.cost > 0;
+    if (wantBill) { const clash = await externalInvoiceClash(db, x.supplier_id, x.reference); if (clash) return res.status(400).json({ error: clash }); }
     const who = req.employee?.id || null;
-    const r = await db.execute({ sql: `INSERT INTO work_order_external_work (work_order_id, supplier_id, company_name, technician_name, phone, email, description, cost, reference, sent_date, returned_date, notes, created_by)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [wo.id, x.supplier_id, x.company_name, x.technician_name, x.phone, x.email, x.description, x.cost, x.reference, x.sent_date, x.returned_date, x.notes, who] });
-    const { rows: [wst] } = await db.execute({ sql: 'SELECT status FROM work_orders WHERE id = ?', args: [wo.id] });
-    await logStatus(db, wo.id, wst.status, `External work added: ${externalLabel(x)} — ${x.description} (cost ${x.cost.toFixed(2)})`, who);
-    const { rows: [row] } = await db.execute({ sql: `${EXTERNAL_SELECT} WHERE x.id = ?`, args: [Number(r.lastInsertRowid)] });
+    const tx = await db.transaction('write');
+    let committed = false, id;
+    try {
+      const billId = wantBill ? await createBill(tx, { ...externalBillFields(wo, x), source: 'work_order', created_by: who }) : null;
+      const r = await tx.execute({ sql: `INSERT INTO work_order_external_work (work_order_id, supplier_id, company_name, technician_name, phone, email, description, labour_hours, hourly_rate, other_cost, tax_amount, cost, reference, sent_date, returned_date, notes, ap_bill_id, created_by)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [wo.id, x.supplier_id, x.company_name, x.technician_name, x.phone, x.email, x.description, x.labour_hours, x.hourly_rate, x.other_cost, x.tax_amount, x.cost, x.reference, x.sent_date, x.returned_date, x.notes, billId, who] });
+      id = Number(r.lastInsertRowid);
+      const { rows: [b] } = billId ? await tx.execute({ sql: 'SELECT bill_number FROM ap_bills WHERE id = ?', args: [billId] }) : { rows: [] };
+      await logStatus(tx, wo.id, wo.status, `External work added: ${externalLabel(x)} — ${x.description} (cost ${x.cost.toFixed(2)})${b ? `, A/P bill ${b.bill_number}` : ''}`, who);
+      await tx.commit();
+      committed = true;
+    } catch (e) {
+      if (!committed) await tx.rollback();
+      throw e;
+    }
+    const { rows: [row] } = await db.execute({ sql: `${EXTERNAL_SELECT} WHERE x.id = ?`, args: [id] });
     res.status(201).json(row);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -915,14 +983,47 @@ router.put('/:id/external-work/:xid', requireAnyPermission('wo_technician', 'wo_
   try {
     const { rows: [old] } = await db.execute({ sql: 'SELECT * FROM work_order_external_work WHERE id = ? AND work_order_id = ?', args: [req.params.xid, req.params.id] });
     if (!old) return res.status(404).json({ error: 'Not found' });
+    const { rows: [wo] } = await db.execute({ sql: 'SELECT id, wo_number, branch_id, status FROM work_orders WHERE id = ?', args: [old.work_order_id] });
     const x = await cleanExternalWork(req.body || {});
     if (x.error) return res.status(400).json({ error: x.error });
+    const state = await externalBillState(db, old.ap_bill_id);
+    const wantBill = x.supplier_id && x.create_bill && x.cost > 0;
+    if (state?.locked) {
+      const b = state.bill;
+      if (!wantBill || Number(x.supplier_id) !== Number(b.supplier_id) || r2(x.cost) !== r2(b.amount) || r2(x.tax_amount) !== r2(b.tax_amount)
+        || (x.reference || '') !== (b.vendor_invoice_number || ''))
+        return res.status(400).json({ error: `A/P bill ${b.bill_number} ${state.locked} — its supplier, cost, GCT and invoice # can't change here now. Ask Accounts Payable.` });
+    }
+    if (wantBill) { const clash = await externalInvoiceClash(db, x.supplier_id, x.reference, state?.bill.id); if (clash) return res.status(400).json({ error: clash }); }
     const who = req.employee?.id || null;
-    await db.execute({ sql: `UPDATE work_order_external_work SET supplier_id = ?, company_name = ?, technician_name = ?, phone = ?, email = ?, description = ?, cost = ?, reference = ?, sent_date = ?, returned_date = ?, notes = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-      args: [x.supplier_id, x.company_name, x.technician_name, x.phone, x.email, x.description, x.cost, x.reference, x.sent_date, x.returned_date, x.notes, who, old.id] });
-    if (Number(old.cost) !== x.cost) {
-      const { rows: [wst] } = await db.execute({ sql: 'SELECT status FROM work_orders WHERE id = ?', args: [old.work_order_id] });
-      await logStatus(db, old.work_order_id, wst.status, `External work cost changed: ${externalLabel(x)} — ${Number(old.cost).toFixed(2)} → ${x.cost.toFixed(2)}`, who);
+    const tx = await db.transaction('write');
+    let committed = false;
+    try {
+      let billId = state ? state.bill.id : null, billNote = '';
+      if (state && !wantBill) {
+        await tx.execute({ sql: VOID_BILL_SQL, args: [`${wo.wo_number} external work no longer billed`, who, billId] });
+        billNote = `, A/P bill ${state.bill.bill_number} voided`; billId = null;
+      } else if (state && !state.locked) {
+        const f = externalBillFields(wo, x);
+        // The bill keeps its own dates once entered unless the return date moved.
+        const keepDates = (old.returned_date || null) === (x.returned_date || null);
+        await tx.execute({ sql: 'UPDATE ap_bills SET supplier_id = ?, vendor_invoice_number = ?, amount = ?, tax_amount = ?, description = ?, bill_date = ?, due_date = ? WHERE id = ?',
+          args: [f.supplier_id, f.vendor_invoice_number, f.amount, f.tax_amount, f.description, keepDates ? state.bill.bill_date : f.bill_date, keepDates ? state.bill.due_date : f.due_date, billId] });
+        if (r2(state.bill.amount) !== r2(x.cost) || Number(state.bill.supplier_id) !== Number(x.supplier_id)) billNote = `, A/P bill ${state.bill.bill_number} updated`;
+      } else if (!state && wantBill) {
+        billId = await createBill(tx, { ...externalBillFields(wo, x), source: 'work_order', created_by: who });
+        const { rows: [b] } = await tx.execute({ sql: 'SELECT bill_number FROM ap_bills WHERE id = ?', args: [billId] });
+        billNote = `, A/P bill ${b.bill_number} raised`;
+      }
+      await tx.execute({ sql: `UPDATE work_order_external_work SET supplier_id = ?, company_name = ?, technician_name = ?, phone = ?, email = ?, description = ?, labour_hours = ?, hourly_rate = ?, other_cost = ?, tax_amount = ?, cost = ?, reference = ?, sent_date = ?, returned_date = ?, notes = ?, ap_bill_id = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        args: [x.supplier_id, x.company_name, x.technician_name, x.phone, x.email, x.description, x.labour_hours, x.hourly_rate, x.other_cost, x.tax_amount, x.cost, x.reference, x.sent_date, x.returned_date, x.notes, billId, who, old.id] });
+      if (r2(old.cost) !== x.cost || billNote)
+        await logStatus(tx, wo.id, wo.status, `External work ${r2(old.cost) !== x.cost ? `cost changed: ${externalLabel(x)} — ${Number(old.cost).toFixed(2)} → ${x.cost.toFixed(2)}` : `updated: ${externalLabel(x)}`}${billNote}`, who);
+      await tx.commit();
+      committed = true;
+    } catch (e) {
+      if (!committed) await tx.rollback();
+      throw e;
     }
     const { rows: [row] } = await db.execute({ sql: `${EXTERNAL_SELECT} WHERE x.id = ?`, args: [old.id] });
     res.json(row);
@@ -933,9 +1034,22 @@ router.delete('/:id/external-work/:xid', requireAnyPermission('wo_technician', '
   try {
     const { rows: [old] } = await db.execute({ sql: 'SELECT * FROM work_order_external_work WHERE id = ? AND work_order_id = ?', args: [req.params.xid, req.params.id] });
     if (!old) return res.status(404).json({ error: 'Not found' });
-    await db.execute({ sql: 'DELETE FROM work_order_external_work WHERE id = ?', args: [old.id] });
-    const { rows: [wst] } = await db.execute({ sql: 'SELECT status FROM work_orders WHERE id = ?', args: [old.work_order_id] });
-    await logStatus(db, old.work_order_id, wst.status, `External work removed: ${externalLabel(old)} — ${old.description} (cost ${Number(old.cost).toFixed(2)})`, req.employee?.id || null);
+    const { rows: [wo] } = await db.execute({ sql: 'SELECT id, wo_number, status FROM work_orders WHERE id = ?', args: [old.work_order_id] });
+    const state = await externalBillState(db, old.ap_bill_id);
+    if (state?.locked) return res.status(400).json({ error: `A/P bill ${state.bill.bill_number} ${state.locked} — it can't be removed here now. Ask Accounts Payable.` });
+    const who = req.employee?.id || null;
+    const tx = await db.transaction('write');
+    let committed = false;
+    try {
+      if (state) await tx.execute({ sql: VOID_BILL_SQL, args: [`${wo.wo_number} external work removed`, who, state.bill.id] });
+      await tx.execute({ sql: 'DELETE FROM work_order_external_work WHERE id = ?', args: [old.id] });
+      await logStatus(tx, wo.id, wo.status, `External work removed: ${externalLabel(old)} — ${old.description} (cost ${Number(old.cost).toFixed(2)})${state ? `, A/P bill ${state.bill.bill_number} voided` : ''}`, who);
+      await tx.commit();
+      committed = true;
+    } catch (e) {
+      if (!committed) await tx.rollback();
+      throw e;
+    }
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

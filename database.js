@@ -2152,7 +2152,8 @@ async function _init() {
     )` },
     // Work done on a work order by an outside technician or company: who did
     // it, what they did and what it cost us (internal cost — not added to
-    // the customer's bill, which is the estimate + parts).
+    // the customer's bill, which is the estimate + parts). With a supplier on
+    // file it raises an A/P bill (ap_bill_id, source 'work_order').
     { sql: `CREATE TABLE IF NOT EXISTS work_order_external_work (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       work_order_id INTEGER NOT NULL REFERENCES work_orders(id),
@@ -3555,6 +3556,15 @@ async function _init() {
     'ALTER TABLE transactions ADD COLUMN recalled_by INTEGER',
     'ALTER TABLE transactions ADD COLUMN recalled_at DATETIME',
     'ALTER TABLE work_orders ADD COLUMN po_number TEXT',
+    // External work cost broken down: labour hours × hourly rate + other
+    // charges + GCT on their invoice (cost = the sum); ap_bill_id = the A/P
+    // bill raised for a supplier on file.
+    'ALTER TABLE work_order_external_work ADD COLUMN labour_hours REAL',
+    'ALTER TABLE work_order_external_work ADD COLUMN hourly_rate REAL',
+    'ALTER TABLE work_order_external_work ADD COLUMN other_cost REAL',
+    'ALTER TABLE work_order_external_work ADD COLUMN tax_amount REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE work_order_external_work ADD COLUMN ap_bill_id INTEGER REFERENCES ap_bills(id)',
+    'UPDATE work_order_external_work SET other_cost = cost WHERE other_cost IS NULL AND labour_hours IS NULL',
     // GCT included in a bill's amount (input tax, base currency) — RetailPOS
     // Books posts it to GCT Recoverable instead of Inventory. NULL = a bill
     // from before the column, filled in once below.
