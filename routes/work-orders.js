@@ -105,6 +105,45 @@ async function recordAccessoryHandBack(executor, woId, status, check, employeeId
   ].filter(Boolean).join('. '), employeeId);
 }
 
+// ─── External work (outside technicians / companies) ─────────────────────
+// Internal cost record only: what the outside party did and what they
+// charged us. The customer is still billed from the estimate + parts.
+const EXTERNAL_SELECT = `SELECT x.*, s.name as supplier_name,
+    (SELECT first_name || ' ' || last_name FROM employees WHERE id = x.created_by) as created_by_name,
+    (SELECT first_name || ' ' || last_name FROM employees WHERE id = x.updated_by) as updated_by_name
+  FROM work_order_external_work x LEFT JOIN suppliers s ON x.supplier_id = s.id`;
+
+async function loadExternalWork(woId) {
+  const { rows } = await db.execute({ sql: `${EXTERNAL_SELECT} WHERE x.work_order_id = ? ORDER BY x.id`, args: [woId] });
+  return rows;
+}
+
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+async function cleanExternalWork(b) {
+  const str = v => { const t = String(v ?? '').trim(); return t || null; };
+  let supplierId = b.supplier_id ? parseInt(b.supplier_id, 10) : null;
+  let company = str(b.company_name);
+  if (supplierId) {
+    const { rows: [sup] } = await db.execute({ sql: 'SELECT id, name FROM suppliers WHERE id = ?', args: [supplierId] });
+    if (!sup) return { error: 'That supplier no longer exists' };
+    company = company || sup.name;
+  }
+  const technician = str(b.technician_name);
+  if (!company && !technician) return { error: 'Enter the outside company or the technician\'s name' };
+  const description = str(b.description);
+  if (!description) return { error: 'Describe the work they did' };
+  const cost = b.cost === '' || b.cost == null ? 0 : Number(b.cost);
+  if (!Number.isFinite(cost) || cost < 0) return { error: 'Cost must be 0 or more' };
+  const sent = str(b.sent_date), back = str(b.returned_date);
+  if (sent && !DAY_RE.test(sent)) return { error: 'Sent date is not a valid date' };
+  if (back && !DAY_RE.test(back)) return { error: 'Returned date is not a valid date' };
+  if (sent && back && back < sent) return { error: 'Returned date is before the sent date' };
+  return { supplier_id: supplierId, company_name: company, technician_name: technician, phone: str(b.phone), email: str(b.email),
+    description, cost: Math.round(cost * 100) / 100, reference: str(b.reference), sent_date: sent, returned_date: back, notes: str(b.notes) };
+}
+
+function externalLabel(x) { return [x.company_name, x.technician_name].filter(Boolean).join(' — '); }
+
 async function removePhotoFile(photo) {
   if (photo.stored_name.startsWith('https://')) await cloudDestroy(photo.stored_name, 'image');
   else { try { fs.unlinkSync(path.join(photoDir, photo.stored_name)); } catch(e) {} }
@@ -297,6 +336,8 @@ router.get('/:id', requirePermission('work_orders'), async (req, res) => {
     });
     wo.tasks = tasks;
     Object.assign(wo, await loadIntakeRecord(wo.id));
+    wo.external_work = await loadExternalWork(wo.id);
+    wo.external_cost_total = Math.round(wo.external_work.reduce((t, x) => t + (Number(x.cost) || 0), 0) * 100) / 100;
     res.json(wo);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -853,6 +894,51 @@ async function syncTaskSkills(taskId, skillIds) {
     await db.execute({ sql: 'INSERT OR IGNORE INTO work_order_task_skills (task_id, skill_id) VALUES (?,?)', args: [taskId, skillId] });
   }
 }
+
+router.post('/:id/external-work', requireAnyPermission('wo_technician', 'wo_assess'), async (req, res) => {
+  try {
+    const { rows: [wo] } = await db.execute({ sql: 'SELECT id FROM work_orders WHERE id = ?', args: [req.params.id] });
+    if (!wo) return res.status(404).json({ error: 'Not found' });
+    const x = await cleanExternalWork(req.body || {});
+    if (x.error) return res.status(400).json({ error: x.error });
+    const who = req.employee?.id || null;
+    const r = await db.execute({ sql: `INSERT INTO work_order_external_work (work_order_id, supplier_id, company_name, technician_name, phone, email, description, cost, reference, sent_date, returned_date, notes, created_by)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [wo.id, x.supplier_id, x.company_name, x.technician_name, x.phone, x.email, x.description, x.cost, x.reference, x.sent_date, x.returned_date, x.notes, who] });
+    const { rows: [wst] } = await db.execute({ sql: 'SELECT status FROM work_orders WHERE id = ?', args: [wo.id] });
+    await logStatus(db, wo.id, wst.status, `External work added: ${externalLabel(x)} — ${x.description} (cost ${x.cost.toFixed(2)})`, who);
+    const { rows: [row] } = await db.execute({ sql: `${EXTERNAL_SELECT} WHERE x.id = ?`, args: [Number(r.lastInsertRowid)] });
+    res.status(201).json(row);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.put('/:id/external-work/:xid', requireAnyPermission('wo_technician', 'wo_assess'), async (req, res) => {
+  try {
+    const { rows: [old] } = await db.execute({ sql: 'SELECT * FROM work_order_external_work WHERE id = ? AND work_order_id = ?', args: [req.params.xid, req.params.id] });
+    if (!old) return res.status(404).json({ error: 'Not found' });
+    const x = await cleanExternalWork(req.body || {});
+    if (x.error) return res.status(400).json({ error: x.error });
+    const who = req.employee?.id || null;
+    await db.execute({ sql: `UPDATE work_order_external_work SET supplier_id = ?, company_name = ?, technician_name = ?, phone = ?, email = ?, description = ?, cost = ?, reference = ?, sent_date = ?, returned_date = ?, notes = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      args: [x.supplier_id, x.company_name, x.technician_name, x.phone, x.email, x.description, x.cost, x.reference, x.sent_date, x.returned_date, x.notes, who, old.id] });
+    if (Number(old.cost) !== x.cost) {
+      const { rows: [wst] } = await db.execute({ sql: 'SELECT status FROM work_orders WHERE id = ?', args: [old.work_order_id] });
+      await logStatus(db, old.work_order_id, wst.status, `External work cost changed: ${externalLabel(x)} — ${Number(old.cost).toFixed(2)} → ${x.cost.toFixed(2)}`, who);
+    }
+    const { rows: [row] } = await db.execute({ sql: `${EXTERNAL_SELECT} WHERE x.id = ?`, args: [old.id] });
+    res.json(row);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/:id/external-work/:xid', requireAnyPermission('wo_technician', 'wo_assess'), async (req, res) => {
+  try {
+    const { rows: [old] } = await db.execute({ sql: 'SELECT * FROM work_order_external_work WHERE id = ? AND work_order_id = ?', args: [req.params.xid, req.params.id] });
+    if (!old) return res.status(404).json({ error: 'Not found' });
+    await db.execute({ sql: 'DELETE FROM work_order_external_work WHERE id = ?', args: [old.id] });
+    const { rows: [wst] } = await db.execute({ sql: 'SELECT status FROM work_orders WHERE id = ?', args: [old.work_order_id] });
+    await logStatus(db, old.work_order_id, wst.status, `External work removed: ${externalLabel(old)} — ${old.description} (cost ${Number(old.cost).toFixed(2)})`, req.employee?.id || null);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 router.post('/:id/tasks', requirePermission('wo_technician'), async (req, res) => {
   try {

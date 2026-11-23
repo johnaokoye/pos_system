@@ -2150,6 +2150,28 @@ async function _init() {
       posted_at DATETIME,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // Work done on a work order by an outside technician or company: who did
+    // it, what they did and what it cost us (internal cost — not added to
+    // the customer's bill, which is the estimate + parts).
+    { sql: `CREATE TABLE IF NOT EXISTS work_order_external_work (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      work_order_id INTEGER NOT NULL REFERENCES work_orders(id),
+      supplier_id INTEGER REFERENCES suppliers(id),
+      company_name TEXT,
+      technician_name TEXT,
+      phone TEXT,
+      email TEXT,
+      description TEXT NOT NULL,
+      cost REAL NOT NULL DEFAULT 0,
+      reference TEXT,
+      sent_date DATE,
+      returned_date DATE,
+      notes TEXT,
+      created_by INTEGER REFERENCES employees(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_by INTEGER REFERENCES employees(id),
+      updated_at DATETIME
+    )` },
     // A work order's parts issued from stock (Issue from Stock): per item
     // (not per part line — the parts list is rewritten when edited), from the
     // WO's branch, recorded once (issue_key). Takes the stock off then.

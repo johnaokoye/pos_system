@@ -514,6 +514,8 @@ Object.assign(App, {
             <p style="font-size:11px;color:var(--text-muted);margin:6px 0 0">Save Parts records what's needed; Confirm Parts is what actually creates the branch transfer or purchase request for anything not in stock here.</p>` : ''}
           </div>` : ''}
 
+          ${this._woExternalSectionHtml(wo)}
+
           ${tasksSectionVisible ? `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px">
             <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Tasks</strong>
             <div id="wo-tasks-list" style="margin-top:6px">
@@ -559,6 +561,111 @@ Object.assign(App, {
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
+  },
+
+  // External Work: outside technicians/companies who did part of the job and
+  // what they cost us. Internal only — never on the customer's invoice.
+  _woExternalSectionHtml(wo) {
+    const list = wo.external_work || [];
+    const editable = this.can('wo_technician') || this.can('wo_assess');
+    this._woExternalRows = list;
+    const esc = v => this.escapeAttr(v || '');
+    const rows = list.map(x => `<div class="wo-ext-row" data-ext-id="${x.id}" style="border-top:1px solid var(--border);padding:6px 0;font-size:12px">
+      <div style="display:flex;justify-content:space-between;gap:8px">
+        <strong>${esc(x.company_name || x.technician_name)}${x.company_name && x.technician_name ? ` <span style="font-weight:normal">— ${esc(x.technician_name)}</span>` : ''}</strong>
+        <strong>${this.fmt(x.cost)}</strong>
+      </div>
+      <div>${esc(x.description)}</div>
+      <div style="color:var(--text-muted)">${[
+        x.phone ? `☎ ${esc(x.phone)}` : '', x.email ? `✉ ${esc(x.email)}` : '',
+        x.reference ? `Their invoice # ${esc(x.reference)}` : '',
+        x.sent_date ? `Sent ${this.fmtDate(x.sent_date)}` : '', x.returned_date ? `Back ${this.fmtDate(x.returned_date)}` : '',
+      ].filter(Boolean).join(' · ')}</div>
+      ${x.notes ? `<div style="color:var(--text-muted)">${esc(x.notes)}</div>` : ''}
+      <div style="color:var(--text-muted);font-size:11px">Added ${this.fmtDateTime(x.created_at)}${x.created_by_name ? ` by ${esc(x.created_by_name)}` : ''}${x.updated_at ? ` · edited ${this.fmtDateTime(x.updated_at)}${x.updated_by_name ? ` by ${esc(x.updated_by_name)}` : ''}` : ''}</div>
+      ${editable ? `<div style="margin-top:4px;display:flex;gap:6px">
+        <button class="btn btn-sm btn-outline" onclick="App._woExternalForm(${wo.id}, ${x.id})">Edit</button>
+        <button class="btn btn-sm btn-outline" onclick="App.deleteWOExternal(${wo.id}, ${x.id})">Remove</button>
+      </div>` : ''}
+    </div>`).join('');
+    return `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">External Work</strong>
+        ${list.length ? `<span style="font-size:12px">Total cost <strong>${this.fmt(wo.external_cost_total)}</strong></span>` : ''}
+      </div>
+      <div style="margin-top:6px">${rows || '<div style="color:var(--text-muted);font-size:12px">No outside technician or company on this job</div>'}</div>
+      <div id="wo-ext-form" style="display:none;margin-top:8px;border-top:1px dashed var(--border);padding-top:8px"></div>
+      ${editable ? `<button type="button" id="wo-ext-add" class="btn btn-sm btn-outline" style="margin-top:8px" onclick="App._woExternalForm(${wo.id})">+ Add External Work</button>` : ''}
+      <p style="font-size:11px;color:var(--text-muted);margin:6px 0 0">Our cost only — not added to the customer's bill.</p>
+    </div>`;
+  },
+
+  async _woExternalForm(woId, xid) {
+    const x = xid ? (this._woExternalRows || []).find(r => r.id === xid) || {} : {};
+    if (!this._woSuppliers) {
+      try { this._woSuppliers = (await this.api('GET', '/suppliers')) || []; } catch (e) { this._woSuppliers = []; }
+    }
+    const esc = v => this.escapeAttr(v || '');
+    const box = document.getElementById('wo-ext-form');
+    if (!box) return;
+    box.innerHTML = `
+      <div class="input-row" style="margin-bottom:6px">
+        <div class="form-group"><label style="font-size:11px">Company</label>
+          <input id="wo-ext-company" list="wo-ext-suppliers" placeholder="Outside company (or pick a supplier)" value="${esc(x.company_name)}">
+          <datalist id="wo-ext-suppliers">${this._woSuppliers.map(s => `<option value="${esc(s.name)}">`).join('')}</datalist></div>
+        <div class="form-group"><label style="font-size:11px">Technician</label><input id="wo-ext-tech" placeholder="Technician's name" value="${esc(x.technician_name)}"></div>
+      </div>
+      <div class="input-row" style="margin-bottom:6px">
+        <div class="form-group"><label style="font-size:11px">Phone</label><input id="wo-ext-phone" value="${esc(x.phone)}"></div>
+        <div class="form-group"><label style="font-size:11px">Email</label><input id="wo-ext-email" type="email" value="${esc(x.email)}"></div>
+      </div>
+      <div class="form-group" style="margin-bottom:6px"><label style="font-size:11px">Work done *</label><textarea id="wo-ext-desc" rows="2" placeholder="What they did">${esc(x.description)}</textarea></div>
+      <div class="input-row" style="margin-bottom:6px">
+        <div class="form-group"><label style="font-size:11px">Cost to us *</label><input id="wo-ext-cost" type="number" min="0" step="0.01" value="${x.cost != null ? x.cost : ''}"></div>
+        <div class="form-group"><label style="font-size:11px">Their invoice / ref #</label><input id="wo-ext-ref" value="${esc(x.reference)}"></div>
+      </div>
+      <div class="input-row" style="margin-bottom:6px">
+        <div class="form-group"><label style="font-size:11px">Sent to them</label><input id="wo-ext-sent" type="date" value="${esc(x.sent_date)}"></div>
+        <div class="form-group"><label style="font-size:11px">Back from them</label><input id="wo-ext-back" type="date" value="${esc(x.returned_date)}"></div>
+      </div>
+      <div class="form-group" style="margin-bottom:6px"><label style="font-size:11px">Notes</label><input id="wo-ext-notes" value="${esc(x.notes)}"></div>
+      <button class="btn btn-sm btn-primary" onclick="App.saveWOExternal(${woId}, ${xid || 'null'})">${xid ? 'Save Changes' : 'Add'}</button>
+      <button class="btn btn-sm btn-secondary" onclick="App._woExternalCancel()">Cancel</button>`;
+    box.style.display = 'block';
+    const add = document.getElementById('wo-ext-add'); if (add) add.style.display = 'none';
+    document.getElementById('wo-ext-company').focus();
+  },
+
+  _woExternalCancel() {
+    const box = document.getElementById('wo-ext-form');
+    if (box) { box.style.display = 'none'; box.innerHTML = ''; }
+    const add = document.getElementById('wo-ext-add'); if (add) add.style.display = '';
+  },
+
+  async saveWOExternal(woId, xid) {
+    const v = id => document.getElementById(id).value.trim();
+    const company = v('wo-ext-company');
+    const sup = (this._woSuppliers || []).find(s => (s.name || '').trim().toLowerCase() === company.toLowerCase());
+    const body = {
+      company_name: company, supplier_id: sup ? sup.id : null, technician_name: v('wo-ext-tech'),
+      phone: v('wo-ext-phone'), email: v('wo-ext-email'), description: v('wo-ext-desc'), cost: v('wo-ext-cost'),
+      reference: v('wo-ext-ref'), sent_date: v('wo-ext-sent'), returned_date: v('wo-ext-back'), notes: v('wo-ext-notes'),
+    };
+    if (!body.company_name && !body.technician_name) { this.alert('Enter the outside company or the technician\'s name', 'error'); return; }
+    if (!body.description) { this.alert('Describe the work they did', 'error'); return; }
+    if (body.cost === '') { this.alert('Enter what it cost (0 if nothing)', 'error'); return; }
+    try {
+      if (xid) await this.api('PUT', `/work-orders/${woId}/external-work/${xid}`, body);
+      else await this.api('POST', `/work-orders/${woId}/external-work`, body);
+      await this.viewWorkOrder(woId);
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  async deleteWOExternal(woId, xid) {
+    const x = (this._woExternalRows || []).find(r => r.id === xid);
+    if (!confirm(`Remove the external work by ${x ? (x.company_name || x.technician_name) : 'this party'}?`)) return;
+    try { await this.api('DELETE', `/work-orders/${woId}/external-work/${xid}`); await this.viewWorkOrder(woId); }
+    catch (e) { this.alert(e.message, 'error'); }
   },
 
   _toggleWODescEdit(id) {
