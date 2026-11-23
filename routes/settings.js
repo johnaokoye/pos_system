@@ -70,6 +70,67 @@ router.get('/currency', requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Which catalogues the customer-facing website (the Next.js storefront, not
+// the WooCommerce sync) offers: 'rentals' (rental catalogue + rental requests
+// only), 'retail' (retail catalogue, cart and checkout only) or 'both'.
+// Unset means 'both' — the storefront's behaviour before this setting existed.
+// The storefront reads it with its API key on every request (briefly cached).
+// website_banner_rentals / website_banner_retail are optional plain-text
+// announcement strips the storefront shows across the top of its rental /
+// retail pages (empty = no banner).
+const WEBSITE_MODES = ['rentals', 'retail', 'both'];
+const WEBSITE_BANNER_KEYS = ['website_banner_rentals', 'website_banner_retail'];
+const WEBSITE_BANNER_MAX = 300;
+// website_url: the storefront's public address, used for links in customer
+// emails the POS sends about the website (e.g. rental application decisions).
+
+
+async function websiteSettings() {
+  const { rows } = await db.execute({ sql: "SELECT key, value FROM settings WHERE key IN ('website_mode','website_banner_rentals','website_banner_retail','website_url')", args: [] });
+  const s = Object.fromEntries(rows.map(r => [r.key, r.value]));
+  return {
+    website_mode: WEBSITE_MODES.includes(s.website_mode) ? s.website_mode : 'both',
+    website_banner_rentals: s.website_banner_rentals || '',
+    website_banner_retail: s.website_banner_retail || '',
+    website_url: s.website_url || '',
+  };
+}
+
+router.get('/website', requireAuth, async (req, res) => {
+  try {
+    res.json(await websiteSettings());
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Partial update: only the fields sent are changed.
+router.put('/website', requirePermission('settings'), async (req, res) => {
+  try {
+    const body = req.body || {};
+    const updates = [];
+    if ('website_mode' in body) {
+      if (!WEBSITE_MODES.includes(body.website_mode)) return res.status(400).json({ error: `website_mode must be one of: ${WEBSITE_MODES.join(', ')}` });
+      updates.push(['website_mode', body.website_mode]);
+    }
+    for (const key of WEBSITE_BANNER_KEYS) {
+      if (!(key in body)) continue;
+      // One line of plain text: collapse newlines/extra spaces.
+      const text = String(body[key] ?? '').replace(/\s+/g, ' ').trim();
+      if (text.length > WEBSITE_BANNER_MAX) return res.status(400).json({ error: `Banner text must be ${WEBSITE_BANNER_MAX} characters or fewer` });
+      updates.push([key, text]);
+    }
+    if ('website_url' in body) {
+      const url = String(body.website_url ?? '').trim().replace(/\/+$/, '');
+      if (url && !/^https?:\/\/[^\s]+$/i.test(url)) return res.status(400).json({ error: 'Website URL must start with http:// or https://' });
+      if (url.length > 200) return res.status(400).json({ error: 'Website URL is too long' });
+      updates.push(['website_url', url]);
+    }
+    for (const [key, value] of updates) {
+      await db.execute({ sql: 'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', args: [key, value] });
+    }
+    res.json(await websiteSettings());
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.put('/', requirePermission('settings'), async (req, res) => {
   try {
     // The Settings form saves every tab's fields in one request regardless
