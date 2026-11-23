@@ -3396,6 +3396,9 @@ async function _init() {
     // Item handed back without a pickup sale — Not Worth Fixing or Cancelled
     'ALTER TABLE work_orders ADD COLUMN returned_to_customer_at DATETIME',
     'ALTER TABLE work_orders ADD COLUMN returned_to_customer_by INTEGER REFERENCES employees(id)',
+    // Awaiting-pickup job put on the cashier's Hold Recall by hand when the customer comes in to collect
+    'ALTER TABLE work_orders ADD COLUMN cashier_hold_at DATETIME',
+    'ALTER TABLE work_orders ADD COLUMN cashier_hold_by INTEGER REFERENCES employees(id)',
     // Pickup window now runs 30 days from completion, not from intake — re-date open WOs (no-op once applied)
     "UPDATE work_orders SET pickup_due_date = CASE WHEN completed_at IS NOT NULL THEN date(completed_at,'+30 days') END WHERE status NOT IN ('picked_up','cancelled','not_worth_fixing')",
     // A real catalog part's own tax_rate at the time it was added; a "Q" item

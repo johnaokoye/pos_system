@@ -86,7 +86,7 @@ Object.assign(App, {
           <td>${wo.branch_name||'—'}</td>
           <td>${this.fmtDate(wo.created_at)}</td>
           ${isQueue ? `<td>${this._woWaitingLabel(wo.created_at)}</td>` : `<td>${wo.pickup_due_date ? this.fmtDate(wo.pickup_due_date) : '<span style="color:var(--text-muted)">After completion</span>'}${this._woPickupBadge(wo)}</td>`}
-          <td><span class="badge-pill ${this._woStatusBadge[wo.status]||'badge-secondary'}">${this._woStatusLabels[wo.status]||wo.status}</span>${wo.returned_to_customer_at ? '<div style="font-size:11px;color:var(--text-muted)">Returned to customer</div>' : ''}${this._woFollowUpBadge(wo)}</td>
+          <td><span class="badge-pill ${this._woStatusBadge[wo.status]||'badge-secondary'}">${this._woStatusLabels[wo.status]||wo.status}</span>${wo.returned_to_customer_at ? '<div style="font-size:11px;color:var(--text-muted)">Returned to customer</div>' : ''}${wo.status === 'awaiting_pickup' && wo.cashier_hold_at ? '<div style="font-size:11px;color:var(--warning)">On hold for cashier</div>' : ''}${this._woFollowUpBadge(wo)}</td>
           <td style="text-align:right;white-space:nowrap">
             ${wo.follow_up_due && this.can('work_orders') ? `<button class="btn btn-sm btn-primary" onclick="App.showWOCallModal(${wo.id})">☎ Log Call</button> ` : ''}<button class="btn btn-sm btn-outline" onclick="App.viewWorkOrder(${wo.id})">View</button>
           </td>
@@ -562,7 +562,9 @@ Object.assign(App, {
           ${['in_progress','awaiting_signoff','awaiting_parts'].includes(wo.status) && this.can('work_orders') ? `<button class="btn btn-secondary" onclick="App.closeModal();App.showWOStatusCommentModal(${wo.id})">Add Status Update</button>` : ''}
           ${['in_progress','awaiting_signoff'].includes(wo.status) && this.can('wo_signoff') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showWOSignoffModal(${wo.id})">Supervisor Sign-Off</button>` : ''}
           ${wo.status==='complete' && this.can('work_orders') ? `<button class="btn btn-primary" onclick="App.closeModal();App.showWONotifyModal(${wo.id})">Notify Customer</button>` : ''}
-          ${wo.status==='awaiting_pickup' ? `<span class="badge-pill badge-warning" style="align-self:center;padding:6px 10px" title="Collected at the register — open Hold Recall in POS to take payment">On hold — awaiting cashier</span>` : ''}
+          ${['complete','awaiting_pickup'].includes(wo.status) && !wo.cashier_hold_at && this.can('work_orders') ? `<button class="btn btn-primary" title="The customer is here to collect — puts it on the POS Hold Recall for the cashier to take the final payment" onclick="App.woPlaceCashierHold(${wo.id})">Place on Hold for Cashier</button>` : ''}
+          ${wo.status==='awaiting_pickup' && wo.cashier_hold_at ? `<span class="badge-pill badge-warning" style="align-self:center;padding:6px 10px" title="Collected at the register — open Hold Recall in POS to take payment">On hold — awaiting cashier${wo.cashier_hold_by_name ? ` (by ${this.escapeAttr(wo.cashier_hold_by_name)})` : ''}</span>` : ''}
+          ${wo.status==='awaiting_pickup' && wo.cashier_hold_at && this.can('work_orders') ? `<button class="btn btn-secondary" title="The customer left without collecting — takes it off the cashier's Hold Recall" onclick="App.woReleaseCashierHold(${wo.id})">Take Off Hold</button>` : ''}
           ${['intake','assessed','pending_deposit'].includes(wo.status) && this.can('work_orders') ? `<button class="btn btn-danger" onclick="App.closeModal();App.showWOCancelModal(${wo.id})">Cancel Work Order</button>` : ''}
           ${['not_worth_fixing','cancelled'].includes(wo.status) && !wo.returned_to_customer_at && this.can('work_orders') ? `<button class="btn btn-primary" onclick="App.showWOReturnToCustomerModal(${wo.id})">Return to Customer</button>` : ''}
           <button class="btn btn-secondary" title="Opens the customer copy — choose Save as PDF in the print dialog to attach it to an email" onclick="App.printWorkOrderInvoice(${wo.id})">🖨️ Print Service and Repair Tax Invoice</button>
@@ -1644,6 +1646,29 @@ Object.assign(App, {
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
+  },
+
+  // Signed-off work reaches the POS Hold Recall only when the customer comes in to collect
+  async woPlaceCashierHold(id) {
+    if (!confirm('Place this work order on hold for the cashier? Do this when the customer is here to collect.')) return;
+    try {
+      await this.api('PATCH', `/work-orders/${id}/cashier-hold`, { employee_id: this.currentUser.id });
+      this.closeModal();
+      this.alert('On hold for the cashier — take the payment from POS Hold Recall');
+      this.renderWorkOrders();
+      if (this.updateHoldBadge) this.updateHoldBadge();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  async woReleaseCashierHold(id) {
+    if (!confirm('Take this work order off the cashier\'s hold? The item stays awaiting pickup.')) return;
+    try {
+      await this.api('DELETE', `/work-orders/${id}/cashier-hold`);
+      this.closeModal();
+      this.alert('Taken off the cashier\'s hold');
+      this.renderWorkOrders();
+      if (this.updateHoldBadge) this.updateHoldBadge();
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   async sendWONotifyEmail(id) {

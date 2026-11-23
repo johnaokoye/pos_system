@@ -2494,7 +2494,7 @@ Object.assign(App, {
         ...held.map(h => ({ type: 'order', created_at: h.created_at, data: h })),
         ...pendingRentals.map(r => ({ type: 'rental', created_at: r.created_at, data: r })),
         ...pendingRentalBalances.map(r => ({ type: 'rental_balance', created_at: r.returned_at || r.created_at, data: r })),
-        ...pendingWOs.map(w => ({ type: 'work_order', created_at: w.created_at, data: w })),
+        ...pendingWOs.map(w => ({ type: 'work_order', created_at: w.cashier_hold_at || w.created_at, data: w })),
         ...pendingExchanges.map(r => ({ type: 'exchange', created_at: r.created_at, data: r })),
       ].sort((a, b) => this._utcDate(b.created_at) - this._utcDate(a.created_at));
       this._holdRecallList = held;

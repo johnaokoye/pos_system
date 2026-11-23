@@ -67,6 +67,7 @@ const WO_LIST_SELECT = `SELECT wo.*, c.first_name || ' ' || c.last_name as custo
   e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name,
   cb.first_name || ' ' || cb.last_name as completed_by_name,
   (SELECT first_name || ' ' || last_name FROM employees WHERE id = wo.returned_to_customer_by) as returned_to_customer_by_name,
+  (SELECT first_name || ' ' || last_name FROM employees WHERE id = wo.cashier_hold_by) as cashier_hold_by_name,
   julianday('now') - julianday(wo.pickup_due_date) as days_past_pickup_due,
   (SELECT COALESCE(SUM(total),0) FROM work_order_items WHERE work_order_id = wo.id) as parts_total,
   (SELECT COALESCE(SUM(total * tax_rate / 100.0),0) FROM work_order_items WHERE work_order_id = wo.id) as parts_tax_total,
@@ -251,8 +252,10 @@ router.get('/', requirePermission('work_orders'), async (req, res) => {
     else if (view === 'follow_ups') { sql += " AND wo.status NOT IN ('picked_up','cancelled') AND wo.returned_to_customer_at IS NULL"; }
     // Assessment fee (status='intake'), deposit (status='pending_deposit'), or the
     // final balance (status='awaiting_pickup') due — surfaced in the POS Hold
-    // Recall list so a cashier can pick it up and take payment there.
-    else if (view === 'awaiting_payment') { sql += " AND wo.status IN ('intake','pending_deposit','awaiting_pickup')"; }
+    // Recall list so a cashier can pick it up and take payment there. A
+    // finished job only goes there once someone places it on hold for the
+    // cashier when the customer comes in to collect (cashier_hold_at).
+    else if (view === 'awaiting_payment') { sql += " AND (wo.status IN ('intake','pending_deposit') OR (wo.status = 'awaiting_pickup' AND wo.cashier_hold_at IS NOT NULL))"; }
     else if (['awaiting_pickup', 'picked_up', 'cancelled', 'not_worth_fixing', 'assessed'].includes(view)) { sql += ' AND wo.status = ?'; params.push(view); effectiveStatus = view; }
     else if (status) { sql += ' AND wo.status = ?'; params.push(status); effectiveStatus = status; }
     if (customer_id) { sql += ' AND wo.customer_id = ?'; params.push(customer_id); }
@@ -1517,6 +1520,49 @@ router.patch('/:id/notify', requirePermission('work_orders'), async (req, res) =
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Signed-off work isn't put on the cashier's Hold Recall automatically: when
+// the customer comes in to collect, staff place it on hold for the cashier
+// (owner's rule, 2026-11-23). A complete job not yet notified moves to
+// awaiting_pickup at the same time — the customer is at the counter. Taken
+// off again if they leave without paying.
+router.patch('/:id/cashier-hold', requireAnyPermission('work_orders', 'pos'), async (req, res) => {
+  try {
+    const who = req.employee?.id || req.body.employee_id || null;
+    const { rows: [wo] } = await db.execute({ sql: 'SELECT * FROM work_orders WHERE id = ?', args: [req.params.id] });
+    if (!wo) return res.status(404).json({ error: 'Not found' });
+    if (!['complete', 'awaiting_pickup'].includes(wo.status)) return res.status(400).json({ error: `This work order is ${wo.status.replace(/_/g, ' ')} — only a signed-off job is placed on hold for collection` });
+    if (wo.cashier_hold_at) return res.status(400).json({ error: 'This work order is already on hold for the cashier' });
+    const tx = await db.transaction('write');
+    let committed = false;
+    try {
+      if (wo.status === 'complete') {
+        await tx.execute({ sql: `UPDATE work_orders SET status = 'awaiting_pickup', notification_method = COALESCE(notification_method, 'in_person'), notified_at = COALESCE(notified_at, CURRENT_TIMESTAMP), notified_by = COALESCE(notified_by, ?) WHERE id = ?`, args: [who, wo.id] });
+      }
+      await tx.execute({ sql: 'UPDATE work_orders SET cashier_hold_at = CURRENT_TIMESTAMP, cashier_hold_by = ? WHERE id = ?', args: [who, wo.id] });
+      await logStatus(tx, wo.id, 'awaiting_pickup', 'Customer came in to collect — placed on hold for the cashier', who);
+      await tx.commit();
+      committed = true;
+    } finally {
+      if (!committed) await tx.rollback().catch(() => {});
+    }
+    const { rows: [updated] } = await db.execute({ sql: `${WO_LIST_SELECT} WHERE wo.id = ?`, args: [wo.id] });
+    res.json(updated);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/:id/cashier-hold', requireAnyPermission('work_orders', 'pos'), async (req, res) => {
+  try {
+    const who = req.employee?.id || null;
+    const { rows: [wo] } = await db.execute({ sql: 'SELECT * FROM work_orders WHERE id = ?', args: [req.params.id] });
+    if (!wo) return res.status(404).json({ error: 'Not found' });
+    if (wo.status !== 'awaiting_pickup' || !wo.cashier_hold_at) return res.status(400).json({ error: 'This work order is not on hold for the cashier' });
+    await db.execute({ sql: 'UPDATE work_orders SET cashier_hold_at = NULL, cashier_hold_by = NULL WHERE id = ?', args: [wo.id] });
+    await logStatus(db, wo.id, 'awaiting_pickup', 'Taken off the cashier\'s hold — not collected', who);
+    const { rows: [updated] } = await db.execute({ sql: `${WO_LIST_SELECT} WHERE wo.id = ?`, args: [wo.id] });
+    res.json(updated);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Hard-gates pickup on the final balance — labor + consumables + parts, less
 // the deposit already paid — the same cash-handling pattern as the
 // assessment fee and deposit above (requireAnyPermission wo_assess/pos,
@@ -1530,6 +1576,7 @@ router.patch('/:id/final-payment', requireAnyPermission('wo_assess', 'pos'), asy
     const { rows: [wo] } = await db.execute({ sql: `${WO_LIST_SELECT} WHERE wo.id = ?`, args: [req.params.id] });
     if (!wo) return res.status(404).json({ error: 'Not found' });
     if (wo.status !== 'awaiting_pickup') return res.status(400).json({ error: `This work order is ${wo.status}, not awaiting pickup` });
+    if (!wo.cashier_hold_at) return res.status(400).json({ error: 'Place this work order on hold for the cashier first — that\'s done when the customer comes in to collect' });
 
     const handBack = await checkAccessoryHandBack(wo.id, accessories_returned, accessories_note);
     if (handBack.error) return res.status(400).json({ error: handBack.error });
