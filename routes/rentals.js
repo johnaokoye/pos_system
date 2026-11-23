@@ -325,6 +325,7 @@ router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
     agreement.replacements = replacements;
     attachDepositReturnPolicy(agreement);
     attachClosedDayGrace(agreement, await loadClosedDaySettings(db));
+    agreement.photos = await rentalPhotos(agreement.id);
     res.json(agreement);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -735,6 +736,98 @@ router.get('/agreements/:id/po-attachment/download', async (req, res) => {
 // earlier step fall back to their existing value instead of being required
 // again — a driver's request body won't include security_employee_id/
 // security_signature/delivery_driver_id at all.
+// ─── Check-out / check-in photos ──────────────────────────────────────────
+// Photos of the item(s) at each handover: issue (counter or the delivery
+// driver at the customer's), pickup (the driver collecting) and return (the
+// counter signing it back in). Each of those steps is refused until at least
+// one photo for it has been taken (pendingPhotoCount); completing the step
+// stamps used_at, after which they stay on the record. Local files live in
+// uploads/rental-photos (a PROTECTED_UPLOAD_DIRS folder); Cloudinary when set.
+const rentalPhotoDir = path.join(__dirname, '../uploads/rental-photos');
+const rentalPhotoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => cb(null, /^image\//.test(file.mimetype)),
+});
+const RENTAL_PHOTO_STAGES = ['issue', 'pickup', 'return'];
+const RENTAL_PHOTO_SELECT = `SELECT p.*, CASE WHEN p.stored_name LIKE 'https://%' THEN p.stored_name ELSE '/uploads/rental-photos/' || p.stored_name END as url,
+  e.first_name || ' ' || e.last_name as uploaded_by_name
+  FROM rental_agreement_photos p LEFT JOIN employees e ON e.id = p.uploaded_by`;
+
+async function rentalPhotos(agreementId) {
+  return (await db.execute({ sql: `${RENTAL_PHOTO_SELECT} WHERE p.agreement_id = ? ORDER BY p.id`, args: [agreementId] })).rows;
+}
+async function pendingPhotoCount(agreementId, stage) {
+  const { rows: [r] } = await db.execute({ sql: 'SELECT COUNT(*) AS n FROM rental_agreement_photos WHERE agreement_id = ? AND stage = ? AND used_at IS NULL', args: [agreementId, stage] });
+  return Number(r.n);
+}
+const photoRequiredError = stage => `Take at least one photo of the item(s) at ${stage} first`;
+async function stampPhotos(executor, agreementId, stage, at) {
+  await executor.execute({ sql: 'UPDATE rental_agreement_photos SET used_at = ? WHERE agreement_id = ? AND stage = ? AND used_at IS NULL', args: [at, agreementId, stage] });
+}
+
+// Who may add/remove a stage's photos, and whether that stage is open now.
+function photoStageError(stage, a, emp) {
+  if (!RENTAL_PHOTO_STAGES.includes(stage)) return [400, 'Stage must be issue, pickup or return'];
+  const p = emp.permissions;
+  if (stage === 'issue') {
+    if (a.status !== 'awaiting_issue') return [400, `This rental is ${a.status}, not awaiting issue`];
+    if (!can(p, 'rentals_issue') && !(emp.is_driver && can(p, 'rentals_confirm_delivery') && a.delivery_driver_id === emp.id)) return [403, 'Only staff issuing this rental (or its delivery driver) can add issue photos'];
+  } else if (stage === 'pickup') {
+    if (a.status !== 'active' || !a.pickup_required) return [400, 'This rental has no pickup to photograph'];
+    if (a.pickup_confirmed_at) return [400, 'Pickup has already been confirmed'];
+    if (!can(p, 'rentals_issue') && !(emp.is_driver && can(p, 'rentals_confirm_pickup') && a.pickup_driver_id === emp.id)) return [403, 'Only the driver assigned to this pickup can add pickup photos'];
+  } else {
+    if (a.status !== 'active') return [400, `This rental is ${a.status} — nothing to return`];
+    if (!can(p, 'rentals_returns')) return [403, 'Missing permission: rentals_returns'];
+  }
+  return null;
+}
+
+router.get('/agreements/:id/photos', requireAnyPermission('rentals_issue', 'rentals_confirm_delivery', 'rentals_confirm_pickup', 'rentals_returns'), async (req, res) => {
+  try { res.json(await rentalPhotos(req.params.id)); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/agreements/:id/photos', requireAnyPermission('rentals_issue', 'rentals_confirm_delivery', 'rentals_confirm_pickup', 'rentals_returns'), (req, res, next) => {
+  rentalPhotoUpload.single('photo')(req, res, err => err ? res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'Photo is larger than 15 MB' : err.message }) : next());
+}, async (req, res) => {
+  try {
+    const { rows: [a] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    if (!a) return res.status(404).json({ error: 'Not found' });
+    const stage = String(req.body.stage || '');
+    const err = photoStageError(stage, a, req.employee);
+    if (err) return res.status(err[0]).json({ error: err[1] });
+    if (!req.file) return res.status(400).json({ error: 'No photo uploaded, or the file is not an image' });
+    const base = `rental${a.id}-${stage}-${Date.now()}-${Math.round(Math.random() * 1e6)}`;
+    let storedName;
+    const cloud = await cloudUpload(req.file.buffer, { folder: 'pos-system/rental-photos', public_id: base, resource_type: 'image' });
+    if (cloud) storedName = cloud.secure_url;
+    else {
+      fs.mkdirSync(rentalPhotoDir, { recursive: true });
+      storedName = `${base}${(path.extname(req.file.originalname) || '.jpg').toLowerCase().replace(/[^.\w]/g, '')}`;
+      fs.writeFileSync(path.join(rentalPhotoDir, storedName), req.file.buffer);
+    }
+    await db.execute({ sql: 'INSERT INTO rental_agreement_photos (agreement_id, stage, stored_name, original_name, mime_type, file_size, uploaded_by) VALUES (?,?,?,?,?,?,?)',
+      args: [a.id, stage, storedName, req.file.originalname, req.file.mimetype, req.file.size, req.employee?.id || null] });
+    res.status(201).json(await rentalPhotos(a.id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Only while its step hasn't been completed.
+router.delete('/agreements/:id/photos/:pid', requireAnyPermission('rentals_issue', 'rentals_confirm_delivery', 'rentals_confirm_pickup', 'rentals_returns'), async (req, res) => {
+  try {
+    const { rows: [ph] } = await db.execute({ sql: 'SELECT * FROM rental_agreement_photos WHERE id = ? AND agreement_id = ?', args: [req.params.pid, req.params.id] });
+    if (!ph) return res.status(404).json({ error: 'Not found' });
+    if (ph.used_at) return res.status(400).json({ error: 'This photo is part of a completed handover and stays on the record' });
+    const { rows: [a] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    const err = photoStageError(ph.stage, a, req.employee);
+    if (err) return res.status(err[0]).json({ error: err[1] });
+    if (!/^https:/.test(ph.stored_name)) fs.rmSync(path.join(rentalPhotoDir, path.basename(ph.stored_name)), { force: true });
+    await db.execute({ sql: 'DELETE FROM rental_agreement_photos WHERE id = ?', args: [ph.id] });
+    res.json(await rentalPhotos(a.id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.patch('/agreements/:id/issue', requireAnyPermission('rentals_issue', 'rentals_confirm_delivery'), async (req, res) => {
   try {
     // Whether delivery/an operator is needed, and what it costs, was already
@@ -770,6 +863,7 @@ router.patch('/agreements/:id/issue', requireAnyPermission('rentals_issue', 'ren
     if (!securityEmployeeId) return res.status(400).json({ error: 'Select the security employee who verified this item leaving' });
     if (!customer_signature) return res.status(400).json({ error: 'Customer signature is required to issue this rental' });
     if (!securityAlreadyDone && !security_signature) return res.status(400).json({ error: "The security employee's signature is required to issue this rental" });
+    if (!(await pendingPhotoCount(agreement.id, 'issue'))) return res.status(400).json({ error: photoRequiredError('issue'), code: 'photos_required' });
 
     // Defaults to the moment this request is processed, but staff can back-date
     // it to when the item actually went out (e.g. it sat ready at the counter
@@ -808,6 +902,7 @@ router.patch('/agreements/:id/issue', requireAnyPermission('rentals_issue', 'ren
         req.params.id,
       ],
     });
+    await stampPhotos(db, agreement.id, 'issue', issuedAt.toISOString());
 
     const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
     const { rows: agItems } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
@@ -1105,9 +1200,12 @@ router.patch('/agreements/:id/confirm-pickup', requirePermission('rentals_confir
     if (agreement.status !== 'active') return res.status(400).json({ error: 'Only active rentals can be confirmed for pickup' });
     if (agreement.pickup_driver_id !== req.employee.id) return res.status(403).json({ error: 'This pickup is assigned to a different driver' });
     if (agreement.pickup_confirmed_at) return res.status(400).json({ error: 'Pickup has already been confirmed' });
+    if (!(await pendingPhotoCount(agreement.id, 'pickup'))) return res.status(400).json({ error: photoRequiredError('pickup'), code: 'photos_required' });
     const sigPath = await uploadSignature(customer_signature, `rental-${req.params.id}-pickup-customer`);
     if (!sigPath) return res.status(400).json({ error: 'Customer signature is required to confirm pickup' });
-    await db.execute({ sql: 'UPDATE rental_agreements SET pickup_confirmed_at = ?, pickup_customer_name = ?, pickup_customer_signature = ? WHERE id = ?', args: [new Date().toISOString(), customer_name.trim(), sigPath, req.params.id] });
+    const pickedAt = new Date().toISOString();
+    await db.execute({ sql: 'UPDATE rental_agreements SET pickup_confirmed_at = ?, pickup_customer_name = ?, pickup_customer_signature = ? WHERE id = ?', args: [pickedAt, customer_name.trim(), sigPath, req.params.id] });
+    await stampPhotos(db, agreement.id, 'pickup', pickedAt);
     const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
     res.json(updated);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -1932,6 +2030,7 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
       // redundant chain-of-custody check, not a real one.
       if (!agreement.pickup_confirmed_at && !driver_signature) return res.status(400).json({ error: "The driver's signature is required to complete this pickup return" });
     }
+    if (!(await pendingPhotoCount(agreement.id, 'return'))) return res.status(400).json({ error: photoRequiredError('return'), code: 'photos_required' });
 
     const { rows: existingItems } = await db.execute({ sql: 'SELECT * FROM rental_agreement_items WHERE agreement_id = ?', args: [req.params.id] });
     const outstandingIds = existingItems.filter(i => i.quantity_returned < i.quantity).map(i => i.id);
@@ -2137,6 +2236,7 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
       }
 
       await tx.execute({ sql: `UPDATE rental_agreements SET settlement_transaction_id = ?, deposit_refunded = ?, duration_adjustment_total = duration_adjustment_total + ?, tax_adjustment_total = tax_adjustment_total + ?, damage_fee_total = damage_fee_total + ?, pickup_driver_id = ?, status = ?, returned_at = ?, return_security_employee_id = ?, return_security_confirmed_at = ?, return_security_signature = ?, return_driver_employee_id = ?, return_driver_confirmed_at = ?, return_driver_signature = ?, deposit_return_method = ? WHERE id = ?`, args: [settlementTxId, depositRefunded, durationAdjustmentTotal, taxAdjustmentTotal, damageFeeTotal, pickupDriverId, newStatus, allReturned ? now.toISOString() : agreement.returned_at, return_security_employee_id, now.toISOString(), guardSigPath, returnDriverId, returnDriverConfirmedAt, driverSigPath, depositReturnMethod, req.params.id] });
+      await stampPhotos(tx, agreement.id, 'return', now.toISOString());
       await tx.commit();
       if (checkoutIsCredit) { try { await runCreditCheck(agreement.customer_id); } catch(e) {} }
     } catch(e) {

@@ -331,6 +331,21 @@ async function _init() {
       uploaded_by INTEGER REFERENCES employees(id),
       uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // Rental check-out / check-in photos (stage issue | pickup | return).
+    // Taken before the step completes (used_at NULL = not yet part of a
+    // completed step, still removable); the step stamps used_at.
+    { sql: `CREATE TABLE IF NOT EXISTS rental_agreement_photos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agreement_id INTEGER NOT NULL REFERENCES rental_agreements(id),
+      stage TEXT NOT NULL,
+      stored_name TEXT NOT NULL,
+      original_name TEXT,
+      mime_type TEXT,
+      file_size INTEGER,
+      uploaded_by INTEGER REFERENCES employees(id),
+      uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      used_at DATETIME
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS work_order_status_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       work_order_id INTEGER NOT NULL REFERENCES work_orders(id),

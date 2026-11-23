@@ -1679,6 +1679,7 @@ Object.assign(App, {
               ${this._sigButton(a.issue_security_signature, 'View Guard Signature')}${this._sigButton(a.issue_customer_signature, 'View Customer Signature')}</div>
             ${a.status==='returned' ? `<div>Return — ${a.return_security_employee_name ? `Security: ${a.return_security_employee_name} (${this.fmtDateTime(a.return_security_confirmed_at)})` : '<span style="color:var(--text-muted)">no security record</span>'}${a.return_driver_employee_name ? `, Collected by: ${a.return_driver_employee_name}` : ''}
               ${this._sigButton(a.return_security_signature, 'View Guard Signature')}</div>` : ''}
+            ${this._rentalPhotoRecordHtml(a.photos || [])}
           </div>` : ''}
           <table class="table" style="margin-bottom:12px">
             <thead><tr><th>Product</th><th>Rate</th><th>Class</th><th>Qty</th><th>Returned</th><th>Est. Fee</th><th>Actual Fee</th><th>Deposit</th><th>Condition</th></tr></thead>
@@ -3366,6 +3367,91 @@ Object.assign(App, {
     }
   },
 
+  // ─── Check-out / check-in photos ───
+  // Issue, driver pickup and return each need at least one photo of the
+  // item(s), uploaded as it's taken (POST /rentals/agreements/:id/photos).
+  // "Take Photo" opens the camera on a phone or tablet. Return shows the
+  // photos from when it went out, to compare.
+  _rentalPhotoLabels: { issue: 'Photos at Issue', pickup: 'Photos at Pickup', return: 'Photos at Return' },
+
+  _rentalPhotoPickerHtml(id, stage) {
+    return `<div class="form-group" style="border-top:1px solid var(--border);padding-top:12px">
+        <label>${this._rentalPhotoLabels[stage]} <span style="font-weight:400;color:var(--text-muted)">(required — at least one of the item(s)${stage === 'issue' ? ' as it goes out' : stage === 'pickup' ? ' as you collect it' : ' as it comes back'})</span></label>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <label class="btn btn-sm btn-outline" style="margin:0;cursor:pointer">📷 Take Photo<input type="file" accept="image/*" capture="environment" style="display:none" onchange="App._rentalAddPhotos(${id},'${stage}',this)"></label>
+          <label class="btn btn-sm btn-outline" style="margin:0;cursor:pointer">Upload Photos<input type="file" accept="image/*" multiple style="display:none" onchange="App._rentalAddPhotos(${id},'${stage}',this)"></label>
+        </div>
+        <div id="rph-${stage}" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px"></div>
+        <div id="rph-${stage}-compare"></div>
+      </div>`;
+  },
+
+  _rentalPhotoThumb(p, removable) {
+    return `<div style="position:relative">
+        <a href="${p.url}" target="_blank" rel="noopener"><img src="${p.url}" loading="lazy" style="width:72px;height:72px;object-fit:cover;border-radius:4px;border:1px solid var(--border)" title="${this.escapeAttr(`${p.uploaded_by_name || ''} ${this.fmtDateTime(p.uploaded_at)}`)}"></a>
+        ${removable ? `<button type="button" title="Remove photo" onclick="App._rentalRemovePhoto(${p.agreement_id},'${p.stage}',${p.id})" style="position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;border:none;background:var(--danger);color:#fff;font-size:11px;cursor:pointer;line-height:20px;padding:0">✕</button>` : ''}
+      </div>`;
+  },
+
+  _rentalPhotoRender(stage, photos) {
+    this._rentalPhotoCache = photos;
+    const el = document.getElementById(`rph-${stage}`);
+    if (!el) return;
+    const pending = photos.filter(p => p.stage === stage && !p.used_at);
+    el.innerHTML = pending.map(p => this._rentalPhotoThumb(p, true)).join('') || '<span style="font-size:12px;color:var(--text-muted)">No photos yet</span>';
+    const cmp = document.getElementById(`rph-${stage}-compare`);
+    const earlier = stage === 'issue' ? [] : photos.filter(p => p.used_at && (p.stage === 'issue' || (stage === 'return' && p.stage === 'pickup')));
+    if (cmp) cmp.innerHTML = earlier.length ? `<div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;margin-top:8px">Earlier photos — compare</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">${earlier.map(p => this._rentalPhotoThumb(p, false)).join('')}</div>` : '';
+  },
+
+  async _rentalPhotoLoad(id, stage) {
+    try { this._rentalPhotoRender(stage, await this.api('GET', `/rentals/agreements/${id}/photos`)); }
+    catch (e) { this._rentalPhotoRender(stage, []); }
+  },
+
+  async _rentalAddPhotos(id, stage, input) {
+    const files = [...input.files];
+    input.value = '';
+    const el = document.getElementById(`rph-${stage}`);
+    for (const [i, file] of files.entries()) {
+      if (el) el.insertAdjacentHTML('beforeend', `<span class="rph-uploading" style="font-size:12px;color:var(--text-muted)">Uploading ${i + 1} of ${files.length}…</span>`);
+      const fd = new FormData();
+      fd.append('stage', stage);
+      fd.append('photo', file);
+      try {
+        const res = await fetch(`/api/rentals/agreements/${id}/photos`, { method: 'POST', body: fd, headers: this.currentUser ? { 'X-Pos-User': String(this.currentUser.id) } : {} });
+        const out = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(out.error || 'Upload failed');
+        this._rentalPhotoRender(stage, out);
+      } catch (e) {
+        this.alert(`${file.name}: ${e.message}`, 'error');
+        document.querySelectorAll('.rph-uploading').forEach(x => x.remove());
+      }
+    }
+  },
+
+  async _rentalRemovePhoto(id, stage, pid) {
+    try { this._rentalPhotoRender(stage, await this.api('DELETE', `/rentals/agreements/${id}/photos/${pid}`)); }
+    catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  _rentalPhotoReady(stage) {
+    if ((this._rentalPhotoCache || []).some(p => p.stage === stage && !p.used_at)) return true;
+    this.alert(`Take at least one photo of the item(s) at ${stage} first`, 'error');
+    return false;
+  },
+
+  // Agreement view: every handover's photos.
+  _rentalPhotoRecordHtml(photos) {
+    const done = photos.filter(p => p.used_at);
+    if (!done.length) return '';
+    return ['issue', 'pickup', 'return'].map(st => {
+      const list = done.filter(p => p.stage === st);
+      return list.length ? `<div style="margin-top:6px">${this._rentalPhotoLabels[st]}<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">${list.map(p => this._rentalPhotoThumb(p, false)).join('')}</div></div>` : '';
+    }).join('');
+  },
+
   async showIssueRentalModal(id) {
     const [a, employees] = await Promise.all([
       this.api('GET', `/rentals/agreements/${id}`),
@@ -3434,6 +3520,7 @@ Object.assign(App, {
           </div>
           ${this._sigPadHtml('ri-guard-sig', 'Guard Signature', 'required — the security employee above signs to confirm')}`}
           </div>
+          ${this._rentalPhotoPickerHtml(id, 'issue')}
           ${this._sigPadHtml('ri-customer-sig', 'Customer Signature', 'required — confirms receipt')}
         </div>
         <div class="modal-footer">
@@ -3443,6 +3530,7 @@ Object.assign(App, {
       </div>`);
     this._sigPadInit('ri-guard-sig');
     this._sigPadInit('ri-customer-sig');
+    this._rentalPhotoLoad(id, 'issue');
   },
 
   async confirmIssueRental(id) {
@@ -3457,6 +3545,7 @@ Object.assign(App, {
     if (operatorEl && !operatorEl.value) { this.alert('Select an operator', 'error'); return; }
     if (securityEl && !securityEl.value) { this.alert('Select the security employee who verified this item leaving', 'error'); return; }
     if (hasSecuritySigPad && !this._sigPadHasDrawn('ri-guard-sig')) { this.alert("The security employee's signature is required to issue this rental", 'error'); return; }
+    if (!this._rentalPhotoReady('issue')) return;
     if (!this._sigPadHasDrawn('ri-customer-sig')) { this.alert('Customer signature is required to issue this rental', 'error'); return; }
     const issuedAtRaw = document.getElementById('ri-issued-at')?.value;
     if (!issuedAtRaw) { this.alert('Enter a start date/time', 'error'); return; }
@@ -3552,6 +3641,7 @@ Object.assign(App, {
             ? `<div style="padding:8px 12px;background:rgba(22,163,74,0.08);border-left:3px solid #16a34a;border-radius:4px;font-size:12px;color:#166534;margin-bottom:12px">✓ Pickup already confirmed in the field by ${a.pickup_driver_name||'the driver'} on ${this.fmtDateTime(a.pickup_confirmed_at)}${a.pickup_customer_name ? ` — signed by ${a.pickup_customer_name}` : ''}${this._sigButton(a.pickup_customer_signature, 'View Customer Signature')}</div>`
             : this._sigPadHtml('rr-driver-sig', 'Driver Signature', 'required — the driver above signs to confirm collection')}` : ''}
 
+          ${this._rentalPhotoPickerHtml(id, 'return')}
           <div class="form-group" style="border-top:1px solid var(--border);padding-top:12px">
             <label>Security Sign-In <span style="font-weight:400;color:var(--text-muted)">(required — item returning)</span></label>
             <select id="rr-security-employee">
@@ -3569,6 +3659,7 @@ Object.assign(App, {
       </div>`);
     this._sigPadInit('rr-guard-sig');
     if (a.pickup_required && !a.pickup_confirmed_at) this._sigPadInit('rr-driver-sig');
+    this._rentalPhotoLoad(id, 'return');
   },
 
   async saveRentalReturn(agreementId, itemIds) {
@@ -3591,6 +3682,7 @@ Object.assign(App, {
     }
     const securityEl = document.getElementById('rr-security-employee');
     if (!securityEl?.value) { this.alert('Select the security employee signing this item back in', 'error'); return; }
+    if (!this._rentalPhotoReady('return')) return;
     if (!this._sigPadHasDrawn('rr-guard-sig')) { this.alert("The security employee's signature is required to complete this return", 'error'); return; }
     const returnedAtRaw = document.getElementById('rr-returned-at').value;
     if (!returnedAtRaw) { this.alert('Enter a return date/time', 'error'); return; }

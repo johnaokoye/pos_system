@@ -222,6 +222,7 @@ Object.assign(App, {
         <div class="modal-body">
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">Have the customer enter their name and sign below to confirm this item was collected.</p>
           <div class="form-group"><label>Customer Name</label><input id="cp-customer-name" placeholder="Full name" value="${(a.customer_name||'').replace(/"/g,'&quot;')}"></div>
+          ${this._rentalPhotoPickerHtml(id, 'pickup')}
           ${this._sigPadHtml('cp-customer-sig', 'Customer Signature', 'required — confirms the item was collected')}
         </div>
         <div class="modal-footer">
@@ -230,11 +231,13 @@ Object.assign(App, {
         </div>
       </div>`);
     this._sigPadInit('cp-customer-sig');
+    this._rentalPhotoLoad(id, 'pickup');
   },
 
   async submitConfirmPickup(id) {
     const name = document.getElementById('cp-customer-name').value.trim();
     if (!name) { this.alert("Enter the customer's name", 'error'); return; }
+    if (!this._rentalPhotoReady('pickup')) return;
     if (!this._sigPadHasDrawn('cp-customer-sig')) { this.alert('Customer signature is required to confirm pickup', 'error'); return; }
     try {
       await this.api('PATCH', `/rentals/agreements/${id}/confirm-pickup`, {
@@ -291,6 +294,7 @@ Object.assign(App, {
         <div class="modal-body">
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">Have the customer enter their name and sign below to complete delivery of ${a.item_summary || 'the item'}. This is what starts the rental clock.</p>
           <div class="form-group"><label>Customer Name</label><input id="dcs-customer-name" placeholder="Full name" value="${(a.customer_name||'').replace(/"/g,'&quot;')}"></div>
+          ${this._rentalPhotoPickerHtml(id, 'issue')}
           ${this._sigPadHtml('dcs-customer-sig', 'Customer Signature', 'required — confirms receipt and starts the rental')}
         </div>
         <div class="modal-footer">
@@ -299,11 +303,13 @@ Object.assign(App, {
         </div>
       </div>`);
     this._sigPadInit('dcs-customer-sig');
+    this._rentalPhotoLoad(id, 'issue');
   },
 
   async submitDeliveryCustomerSignature(id) {
     const name = document.getElementById('dcs-customer-name').value.trim();
     if (!name) { this.alert("Enter the customer's name", 'error'); return; }
+    if (!this._rentalPhotoReady('issue')) return;
     if (!this._sigPadHasDrawn('dcs-customer-sig')) { this.alert('Customer signature is required to complete delivery', 'error'); return; }
     try {
       await this.api('PATCH', `/rentals/agreements/${id}/issue`, {
