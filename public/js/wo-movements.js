@@ -52,7 +52,7 @@ Object.assign(App, {
         ? `🚚 On the way from ${this.escapeAttr(this._woLocLabel(m.in_transit.from, wo))} to <strong>${this.escapeAttr(this._woLocLabel(m.in_transit.to, wo))}</strong>`
         : `📍 At <strong>${this.escapeAttr(this._woLocLabel(m.location, wo))}</strong>`}
         ${m.assessment_blocked ? '<div style="font-size:12px;color:var(--warning)">Assessment waits until the Warehouse receives the item</div>' : ''}
-        ${['awaiting_pickup', 'complete'].includes(wo.status) && !m.at_home ? `<div style="font-size:12px;color:var(--warning)">Not back at ${this.escapeAttr(this._woLocLabel(m.home, wo))} yet</div>` : ''}
+        ${['awaiting_pickup', 'complete', 'not_worth_fixing', 'cancelled'].includes(wo.status) && !wo.returned_to_customer_at && !m.at_home ? `<div style="font-size:12px;color:var(--warning)">Not back at ${this.escapeAttr(this._woLocLabel(m.home, wo))} yet — the customer can't collect it until it's received there</div>` : ''}
       </div>
       ${moves.length ? moves.map(row).join('') : '<div style="color:var(--text-muted);font-size:12px;margin-top:4px">No movements recorded</div>'}
     </div>`;

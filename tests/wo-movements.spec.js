@@ -93,15 +93,38 @@ test('item trip with Warehouse checkpoint, assessment gate and return', async ({
   await db.execute({ sql: "UPDATE work_orders SET status = 'complete', completed_at = CURRENT_TIMESTAMP WHERE id = ?", args: [wo.id] });
   w = await api(page, 'GET', `/work-orders/${wo.id}`);
   expect(w.movement.next).toMatchObject({ kind: 'send', from: 'service_center', to: 'warehouse' });
+  // Pickup needs the item back at the store.
+  expect(await attempt(page, 'PATCH', `/work-orders/${wo.id}/cashier-hold`, {})).toContain('is at the Service Center, not back at');
   await api(page, 'POST', `/work-orders/${wo.id}/movements/send`, { carried_by: 'Van 2' });
   await receive(page, wo.id, { accessories: ok2 });
   w = await api(page, 'POST', `/work-orders/${wo.id}/movements/send`, { carried_by: 'Dan' });
   expect(w.movement.in_transit).toMatchObject({ from: 'warehouse', to: 'store' });
   expect((await api(page, 'GET', '/work-orders?view=movements&at=store')).map(r => r.id)).toContain(wo.id);
+  expect(await attempt(page, 'PATCH', `/work-orders/${wo.id}/cashier-hold`, {})).toContain('on its way to the');
+  // Placed on hold some other way (e.g. before this rule) — final payment still refused
+  await db.execute({ sql: "UPDATE work_orders SET status = 'awaiting_pickup', cashier_hold_at = CURRENT_TIMESTAMP WHERE id = ?", args: [wo.id] });
+  expect(await attempt(page, 'PATCH', `/work-orders/${wo.id}/final-payment`, { payment_method: 'cash' })).toContain('not back at');
+  await db.execute({ sql: 'UPDATE work_orders SET cashier_hold_at = NULL WHERE id = ?', args: [wo.id] });
   w = await receive(page, wo.id, { accessories: ok2 });
   expect(w.movement).toMatchObject({ location: 'store', at_home: true, next: null });
   expect(w.movements.length).toBe(8);
   expect((await api(page, 'GET', '/work-orders?view=movements')).map(r => r.id)).not.toContain(wo.id);
+  await api(page, 'PATCH', `/work-orders/${wo.id}/cashier-hold`, {});
+  await api(page, 'PATCH', `/work-orders/${wo.id}/final-payment`, { payment_method: 'cash', accessories_returned: [charger.id], accessories_note: 'Bag kept by customer earlier' });
+  expect((await api(page, 'GET', `/work-orders/${wo.id}`)).status).toBe('picked_up');
+
+  // Not worth fixing at the Warehouse: can't be handed back until it's at the store.
+  const nwf = await api(page, 'POST', '/work-orders', { customer_id: cust.id, employee_id: 1, branch_id: store.id, description: `Dead radio ${s}`, item_label: 'Radio', assessment_fee_product_id: fee.id });
+  await api(page, 'POST', `/work-orders/${nwf.id}/movements/send`, { carried_by: 'Dan' });
+  await receive(page, nwf.id);
+  await db.execute({ sql: "UPDATE work_orders SET status = 'not_worth_fixing' WHERE id = ?", args: [nwf.id] });
+  expect(await attempt(page, 'PATCH', `/work-orders/${nwf.id}/return-to-customer`, {})).toContain('is at the Warehouse, not back at');
+  await page.evaluate(id => App.viewWorkOrder(id), nwf.id);
+  await expect(page.locator('.modal')).toContainText('Return to Customer — item not back yet');
+  await page.evaluate(() => App.closeModal());
+  await api(page, 'POST', `/work-orders/${nwf.id}/movements/send`, { carried_by: 'Dan' });
+  await receive(page, nwf.id);
+  expect(await attempt(page, 'PATCH', `/work-orders/${nwf.id}/return-to-customer`, {})).toBe('accepted');
 });
 
 test('a work order taken in at the Warehouse starts there; older work orders are not held back', async ({ page }) => {

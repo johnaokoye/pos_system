@@ -1024,6 +1024,17 @@ async function assessmentWaitsForWarehouse(wo) {
   return full.state.assessment_blocked;
 }
 
+// Pickup (owner's rule, 2026-11-23): the item has to be received back where it
+// was taken in before it's placed on the cashier's hold, paid for and collected,
+// or handed back unrepaired.
+async function itemNotBackError(woId) {
+  const wo = await loadWoForMovement(woId);
+  if (!wo || wo.state.at_home) return null;
+  const home = locationLabel(wo.state.home, wo);
+  const where = wo.state.in_transit ? `on its way to the ${locationLabel(wo.state.in_transit.to, wo)}` : `at the ${locationLabel(wo.state.location, wo)}`;
+  return `The item is ${where}, not back at ${home} yet — it has to be received there before the customer can collect it`;
+}
+
 async function movementResponse(woId) {
   const { rows: [wo] } = await db.execute({ sql: `${WO_LIST_SELECT} WHERE wo.id = ?`, args: [woId] });
   wo.movements = await loadMovements(db, woId);
@@ -1648,6 +1659,8 @@ router.patch('/:id/cashier-hold', requireAnyPermission('work_orders', 'pos'), as
     if (!wo) return res.status(404).json({ error: 'Not found' });
     if (!['complete', 'awaiting_pickup'].includes(wo.status)) return res.status(400).json({ error: `This work order is ${wo.status.replace(/_/g, ' ')} — only a signed-off job is placed on hold for collection` });
     if (wo.cashier_hold_at) return res.status(400).json({ error: 'This work order is already on hold for the cashier' });
+    const notBack = await itemNotBackError(wo.id);
+    if (notBack) return res.status(400).json({ error: notBack });
     const tx = await db.transaction('write');
     let committed = false;
     try {
@@ -1693,6 +1706,8 @@ router.patch('/:id/final-payment', requireAnyPermission('wo_assess', 'pos'), asy
     if (!wo) return res.status(404).json({ error: 'Not found' });
     if (wo.status !== 'awaiting_pickup') return res.status(400).json({ error: `This work order is ${wo.status}, not awaiting pickup` });
     if (!wo.cashier_hold_at) return res.status(400).json({ error: 'Place this work order on hold for the cashier first — that\'s done when the customer comes in to collect' });
+    const notBack = await itemNotBackError(wo.id);
+    if (notBack) return res.status(400).json({ error: notBack });
 
     const handBack = await checkAccessoryHandBack(wo.id, accessories_returned, accessories_note);
     if (handBack.error) return res.status(400).json({ error: handBack.error });
@@ -1748,6 +1763,8 @@ router.patch('/:id/return-to-customer', requirePermission('work_orders'), async 
     if (!wo) return res.status(404).json({ error: 'Not found' });
     if (!['not_worth_fixing', 'cancelled'].includes(wo.status)) return res.status(400).json({ error: 'Only a Not Worth Fixing or Cancelled work order is returned this way — a repaired item goes back through the cashier\'s final payment' });
     if (wo.returned_to_customer_at) return res.status(400).json({ error: 'This item has already been returned to the customer' });
+    const notBack = await itemNotBackError(wo.id);
+    if (notBack) return res.status(400).json({ error: notBack });
     const handBack = await checkAccessoryHandBack(wo.id, accessories_returned, accessories_note);
     if (handBack.error) return res.status(400).json({ error: handBack.error });
 
