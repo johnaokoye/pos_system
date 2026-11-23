@@ -2150,6 +2150,25 @@ async function _init() {
       posted_at DATETIME,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // Follow-up calls on a work order (append-only log): who called, how,
+    // the outcome, notes, a promised pickup date and when to call next.
+    // Reaching the customer on a complete job is its ready-for-pickup
+    // notification (owner's choice, 2026-11-23).
+    { sql: `CREATE TABLE IF NOT EXISTS work_order_calls (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      work_order_id INTEGER NOT NULL REFERENCES work_orders(id),
+      employee_id INTEGER REFERENCES employees(id),
+      called_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      method TEXT NOT NULL DEFAULT 'phone',
+      contact TEXT,
+      outcome TEXT NOT NULL,
+      promised_date DATE,
+      next_follow_up DATE,
+      notes TEXT,
+      counted_as_notification INTEGER NOT NULL DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    { sql: 'CREATE INDEX IF NOT EXISTS idx_wo_calls_wo ON work_order_calls(work_order_id)' },
     // Documents attached to a work order — a signed service contract or
     // anything else. Local files in uploads/wo-attachments (served only via
     // the authenticated download route), Cloudinary when configured.

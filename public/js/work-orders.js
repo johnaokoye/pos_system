@@ -4,6 +4,7 @@ Object.assign(App, {
 
   _woTabs: [
     { key: 'active',          label: 'Active' },
+    { key: 'follow_ups',      label: '📞 Follow-Ups Due' },
     { key: 'assessed',        label: 'Assessment Queue' },
     { key: 'awaiting_pickup', label: 'Awaiting Pickup' },
     { key: 'picked_up',       label: 'Picked Up' },
@@ -71,7 +72,8 @@ Object.assign(App, {
     const view = this.woTab === 'all' ? '' : this.woTab;
     const workOrders = await this.api('GET', `/work-orders${view ? '?view='+view : ''}`);
     if (!document.getElementById('wo-content')) return;
-    document.getElementById('wo-content').innerHTML = !workOrders.length ? '<div class="empty-state"><p>No work orders found.</p></div>' : `
+    document.getElementById('wo-content').innerHTML = !workOrders.length ? `<div class="empty-state"><p>${this.woTab === 'follow_ups' ? 'No follow-up calls due.' : 'No work orders found.'}</p></div>` : `
+      ${this.woTab === 'follow_ups' ? `<p style="font-size:12px;color:var(--text-muted);margin:0 0 8px">Jobs to call about: finished and not yet told, a follow-up date that has come, or a pickup overdue with no call in the last 7 days.</p>` : ''}
       ${isQueue ? `<p style="font-size:12px;color:var(--text-muted);margin:0 0 8px">Waiting to be assessed, oldest first — work top to bottom unless a supervisor bumps a job for express service.</p>` : ''}
       <div class="table-wrap">
       <table class="table">
@@ -84,9 +86,9 @@ Object.assign(App, {
           <td>${wo.branch_name||'—'}</td>
           <td>${this.fmtDate(wo.created_at)}</td>
           ${isQueue ? `<td>${this._woWaitingLabel(wo.created_at)}</td>` : `<td>${wo.pickup_due_date ? this.fmtDate(wo.pickup_due_date) : '<span style="color:var(--text-muted)">After completion</span>'}${this._woPickupBadge(wo)}</td>`}
-          <td><span class="badge-pill ${this._woStatusBadge[wo.status]||'badge-secondary'}">${this._woStatusLabels[wo.status]||wo.status}</span>${wo.returned_to_customer_at ? '<div style="font-size:11px;color:var(--text-muted)">Returned to customer</div>' : ''}</td>
+          <td><span class="badge-pill ${this._woStatusBadge[wo.status]||'badge-secondary'}">${this._woStatusLabels[wo.status]||wo.status}</span>${wo.returned_to_customer_at ? '<div style="font-size:11px;color:var(--text-muted)">Returned to customer</div>' : ''}${this._woFollowUpBadge(wo)}</td>
           <td style="text-align:right;white-space:nowrap">
-            <button class="btn btn-sm btn-outline" onclick="App.viewWorkOrder(${wo.id})">View</button>
+            ${wo.follow_up_due && this.can('work_orders') ? `<button class="btn btn-sm btn-primary" onclick="App.showWOCallModal(${wo.id})">☎ Log Call</button> ` : ''}<button class="btn btn-sm btn-outline" onclick="App.viewWorkOrder(${wo.id})">View</button>
           </td>
         </tr>`).join('')}</tbody>
       </table>
@@ -519,6 +521,7 @@ Object.assign(App, {
             <p style="font-size:11px;color:var(--text-muted);margin:6px 0 0">Save Parts records what's needed; Confirm Parts is what actually creates the branch transfer or purchase request for anything not in stock here.</p>` : ''}
           </div>` : ''}
 
+          ${this._woCallsSectionHtml(wo)}
           ${this._woDocumentsSectionHtml(wo)}
           ${this._woExternalSectionHtml(wo)}
 
@@ -567,6 +570,97 @@ Object.assign(App, {
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
+  },
+
+  // ─── Follow-up calls ─────────────────────────────────────────────────
+  _woCallOutcomes: {
+    reached: 'Reached customer', will_collect: 'Customer will collect', voicemail: 'Left voicemail', no_answer: 'No answer',
+    wrong_number: 'Wrong / disconnected number', declined: 'Customer declined', other: 'Other',
+  },
+  _woCallMethods: { phone: 'Phone', whatsapp: 'WhatsApp', sms: 'SMS', email: 'Email', in_person: 'In person' },
+  _woFollowUpReasons: { ready_to_notify: 'Ready — tell the customer', scheduled: 'Follow-up scheduled', pickup_overdue: 'Pickup overdue — call' },
+
+  _woFollowUpBadge(wo) {
+    const last = wo.last_call_at ? `<div style="font-size:11px;color:var(--text-muted)">Last call ${this.fmtDate(wo.last_call_at)} · ${this._woCallOutcomes[wo.last_call_outcome] || wo.last_call_outcome}</div>` : '';
+    const next = !wo.follow_up_due && wo.next_follow_up && !['picked_up', 'cancelled'].includes(wo.status) ? `<div style="font-size:11px;color:var(--text-muted)">Next call ${this.fmtDate(wo.next_follow_up)}</div>` : '';
+    return (wo.follow_up_due ? `<div><span class="badge-pill badge-danger" style="font-size:10px;margin-top:3px">📞 ${this._woFollowUpReasons[wo.follow_up_reason] || 'Follow-up due'}</span></div>` : '') + last + next;
+  },
+
+  _woCallsSectionHtml(wo) {
+    const calls = wo.calls || [];
+    const esc = v => this.escapeAttr(v || '');
+    const outcomeBadge = o => ({ reached: 'badge-success', will_collect: 'badge-success', declined: 'badge-warning', voicemail: 'badge-info', no_answer: 'badge-secondary', wrong_number: 'badge-danger' }[o] || 'badge-secondary');
+    return `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Follow-Up Calls</strong>
+        <span>${wo.follow_up_due ? `<span class="badge-pill badge-danger" style="font-size:10px">📞 ${this._woFollowUpReasons[wo.follow_up_reason] || 'Follow-up due'}</span>` : (wo.next_follow_up && !['picked_up', 'cancelled'].includes(wo.status) ? `<span style="font-size:11px;color:var(--text-muted)">Next call ${this.fmtDate(wo.next_follow_up)}</span>` : '')}
+        ${this.can('work_orders') && !['picked_up', 'cancelled'].includes(wo.status) ? ` <button class="btn btn-sm btn-outline" onclick="App.showWOCallModal(${wo.id})">☎ Log Call</button>` : ''}</span>
+      </div>
+      <div style="margin-top:6px;max-height:220px;overflow-y:auto">${calls.length ? calls.map(c => `<div class="wo-call-row" style="border-top:1px solid var(--border);padding:5px 0;font-size:12px">
+        <div style="display:flex;justify-content:space-between;gap:8px">
+          <span><span class="badge-pill ${outcomeBadge(c.outcome)}" style="font-size:10px">${this._woCallOutcomes[c.outcome] || c.outcome}</span> ${this._woCallMethods[c.method] || c.method}${c.contact ? ` · ${esc(c.contact)}` : ''}${c.counted_as_notification ? ' <span class="badge-pill badge-info" style="font-size:10px">Pickup notice</span>' : ''}</span>
+          <span style="color:var(--text-muted);white-space:nowrap">${this.fmtDateTime(c.called_at)}</span>
+        </div>
+        ${c.notes ? `<div>${esc(c.notes)}</div>` : ''}
+        <div style="color:var(--text-muted);font-size:11px">${[c.employee_name ? `By ${esc(c.employee_name)}` : '', c.promised_date ? `Will collect ${this.fmtDate(c.promised_date)}` : '', c.next_follow_up ? `Next call ${this.fmtDate(c.next_follow_up)}` : ''].filter(Boolean).join(' · ')}</div>
+      </div>`).join('') : '<div style="color:var(--text-muted);font-size:12px">No calls logged yet</div>'}</div>
+    </div>`;
+  },
+
+  async showWOCallModal(id) {
+    const wo = await this.api('GET', `/work-orders/${id}`);
+    const esc = v => this.escapeAttr(v || '');
+    const today = this._storeDay(new Date());
+    this.showModal(`
+      <div class="modal" style="max-width:480px">
+        <div class="modal-header"><span class="modal-title">☎ Log Follow-Up Call — ${wo.wo_number}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div style="font-size:13px;margin-bottom:10px"><strong>${esc(wo.customer_name)}</strong>${wo.customer_phone ? ` · <a href="tel:${esc(wo.customer_phone)}">${esc(wo.customer_phone)}</a>` : ''}
+            <div style="color:var(--text-muted);font-size:12px">${esc(wo.description)} · ${this._woStatusLabels[wo.status] || wo.status}${wo.pickup_due_date ? ` · pickup due ${this.fmtDate(wo.pickup_due_date)}` : ''}</div></div>
+          ${wo.status === 'complete' ? `<div style="font-size:12px;background:var(--bg-secondary);border-radius:6px;padding:6px 8px;margin-bottom:10px">This job is ready. If you reach the customer, this call is their ready-for-pickup notice and the job moves to Awaiting Pickup.</div>` : ''}
+          <div class="input-row">
+            <div class="form-group"><label>How</label><select id="woc-method">${Object.entries(this._woCallMethods).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></div>
+            <div class="form-group"><label>Number / contact</label><input id="woc-contact" value="${esc(wo.customer_phone)}"></div>
+          </div>
+          <div class="form-group"><label>Outcome *</label>
+            <select id="woc-outcome" onchange="App._woCallOutcomeChanged()"><option value="">— Pick one —</option>${Object.entries(this._woCallOutcomes).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></div>
+          <div class="form-group" id="woc-promised-wrap" style="display:none"><label>Will collect on *</label><input type="date" id="woc-promised" min="${today}"></div>
+          <div class="form-group"><label>Notes</label><textarea id="woc-notes" rows="3" placeholder="What was said"></textarea></div>
+          <div class="form-group"><label>Next follow-up</label><input type="date" id="woc-next" min="${today}">
+            <div style="font-size:11px;color:var(--text-muted);margin-top:2px" id="woc-next-hint">Leave blank if no further call is needed.</div></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.viewWorkOrder(${id})">Cancel</button>
+          <button class="btn btn-primary" onclick="App.saveWOCall(${id})">Save Call</button>
+        </div>
+      </div>`);
+  },
+
+  // A missed call suggests trying again tomorrow; a promise to collect books
+  // the call for the day after (the server does that if left blank).
+  _woCallOutcomeChanged() {
+    const o = document.getElementById('woc-outcome').value;
+    document.getElementById('woc-promised-wrap').style.display = o === 'will_collect' ? '' : 'none';
+    const next = document.getElementById('woc-next');
+    if (['voicemail', 'no_answer'].includes(o) && !next.value) {
+      const [y, m, d] = this._storeDay(new Date()).split('-').map(Number);
+      next.value = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+    }
+    document.getElementById('woc-next-hint').textContent = o === 'will_collect' ? 'Blank = the day after they said they would collect.' : 'Leave blank if no further call is needed.';
+  },
+
+  async saveWOCall(id) {
+    const v = x => document.getElementById(x).value.trim();
+    const body = { method: v('woc-method'), contact: v('woc-contact'), outcome: v('woc-outcome'), promised_date: v('woc-promised'), next_follow_up: v('woc-next'), notes: v('woc-notes') };
+    if (!body.outcome) { this.alert('Pick the outcome of the call', 'error'); return; }
+    if (body.outcome === 'will_collect' && !body.promised_date) { this.alert('When did the customer say they will collect?', 'error'); return; }
+    if (body.outcome === 'other' && !body.notes) { this.alert('Add a note saying what happened', 'error'); return; }
+    try {
+      const r = await this.api('POST', `/work-orders/${id}/calls`, body);
+      this.alert(r.notified ? 'Call logged — customer notified, job is now Awaiting Pickup' : 'Call logged', 'success');
+      if (document.getElementById('wo-content')) this.loadWorkOrders();
+      await this.viewWorkOrder(id);
+    } catch (e) { this.alert(e.message, 'error'); }
   },
 
   // Documents on the job — the customer's signed contract, or anything else.
@@ -1543,7 +1637,8 @@ Object.assign(App, {
           ${wo.customer_email ? `
           <div class="form-group"><label>Email</label><input id="wo-notify-email" value="${this.escapeAttr(wo.customer_email)}"></div>
           <button class="btn btn-primary" style="width:100%;margin-bottom:8px" onclick="App.sendWONotifyEmail(${id})">📧 Send Email Notification</button>` : `<p style="font-size:12px;color:var(--warning)">No email on file for this customer.</p>`}
-          <button class="btn btn-secondary" style="width:100%" onclick="App.markWONotifyCalled(${id})">☎ Mark as Called</button>
+          <button class="btn btn-secondary" style="width:100%" onclick="App.showWOCallModal(${id})">☎ Log a Call</button>
+          <p style="font-size:11px;color:var(--text-muted);margin:6px 0 0">A call that reaches the customer counts as the notification.</p>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
@@ -1563,14 +1658,6 @@ Object.assign(App, {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
-  async markWONotifyCalled(id) {
-    try {
-      await this.api('PATCH', `/work-orders/${id}/notify`, { notification_method: 'phone', employee_id: this.currentUser.id });
-      this.closeModal();
-      this.alert('Marked as called');
-      this.renderWorkOrders();
-    } catch(e) { this.alert(e.message, 'error'); }
-  },
 
   async showWOFinalPaymentModal(id) {
     try {

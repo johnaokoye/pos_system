@@ -12,7 +12,7 @@ const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 const { syncBinQty } = require('../lib/binSync');
 const { branchStockQty } = require('../lib/branchStock');
 const { takeFromLots, costOn } = require('../lib/stockLots');
-const { storeToday, storeOffsetModifier } = require('../lib/storeTime');
+const { storeToday, storeDay, storeOffsetModifier } = require('../lib/storeTime');
 const { createBill, dueDateFor, PAID_SQL } = require('../lib/payables');
 
 // Statuses a WO can freely log a comment against via PATCH /:id/status without
@@ -30,6 +30,38 @@ async function logStatus(executor, workOrderId, status, comment, employeeId) {
   await executor.execute({ sql: 'INSERT INTO work_order_status_log (work_order_id, status, comment, employee_id) VALUES (?,?,?,?)', args: [workOrderId, status, comment || null, employeeId || null] });
 }
 
+// ─── Follow-up calls ──────────────────────────────────────────────────────
+// A work order needs a call (follow_up_due) when, on the store clock:
+//  - it's complete (signed off) and the customer hasn't been told yet;
+//  - the next follow-up date set on its latest call has come; or
+//  - its pickup is overdue and nobody has called in the last 7 days (and no
+//    later follow-up is booked).
+// Closed jobs (picked up, cancelled, or handed back) never need one.
+const CALL_OUTCOMES = {
+  reached: 'Reached customer', will_collect: 'Customer will collect', voicemail: 'Left voicemail', no_answer: 'No answer',
+  wrong_number: 'Wrong / disconnected number', declined: 'Customer declined', other: 'Other',
+};
+const CALL_METHODS = { phone: 'Phone', whatsapp: 'WhatsApp', sms: 'SMS', email: 'Email', in_person: 'In person' };
+// Outcomes that mean the customer actually got the message.
+const CALL_REACHED = ['reached', 'will_collect', 'declined'];
+
+function daysBetween(a, b) { return Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86400000); }
+
+function decorateFollowUp(wo, today = storeToday()) {
+  const closed = ['picked_up', 'cancelled'].includes(wo.status) || !!wo.returned_to_customer_at;
+  const lastDay = wo.last_call_at ? storeDay(wo.last_call_at) : null;
+  let reason = null;
+  if (!closed) {
+    if (wo.status === 'complete') reason = 'ready_to_notify';
+    else if (wo.next_follow_up && wo.next_follow_up <= today) reason = 'scheduled';
+    else if (wo.pickup_due_date && wo.pickup_due_date < today && !(wo.next_follow_up && wo.next_follow_up > today)
+      && (!lastDay || daysBetween(lastDay, today) >= 7)) reason = 'pickup_overdue';
+  }
+  wo.follow_up_due = !!reason;
+  wo.follow_up_reason = reason;
+  return wo;
+}
+
 const WO_LIST_SELECT = `SELECT wo.*, c.first_name || ' ' || c.last_name as customer_name, c.phone as customer_phone, c.email as customer_email,
   c.customer_number, c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
   e.first_name || ' ' || e.last_name as employee_name, b.name as branch_name,
@@ -37,7 +69,11 @@ const WO_LIST_SELECT = `SELECT wo.*, c.first_name || ' ' || c.last_name as custo
   (SELECT first_name || ' ' || last_name FROM employees WHERE id = wo.returned_to_customer_by) as returned_to_customer_by_name,
   julianday('now') - julianday(wo.pickup_due_date) as days_past_pickup_due,
   (SELECT COALESCE(SUM(total),0) FROM work_order_items WHERE work_order_id = wo.id) as parts_total,
-  (SELECT COALESCE(SUM(total * tax_rate / 100.0),0) FROM work_order_items WHERE work_order_id = wo.id) as parts_tax_total
+  (SELECT COALESCE(SUM(total * tax_rate / 100.0),0) FROM work_order_items WHERE work_order_id = wo.id) as parts_tax_total,
+  (SELECT COUNT(*) FROM work_order_calls WHERE work_order_id = wo.id) as call_count,
+  (SELECT called_at FROM work_order_calls WHERE work_order_id = wo.id ORDER BY called_at DESC, id DESC LIMIT 1) as last_call_at,
+  (SELECT outcome FROM work_order_calls WHERE work_order_id = wo.id ORDER BY called_at DESC, id DESC LIMIT 1) as last_call_outcome,
+  (SELECT next_follow_up FROM work_order_calls WHERE work_order_id = wo.id ORDER BY called_at DESC, id DESC LIMIT 1) as next_follow_up
   FROM work_orders wo
   LEFT JOIN customers c ON wo.customer_id = c.id
   LEFT JOIN employees e ON wo.employee_id = e.id
@@ -211,6 +247,8 @@ router.get('/', requirePermission('work_orders'), async (req, res) => {
     const params = [];
     let effectiveStatus = null;
     if (view === 'active') { sql += " AND wo.status NOT IN ('picked_up','cancelled','not_worth_fixing')"; }
+    // Jobs needing a call — filtered after decorateFollowUp below.
+    else if (view === 'follow_ups') { sql += " AND wo.status NOT IN ('picked_up','cancelled') AND wo.returned_to_customer_at IS NULL"; }
     // Assessment fee (status='intake'), deposit (status='pending_deposit'), or the
     // final balance (status='awaiting_pickup') due — surfaced in the POS Hold
     // Recall list so a cashier can pick it up and take payment there.
@@ -223,10 +261,12 @@ router.get('/', requirePermission('work_orders'), async (req, res) => {
     // but the assessment queue (status='assessed', paid and waiting for
     // someone to assess it) is a strict first-in-first-out line — whoever
     // assesses next works the oldest-opened item first, oldest at the top.
-    sql += effectiveStatus === 'assessed' ? ' ORDER BY wo.created_at ASC LIMIT ?' : ' ORDER BY wo.created_at DESC LIMIT ?';
-    params.push(parseInt(limit));
+    sql += effectiveStatus === 'assessed' || view === 'follow_ups' ? ' ORDER BY wo.created_at ASC' : ' ORDER BY wo.created_at DESC';
+    if (view !== 'follow_ups') { sql += ' LIMIT ?'; params.push(parseInt(limit)); }
     const { rows } = await db.execute({ sql, args: params });
-    res.json(rows);
+    const today = storeToday();
+    rows.forEach(r => decorateFollowUp(r, today));
+    res.json(view === 'follow_ups' ? rows.filter(r => r.follow_up_due) : rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -558,6 +598,8 @@ router.get('/:id', requirePermission('work_orders'), async (req, res) => {
     Object.assign(wo, await loadIntakeRecord(wo.id));
     wo.external_work = await loadExternalWork(wo.id);
     wo.documents = await loadWoDocuments(wo.id);
+    wo.calls = await loadWoCalls(wo.id);
+    decorateFollowUp(wo);
     wo.external_cost_total = Math.round(wo.external_work.reduce((t, x) => t + (Number(x.cost) || 0), 0) * 100) / 100;
     res.json(wo);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -1115,6 +1157,62 @@ async function syncTaskSkills(taskId, skillIds) {
     await db.execute({ sql: 'INSERT OR IGNORE INTO work_order_task_skills (task_id, skill_id) VALUES (?,?)', args: [taskId, skillId] });
   }
 }
+
+async function loadWoCalls(woId) {
+  const { rows } = await db.execute({ sql: `SELECT c.*, e.first_name || ' ' || e.last_name as employee_name FROM work_order_calls c
+    LEFT JOIN employees e ON e.id = c.employee_id WHERE c.work_order_id = ? ORDER BY c.called_at DESC, c.id DESC`, args: [woId] });
+  return rows;
+}
+
+
+// Log a follow-up call. On a complete job, reaching the customer is the
+// ready-for-pickup notification: the job moves to awaiting_pickup with
+// notification_method = the call's method, same as Notify Customer did.
+router.post('/:id/calls', requirePermission('work_orders'), async (req, res) => {
+  try {
+    const b = req.body || {};
+    const { rows: [wo] } = await db.execute({ sql: 'SELECT * FROM work_orders WHERE id = ?', args: [req.params.id] });
+    if (!wo) return res.status(404).json({ error: 'Not found' });
+    if (['picked_up', 'cancelled'].includes(wo.status) && !b.allow_closed) return res.status(400).json({ error: `This work order is ${wo.status.replace(/_/g, ' ')} — no follow-up needed` });
+    const outcome = String(b.outcome || '');
+    if (!CALL_OUTCOMES[outcome]) return res.status(400).json({ error: 'Pick the outcome of the call' });
+    const method = CALL_METHODS[b.method] ? b.method : 'phone';
+    const notes = String(b.notes || '').trim() || null;
+    if (outcome === 'other' && !notes) return res.status(400).json({ error: 'Add a note saying what happened' });
+    const today = storeToday();
+    const day = v => { const t = String(v || '').trim(); if (!t) return null; if (!DAY_ONLY.test(t)) throw Object.assign(new Error('Dates must be YYYY-MM-DD'), { status: 400 }); return t; };
+    let promised, next;
+    try { promised = day(b.promised_date); next = day(b.next_follow_up); } catch (e) { return res.status(400).json({ error: e.message }); }
+    if (outcome === 'will_collect' && !promised) return res.status(400).json({ error: 'When did the customer say they will collect?' });
+    if (promised && promised < today) return res.status(400).json({ error: "The promised pickup date can't be in the past" });
+    if (next && next < today) return res.status(400).json({ error: "The next follow-up date can't be in the past" });
+    // A promise to collect books the next call for the day after, unless one was set.
+    if (!next && promised) { const d = new Date(`${promised}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + 1); next = d.toISOString().slice(0, 10); }
+    const who = req.employee?.id || b.employee_id || null;
+    const notify = wo.status === 'complete' && CALL_REACHED.includes(outcome);
+    const tx = await db.transaction('write');
+    let committed = false, id;
+    try {
+      const r = await tx.execute({ sql: `INSERT INTO work_order_calls (work_order_id, employee_id, method, contact, outcome, promised_date, next_follow_up, notes, counted_as_notification) VALUES (?,?,?,?,?,?,?,?,?)`,
+        args: [wo.id, who, method, String(b.contact || '').trim() || null, outcome, promised, next, notes, notify ? 1 : 0] });
+      id = Number(r.lastInsertRowid);
+      const summary = `${CALL_METHODS[method]} follow-up: ${CALL_OUTCOMES[outcome]}${promised ? ` — will collect ${promised}` : ''}${next ? `; next follow-up ${next}` : ''}${notes ? `. ${notes}` : ''}`;
+      if (notify) {
+        await tx.execute({ sql: `UPDATE work_orders SET status = 'awaiting_pickup', notification_method = ?, notified_at = CURRENT_TIMESTAMP, notified_by = ? WHERE id = ?`, args: [method, who, wo.id] });
+        await logStatus(tx, wo.id, 'awaiting_pickup', `Customer notified — ${summary}`, who);
+      } else {
+        await logStatus(tx, wo.id, wo.status, summary, who);
+      }
+      await tx.commit();
+      committed = true;
+    } catch (e) {
+      if (!committed) await tx.rollback();
+      throw e;
+    }
+    const { rows: [call] } = await db.execute({ sql: `SELECT c.*, e.first_name || ' ' || e.last_name as employee_name FROM work_order_calls c LEFT JOIN employees e ON e.id = c.employee_id WHERE c.id = ?`, args: [id] });
+    res.status(201).json({ call, notified: notify });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
 
 // ─── Documents (signed contract etc.) ─────────────────────────────────────
 // Same pattern as quote attachments: download only through the route below.
