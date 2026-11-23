@@ -483,7 +483,7 @@ Object.assign(App, {
             <label style="display:flex;justify-content:space-between;align-items:center">Customer P.O. #
               ${this.can('work_orders') ? `<button type="button" class="btn btn-sm btn-outline" onclick="App.editWOPoNumber(${wo.id}, '${this.escapeAttr(wo.po_number || '').replace(/'/g, "\\'")}')">Edit</button>` : ''}
             </label>
-            <div>${wo.po_number ? this.escapeAttr(wo.po_number) : '<span style="color:var(--text-muted)">None — the invoice prints a blank line</span>'}</div>
+            <div>${wo.po_number ? this.escapeAttr(wo.po_number) : '<span style="color:var(--text-muted)">None — the Service and Repair Tax Invoice prints a blank line</span>'}</div>
           </div>
           ${this._woIntakeSectionHtml(wo)}
 
@@ -558,8 +558,8 @@ Object.assign(App, {
           ${wo.status==='awaiting_pickup' ? `<span class="badge-pill badge-warning" style="align-self:center;padding:6px 10px" title="Collected at the register — open Hold Recall in POS to take payment">On hold — awaiting cashier</span>` : ''}
           ${['intake','assessed','pending_deposit'].includes(wo.status) && this.can('work_orders') ? `<button class="btn btn-danger" onclick="App.closeModal();App.showWOCancelModal(${wo.id})">Cancel Work Order</button>` : ''}
           ${['not_worth_fixing','cancelled'].includes(wo.status) && !wo.returned_to_customer_at && this.can('work_orders') ? `<button class="btn btn-primary" onclick="App.showWOReturnToCustomerModal(${wo.id})">Return to Customer</button>` : ''}
-          <button class="btn btn-secondary" title="Opens the customer copy — choose Save as PDF in the print dialog to attach it to an email" onclick="App.printWorkOrderInvoice(${wo.id})">🖨️ Print Invoice</button>
-          <button class="btn btn-secondary" onclick="App.emailWorkOrderInvoice(${wo.id}, '${(wo.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email Invoice</button>
+          <button class="btn btn-secondary" title="Opens the customer copy — choose Save as PDF in the print dialog to attach it to an email" onclick="App.printWorkOrderInvoice(${wo.id})">🖨️ Print Service and Repair Tax Invoice</button>
+          <button class="btn btn-secondary" onclick="App.emailWorkOrderInvoice(${wo.id}, '${(wo.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email Service and Repair Tax Invoice</button>
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
@@ -1537,8 +1537,8 @@ Object.assign(App, {
             </div>` : `<p style="font-size:13px;color:var(--text-muted)">No balance due — the deposit already covers the final cost.</p>`}
           </div>
           <div class="modal-footer">
-            <button class="btn btn-secondary" title="Opens the customer copy — choose Save as PDF in the print dialog to attach it to an email" onclick="App.printWorkOrderInvoice(${id})">🖨️ Print Invoice</button>
-            <button class="btn btn-secondary" onclick="App.emailWorkOrderInvoice(${id}, '${(wo.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email Invoice</button>
+            <button class="btn btn-secondary" title="Opens the customer copy — choose Save as PDF in the print dialog to attach it to an email" onclick="App.printWorkOrderInvoice(${id})">🖨️ Print Service and Repair Tax Invoice</button>
+            <button class="btn btn-secondary" onclick="App.emailWorkOrderInvoice(${id}, '${(wo.customer_email||'').replace(/'/g,"\\'")}')">✉️ Email Service and Repair Tax Invoice</button>
             <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
             <button class="btn btn-primary" onclick="App.confirmWOFinalPayment(${id})">${balance > 0 ? 'Confirm Payment' : 'Complete Pickup'}</button>
           </div>
@@ -1629,13 +1629,13 @@ Object.assign(App, {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
-  // ─── Work order invoice ──────────────────────────────────────────
+  // ─── Service and Repair Tax Invoice (the work order's invoice) ───
   // Letter-size print of the invoice (see _printServerDocument) — available
   // from the WO detail view (viewWorkOrder) and the cashier's final-payment
   // modal (showWOFinalPaymentModal), not gated on WO status since a partial
   // invoice (assessment fee only, no estimate yet) is still valid to hand over.
   printWorkOrderInvoice(id) {
-    return this._printServerDocument(`/api/email/work-order-preview/${id}`, 'work-order-invoice', 'invoice');
+    return this._printServerDocument(`/api/email/work-order-preview/${id}`, 'work-order-invoice', 'Service and Repair Tax Invoice');
   },
 
   emailWorkOrderInvoice(id, customerEmail) {
