@@ -5,7 +5,7 @@ import path from 'path';
 
 // A work order item's trip: store → Warehouse → service center, and back once
 // the job is finished. Each arrival is a checkpoint with photos and every
-// accessory marked OK / damaged / missing. Assessment waits for the Warehouse.
+// accessory marked OK / damaged / missing. Assessment waits for the Service Center.
 const api = (page, method, url, data) => page.evaluate(([m, u, d]) => App.api(m, u, d), [method, url, data]);
 const attempt = (page, method, url, data) => page.evaluate(([m, u, d]) => App.api(m, u, d).then(() => 'accepted', e => e.message), [method, url, data]);
 const testDb = () => createClient({ url: `file:${path.join(os.tmpdir(), 'pos-playwright', 'test.db')}` });
@@ -40,7 +40,7 @@ test('item trip with Warehouse checkpoint, assessment gate and return', async ({
 
   // Paid, but not assessable until the Warehouse has it.
   await api(page, 'PATCH', `/work-orders/${wo.id}/assessment-paid`, { payment_method: 'cash', employee_id: 1, branch_id: store.id });
-  expect(await attempt(page, 'PATCH', `/work-orders/${wo.id}/estimate`, { estimate_labor: 100 })).toContain('not been received at the Warehouse');
+  expect(await attempt(page, 'PATCH', `/work-orders/${wo.id}/estimate`, { estimate_labor: 100 })).toContain('not been received at the Service Center');
 
   // Can't receive before it's sent; a send needs who's carrying it.
   expect(await receive(page, wo.id)).toContain('has to be sent first');
@@ -73,7 +73,7 @@ test('item trip with Warehouse checkpoint, assessment gate and return', async ({
   await expect(page.locator('.modal')).toHaveCount(0);
 
   w = await api(page, 'GET', `/work-orders/${wo.id}`);
-  expect(w.movement).toMatchObject({ location: 'warehouse', warehouse_received: true, assessment_blocked: false, next: { kind: 'send', to: 'service_center' } });
+  expect(w.movement).toMatchObject({ location: 'warehouse', warehouse_received: true, service_center_received: false, assessment_blocked: true, next: { kind: 'send', to: 'service_center' } });
   const rcv = w.movements.find(m => m.kind === 'receive');
   expect(rcv.photos.length).toBe(1);
   expect(rcv.accessories.map(c => [c.line_no, c.condition, c.note])).toEqual([[1, 'ok', null], [2, 'damaged', 'Zip torn']]);
@@ -82,12 +82,13 @@ test('item trip with Warehouse checkpoint, assessment gate and return', async ({
   expect(w.status_log.some(l => /Item received at Warehouse — 1 photo\(s\), 1\/2 accessories OK; A2 Bag damaged: Zip torn/.test(l.comment || ''))).toBe(true);
   expect(await attempt(page, 'DELETE', `/work-orders/${wo.id}/photos/${rcv.photos[0].id}`)).toContain('Checkpoint photos stay');
 
-  // Now it can be assessed; up to the service center.
-  await api(page, 'PATCH', `/work-orders/${wo.id}/estimate`, { estimate_labor: 100, deposit_amount: 0 });
+  // Still not assessable at the Warehouse; up to the service center, then it can be.
+  expect(await attempt(page, 'PATCH', `/work-orders/${wo.id}/estimate`, { estimate_labor: 100 })).toContain('not been received at the Service Center');
   await api(page, 'POST', `/work-orders/${wo.id}/movements/send`, { carried_by: 'Van 2' });
   const ok2 = [{ accessory_id: charger.id, condition: 'ok' }, { accessory_id: bag.id, condition: 'damaged', note: 'Zip torn, as at Warehouse' }];
   w = await receive(page, wo.id, { accessories: ok2, at: 'service_center' });
-  expect(w.movement).toMatchObject({ location: 'service_center', next: null });
+  expect(w.movement).toMatchObject({ location: 'service_center', service_center_received: true, assessment_blocked: false, next: null });
+  await api(page, 'PATCH', `/work-orders/${wo.id}/estimate`, { estimate_labor: 100, deposit_amount: 0 });
 
   // Finished: back down to the Warehouse, then the store.
   await db.execute({ sql: "UPDATE work_orders SET status = 'complete', completed_at = CURRENT_TIMESTAMP WHERE id = ?", args: [wo.id] });
@@ -137,7 +138,7 @@ test('a work order taken in at the Warehouse starts there; older work orders are
   const cust = await api(page, 'POST', '/customers', { first_name: 'Ware', last_name: `House${s}`, phone: `874${s.slice(-7)}` });
   const wo = await api(page, 'POST', '/work-orders', { customer_id: cust.id, employee_id: 1, branch_id: wh.id, description: 'Drill', item_label: 'Drill', assessment_fee_product_id: fee.id });
   let w = await api(page, 'GET', `/work-orders/${wo.id}`);
-  expect(w.movement).toMatchObject({ home: 'warehouse', location: 'warehouse', warehouse_received: true, assessment_blocked: false, next: { kind: 'send', to: 'service_center' } });
+  expect(w.movement).toMatchObject({ home: 'warehouse', location: 'warehouse', warehouse_received: true, assessment_blocked: true, next: { kind: 'send', to: 'service_center' } });
 
   // Finished at the service center: comes back to the Warehouse and stops there.
   await api(page, 'POST', `/work-orders/${wo.id}/movements/send`, { carried_by: 'Van' });

@@ -1018,7 +1018,7 @@ async function loadWoForMovement(id) {
   return wo;
 }
 
-async function assessmentWaitsForWarehouse(wo) {
+async function assessmentWaitsForServiceCenter(wo) {
   if (!Number(wo.movement_tracked)) return false;
   const full = await loadWoForMovement(wo.id);
   return full.state.assessment_blocked;
@@ -1176,7 +1176,7 @@ router.patch('/:id/estimate', requirePermission('wo_assess'), async (req, res) =
     const { rows: [wo] } = await db.execute({ sql: 'SELECT * FROM work_orders WHERE id = ?', args: [req.params.id] });
     if (!wo) return res.status(404).json({ error: 'Not found' });
     if (wo.status !== 'assessed') return res.status(400).json({ error: `This work order is ${wo.status}, not awaiting an estimate` });
-    if (await assessmentWaitsForWarehouse(wo)) return res.status(400).json({ error: 'The item has not been received at the Warehouse yet — it is assessed once the Warehouse checkpoint is done' });
+    if (await assessmentWaitsForServiceCenter(wo)) return res.status(400).json({ error: 'The item has not been received at the Service Center yet — it is assessed once the Service Center checkpoint is done' });
     // Deposit is optional (recent process change) — a $0/blank deposit skips
     // the pending_deposit stop entirely and goes straight to in_progress,
     // the same way a $0 final balance below skips creating a payment
