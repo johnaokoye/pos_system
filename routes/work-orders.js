@@ -583,7 +583,7 @@ router.patch('/:id/parts', requirePermission('wo_assign_parts'), async (req, res
 
     let processedItems;
     try {
-      processedItems = await processWorkOrderItems(items || [], defaultTaxRate);
+      processedItems = await processWorkOrderItems(items || [], defaultTaxRate, wo.branch_id);
     } catch(e) { return res.status(400).json({ error: e.message }); }
 
     // Parts already issued from stock can't be taken off the list.

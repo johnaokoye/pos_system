@@ -434,7 +434,9 @@ Object.assign(App, {
         this.api('GET', '/branches'),
       ]);
       this._woPartsProducts = products;
-      this._woBranches = (branches||[]).filter(b => String(b.id) !== String(wo.branch_id));
+      // Parts come from the Warehouse only (owner's rule) — the WO branch's own
+      // stock first, then a transfer from the Warehouse, else Purchasing.
+      this._woBranches = (branches||[]).filter(b => String(b.id) !== String(wo.branch_id) && Number(b.is_warehouse) && b.active);
       this._woPartsStockCache = {};
       // Part lines are added dynamically (addWOPartLine), so this closes
       // whichever wop-prod-dd-* dropdown is currently open rather than
@@ -1017,7 +1019,7 @@ Object.assign(App, {
         <input id="wop-cs-qty-${idx}" type="number" min="1" value="1" style="width:70px" placeholder="Qty">
       </span>
       <button class="btn btn-sm btn-danger" onclick="document.getElementById('wo-part-${idx}').remove();const a=document.getElementById('wo-part-alloc-${idx}');if(a)a.remove();const h=document.getElementById('wo-part-hint-${idx}');if(h)h.remove()">✕</button>
-      <div id="wo-part-hint-${idx}" style="flex-basis:100%;font-size:11px;color:var(--text-muted);margin-top:2px">Checked against this branch's stock — a shortfall is auto-sourced from another branch or sent to Purchasing.</div>`;
+      <div id="wo-part-hint-${idx}" style="flex-basis:100%;font-size:11px;color:var(--text-muted);margin-top:2px">Checked against this branch's stock — a shortfall is transferred from the Warehouse, or sent to Purchasing if the Warehouse is short too.</div>`;
     container.appendChild(div);
     const allocDiv = document.createElement('div');
     allocDiv.id = `wo-part-alloc-${idx}`;
@@ -1055,7 +1057,7 @@ Object.assign(App, {
   },
 
   _woPartTypeHints: {
-    product: "Checked against this branch's stock — a shortfall is auto-sourced from another branch or sent to Purchasing.",
+    product: "Checked against this branch's stock — a shortfall is transferred from the Warehouse, or sent to Purchasing if the Warehouse is short too.",
     custom: "Not in the catalog at all — automatically sent to Purchasing to order once you Confirm Parts. Enter your best price estimate; Purchasing can adjust it later.",
     customer: "The customer brought this part themselves — no charge, and it's never sourced or sent to Purchasing. It just shows up on the WO for the technician.",
   },
@@ -1099,19 +1101,24 @@ Object.assign(App, {
     const shortfall = qty - available;
     const otherBranches = this._woBranches || [];
     await Promise.all(otherBranches.map(b => this.getWOBranchStock(b.id)));
+    // The Warehouse covers as much of the shortfall as it holds (filled in
+    // for you); whatever's left goes to Purchasing.
+    let toCover = shortfall;
     const rowsHtml = otherBranches.map(b => {
-      const avail = (this._woPartsStockCache[b.id]||{})[productId]?.stock_qty || 0;
+      const avail = Math.max(0, (this._woPartsStockCache[b.id]||{})[productId]?.stock_qty || 0);
+      const take = Math.min(toCover, avail);
+      toCover -= take;
       return `<div style="display:flex;align-items:center;gap:8px;font-size:12px;margin-top:4px">
-        <span style="flex:1">${b.name} <span style="color:var(--text-muted)">(avail: ${avail})</span></span>
-        <input type="number" min="0" max="${avail}" value="0" style="width:70px" id="wo-part-alloc-${idx}-b${b.id}" data-branch="${b.id}" data-max="${avail}" oninput="App.recalcWOPartAllocation(${idx})">
+        <span style="flex:1">Transfer from ${b.name} <span style="color:var(--text-muted)">(avail: ${avail})</span></span>
+        <input type="number" min="0" max="${avail}" value="${take}" style="width:70px" id="wo-part-alloc-${idx}-b${b.id}" data-branch="${b.id}" data-max="${avail}" oninput="App.recalcWOPartAllocation(${idx})">
       </div>`;
-    }).join('');
+    }).join('') || '<div style="font-size:12px;margin-top:4px;color:var(--text-muted)">No warehouse is set up (Branches → Warehouse), so the shortfall goes to Purchasing.</div>';
     allocDiv.dataset.productId = productId;
     allocDiv.innerHTML = `
       <div style="background:var(--bg-card);border:1px solid var(--warning,#f59e0b);border-radius:6px;padding:8px 10px;margin:2px 0 8px">
-        <div style="font-size:12px;color:var(--warning,#f59e0b);font-weight:600;margin-bottom:4px">⚠ Only ${available} available at this branch — source the remaining <span id="wo-part-alloc-${idx}-shortfall">${shortfall}</span> from elsewhere:</div>
+        <div style="font-size:12px;color:var(--warning,#f59e0b);font-weight:600;margin-bottom:4px">⚠ Only ${available} available at this branch — the remaining <span id="wo-part-alloc-${idx}-shortfall">${shortfall}</span> come from the Warehouse:</div>
         ${rowsHtml}
-        <div style="font-size:12px;margin-top:6px;font-weight:600">To purchase (no stock available): <span id="wo-part-alloc-${idx}-remainder">${shortfall}</span></div>
+        <div style="font-size:12px;margin-top:6px;font-weight:600">To purchase (Warehouse doesn't have them): <span id="wo-part-alloc-${idx}-remainder">${toCover}</span></div>
       </div>`;
   },
 
@@ -1207,7 +1214,7 @@ Object.assign(App, {
     try {
       await this.api('PATCH', `/work-orders/${id}/parts`, { items: this._collectWOPartLines() });
       await this.api('POST', `/work-orders/${id}/confirm-parts`);
-      this.alert('Parts confirmed — transfers/purchase requests created where needed');
+      this.alert('Parts confirmed — Warehouse transfers / purchase requests created where needed');
       await this.viewWorkOrder(id);
     } catch(e) { this.alert(e.message, 'error'); }
   },
