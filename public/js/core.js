@@ -618,11 +618,21 @@ const App = {
   // Dispatch / Rental Deposits / Rental Items screens — a driver should only
   // ever reach rental data through the restricted My Deliveries dashboard
   // (renderDriverDashboard / GET /rentals/agreements/driver-queue).
+  // Mirrors canManageTransfers() in lib/permissions.js: Mark Picked Up /
+  // Mark Dropped Off alone don't open the Transfers screens.
+  _canManageTransfers() {
+    const perms = this.currentUser?.permissions;
+    if (!perms) return true;
+    if (perms.transfers) return true;
+    const mod = this._permissionTree.find(m => m.key === 'transfers');
+    return !!mod && mod.subs.some(s => !this._standaloneSubs.has(s.key) && !!perms[s.key]);
+  },
+
   _canManageRentals() {
     const perms = this.currentUser?.permissions;
     if (!perms) return true;
     if (perms.rentals) return true;
-    const driverOnlySubs = this._rentalsStandaloneSubs;
+    const driverOnlySubs = this._standaloneSubs;
     const mod = this._permissionTree.find(m => m.key === 'rentals');
     return !!mod && mod.subs.some(s => !driverOnlySubs.has(s.key) && !!perms[s.key]);
   },
@@ -638,7 +648,8 @@ const App = {
     if (section === 'rental-items') return this._canManageRentals();
     if (section === 'rental-deposits') return this._canManageRentals();
     if (section === 'rental-dispatch') return this._canManageRentals();
-    if (section === 'transfer-dispatch') return this.can('transfers');
+    if (section === 'transfer-dispatch') return this.can('transfers_pickup') || this.can('transfers_dropoff') || this._canManageTransfers();
+    if (section === 'transfers') return this._canManageTransfers();
     if (section === 'purchase-requests') return this.can('purchase_requests');
     if (section === 'work-orders') return this.can('work_orders');
     if (section === 'wo-schedule') return this.can('work_orders');
@@ -858,7 +869,7 @@ const App = {
       this._settingsDirty = false;
     }
     const perms = this.currentUser?.permissions;
-    const sectionAllowed = name === 'home' ? true : name === 'driver-dashboard' ? !!this.currentUser?.is_driver : name === 'guard-dashboard' ? !!this.currentUser?.is_security : name === 'online-orders' ? this.can('transactions') : name === 'rentals' ? this._canManageRentals() : name === 'rental-items' ? this._canManageRentals() : name === 'rental-deposits' ? this._canManageRentals() : name === 'rental-dispatch' ? this._canManageRentals() : name === 'transfer-dispatch' ? this.can('transfers') : name === 'purchase-requests' ? this.can('purchase_requests') : name === 'work-orders' ? this.can('work_orders') : name === 'wo-schedule' ? this.can('work_orders') : name === 'special-projects' ? (this.can('special_projects') || this.can('special_projects_approve')) : name === 'payables' ? (this.can('payables') || this.can('payables_approve')) : name === 'shop-use' ? this._suCanOpen() : name === 'consignment' ? this._consCanOpen() : name === 'special-orders' ? this._canSeeSpecialOrders() : (name === 'reports-marketing' || name === 'reports-sales' || name === 'reports-accounts' || name === 'reports-purchasing') ? this.can('reports') : name === 'reports-inventory' ? (this.can('reports') || this.can('inventory')) : this._hubGroups[name] ? this.canAccessHub(name) : this.can(name);
+    const sectionAllowed = name === 'home' ? true : name === 'driver-dashboard' ? !!this.currentUser?.is_driver : name === 'guard-dashboard' ? !!this.currentUser?.is_security : name === 'online-orders' ? this.can('transactions') : name === 'rentals' ? this._canManageRentals() : name === 'rental-items' ? this._canManageRentals() : name === 'rental-deposits' ? this._canManageRentals() : name === 'rental-dispatch' ? this._canManageRentals() : name === 'transfer-dispatch' ? this._hubTileAllowed('transfer-dispatch') : name === 'transfers' ? this._canManageTransfers() : name === 'purchase-requests' ? this.can('purchase_requests') : name === 'work-orders' ? this.can('work_orders') : name === 'wo-schedule' ? this.can('work_orders') : name === 'special-projects' ? (this.can('special_projects') || this.can('special_projects_approve')) : name === 'payables' ? (this.can('payables') || this.can('payables_approve')) : name === 'shop-use' ? this._suCanOpen() : name === 'consignment' ? this._consCanOpen() : name === 'special-orders' ? this._canSeeSpecialOrders() : (name === 'reports-marketing' || name === 'reports-sales' || name === 'reports-accounts' || name === 'reports-purchasing') ? this.can('reports') : name === 'reports-inventory' ? (this.can('reports') || this.can('inventory')) : this._hubGroups[name] ? this.canAccessHub(name) : this.can(name);
     if (perms && !sectionAllowed) return;
     this.section = name;
     this._reportSection(name);

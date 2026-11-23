@@ -4,13 +4,13 @@ const router = express.Router();
 const { db } = require('../database');
 const { createTransfer, deductTransferStock, addTransferStock } = require('../lib/transfers');
 const { receiveTransferLots, returnTransferLots, releaseTransferReservations } = require('../lib/stockLots');
-const { requirePermission, requireAnyPermission, requireAuth } = require('../lib/permissions');
+const { requirePermission, requireAnyPermission, requireAuth, requireTransfersManage } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 
 router.use(requireAuth);
 
 // GET all transfers
-router.get('/', requirePermission('transfers'), async (req, res) => {
+router.get('/', requireTransfersManage, async (req, res) => {
   try {
     const { status, from_branch_id, to_branch_id, limit = 100 } = req.query;
     let sql = `SELECT t.*, fb.name as from_branch_name, tb.name as to_branch_name, e.first_name || ' ' || e.last_name as employee_name,
@@ -63,6 +63,24 @@ router.get('/people', requireAnyPermission('transfers_pickup', 'transfers_dropof
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// The driver's list (Branch Transfer Dispatch): transfers waiting to be
+// picked up or dropped off, with just what's needed to do that — branches,
+// items and quantities, who has it. Nothing about the sale or customer
+// behind it. Registered before GET /:id.
+router.get('/driver-queue', requireAnyPermission('transfers_pickup', 'transfers_dropoff'), async (req, res) => {
+  try {
+    const { rows } = await db.execute({ sql: `SELECT t.id, t.transfer_number, t.status, t.from_branch_id, t.to_branch_id, t.driver_id, t.dispatched_at, t.created_at,
+        fb.name as from_branch_name, tb.name as to_branch_name, COALESCE(dr.first_name || ' ' || dr.last_name, t.driver_name) as driver_display_name, t.driver_name,
+        (SELECT GROUP_CONCAT(product_name || ' x' || quantity_requested, ', ') FROM branch_transfer_items WHERE transfer_id = t.id) as item_summary,
+        (SELECT json_group_array(json_object('id', ti.id, 'product_name', ti.product_name, 'quantity_requested', ti.quantity_requested, 'quantity_received', COALESCE(ti.quantity_received, 0)))
+           FROM branch_transfer_items ti WHERE ti.transfer_id = t.id) as items_json
+      FROM branch_transfers t LEFT JOIN branches fb ON t.from_branch_id = fb.id LEFT JOIN branches tb ON t.to_branch_id = tb.id LEFT JOIN employees dr ON dr.id = t.driver_id
+      WHERE t.status IN ('pending', 'in_transit') ORDER BY t.created_at LIMIT 200`, args: [] });
+    for (const r of rows) { r.items = JSON.parse(r.items_json || '[]'); delete r.items_json; }
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Who carried the stock: an active employee (id) or an outside courier
 // (typed name). Returns { id, name } or { error }.
 async function resolveCarrier(executor, id, name, label) {
@@ -77,7 +95,7 @@ async function resolveCarrier(executor, id, name, label) {
 }
 
 // GET single transfer with items
-router.get('/:id', requirePermission('transfers'), async (req, res) => {
+router.get('/:id', requireTransfersManage, async (req, res) => {
   try {
     const { rows: [transfer] } = await db.execute({ sql: `SELECT t.*, fb.name as from_branch_name, tb.name as to_branch_name, e.first_name || ' ' || e.last_name as employee_name,
       se.first_name || ' ' || se.last_name as sent_by_name,
@@ -308,7 +326,7 @@ router.patch('/:id/receive', requirePermission('transfers_dropoff'), async (req,
 });
 
 // PATCH cancel — restore unreceived qty back to source branch
-router.patch('/:id/cancel', requirePermission('transfers'), async (req, res) => {
+router.patch('/:id/cancel', requireTransfersManage, async (req, res) => {
   try {
     const { rows: [transfer] } = await db.execute({ sql: 'SELECT * FROM branch_transfers WHERE id = ?', args: [req.params.id] });
     if (!transfer) return res.status(404).json({ error: 'Not found' });

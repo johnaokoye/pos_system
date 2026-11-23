@@ -4212,6 +4212,25 @@ async function _init() {
       await db.execute({ sql: "INSERT OR REPLACE INTO settings (key, value) VALUES ('fix_rentals_standalone_parent', '1')", args: [] });
     }
   } catch(e) {}
+  // Same for Branch Transfers: a group with only Mark Picked Up / Mark
+  // Dropped Off had Transfers ticked too (the whole module, cancelling included).
+  try {
+    const { rows: [done] } = await db.execute({ sql: "SELECT value FROM settings WHERE key = 'fix_transfers_standalone_parent'", args: [] });
+    if (!done) {
+      const standalone = ['transfers_pickup', 'transfers_dropoff'];
+      const others = ['transfers_create', 'transfers_approve', 'transfers_quick'];
+      const { rows: groups } = await db.execute({ sql: 'SELECT id, name, permissions FROM security_groups', args: [] });
+      for (const g of groups) {
+        const perms = JSON.parse(g.permissions || '{}');
+        if (perms.transfers && standalone.some(k => perms[k]) && others.every(k => perms[k] === false)) {
+          perms.transfers = false;
+          await db.execute({ sql: 'UPDATE security_groups SET permissions = ? WHERE id = ?', args: [JSON.stringify(perms), g.id] });
+          console.log(`[permissions] ${g.name}: Transfers unticked — only Mark Picked Up / Dropped Off were on`);
+        }
+      }
+      await db.execute({ sql: "INSERT OR REPLACE INTO settings (key, value) VALUES ('fix_transfers_standalone_parent', '1')", args: [] });
+    }
+  } catch(e) {}
 
   // Add promotions permission to existing security groups
   try {

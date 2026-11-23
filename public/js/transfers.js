@@ -621,7 +621,8 @@ Object.assign(App, {
   },
 
   async showReceiveTransfer(id) {
-    const [t, people] = await Promise.all([this.api('GET', `/transfers/${id}`), this._transferPeople()]);
+    const cached = (this._transferDriverCache || []).find(x => x.id === id);
+    const [t, people] = await Promise.all([cached || this.api('GET', `/transfers/${id}`), this._transferPeople()]);
     if (t.status === 'requested') { this.alert('This transfer has not been sent yet', 'warning'); return; }
     const pending = t.items.filter(i => (i.quantity_received||0) < i.quantity_requested);
     if (!pending.length) { this.alert('All items already received', 'warning'); return; }
@@ -683,11 +684,13 @@ Object.assign(App, {
   async loadTransferDispatch() {
     const el = document.getElementById('transfer-dispatch-content');
     if (!el) return;
-    const [pending, inTransit] = await Promise.all([
-      this.api('GET', '/transfers?status=pending&limit=100'),
-      this.api('GET', '/transfers?status=in_transit&limit=100'),
-    ]);
-    const transferList = [...pending, ...inTransit];
+    // A driver (Mark Picked Up / Mark Dropped Off only) reads their own
+    // slim list; everyone else the full transfer list.
+    const manage = this._canManageTransfers();
+    const transferList = manage
+      ? (await Promise.all([this.api('GET', '/transfers?status=pending&limit=100'), this.api('GET', '/transfers?status=in_transit&limit=100')])).flat()
+      : await this.api('GET', '/transfers/driver-queue');
+    this._transferDriverCache = manage ? null : transferList;
     if (!document.getElementById('transfer-dispatch-content')) return;
     const statusColor = { pending:'badge-warning', in_transit:'badge-info' };
     document.getElementById('transfer-dispatch-content').innerHTML = !transferList.length ? '<div class="empty-state"><p>No transfers awaiting pickup or drop-off.</p></div>' : `
@@ -702,7 +705,7 @@ Object.assign(App, {
           <td style="text-align:right;white-space:nowrap">
             ${t.status==='pending' && this.can('transfers_pickup') ? `<button class="btn btn-sm btn-primary" onclick="App.dispatchTransfer(${t.id})">Picked Up</button>` : ''}
             ${(t.status==='pending'||t.status==='in_transit') && this.can('transfers_dropoff') ? `<button class="btn btn-sm btn-success" onclick="App.showReceiveTransfer(${t.id})">Dropped Off</button>` : ''}
-            <button class="btn btn-sm btn-outline" onclick="App.viewTransfer(${t.id})">View</button>
+            ${manage ? `<button class="btn btn-sm btn-outline" onclick="App.viewTransfer(${t.id})">View</button>` : ''}
           </td>
         </tr>`).join('')}</tbody>
       </table>`;
