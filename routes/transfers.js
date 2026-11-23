@@ -14,7 +14,7 @@ router.get('/', requireTransfersManage, async (req, res) => {
   try {
     const { status, from_branch_id, to_branch_id, limit = 100 } = req.query;
     let sql = `SELECT t.*, fb.name as from_branch_name, tb.name as to_branch_name, e.first_name || ' ' || e.last_name as employee_name,
-      COALESCE(dr.first_name || ' ' || dr.last_name, t.driver_name) as driver_display_name,
+      COALESCE(dr.first_name || ' ' || dr.last_name, t.driver_name) as driver_display_name, (SELECT first_name || ' ' || last_name FROM employees WHERE id = t.dropped_off_by) as dropped_off_by_name,
       (SELECT GROUP_CONCAT(product_name || ' x' || quantity_requested, ', ') FROM branch_transfer_items WHERE transfer_id = t.id) as item_summary,
       st.transaction_number AS sale_number, st.status AS sale_status, sc.first_name || ' ' || sc.last_name AS sale_customer_name
       FROM branch_transfers t LEFT JOIN branches fb ON t.from_branch_id = fb.id LEFT JOIN branches tb ON t.to_branch_id = tb.id LEFT JOIN employees e ON t.employee_id = e.id
@@ -55,7 +55,7 @@ router.get('/inbox', requirePermission('transfers_approve'), async (req, res) =>
 // Active employees for the "Picked up by" / "Delivered by" pickers — names
 // only (the employee list itself needs the Employees module). Drivers first.
 // Registered before GET /:id.
-router.get('/people', requireAnyPermission('transfers_pickup', 'transfers_dropoff'), async (req, res) => {
+router.get('/people', requireAnyPermission('transfers_pickup', 'transfers_dropoff', 'transfers_receive'), async (req, res) => {
   try {
     const { rows } = await db.execute({ sql: `SELECT id, first_name || ' ' || last_name AS name, is_driver FROM employees
       WHERE active = 1 ORDER BY is_driver DESC, first_name, last_name`, args: [] });
@@ -75,7 +75,7 @@ router.get('/driver-queue', requireAnyPermission('transfers_pickup', 'transfers_
         (SELECT json_group_array(json_object('id', ti.id, 'product_name', ti.product_name, 'quantity_requested', ti.quantity_requested, 'quantity_received', COALESCE(ti.quantity_received, 0)))
            FROM branch_transfer_items ti WHERE ti.transfer_id = t.id) as items_json
       FROM branch_transfers t LEFT JOIN branches fb ON t.from_branch_id = fb.id LEFT JOIN branches tb ON t.to_branch_id = tb.id LEFT JOIN employees dr ON dr.id = t.driver_id
-      WHERE t.status IN ('pending', 'in_transit') ORDER BY t.created_at LIMIT 200`, args: [] });
+      WHERE t.status IN ('pending', 'in_transit') AND t.dropped_off_at IS NULL ORDER BY t.created_at LIMIT 200`, args: [] });
     for (const r of rows) { r.items = JSON.parse(r.items_json || '[]'); delete r.items_json; }
     res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -100,7 +100,7 @@ router.get('/:id', requireTransfersManage, async (req, res) => {
     const { rows: [transfer] } = await db.execute({ sql: `SELECT t.*, fb.name as from_branch_name, tb.name as to_branch_name, e.first_name || ' ' || e.last_name as employee_name,
       se.first_name || ' ' || se.last_name as sent_by_name,
       COALESCE(dr.first_name || ' ' || dr.last_name, t.driver_name) as driver_display_name,
-      dp.first_name || ' ' || dp.last_name as dispatched_by_name, st.transaction_number AS sale_number, st.status AS sale_status, sc.first_name || ' ' || sc.last_name AS sale_customer_name
+      dp.first_name || ' ' || dp.last_name as dispatched_by_name, (SELECT first_name || ' ' || last_name FROM employees WHERE id = t.dropped_off_by) as dropped_off_by_name, st.transaction_number AS sale_number, st.status AS sale_status, sc.first_name || ' ' || sc.last_name AS sale_customer_name
       FROM branch_transfers t LEFT JOIN branches fb ON t.from_branch_id = fb.id LEFT JOIN branches tb ON t.to_branch_id = tb.id LEFT JOIN employees e ON t.employee_id = e.id LEFT JOIN employees se ON t.sent_by = se.id
       LEFT JOIN employees dr ON dr.id = t.driver_id LEFT JOIN employees dp ON dp.id = t.dispatched_by LEFT JOIN transactions st ON st.id = t.transaction_id LEFT JOIN customers sc ON sc.id = st.customer_id WHERE t.id = ?`, args: [req.params.id] });
     if (!transfer) return res.status(404).json({ error: 'Not found' });
@@ -261,9 +261,26 @@ router.patch('/:id/dispatch', requirePermission('transfers_pickup'), async (req,
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// PATCH receive — receive items at destination, add to destination branch_inventory
-// (a.k.a. "dropped off" at the destination branch)
-router.patch('/:id/receive', requirePermission('transfers_dropoff'), async (req, res) => {
+// PATCH dropoff — the driver marks it delivered at the receiving branch.
+// Nothing is counted or put into stock here: someone at that branch does
+// that with Receive (transfers_receive), which takes the driver as who
+// delivered it.
+router.patch('/:id/dropoff', requirePermission('transfers_dropoff'), async (req, res) => {
+  try {
+    const { rows: [t] } = await db.execute({ sql: 'SELECT * FROM branch_transfers WHERE id = ?', args: [req.params.id] });
+    if (!t) return res.status(404).json({ error: 'Not found' });
+    if (t.status === 'pending') return res.status(400).json({ error: 'Mark it picked up first' });
+    if (t.status !== 'in_transit') return res.status(400).json({ error: `This transfer is ${t.status}` });
+    if (t.dropped_off_at) return res.status(400).json({ error: 'Already marked dropped off' });
+    await db.execute({ sql: 'UPDATE branch_transfers SET dropped_off_at = ?, dropped_off_by = ?, dropoff_note = ? WHERE id = ? AND dropped_off_at IS NULL',
+      args: [new Date().toISOString(), req.employee?.id || null, String(req.body?.note || '').trim().slice(0, 300) || null, t.id] });
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// PATCH receive — the receiving branch counts the items in and they go into
+// its branch_inventory.
+router.patch('/:id/receive', requirePermission('transfers_receive'), async (req, res) => {
   try {
     const { items } = req.body;
     const { rows: [transfer] } = await db.execute({ sql: 'SELECT * FROM branch_transfers WHERE id = ?', args: [req.params.id] });

@@ -2,6 +2,7 @@ import { test, expect } from './fixtures.js';
 
 // A driver with only Mark Picked Up / Mark Dropped Off: their own list on
 // Branch Transfer Dispatch, the two actions, and nothing else of Transfers.
+// Dropping off counts nothing in — someone at the branch receives it.
 const api = (page, method, url, data) => page.evaluate(([m, u, d]) => App.api(m, u, d), [method, url, data]);
 const attempt = (page, method, url, data) => page.evaluate(([m, u, d]) => App.api(m, u, d).then(() => 'accepted', e => e.message), [method, url, data]);
 
@@ -53,15 +54,33 @@ test('a transfer driver can only mark picked up and dropped off', async ({ page 
   await page.click('button:has-text("Mark In-Transit")');
   await expect.poll(async () => (await api(page, 'GET', '/transfers/driver-queue')).find(t => t.id === tr.id)?.status).toBe('in_transit');
 
-  // Dropped off.
+  // Dropped off: no quantities, nothing into stock yet.
   await page.locator('tr', { hasText: tr.transfer_number }).locator('button', { hasText: 'Dropped Off' }).click();
-  await expect(page.locator('.modal')).toContainText(`Receive Transfer — ${tr.transfer_number}`);
-  await page.click('button:has-text("Confirm Receipt")');
+  await expect(page.locator('.modal')).not.toContainText('Qty');
+  await page.fill('#tdrop-note', 'Left with the counter');
+  await page.click('.modal-footer button:has-text("Mark Dropped Off")');
+  await expect(page.locator('.alert-success', { hasText: 'Dropped off' }).last()).toBeVisible();
   await expect.poll(async () => (await api(page, 'GET', '/transfers/driver-queue')).some(t => t.id === tr.id)).toBe(false);
+  expect(await attempt(page, 'PATCH', `/transfers/${tr.id}/receive`, { items: [{ item_id: full.items[0].id, quantity_received: 3 }], delivered_by_name: 'x' })).toMatch(/permission/i);
+
+  // Someone at the branch counts it in.
+  const recvGroup = await (async () => { await signIn(page, 'admin', '123456'); return api(page, 'POST', '/security-groups', { name: `Receivers ${s}`, permissions: { transfers_receive: true } }); })();
+  await api(page, 'POST', '/employees', { first_name: 'Branch', last_name: `Receiver ${s}`, username: `br${s}`, pin: String(Number(s.slice(-6)) + 1).slice(-6), password: 'pw-123456', must_change_password: 0, security_group_id: recvGroup.id, active: 1, default_branch_id: other.id });
+  let t = await api(page, 'GET', `/transfers/${tr.id}`);
+  expect(t).toMatchObject({ status: 'in_transit', dropped_off_by_name: `Van Driver ${s}`, dropoff_note: 'Left with the counter' });
+  expect(t.items[0].quantity_received || 0).toBe(0);
+  await signIn(page, `br${s}`, 'pw-123456');
+  await page.evaluate(() => App.showSection('transfers'));
+  const listRow = page.locator('tr', { hasText: tr.transfer_number });
+  await expect(listRow).toContainText('dropped off');
+  await listRow.locator('button', { hasText: 'Receive' }).click();
+  await page.fill(`#trecv-${full.items[0].id}`, '2');
+  await page.click('button:has-text("Confirm Receipt")');
+  await expect(page.locator('.alert-success', { hasText: 'Items received' }).last()).toBeVisible();
 
   await signIn(page, 'admin', '123456');
-  const done = await api(page, 'GET', `/transfers/${tr.id}`);
-  expect(done.status).toBe('received');
-  expect(done.driver_display_name).toBe(`Van Driver ${s}`);
-  expect(done.receipts[0].delivered_by_display).toBe(`Van Driver ${s}`);
+  t = await api(page, 'GET', `/transfers/${tr.id}`);
+  expect(t.items[0].quantity_received).toBe(2);
+  expect(t.driver_display_name).toBe(`Van Driver ${s}`);
+  expect(t.receipts[0]).toMatchObject({ delivered_by_display: `Van Driver ${s}`, received_by_name: `Branch Receiver ${s}` });
 });

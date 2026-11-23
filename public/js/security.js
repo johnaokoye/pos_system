@@ -130,8 +130,9 @@ Object.assign(App, {
     { key: 'transfers', label: 'Branch Transfers', subs: [
       { key: 'transfers_create', label: 'Create Transfers' },
       { key: 'transfers_approve', label: 'Approve Transfers' },
-      { key: 'transfers_pickup', label: 'Mark Picked Up' },
-      { key: 'transfers_dropoff', label: 'Mark Dropped Off' },
+      { key: 'transfers_pickup', label: 'Mark Picked Up (Driver)' },
+      { key: 'transfers_dropoff', label: 'Mark Dropped Off (Driver)' },
+      { key: 'transfers_receive', label: 'Receive Transfers (count quantities in)' },
       { key: 'transfers_quick', label: 'Quick Transfer (move stock instantly)' },
     ]},
     { key: 'quotations', label: 'Quotations', subs: [

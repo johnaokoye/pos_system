@@ -34,14 +34,14 @@ Object.assign(App, {
                   <td class="fw-600">${t.transfer_number}${this._transferCustomerOrderBadge(t)}</td>
                   <td>${t.from_branch_name||'-'}</td>
                   <td>${t.to_branch_name||'-'}</td>
-                  <td><span class="badge-pill ${statusColor[t.status]||'badge-info'}">${this._transferStatusLabel(t.status)}</span>${t.is_quick ? ' <span class="badge-pill badge-secondary" title="Quick transfer — moved instantly">⚡ Quick</span>' : ''}</td>
+                  <td><span class="badge-pill ${statusColor[t.status]||'badge-info'}">${this._transferStatusLabel(t.status, t)}</span>${t.is_quick ? ' <span class="badge-pill badge-secondary" title="Quick transfer — moved instantly">⚡ Quick</span>' : ''}</td>
                   <td style="color:var(--text-muted)">${this.fmtDate(t.created_at)}</td>
                   <td style="color:var(--text-muted)">${t.received_at ? this.fmtDate(t.received_at) : '—'}</td>
                   <td>
                     <button class="btn btn-sm btn-secondary" onclick="App.viewTransfer(${t.id})">View</button>
                     ${t.status==='requested' && this.can('transfers_approve') ? `<button class="btn btn-sm btn-primary" onclick="App.showSendTransfer(${t.id})">Review &amp; Send</button>` : ''}
                     ${t.status==='requested'||t.status==='pending' ? `<button class="btn btn-sm btn-outline" onclick="App.printTransferPickList(${t.id})" title="Print Pick List">🗒 Pick List</button>` : ''}
-                    ${(t.status==='pending'||t.status==='in_transit') && this.can('transfers_dropoff') ? `<button class="btn btn-sm btn-success" onclick="App.showReceiveTransfer(${t.id})">Receive</button>` : ''}
+                    ${(t.status==='pending'||t.status==='in_transit') && this.can('transfers_receive') ? `<button class="btn btn-sm btn-success" onclick="App.showReceiveTransfer(${t.id})">Receive</button>` : ''}
                   </td>
                 </tr>`).join('') : '<tr><td colspan="7" class="empty-state">No transfers yet</td></tr>'}
             </tbody>
@@ -250,7 +250,10 @@ Object.assign(App, {
 
   _transferStatusColor: { requested:'badge-secondary', pending:'badge-warning', in_transit:'badge-info', received:'badge-success', cancelled:'badge-danger' },
   // 'pending' is a sent transfer waiting for pickup / receiving.
-  _transferStatusLabel(status) {
+  // A transfer the driver has dropped off but the branch hasn't counted in yet
+  // shows as "dropped off".
+  _transferStatusLabel(status, t) {
+    if (status === 'in_transit' && t && t.dropped_off_at) return 'dropped off';
     return { requested: 'requested', pending: 'sent', in_transit: 'in transit' }[status] || status;
   },
 
@@ -266,7 +269,7 @@ Object.assign(App, {
         <div class="modal-header">
           <span class="modal-title">Transfer: ${t.transfer_number}</span>
           <div style="display:flex;gap:8px;align-items:center">
-            <span class="badge-pill ${statusColor[t.status]||''}">${this._transferStatusLabel(t.status)}</span>
+            <span class="badge-pill ${statusColor[t.status]||''}">${this._transferStatusLabel(t.status, t)}</span>
             <button class="modal-close">✕</button>
           </div>
         </div>
@@ -277,6 +280,7 @@ Object.assign(App, {
             <div><strong>Requested by:</strong> ${t.employee_name||'-'} · ${this.fmtDate(t.created_at)}</div>
             ${t.sent_at ? `<div><strong>Sent by:</strong> ${t.sent_by_name||'-'} · ${this.fmtDate(t.sent_at)}</div>` : ''}
             ${t.dispatched_at ? `<div><strong>Picked up by:</strong> ${this.escapeAttr(t.driver_display_name||'-')} · ${this.fmtDateTime(t.dispatched_at)}${t.dispatched_by_name && t.dispatched_by_name !== t.driver_display_name ? ` <span style="color:var(--text-muted)">(marked by ${this.escapeAttr(t.dispatched_by_name)})</span>` : ''}</div>` : ''}
+            ${t.dropped_off_at ? `<div><strong>Dropped off by:</strong> ${this.escapeAttr(t.dropped_off_by_name || '-')} · ${this.fmtDateTime(t.dropped_off_at)}${t.dropoff_note ? ` <span style="color:var(--text-muted)">— ${this.escapeAttr(t.dropoff_note)}</span>` : ''}</div>` : ''}
           </div>
           ${this._transferCustomerOrderBanner(t)}
           ${t.notes ? `<p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">${t.notes}</p>` : ''}
@@ -311,7 +315,8 @@ Object.assign(App, {
           ${t.status!=='cancelled' ? `<button class="btn btn-outline" onclick="App.printTransferPickList(${t.id})">🗒 Print Pick List</button>` : ''}
           ${t.status==='pending' && this.can('transfers_pickup') ? `<button class="btn btn-secondary" onclick="App.dispatchTransfer(${t.id})">Mark In-Transit</button>` : ''}
           ${t.status!=='cancelled'&&t.status!=='received' ? `<button class="btn btn-danger" onclick="App.cancelTransfer(${t.id})">Cancel</button>` : ''}
-          ${(t.status==='pending'||t.status==='in_transit') && this.can('transfers_dropoff') ? `<button class="btn btn-success" onclick="App.closeModal();App.showReceiveTransfer(${t.id})">Receive Items</button>` : ''}
+          ${t.status==='in_transit' && !t.dropped_off_at && this.can('transfers_dropoff') ? `<button class="btn btn-secondary" onclick="App.closeModal();App.markTransferDroppedOff(${t.id})">Mark Dropped Off</button>` : ''}
+          ${(t.status==='pending'||t.status==='in_transit') && this.can('transfers_receive') ? `<button class="btn btn-success" onclick="App.closeModal();App.showReceiveTransfer(${t.id})">Receive Items</button>` : ''}
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
@@ -672,6 +677,33 @@ Object.assign(App, {
   // framed as "Picked Up" (dispatch) / "Dropped Off" (receive) and limited
   // to jobs that still need one of those two things done.
 
+  // Driver: delivered to the receiving branch. The branch counts it in later
+  // (Receive, transfers_receive) — no quantities here.
+  markTransferDroppedOff(id) {
+    const t = (this._transferDriverCache || []).find(x => x.id === id);
+    this.showModal(`
+      <div class="modal" style="max-width:420px">
+        <div class="modal-header"><span class="modal-title">Dropped Off${t ? ` — ${t.transfer_number}` : ''}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <p style="font-size:13px;margin-top:0">Confirm you've delivered ${t ? `<strong>${this.escapeAttr(t.item_summary || 'the items')}</strong> to <strong>${this.escapeAttr(t.to_branch_name || 'the branch')}</strong>` : 'this transfer'}. Someone there will count it in.</p>
+          <div class="form-group"><label>Note</label><input id="tdrop-note" placeholder="Optional — e.g. left with Kim at the counter"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-success" onclick="App.confirmTransferDroppedOff(${id})">Mark Dropped Off</button>
+        </div>
+      </div>`);
+  },
+
+  async confirmTransferDroppedOff(id) {
+    try {
+      await this.api('PATCH', `/transfers/${id}/dropoff`, { note: document.getElementById('tdrop-note')?.value.trim() || null });
+      this.closeModal();
+      this.alert('Dropped off — the branch will count it in');
+      this._refreshTransferView();
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
   async renderTransferDispatch() {
     document.getElementById('content').innerHTML = `
       <div class="section-header">
@@ -701,10 +733,11 @@ Object.assign(App, {
           <td>${t.from_branch_name||'—'}</td>
           <td>${t.to_branch_name||'—'}</td>
           <td style="max-width:260px">${t.item_summary||'—'}</td>
-          <td><span class="badge-pill ${statusColor[t.status]||'badge-secondary'}">${this._transferStatusLabel(t.status)}</span>${t.driver_display_name ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">with ${this.escapeAttr(t.driver_display_name)}</div>` : ''}</td>
+          <td><span class="badge-pill ${statusColor[t.status]||'badge-secondary'}">${this._transferStatusLabel(t.status, t)}</span>${t.driver_display_name ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">${t.dropped_off_at ? 'by' : 'with'} ${this.escapeAttr(t.driver_display_name)}</div>` : ''}</td>
           <td style="text-align:right;white-space:nowrap">
             ${t.status==='pending' && this.can('transfers_pickup') ? `<button class="btn btn-sm btn-primary" onclick="App.dispatchTransfer(${t.id})">Picked Up</button>` : ''}
-            ${(t.status==='pending'||t.status==='in_transit') && this.can('transfers_dropoff') ? `<button class="btn btn-sm btn-success" onclick="App.showReceiveTransfer(${t.id})">Dropped Off</button>` : ''}
+            ${t.status==='in_transit' && !t.dropped_off_at && this.can('transfers_dropoff') ? `<button class="btn btn-sm btn-success" onclick="App.markTransferDroppedOff(${t.id})">Dropped Off</button>` : ''}
+            ${manage && t.status==='in_transit' && t.dropped_off_at && this.can('transfers_receive') ? `<button class="btn btn-sm btn-success" onclick="App.showReceiveTransfer(${t.id})">Receive</button>` : ''}
             ${manage ? `<button class="btn btn-sm btn-outline" onclick="App.viewTransfer(${t.id})">View</button>` : ''}
           </td>
         </tr>`).join('')}</tbody>
