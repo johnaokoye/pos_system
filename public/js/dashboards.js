@@ -215,7 +215,9 @@ Object.assign(App, {
   // actually collected; no financial settlement happens here (that's still
   // Process Return, done later by whoever's at the counter).
   async showConfirmPickupModal(id) {
-    const a = await this.api('GET', `/rentals/agreements/${id}`);
+    // From the driver's own queue — the full agreement (with its amounts)
+    // isn't open to a driver-only group.
+    const a = (this._driverQueueCache||[]).find(x => x.id === id) || await this.api('GET', `/rentals/agreements/${id}`);
     this.showModal(`
       <div class="modal" style="max-width:440px">
         <div class="modal-header"><span class="modal-title">Confirm Pickup — ${a.agreement_number}</span><button class="modal-close">✕</button></div>
@@ -322,38 +324,40 @@ Object.assign(App, {
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
+  // Security's screen: no amounts anywhere — rows come from the slim
+  // GET /rentals/agreements/guard-queue, and View (the full agreement, with
+  // its money) only shows for someone who can manage rentals anyway.
   async renderGuardDashboard() {
-    const [awaitingIssue, active, returned] = await Promise.all([
-      this.api('GET', '/rentals/agreements?view=awaiting_issue'),
-      this.api('GET', '/rentals/agreements?view=active'),
-      this.api('GET', '/rentals/agreements?view=returned'),
-    ]);
+    const rows = await this.api('GET', '/rentals/agreements/guard-queue');
     if (this.section !== 'guard-dashboard') return;
-    this._guardDashCache = [...awaitingIssue, ...active, ...returned];
-
-    const awaitingCheck = awaitingIssue.filter(a => !a.issue_security_employee_id);
-    const expectedReturns = [...active].sort((a,b) => (a.due_date||'').localeCompare(b.due_date||''));
-
+    this._guardDashCache = rows;
+    const canView = this._canManageRentals();
+    const canSign = this.can('rentals_security_signoff');
+    const awaitingCheck = rows.filter(a => a.status === 'awaiting_issue' && !a.issue_security_employee_id);
+    const expectedReturns = rows.filter(a => a.status === 'active').sort((a,b) => (a.due_date||'').localeCompare(b.due_date||''));
     const myId = this.currentUser.id;
-    const history = [...awaitingIssue, ...active, ...returned]
+    const history = rows
       .filter(a => a.issue_security_employee_id === myId || a.return_security_employee_id === myId)
       .map(a => ({ a, at: a.return_security_confirmed_at || a.issue_security_confirmed_at || a.created_at }))
       .sort((x,y) => (y.at||'').localeCompare(x.at||''))
       .slice(0, 8)
       .map(x => x.a);
+    const how = a => `<div style="font-size:11px;color:var(--text-muted)">${a.delivery_required ? 'Going out for delivery' : 'Customer collecting'}${a.accessory_summary ? ` · with ${this.escapeAttr(a.accessory_summary)}` : ''}</div>`;
+    const action = a => !canSign ? '' : a.delivery_required
+      ? `<button class="btn btn-sm btn-primary" onclick="App.showSecuritySignoffModal(${a.id})">Sign Off</button>`
+      : `<button class="btn btn-sm btn-primary" onclick="App.showGuardIssueModal(${a.id})">Hand Over</button>`;
 
     document.getElementById('content').innerHTML = `
       <div class="section-header"><h2>My Verifications</h2></div>
-      ${this._rentalDashSection('Awaiting Security Check', awaitingCheck.map(a => this._rentalDashRow(a, '', (a.delivery_required && this.can('rentals_security_signoff')) ? `<button class="btn btn-sm btn-primary" onclick="App.showSecuritySignoffModal(${a.id})">Sign Off</button>` : '')), 'Nothing waiting on a security check right now.')}
-      ${this._rentalDashSection('Expected Returns', expectedReturns.map(a => this._rentalDashRow(a)), 'No active rentals outstanding.')}
-      ${this._rentalDashSection('My Recent Verifications', history.map(a => this._rentalDashRow(a, `<div style="font-size:11px;color:var(--text-muted)">${a.display_status}</div>`)), 'No verifications recorded yet.')}
+      ${this._rentalDashSection('Awaiting Security Check', awaitingCheck.map(a => this._rentalDashRow(a, how(a), action(a), '', canView)), 'Nothing waiting on a security check right now.')}
+      ${this._rentalDashSection('Expected Returns', expectedReturns.map(a => this._rentalDashRow(a, '', '', '', canView)), 'No active rentals outstanding.')}
+      ${this._rentalDashSection('My Recent Verifications', history.map(a => this._rentalDashRow(a, `<div style="font-size:11px;color:var(--text-muted)">${a.display_status}</div>`, '', '', canView)), 'No verifications recorded yet.')}
     `;
   },
 
-  // Self-service — the logged-in guard IS the signer, so there's no employee
-  // picker like the legacy combined Issue modal has. Only offered for
-  // delivery-required agreements; counter-pickup ones still go through
-  // showIssueRentalModal's combined step, unchanged.
+  // Self-service — the logged-in guard IS the signer. Delivery: photos are
+  // optional here (they count toward the issue photos the driver would
+  // otherwise take at the customer's).
   showSecuritySignoffModal(id) {
     const a = (this._guardDashCache||[]).find(x => x.id === id);
     if (!a) { this.alert('Agreement not found — refresh and try again', 'error'); return; }
@@ -362,6 +366,7 @@ Object.assign(App, {
         <div class="modal-header"><span class="modal-title">Security Sign-Off — ${a.agreement_number}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">${a.item_summary || 'Item'} is going out for delivery. Sign below to confirm it's clear to leave.</p>
+          ${this._rentalPhotoPickerHtml(id, 'issue').replace('(required — at least one of the item(s) as it goes out)', '(optional — the item(s) as they leave)')}
           ${this._sigPadHtml('ss-guard-sig', 'Guard Signature', 'required — confirms this item is clear to leave')}
         </div>
         <div class="modal-footer">
@@ -370,6 +375,55 @@ Object.assign(App, {
         </div>
       </div>`);
     this._sigPadInit('ss-guard-sig');
+    this._rentalPhotoLoad(id, 'issue');
+  },
+
+  // Customer collecting at the counter (no delivery): the guard hands it
+  // over — photos, their own signature, the customer's name and signature —
+  // and the rental clock starts now. Nothing about money is shown.
+  showGuardIssueModal(id) {
+    const a = (this._guardDashCache||[]).find(x => x.id === id);
+    if (!a) { this.alert('Agreement not found — refresh and try again', 'error'); return; }
+    this.showModal(`
+      <div class="modal" style="max-width:460px">
+        <div class="modal-header"><span class="modal-title">Hand Over — ${a.agreement_number}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:12px;font-size:13px">
+            <strong>${this.escapeAttr(a.item_summary || 'Item')}</strong>
+            ${a.accessory_summary ? `<div style="font-size:12px;color:var(--text-muted)">+ ${this.escapeAttr(a.accessory_summary)}</div>` : ''}
+            <div style="font-size:12px;color:var(--text-muted);margin-top:4px">For ${this.escapeAttr(a.customer_name || '—')} · due back ${this.fmtDate(a.due_date)}</div>
+          </div>
+          ${this._rentalPhotoPickerHtml(id, 'issue')}
+          ${this._sigPadHtml('gi-guard-sig', 'Guard Signature', 'required — you confirm the item(s) are clear to leave')}
+          <div class="form-group" style="margin-top:12px"><label>Collected By *</label><input id="gi-customer-name" placeholder="Full name" value="${this.escapeAttr(a.customer_name || '')}"></div>
+          ${this._sigPadHtml('gi-customer-sig', 'Customer Signature', 'required — confirms receipt and starts the rental')}
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="App.submitGuardIssue(${id})">Hand Over &amp; Start Rental</button>
+        </div>
+      </div>`);
+    this._sigPadInit('gi-guard-sig');
+    this._sigPadInit('gi-customer-sig');
+    this._rentalPhotoLoad(id, 'issue');
+  },
+
+  async submitGuardIssue(id) {
+    if (!this._rentalPhotoReady('issue')) return;
+    if (!this._sigPadHasDrawn('gi-guard-sig')) { this.alert('Your signature is required', 'error'); return; }
+    const name = document.getElementById('gi-customer-name').value.trim();
+    if (!name) { this.alert('Enter the name of the person collecting it', 'error'); return; }
+    if (!this._sigPadHasDrawn('gi-customer-sig')) { this.alert('Customer signature is required', 'error'); return; }
+    try {
+      await this.api('PATCH', `/rentals/agreements/${id}/issue`, {
+        customer_name: name,
+        security_signature: this._sigPadDataUrl('gi-guard-sig'),
+        customer_signature: this._sigPadDataUrl('gi-customer-sig'),
+      });
+      this.closeModal();
+      this.alert('Handed over — rental clock started');
+      this.renderGuardDashboard();
+    } catch(e) { this.alert(e.message, 'error'); }
   },
 
   async submitSecuritySignoff(id) {

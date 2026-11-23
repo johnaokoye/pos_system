@@ -89,7 +89,7 @@ Object.assign(App, {
       { key: 'rentals_confirm_pickup', label: 'Confirm Rental Pickups (Driver)' },
       { key: 'rentals_deposit_refund', label: 'Record Deposit Refunds' },
       { key: 'rentals_credit_note', label: 'Issue Credit Notes' },
-      { key: 'rentals_security_signoff', label: 'Sign Off on Delivery (Security)' },
+      { key: 'rentals_security_signoff', label: 'Security Sign-Off & Counter Hand-Over (Security)' },
       { key: 'rentals_confirm_delivery', label: 'Accept & Sign for Delivery (Driver)' },
     ]},
     { key: 'work_orders', label: 'Work Orders', subs: [

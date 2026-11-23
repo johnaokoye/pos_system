@@ -188,6 +188,27 @@ router.get('/agreements/pickup-reminders', requireRentalsManage, async (req, res
 // driver-only group would actually have — from unlocking the full routes
 // below, so a driver stuck at this endpoint can't just be granted broader
 // access by accident.
+// Security's own list (My Verifications): what's waiting to go out and
+// what's due back — items, customer and dates only, never any amounts.
+router.get('/agreements/guard-queue', requireAuth, async (req, res) => {
+  try {
+    if (!req.employee.is_security) return res.status(403).json({ error: 'Only security employees can view this' });
+    const { rows } = await db.execute({ sql: `SELECT ra.id, ra.agreement_number, ra.status, ra.due_date, ra.returned_at, ra.checkout_datetime, ra.created_at, ra.branch_id, b.name as branch_name,
+      ra.delivery_required, ra.delivery_driver_confirmed_at, ra.pickup_required,
+      ra.issue_security_employee_id, ra.issue_security_confirmed_at, ra.return_security_employee_id, ra.return_security_confirmed_at,
+      c.first_name || ' ' || c.last_name as customer_name,
+      (SELECT GROUP_CONCAT(product_name || ' x' || quantity, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_summary,
+      (SELECT GROUP_CONCAT(product_name, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NOT NULL) as accessory_summary,
+      CASE WHEN ra.status = 'awaiting_issue' AND ra.delivery_driver_confirmed_at IS NOT NULL THEN 'out_for_delivery'
+           WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused'
+           WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' ELSE ra.status END as display_status
+      FROM rental_agreements ra LEFT JOIN customers c ON ra.customer_id = c.id LEFT JOIN branches b ON b.id = ra.branch_id
+      WHERE ra.status IN ('awaiting_issue','active') OR (ra.status = 'returned' AND (ra.issue_security_employee_id = ? OR ra.return_security_employee_id = ?) AND ra.returned_at >= datetime('now', '-30 days'))
+      ORDER BY ra.created_at DESC LIMIT 300`, args: [req.employee.id, req.employee.id] });
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/agreements/driver-queue', requireAuth, async (req, res) => {
   try {
     if (!req.employee.is_driver) return res.status(403).json({ error: 'Only drivers can view this' });
@@ -766,13 +787,15 @@ async function stampPhotos(executor, agreementId, stage, at) {
   await executor.execute({ sql: 'UPDATE rental_agreement_photos SET used_at = ? WHERE agreement_id = ? AND stage = ? AND used_at IS NULL', args: [at, agreementId, stage] });
 }
 
+const isGuard = emp => !!emp.is_security && can(emp.permissions, 'rentals_security_signoff');
+
 // Who may add/remove a stage's photos, and whether that stage is open now.
 function photoStageError(stage, a, emp) {
   if (!RENTAL_PHOTO_STAGES.includes(stage)) return [400, 'Stage must be issue, pickup or return'];
   const p = emp.permissions;
   if (stage === 'issue') {
     if (a.status !== 'awaiting_issue') return [400, `This rental is ${a.status}, not awaiting issue`];
-    if (!can(p, 'rentals_issue') && !(emp.is_driver && can(p, 'rentals_confirm_delivery') && a.delivery_driver_id === emp.id)) return [403, 'Only staff issuing this rental (or its delivery driver) can add issue photos'];
+    if (!can(p, 'rentals_issue') && !(emp.is_driver && can(p, 'rentals_confirm_delivery') && a.delivery_driver_id === emp.id) && !isGuard(emp)) return [403, 'Only staff issuing this rental, its delivery driver or security can add issue photos'];
   } else if (stage === 'pickup') {
     if (a.status !== 'active' || !a.pickup_required) return [400, 'This rental has no pickup to photograph'];
     if (a.pickup_confirmed_at) return [400, 'Pickup has already been confirmed'];
@@ -784,11 +807,11 @@ function photoStageError(stage, a, emp) {
   return null;
 }
 
-router.get('/agreements/:id/photos', requireAnyPermission('rentals_issue', 'rentals_confirm_delivery', 'rentals_confirm_pickup', 'rentals_returns'), async (req, res) => {
+router.get('/agreements/:id/photos', requireAnyPermission('rentals_issue', 'rentals_confirm_delivery', 'rentals_confirm_pickup', 'rentals_returns', 'rentals_security_signoff'), async (req, res) => {
   try { res.json(await rentalPhotos(req.params.id)); } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/agreements/:id/photos', requireAnyPermission('rentals_issue', 'rentals_confirm_delivery', 'rentals_confirm_pickup', 'rentals_returns'), (req, res, next) => {
+router.post('/agreements/:id/photos', requireAnyPermission('rentals_issue', 'rentals_confirm_delivery', 'rentals_confirm_pickup', 'rentals_returns', 'rentals_security_signoff'), (req, res, next) => {
   rentalPhotoUpload.single('photo')(req, res, err => err ? res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'Photo is larger than 15 MB' : err.message }) : next());
 }, async (req, res) => {
   try {
@@ -814,7 +837,7 @@ router.post('/agreements/:id/photos', requireAnyPermission('rentals_issue', 'ren
 });
 
 // Only while its step hasn't been completed.
-router.delete('/agreements/:id/photos/:pid', requireAnyPermission('rentals_issue', 'rentals_confirm_delivery', 'rentals_confirm_pickup', 'rentals_returns'), async (req, res) => {
+router.delete('/agreements/:id/photos/:pid', requireAnyPermission('rentals_issue', 'rentals_confirm_delivery', 'rentals_confirm_pickup', 'rentals_returns', 'rentals_security_signoff'), async (req, res) => {
   try {
     const { rows: [ph] } = await db.execute({ sql: 'SELECT * FROM rental_agreement_photos WHERE id = ? AND agreement_id = ?', args: [req.params.pid, req.params.id] });
     if (!ph) return res.status(404).json({ error: 'Not found' });
@@ -828,13 +851,13 @@ router.delete('/agreements/:id/photos/:pid', requireAnyPermission('rentals_issue
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.patch('/agreements/:id/issue', requireAnyPermission('rentals_issue', 'rentals_confirm_delivery'), async (req, res) => {
+router.patch('/agreements/:id/issue', requireAnyPermission('rentals_issue', 'rentals_confirm_delivery', 'rentals_security_signoff'), async (req, res) => {
   try {
     // Whether delivery/an operator is needed, and what it costs, was already
     // decided (and charged for) when the rental was created — this step only
     // assigns WHO does it, for whichever of those the agreement already flags
     // as required.
-    const { employee_id, delivery_driver_id, operator_id, issued_at, security_employee_id, customer_name, customer_signature, security_signature } = req.body;
+    let { employee_id, delivery_driver_id, operator_id, issued_at, security_employee_id, customer_name, customer_signature, security_signature } = req.body;
     const { rows: [agreement] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
     if (!agreement) return res.status(404).json({ error: 'Not found' });
     if (agreement.status !== 'awaiting_issue') return res.status(400).json({ error: `This agreement is ${agreement.status}, not awaiting issue` });
@@ -846,8 +869,24 @@ router.patch('/agreements/:id/issue', requireAnyPermission('rentals_issue', 'ren
     // in the field, not running the office counter flow — lock this down to
     // exactly the driver who claimed it, and only once they actually have
     // (claiming is PATCH .../claim-delivery, below).
+    //
+    // Security can hand over a rental the customer collects at the counter
+    // (no delivery) from My Verifications: they sign as the guard
+    // themselves, the customer signs, the clock starts now — no back-dating,
+    // and nothing financial is involved (it's already paid).
     if (!can(req.employee.permissions, 'rentals_issue')) {
-      if (!req.employee.is_driver || agreement.delivery_driver_id !== req.employee.id || !driverAlreadyDone) {
+      const isDriver = req.employee.is_driver && can(req.employee.permissions, 'rentals_confirm_delivery');
+      if (isDriver && agreement.delivery_driver_id === req.employee.id && driverAlreadyDone) {
+        // the delivery driver completing their own delivery
+      } else if (isGuard(req.employee) && !agreement.delivery_required) {
+        security_employee_id = req.employee.id;
+        employee_id = req.employee.id;
+        issued_at = null; delivery_driver_id = null; operator_id = agreement.operator_id || null;
+        if (!String(customer_name || '').trim()) return res.status(400).json({ error: "Enter the name of the person collecting it" });
+        if (agreement.operator_required && !operator_id) return res.status(400).json({ error: 'This rental needs an operator assigned — the rental desk issues it' });
+      } else if (isGuard(req.employee)) {
+        return res.status(403).json({ error: 'A delivery is handed over by its driver — sign off from My Verifications instead' });
+      } else {
         return res.status(403).json({ error: 'This delivery has not been claimed and signed for by you yet' });
       }
     }

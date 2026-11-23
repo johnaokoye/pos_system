@@ -622,7 +622,7 @@ const App = {
     const perms = this.currentUser?.permissions;
     if (!perms) return true;
     if (perms.rentals) return true;
-    const driverOnlySubs = new Set(['rentals_confirm_pickup', 'rentals_confirm_delivery']);
+    const driverOnlySubs = new Set(['rentals_confirm_pickup', 'rentals_confirm_delivery', 'rentals_security_signoff']);
     const mod = this._permissionTree.find(m => m.key === 'rentals');
     return !!mod && mod.subs.some(s => !driverOnlySubs.has(s.key) && !!perms[s.key]);
   },
