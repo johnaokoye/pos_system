@@ -377,6 +377,9 @@ Object.assign(App, {
     this._wirePermissionCheckboxes();
   },
 
+  // Mirrors RENTALS_NON_ESCALATING_SUBS in lib/permissions.js.
+  _rentalsStandaloneSubs: new Set(['rentals_confirm_pickup', 'rentals_confirm_delivery', 'rentals_security_signoff']),
+
   _wirePermissionCheckboxes() {
     this._permissionTree.forEach(mod => {
       if (!mod.subs.length) return;
@@ -384,10 +387,14 @@ Object.assign(App, {
       if (!parentEl) return;
       const subEls = mod.subs.map(s => document.getElementById(`perm-${s.key}`)).filter(Boolean);
       if (!subEls.length) return;
+      // The driver and security boxes under Rentals are for groups that must
+      // never get the Rentals module itself (its screens show amounts), so
+      // ticking them doesn't tick Rentals — see RENTALS_NON_ESCALATING_SUBS.
+      const standalone = el => this._rentalsStandaloneSubs.has(el.id.replace(/^perm-/, ''));
 
       const syncParent = () => {
-        const n = subEls.filter(el => el.checked).length;
-        if (n === subEls.length) {
+        const n = subEls.filter(el => el.checked && !standalone(el)).length;
+        if (subEls.every(el => el.checked)) {
           parentEl.checked = true;
           parentEl.indeterminate = false;
         } else if (n > 0) {
@@ -412,7 +419,7 @@ Object.assign(App, {
 
       subEls.forEach(subEl => {
         subEl.addEventListener('change', () => {
-          if (subEl.checked) parentEl.checked = true;
+          if (subEl.checked && !standalone(subEl)) parentEl.checked = true;
           syncParent();
         });
       });

@@ -145,3 +145,22 @@ test('security hands over a counter rental with photos and signatures, and sees 
   expect(issued).toMatchObject({ status: 'active', issue_security_employee_id: guard.id, issued_by: guard.id, issue_customer_name: 'Pat Collector' });
   expect(issued.photos.map(p => [p.stage, !!p.used_at, p.uploaded_by])).toEqual([['issue', true, guard.id]]);
 });
+
+test('ticking the security or driver box does not tick the whole Rentals module', async ({ page }) => {
+  const s = `${Date.now()}`;
+  await page.evaluate(() => App.showSecurityGroupForm());
+  await page.fill('#sg-name', `Gate Only ${s}`);
+  await page.locator('#perm-rentals_security_signoff').check({ force: true });
+  await page.locator('#perm-rentals_confirm_pickup').check({ force: true });
+  expect(await page.locator('#perm-rentals').isChecked()).toBe(false);
+  await page.locator('#perm-rentals_returns').check({ force: true });
+  expect(await page.locator('#perm-rentals').isChecked()).toBe(true); // any other box still does
+  await page.locator('#perm-rentals_returns').uncheck({ force: true });
+  await page.locator('#perm-rentals').uncheck({ force: true });
+  await page.locator('#perm-rentals_security_signoff').check({ force: true });
+  await page.click('button:has-text("Save Group")');
+  await expect(page.locator('.alert-success', { hasText: 'Security group saved' }).last()).toBeVisible();
+  const g = (await api(page, 'GET', '/security-groups')).find(x => x.name === `Gate Only ${s}`);
+  const perms = typeof g.permissions === 'string' ? JSON.parse(g.permissions) : g.permissions;
+  expect(perms).toMatchObject({ rentals: false, rentals_security_signoff: true, rentals_returns: false });
+});

@@ -4184,6 +4184,28 @@ async function _init() {
     }
   } catch(e) {}
 
+  // Once: the Security Group editor used to tick Rentals whenever a box
+  // under it was ticked, so a driver- or guard-only group was saved with the
+  // whole Rentals module (every rentals screen and amount). Untick Rentals on
+  // a group whose only Rentals boxes are the driver/security ones.
+  try {
+    const { rows: [done] } = await db.execute({ sql: "SELECT value FROM settings WHERE key = 'fix_rentals_standalone_parent'", args: [] });
+    if (!done) {
+      const standalone = ['rentals_confirm_pickup', 'rentals_confirm_delivery', 'rentals_security_signoff'];
+      const others = ['rentals_manage_items', 'rentals_checkout', 'rentals_returns', 'rentals_issue', 'rentals_pause', 'rentals_deposit_refund', 'rentals_credit_note'];
+      const { rows: groups } = await db.execute({ sql: 'SELECT id, name, permissions FROM security_groups', args: [] });
+      for (const g of groups) {
+        const perms = JSON.parse(g.permissions || '{}');
+        if (perms.rentals && standalone.some(k => perms[k]) && others.every(k => perms[k] === false)) {
+          perms.rentals = false;
+          await db.execute({ sql: 'UPDATE security_groups SET permissions = ? WHERE id = ?', args: [JSON.stringify(perms), g.id] });
+          console.log(`[permissions] ${g.name}: Rentals unticked — only driver/security boxes were on`);
+        }
+      }
+      await db.execute({ sql: "INSERT OR REPLACE INTO settings (key, value) VALUES ('fix_rentals_standalone_parent', '1')", args: [] });
+    }
+  } catch(e) {}
+
   // Add promotions permission to existing security groups
   try {
     const { rows: groups } = await db.execute({ sql: 'SELECT id, name, permissions FROM security_groups', args: [] });
