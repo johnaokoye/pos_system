@@ -3386,6 +3386,7 @@ Object.assign(App, {
     return `<div class="form-group" style="border-top:1px solid var(--border);padding-top:12px">
         <label>${this._rentalPhotoLabels[stage]} <span style="font-weight:400;color:var(--text-muted)">(required — at least one of the item(s)${stage === 'issue' ? ' as it goes out' : stage === 'pickup' ? ' as you collect it' : ' as it comes back'})</span></label>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <select id="rph-${stage}-item" title="Which item this photo shows" style="display:none;width:auto;max-width:260px;font-size:12px;padding:3px 6px"></select>
           <label class="btn btn-sm btn-outline" style="margin:0;cursor:pointer">📷 Take Photo<input type="file" accept="image/*" capture="environment" style="display:none" onchange="App._rentalAddPhotos(${id},'${stage}',this)"></label>
           <label class="btn btn-sm btn-outline" style="margin:0;cursor:pointer">Upload Photos<input type="file" accept="image/*" multiple style="display:none" onchange="App._rentalAddPhotos(${id},'${stage}',this)"></label>
         </div>
@@ -3395,8 +3396,10 @@ Object.assign(App, {
   },
 
   _rentalPhotoThumb(p, removable) {
-    return `<div style="position:relative">
-        <a href="${p.url}" target="_blank" rel="noopener"><img src="${p.url}" loading="lazy" style="width:72px;height:72px;object-fit:cover;border-radius:4px;border:1px solid var(--border)" title="${this.escapeAttr(`${p.uploaded_by_name || ''} ${this.fmtDateTime(p.uploaded_at)}`)}"></a>
+    const tag = p.item_sku || p.item_name || '';
+    return `<div style="position:relative;width:72px">
+        <a href="${p.url}" target="_blank" rel="noopener"><img src="${p.url}" loading="lazy" style="width:72px;height:72px;object-fit:cover;border-radius:4px;border:1px solid var(--border)" title="${this.escapeAttr(`${p.item_name ? `${p.item_name}${p.item_sku ? ` (${p.item_sku})` : ''} · ` : ''}${p.uploaded_by_name || ''} ${this.fmtDateTime(p.uploaded_at)}`)}"></a>
+        ${tag ? `<div class="rph-sku" title="${this.escapeAttr(p.item_name || '')}" style="font-family:monospace;font-size:10px;color:var(--text-muted);text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${this.escapeAttr(tag)}</div>` : ''}
         ${removable ? `<button type="button" title="Remove photo" onclick="App._rentalRemovePhoto(${p.agreement_id},'${p.stage}',${p.id})" style="position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;border:none;background:var(--danger);color:#fff;font-size:11px;cursor:pointer;line-height:20px;padding:0">✕</button>` : ''}
       </div>`;
   },
@@ -3414,8 +3417,23 @@ Object.assign(App, {
   },
 
   async _rentalPhotoLoad(id, stage) {
-    try { this._rentalPhotoRender(stage, await this.api('GET', `/rentals/agreements/${id}/photos`)); }
-    catch (e) { this._rentalPhotoRender(stage, []); }
+    try {
+      const { photos, items } = await this.api('GET', `/rentals/agreements/${id}/photos?with_items=1`);
+      this._rentalPhotoItemBox(stage, items);
+      this._rentalPhotoRender(stage, photos);
+    } catch (e) { this._rentalPhotoRender(stage, []); }
+  },
+
+  // "Which item" box beside Take Photo: each photo is tagged with that item's
+  // SKU. Pickup/return list only what's still out. Hidden for a one-item rental.
+  _rentalPhotoItemBox(stage, items) {
+    const sel = document.getElementById(`rph-${stage}-item`);
+    if (!sel) return;
+    const list = (items || []).filter(i => stage === 'issue' || i.quantity_returned < i.quantity);
+    if (!list.length) return;
+    sel.innerHTML = list.map(i => `<option value="${i.id}">${i.parent_item_id ? '↳ ' : ''}${this.escapeAttr(i.product_name)}${i.sku ? ` [${this.escapeAttr(i.sku)}]` : ''}</option>`).join('')
+      + (list.length > 1 ? '<option value="">Several items in one photo</option>' : '');
+    sel.style.display = list.length > 1 ? '' : 'none';
   },
 
   async _rentalAddPhotos(id, stage, input) {
@@ -3426,6 +3444,8 @@ Object.assign(App, {
       if (el) el.insertAdjacentHTML('beforeend', `<span class="rph-uploading" style="font-size:12px;color:var(--text-muted)">Uploading ${i + 1} of ${files.length}…</span>`);
       const fd = new FormData();
       fd.append('stage', stage);
+      const itemBox = document.getElementById(`rph-${stage}-item`);
+      if (itemBox && itemBox.options.length) fd.append('item_id', itemBox.value);
       fd.append('photo', file);
       try {
         const res = await fetch(`/api/rentals/agreements/${id}/photos`, { method: 'POST', body: fd, headers: this.currentUser ? { 'X-Pos-User': String(this.currentUser.id) } : {} });

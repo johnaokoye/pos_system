@@ -38,6 +38,12 @@ test('issue and return need photos of the item, kept on the agreement', async ({
     return (await fetch(`/api/rentals/agreements/${id}/photos`, { method: 'POST', body: fd })).status;
   }, ag.id)).toBe(400);
 
+  // A photo can only be tagged with an item on this rental.
+  expect(await page.evaluate(async id => {
+    const fd = new FormData(); fd.append('stage', 'issue'); fd.append('item_id', '999999999'); fd.append('photo', new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' }), 'x.png');
+    return (await (await fetch(`/api/rentals/agreements/${id}/photos`, { method: 'POST', body: fd })).json()).error;
+  }, ag.id)).toMatch(/not on this rental/);
+
   // Issue screen: the button asks for a photo, then takes one.
   await page.evaluate(id => App.showIssueRentalModal(id), ag.id);
   await page.locator('#ri-security-employee').selectOption(String(guard.id));
@@ -64,6 +70,9 @@ test('issue and return need photos of the item, kept on the agreement', async ({
   // Return screen: issue photos shown to compare; refused until a return photo is taken.
   await page.evaluate(id => App.showRentalReturnModal(id), ag.id);
   await expect(page.locator('#rph-return-compare img')).toHaveCount(2);
+  // Each photo carries the item's SKU (one-item rental: tagged without asking).
+  await expect(page.locator('#rph-return-compare .rph-sku').first()).toHaveText(`RPH-${s}`);
+  await expect(page.locator('#rph-return-item')).toBeHidden();
   await page.locator('#rr-security-employee').selectOption(String(guard.id));
   await drawSig(page, 'rr-guard-sig');
   await page.click('button:has-text("Confirm Return")');
@@ -76,6 +85,7 @@ test('issue and return need photos of the item, kept on the agreement', async ({
 
   full = await api(page, 'GET', `/rentals/agreements/${ag.id}`);
   expect(full.photos.map(p => [p.stage, !!p.used_at])).toEqual([['issue', true], ['issue', true], ['return', true]]);
+  expect(full.photos.map(p => p.item_sku)).toEqual([`RPH-${s}`, `RPH-${s}`, `RPH-${s}`]);
   await page.evaluate(() => App.closeModal());
   await page.evaluate(id => App.viewRentalAgreement(id), ag.id);
   await expect(page.locator('.modal')).toContainText('Photos at Issue');

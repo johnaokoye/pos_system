@@ -3890,6 +3890,10 @@ async function _init() {
     'ALTER TABLE rental_agreements ADD COLUMN return_checkin_by INTEGER REFERENCES employees(id)',
     'ALTER TABLE rental_agreements ADD COLUMN return_checkin_signature TEXT',
     'ALTER TABLE rental_agreements ADD COLUMN return_checkin_items TEXT',
+    // Which item a handover photo shows; SKU/name snapshotted so a later swap doesn't relabel it.
+    'ALTER TABLE rental_agreement_photos ADD COLUMN item_id INTEGER REFERENCES rental_agreement_items(id)',
+    'ALTER TABLE rental_agreement_photos ADD COLUMN item_sku TEXT',
+    'ALTER TABLE rental_agreement_photos ADD COLUMN item_name TEXT',
     // The driver's drop-off at the receiving branch (Branch Transfer Dispatch
     // → Dropped Off); the branch then counts it in with Receive.
     'ALTER TABLE branch_transfers ADD COLUMN dropped_off_at DATETIME',

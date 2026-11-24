@@ -816,8 +816,15 @@ function photoStageError(stage, a, emp) {
   return null;
 }
 
+// ?with_items=1 → { photos, items }: the agreement's items (name, SKU, qty) for
+// the photo step's "which item" box — drivers and guards can't open the agreement.
 router.get('/agreements/:id/photos', requireAnyPermission('rentals_issue', 'rentals_confirm_delivery', 'rentals_confirm_pickup', 'rentals_returns', 'rentals_security_signoff'), async (req, res) => {
-  try { res.json(await rentalPhotos(req.params.id)); } catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const photos = await rentalPhotos(req.params.id);
+    if (!req.query.with_items) return res.json(photos);
+    const { rows: items } = await db.execute({ sql: 'SELECT id, parent_item_id, product_name, sku, quantity, quantity_returned FROM rental_agreement_items WHERE agreement_id = ? ORDER BY COALESCE(parent_item_id, id), id', args: [req.params.id] });
+    res.json({ photos, items });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 router.post('/agreements/:id/photos', requireAnyPermission('rentals_issue', 'rentals_confirm_delivery', 'rentals_confirm_pickup', 'rentals_returns', 'rentals_security_signoff'), (req, res, next) => {
@@ -830,6 +837,11 @@ router.post('/agreements/:id/photos', requireAnyPermission('rentals_issue', 'ren
     const err = photoStageError(stage, a, req.employee);
     if (err) return res.status(err[0]).json({ error: err[1] });
     if (!req.file) return res.status(400).json({ error: 'No photo uploaded, or the file is not an image' });
+    let item = null;
+    if (req.body.item_id) {
+      ({ rows: [item] } = await db.execute({ sql: 'SELECT id, product_name, sku FROM rental_agreement_items WHERE id = ? AND agreement_id = ?', args: [req.body.item_id, a.id] }));
+      if (!item) return res.status(400).json({ error: 'That item is not on this rental' });
+    } else if (req.body.item_id === '') item = { id: null, sku: null, product_name: 'Several items' };
     const base = `rental${a.id}-${stage}-${Date.now()}-${Math.round(Math.random() * 1e6)}`;
     let storedName;
     const cloud = await cloudUpload(req.file.buffer, { folder: 'pos-system/rental-photos', public_id: base, resource_type: 'image' });
@@ -839,8 +851,8 @@ router.post('/agreements/:id/photos', requireAnyPermission('rentals_issue', 'ren
       storedName = `${base}${(path.extname(req.file.originalname) || '.jpg').toLowerCase().replace(/[^.\w]/g, '')}`;
       fs.writeFileSync(path.join(rentalPhotoDir, storedName), req.file.buffer);
     }
-    await db.execute({ sql: 'INSERT INTO rental_agreement_photos (agreement_id, stage, stored_name, original_name, mime_type, file_size, uploaded_by) VALUES (?,?,?,?,?,?,?)',
-      args: [a.id, stage, storedName, req.file.originalname, req.file.mimetype, req.file.size, req.employee?.id || null] });
+    await db.execute({ sql: 'INSERT INTO rental_agreement_photos (agreement_id, stage, stored_name, original_name, mime_type, file_size, uploaded_by, item_id, item_sku, item_name) VALUES (?,?,?,?,?,?,?,?,?,?)',
+      args: [a.id, stage, storedName, req.file.originalname, req.file.mimetype, req.file.size, req.employee?.id || null, item?.id || null, item?.sku || null, item?.product_name || null] });
     res.status(201).json(await rentalPhotos(a.id));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
