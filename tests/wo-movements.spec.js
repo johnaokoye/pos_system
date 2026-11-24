@@ -81,6 +81,13 @@ test('item trip with Warehouse checkpoint, assessment gate and return', async ({
   expect(w.photos.length).toBe(0); // checkpoint photos aren't intake photos
   expect(w.status_log.some(l => /Item received at Warehouse — 1 photo\(s\), 1\/2 accessories OK; A2 Bag damaged: Zip torn/.test(l.comment || ''))).toBe(true);
   expect(await attempt(page, 'DELETE', `/work-orders/${wo.id}/photos/${rcv.photos[0].id}`)).toContain('Checkpoint photos stay');
+  // Checkpoint photos open full screen from the work order.
+  await page.evaluate(id => App.viewWorkOrder(id), wo.id);
+  await page.locator(`a[data-zoom="wo-${wo.id}"]`).first().click();
+  await expect(page.locator('#photo-zoom #pz-img')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#photo-zoom')).toHaveCount(0);
+  await page.evaluate(() => App.closeModal?.());
 
   // Still not assessable at the Warehouse; up to the service center, then it can be.
   expect(await attempt(page, 'PATCH', `/work-orders/${wo.id}/estimate`, { estimate_labor: 100 })).toContain('not been received at the Service Center');

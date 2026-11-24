@@ -90,6 +90,19 @@ test('issue and return need photos of the item, kept on the agreement', async ({
   await page.evaluate(id => App.viewRentalAgreement(id), ag.id);
   await expect(page.locator('.modal')).toContainText('Photos at Issue');
   await expect(page.locator('.modal')).toContainText('Photos at Return');
+
+  // A thumbnail opens the photo full screen over the agreement; arrows step through its photos, Esc closes only the viewer.
+  await page.locator('.modal a[data-zoom]').first().click();
+  await expect(page.locator('#photo-zoom')).toBeVisible();
+  await expect(page.locator('#pz-count')).toHaveText('1 / 3');
+  await expect(page.locator('#pz-caption')).toContainText(`RPH-${s}`);
+  await page.keyboard.press('ArrowRight');
+  await expect(page.locator('#pz-count')).toHaveText('2 / 3');
+  await page.locator('#pz-img').click();
+  await expect(page.locator('#pz-img')).toHaveCSS('cursor', 'zoom-out');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#photo-zoom')).toHaveCount(0);
+  await expect(page.locator('.modal')).toContainText('Photos at Return');
 });
 
 test('security hands over a counter rental with photos and signatures, and sees no amounts', async ({ page }) => {

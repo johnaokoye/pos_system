@@ -291,7 +291,7 @@ Object.assign(App, {
   // ─── Item & accessories on an existing work order ───
   _woPhotoThumbs(photos, woId, canRemove) {
     return photos.map(p => `<div style="position:relative">
-        <a href="${p.url}" target="_blank" rel="noopener"><img src="${p.url}" loading="lazy" style="width:72px;height:72px;object-fit:cover;border-radius:4px;border:1px solid var(--border)"></a>
+        ${this._zoomThumbHtml(p.url, `wo-${woId}`, `${p.movement_id ? 'Movement check' : p.accessory_id ? 'Accessory' : 'Intake'} photo · ${this.fmtDateTime(p.uploaded_at)}`)}
         ${canRemove ? `<button type="button" title="Remove photo" onclick="App.deleteWOPhoto(${woId},${p.id})" style="position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;border:none;background:var(--danger);color:#fff;font-size:11px;cursor:pointer;line-height:20px;padding:0">✕</button>` : ''}
       </div>`).join('');
   },
@@ -1733,7 +1733,7 @@ Object.assign(App, {
       <div style="font-size:12px;color:var(--text-muted);margin:2px 0 6px">Tick each one as you give it to the customer.</div>
       ${wo.accessories.map(a => `<label style="display:flex;gap:8px;align-items:flex-start;padding:6px 0;border-top:1px dashed var(--border);cursor:pointer;text-transform:none;font-weight:normal">
         <input type="checkbox" class="wo-acc-back" value="${a.id}" style="width:auto;margin-top:3px" onchange="App._woPickupAccChanged()">
-        ${a.photos?.[0] ? `<img src="${a.photos[0].url}" style="width:44px;height:44px;object-fit:cover;border-radius:4px;border:1px solid var(--border)">` : ''}
+        ${a.photos?.[0] ? this._zoomThumbHtml(a.photos[0].url, `wo-acc-${a.id}`, `A${a.line_no} — ${a.name}`, 44) : ''}
         <span><strong>A${a.line_no}</strong> — ${this.escapeAttr(a.name)}${a.serial_number ? ` · Item # ${this.escapeAttr(a.serial_number)}` : ''}<br><span style="color:var(--text-muted);font-size:12px">${this.escapeAttr(a.description)}</span></span>
       </label>`).join('')}
       <div id="wo-acc-note-wrap" class="form-group" style="margin:6px 0 0">

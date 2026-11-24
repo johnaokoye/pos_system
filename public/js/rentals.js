@@ -3399,7 +3399,7 @@ Object.assign(App, {
   _rentalPhotoThumb(p, removable) {
     const tag = p.item_sku || p.item_name || '';
     return `<div style="position:relative;width:72px">
-        <a href="${p.url}" target="_blank" rel="noopener"><img src="${p.url}" loading="lazy" style="width:72px;height:72px;object-fit:cover;border-radius:4px;border:1px solid var(--border)" title="${this.escapeAttr(`${p.item_name ? `${p.item_name}${p.item_sku ? ` (${p.item_sku})` : ''} · ` : ''}${p.uploaded_by_name || ''} ${this.fmtDateTime(p.uploaded_at)}`)}"></a>
+        ${this._zoomThumbHtml(p.url, `rental-${p.agreement_id}`, `${({ issue: 'Issue', pickup: 'Pickup', return: 'Return' })[p.stage] || ''} · ${p.item_name ? `${p.item_name}${p.item_sku ? ` (${p.item_sku})` : ''} · ` : ''}${p.uploaded_by_name || ''} ${this.fmtDateTime(p.uploaded_at)}`)}
         ${tag ? `<div class="rph-sku" title="${this.escapeAttr(p.item_name || '')}" style="font-family:monospace;font-size:10px;color:var(--text-muted);text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${this.escapeAttr(tag)}</div>` : ''}
         ${removable ? `<button type="button" title="Remove photo" onclick="App._rentalRemovePhoto(${p.agreement_id},'${p.stage}',${p.id})" style="position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;border:none;background:var(--danger);color:#fff;font-size:11px;cursor:pointer;line-height:20px;padding:0">✕</button>` : ''}
       </div>`;
