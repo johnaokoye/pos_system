@@ -206,6 +206,16 @@ setInterval(async () => {
   } catch (e) {}
 }, 60000);
 
+// Rental reminder emails to customers (day before, due day, overdue) —
+// off until Settings → Website → Email rental reminders; lib/rentalReminders.js.
+setInterval(async () => {
+  try {
+    await ensureReady();
+    const r = await require('./lib/rentalReminders').runRentalReminders(db);
+    if (r.sent?.length || r.failed?.length) console.log(`[rental-reminders] sent ${r.sent.length}, failed ${r.failed.length}`);
+  } catch (e) { console.error('[rental-reminders]', e.message); }
+}, 30 * 60000);
+
 // Rental overdue detection — "overdue" is only ever computed live at read
 // time (see rental_agreements' display_status in routes/rentals.js), so
 // this is the one place that turns "due_date has passed" into a one-time

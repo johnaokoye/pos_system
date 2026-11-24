@@ -1682,6 +1682,7 @@ Object.assign(App, {
               ${this._sigButton(a.return_security_signature, 'View Guard Signature')}</div>` : ''}
             ${this._rentalPhotoRecordHtml(a.photos || [])}
           </div>` : ''}
+          ${this._rentalReminderLogHtml(a.reminders || [])}
           <table class="table" style="margin-bottom:12px">
             <thead><tr><th>Product</th><th>Rate</th><th>Class</th><th>Qty</th><th>Returned</th><th>Est. Fee</th><th>Actual Fee</th><th>Deposit</th><th>Condition</th></tr></thead>
             <tbody>${a.items.map(i=>{
@@ -3471,6 +3472,16 @@ Object.assign(App, {
   },
 
   // Agreement view: every handover's photos.
+  // Reminder emails sent to the customer (lib/rentalReminders.js).
+  _rentalReminderLogHtml(list) {
+    if (!list.length) return '';
+    const label = { due_soon: 'Due tomorrow', due_today: 'Due today', overdue: 'Overdue' };
+    return `<div style="font-size:12px;margin-bottom:12px;padding:8px 12px;background:var(--bg-secondary,#f8fafc);border-radius:6px">
+      <strong style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Reminder Emails</strong>
+      ${list.map(r => `<div>${this.fmtDateTime(r.created_at)} — ${label[r.kind] || r.kind} reminder ${r.status === 'sent' ? `sent to ${this.escapeAttr(r.sent_to || '')}` : `<span class="color-danger">failed: ${this.escapeAttr(r.error || '')}</span>`}</div>`).join('')}
+    </div>`;
+  },
+
   _rentalPhotoRecordHtml(photos) {
     const done = photos.filter(p => p.used_at);
     if (!done.length) return '';

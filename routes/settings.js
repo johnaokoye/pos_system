@@ -90,7 +90,7 @@ const WEBSITE_BANNER_MAX = 300;
 // (lib/websiteBranch.js; blank = the Ecommerce Sync branch). Rentals aren't
 // tied to it: the website shows rental availability at every branch.
 async function websiteSettings() {
-  const { rows } = await db.execute({ sql: "SELECT key, value FROM settings WHERE key IN ('website_mode','website_banner_rentals','website_banner_retail','website_url','website_retail_branch_id')", args: [] });
+  const { rows } = await db.execute({ sql: "SELECT key, value FROM settings WHERE key IN ('website_mode','website_banner_rentals','website_banner_retail','website_url','website_retail_branch_id','rental_reminders_enabled','rental_reminders_since')", args: [] });
   const s = Object.fromEntries(rows.map(r => [r.key, r.value]));
   const { onlineRetailBranchId } = require('../lib/websiteBranch');
   const retailBranchId = await onlineRetailBranchId(db);
@@ -99,6 +99,10 @@ async function websiteSettings() {
     : null;
   return {
     website_retail_branch_id: Number(s.website_retail_branch_id) || null,
+    // Rental reminder emails (lib/rentalReminders.js); since = the store day
+    // they were first turned on — only rentals due from then are reminded.
+    rental_reminders_enabled: s.rental_reminders_enabled === '1',
+    rental_reminders_since: s.rental_reminders_since || null,
     retail_branch: retailBranch ? { id: retailBranch.id, name: retailBranch.name, city: retailBranch.city, address: retailBranch.address, phone: retailBranch.phone } : null,
     website_mode: WEBSITE_MODES.includes(s.website_mode) ? s.website_mode : 'both',
     website_banner_rentals: s.website_banner_rentals || '',
@@ -128,6 +132,14 @@ router.put('/website', requirePermission('settings'), async (req, res) => {
       const text = String(body[key] ?? '').replace(/\s+/g, ' ').trim();
       if (text.length > WEBSITE_BANNER_MAX) return res.status(400).json({ error: `Banner text must be ${WEBSITE_BANNER_MAX} characters or fewer` });
       updates.push([key, text]);
+    }
+    if ('rental_reminders_enabled' in body) {
+      const on = body.rental_reminders_enabled === true || body.rental_reminders_enabled === 1 || body.rental_reminders_enabled === '1';
+      updates.push(['rental_reminders_enabled', on ? '1' : '0']);
+      if (on) {
+        const { rows: [since] } = await db.execute({ sql: "SELECT value FROM settings WHERE key = 'rental_reminders_since'", args: [] });
+        if (!since?.value) updates.push(['rental_reminders_since', require('../lib/storeTime').storeToday()]);
+      }
     }
     if ('website_retail_branch_id' in body) {
       const id = body.website_retail_branch_id ? Number(body.website_retail_branch_id) : null;

@@ -3275,5 +3275,57 @@ async function sendRentalApplicationEmail(customer, action, note) {
   });
 }
 
+// Rental reminder (lib/rentalReminders.js): kind due_soon | due_today |
+// overdue. Lists what's still out (with SKUs), when it's due back, the branch
+// to return it to (or that we'll collect it, when pickup is booked), and a
+// Track My Rental link to the website (website_url + /account/rentals/:id).
+async function sendRentalReminderEmail({ agreement: a, items, kind, daysOverdue }) {
+  if (!a.customer_email) throw new Error('Customer has no email address on file');
+  const s = await getSettings();
+  await refreshStoreTz();
+  const transporter = createTransporter(s);
+  const store = s.store_name || 'Our Store';
+  const site = String(s.website_url || '').replace(/\/+$/, '');
+  const { dueDateTime } = require('../lib/rentals');
+  const due = dueDateTime(a);
+  const dueText = due ? fmtDateTime(due) : fmtDate(a.due_date);
+  const pickup = !!a.pickup_required;
+  const where = pickup
+    ? 'Our team will collect it from you — please have it ready.'
+    : `Please return it to <strong>${esc(a.branch_name || store)}</strong>${a.branch_address ? ` (${esc(a.branch_address)})` : ''}.`;
+  const subject = {
+    due_soon: `Reminder: rental ${a.agreement_number} is due back tomorrow`,
+    due_today: `Reminder: rental ${a.agreement_number} is due back today`,
+    overdue: `Overdue: rental ${a.agreement_number} was due back ${fmtDate(a.due_date)}`,
+  }[kind];
+  const lead = {
+    due_soon: `Your rental is due back <strong>tomorrow, ${esc(dueText)}</strong>.`,
+    due_today: `Your rental is due back <strong>today, ${esc(dueText)}</strong>.`,
+    overdue: `Your rental was due back on <strong>${esc(dueText)}</strong> and is now <strong>${daysOverdue} day${daysOverdue === 1 ? '' : 's'} overdue</strong>. Rental charges continue until it's back.`,
+  }[kind];
+  const phone = a.branch_phone || s.store_phone;
+  const rows = items.map(i => `<tr><td style="padding:6px 8px;border-bottom:1px solid #eee">${i.parent_item_id ? '&nbsp;&nbsp;↳ ' : ''}${esc(i.product_name)}${i.sku ? ` <span style="color:#777;font-family:monospace;font-size:12px">${esc(i.sku)}</span>` : ''}</td><td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:center">${i.quantity - i.quantity_returned}</td></tr>`).join('');
+  const button = site ? `<p><a href="${esc(`${site}/account/rentals/${a.id}`)}" style="display:inline-block;background:#008038;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:700">Track My Rental</a></p>` : '';
+  const body = `<p>Hi ${esc(a.first_name || 'there')},</p>
+    <p>${lead}</p>
+    <table style="border-collapse:collapse;width:100%;margin:12px 0;font-size:14px"><thead><tr><th style="text-align:left;padding:6px 8px;border-bottom:2px solid #ddd">Item</th><th style="padding:6px 8px;border-bottom:2px solid #ddd">Qty out</th></tr></thead><tbody>${rows}</tbody></table>
+    <p>${where}</p>
+    <p>Need it longer? Call us${phone ? ` on <strong>${esc(phone)}</strong>` : ''} before the due time to extend.</p>
+    <p style="color:#777;font-size:12px">Agreement ${esc(a.agreement_number)}</p>
+    ${button}`;
+  const contact = [phone, s.store_email].filter(Boolean).map(esc).join(' · ');
+  await transporter.sendMail({
+    from: `"${s.email_from_name || store}" <${s.email_smtp_user || s.store_email || ''}>`,
+    to: a.customer_email,
+    subject,
+    html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;color:#1a1a1a;font-size:14px;line-height:1.5">
+      <div style="background:${kind === 'overdue' ? '#b91c1c' : '#008038'};color:#fff;padding:16px 20px;font-weight:900;font-size:16px">${esc(store)}</div>
+      <div style="padding:20px">${body}</div>
+      <div style="padding:12px 20px;font-size:12px;color:#777;border-top:1px solid #eee">${contact || esc(store)}</div>
+    </div>`,
+  });
+}
+
 module.exports = router;
 module.exports.sendRentalApplicationEmail = sendRentalApplicationEmail;
+module.exports.sendRentalReminderEmail = sendRentalReminderEmail;

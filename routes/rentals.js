@@ -357,6 +357,7 @@ router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
     attachDepositReturnPolicy(agreement);
     attachClosedDayGrace(agreement, await loadClosedDaySettings(db));
     agreement.photos = await rentalPhotos(agreement.id);
+    agreement.reminders = await require('../lib/rentalReminders').remindersFor(db, agreement.id);
     res.json(agreement);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -381,6 +382,15 @@ router.get('/availability', requireRentalsManage, async (req, res) => {
 // and when `quantity` are next free for that many days. product_id or ids
 // (comma list, ≤ 200; may include accessories not on the website); neither =
 // every rental item flagged for the website. See lib/rentalOnlineAvailability.js.
+// Reminder emails now, without waiting for the half-hourly pass (still only
+// rentals due from rental_reminders_since; once per kind per due date).
+router.post('/reminders/run', requirePermission('settings'), async (req, res) => {
+  try {
+    if (req.apiKey) return res.status(403).json({ error: 'Not available to API keys' });
+    res.json(await require('../lib/rentalReminders').runRentalReminders(db, { force: true }));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/online-availability', requireRentalsManage, async (req, res) => {
   try {
     const raw = req.query.ids ?? req.query.product_id;

@@ -334,6 +334,19 @@ async function _init() {
     // Rental check-out / check-in photos (stage issue | pickup | return).
     // Taken before the step completes (used_at NULL = not yet part of a
     // completed step, still removable); the step stamps used_at.
+    // Reminder emails to the customer (lib/rentalReminders.js): kind
+    // due_soon | due_today | overdue, for that due_date; status sent | failed.
+    { sql: `CREATE TABLE IF NOT EXISTS rental_reminder_emails (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agreement_id INTEGER NOT NULL REFERENCES rental_agreements(id),
+      kind TEXT NOT NULL,
+      due_date TEXT NOT NULL,
+      sent_to TEXT,
+      status TEXT NOT NULL,
+      error TEXT,
+      sent_day TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS rental_agreement_photos (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       agreement_id INTEGER NOT NULL REFERENCES rental_agreements(id),

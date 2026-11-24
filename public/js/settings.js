@@ -194,6 +194,13 @@ Object.assign(App, {
               <label>Retail Banner <span style="font-weight:400;color:var(--text-muted)">(shown across the top of the shop pages)</span></label>
               <input id="s-website-banner-retail" maxlength="300" placeholder="e.g. 10% off all DeWalt power tools this week" value="${this.escapeAttr(s.website_banner_retail||'')}">
             </div>
+            <div class="form-group">
+              <label style="display:flex;align-items:center;gap:8px;font-weight:normal;text-transform:none;cursor:pointer">
+                <input type="checkbox" id="s-rental-reminders" ${s.rental_reminders_enabled === '1' ? 'checked' : ''} style="width:16px;height:16px;margin:0">
+                <span><strong>Email rental reminders to customers</strong> — the day before a rental is due back, on the due day, and when it's overdue (then every 3 days, up to 3 times), with a Track My Rental link to the website. Uses the Email (SMTP) settings above.${s.rental_reminders_since ? ` On since ${this.fmtDate(s.rental_reminders_since)}; rentals due before then aren't reminded.` : ' Only rentals due from the day you turn this on are reminded.'}</span>
+              </label>
+              ${this.can('settings') ? `<button type="button" class="btn btn-sm btn-outline" style="margin-top:6px" onclick="App._runRentalRemindersNow()">Send due reminders now</button>` : ''}
+            </div>
             <p style="font-size:11px;color:var(--text-muted);margin:-4px 0 12px">Leave a banner empty to hide it. With retail off, the rentals banner shows on every page. Changes take effect on the website within about 30 seconds.</p>
             <button class="btn btn-primary" onclick="App.saveWebsiteMode()">Save</button>
           </div>
@@ -734,6 +741,16 @@ Object.assign(App, {
 
   _SETTINGS_FORM_IDS: ['s-name', 's-addr', 's-phone', 's-email', 's-drawer-email', 's-footer', 's-tax', 's-currency', 's-loyalty', 's-lowstock', 's-max-discount', 's-layaway-deposit', 's-layaway-markup', 's-closed-return-by', 's-store-tz', 's-public-holidays', 's-layaway-fee-type', 's-layaway-fee-value', 's-smtp-host', 's-smtp-port', 's-smtp-user', 's-smtp-pass', 's-smtp-name', 's-smtp-secure'],
 
+  // Runs the rental reminder pass now (same rules as the half-hourly one,
+  // without the 8am / switched-on checks).
+  async _runRentalRemindersNow() {
+    if (!confirm('Email every customer whose rental reminder is due now?')) return;
+    try {
+      const r = await this.api('POST', '/rentals/reminders/run', {});
+      this.alert(`Rental reminders: ${r.sent.length} sent${r.failed.length ? `, ${r.failed.length} failed (${r.failed[0].error})` : ''}`, r.failed.length ? 'warning' : 'success');
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
   async saveWebsiteMode() {
     try {
       const { website_mode } = await this.api('PUT', '/settings/website', {
@@ -742,6 +759,7 @@ Object.assign(App, {
         website_banner_retail: document.getElementById('s-website-banner-retail').value,
         website_url: document.getElementById('s-website-url').value,
         website_retail_branch_id: document.getElementById('s-website-retail-branch').value || null,
+        rental_reminders_enabled: document.getElementById('s-rental-reminders').checked,
       });
       const labels = { rentals: 'Rentals only', retail: 'Retail only', both: 'Rentals & Retail' };
       this.alert(`Website settings saved — mode: ${labels[website_mode]}`, 'success');
