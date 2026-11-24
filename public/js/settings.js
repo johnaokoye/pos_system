@@ -612,6 +612,7 @@ Object.assign(App, {
       { value: 'petty_cash:write', label: 'Petty Cash Postings — Acknowledge' },
       { value: 'consignment:read',  label: 'Consignment Postings — Read' },
       { value: 'consignment:write', label: 'Consignment Postings — Acknowledge' },
+      { value: 'rentals:read',      label: 'Rental Availability — Read (e-commerce site)' },
     ];
     this.showModal(`
       <div class="modal" style="max-width:480px">

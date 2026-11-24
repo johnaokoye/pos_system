@@ -3,6 +3,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { CUSTOMER_SALESPERSON_SQL } = require('../lib/salesCredit');
 const { getOutstandingQty, getOutOfServiceQty } = require('../lib/rentalAvailability');
+const { onlineRentalAvailability, parseRange } = require('../lib/rentalOnlineAvailability');
 const { blockedMessage, creditLimitError } = require('../lib/creditBlock');
 const { depositWaiver, isCreditCustomerType, getBranchStock, feeFor, blendedFeePerUnit, checkAvailability, parseDbTime, buildRentalLines, insertPendingAgreement, assertRentalCustomerEligible, assertNoUnpaidRentalReturns, dueDateTime, requiredDepositReturnMethod, rentalDiscount, rentalTaxAfterDiscount, attachRateBasis, rentalWindow, rateLineOf } = require('../lib/rentals');
 const { allocateTicketDiscount } = require('../lib/ticketDiscount');
@@ -372,6 +373,25 @@ router.get('/availability', requireRentalsManage, async (req, res) => {
     const outstanding = await getOutstandingQty(db, product_id, branch_id || null);
     const outOfService = await getOutOfServiceQty(db, product_id, branch_id || null);
     res.json({ product_id: product.id, stock_qty: stockQty, outstanding_qty: outstanding, out_of_service_qty: outOfService, available_qty: Math.max(0, stockQty - outstanding - outOfService) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// For the e-commerce site (API key scope rentals:read): per rentable branch,
+// how many are free for start..end (store days, default today), free today,
+// and when `quantity` are next free for that many days. product_id or ids
+// (comma list, ≤ 200; may include accessories not on the website); neither =
+// every rental item flagged for the website. See lib/rentalOnlineAvailability.js.
+router.get('/online-availability', requireRentalsManage, async (req, res) => {
+  try {
+    const raw = req.query.ids ?? req.query.product_id;
+    const ids = raw ? String(raw).split(',').map(s => s.trim()).filter(Boolean) : [];
+    if (ids.length > 200) return res.status(400).json({ error: 'Ask for at most 200 items at a time' });
+    if (ids.some(s => !/^\d+$/.test(s))) return res.status(400).json({ error: 'ids must be item ids' });
+    const { storeToday } = require('../lib/storeTime');
+    const range = parseRange(req.query, storeToday());
+    if (range.error) return res.status(400).json({ error: range.error });
+    const quantity = Math.max(1, parseInt(req.query.quantity, 10) || 1);
+    res.json(await onlineRentalAvailability(db, { productIds: ids, ...range, quantity }));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
