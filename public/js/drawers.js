@@ -911,7 +911,16 @@ Object.assign(App, {
 
   // ─── POS drawer check and open ───────────────────────────────────
   async checkPOSDrawer() {
-    if (this.currentDrawerSession) return;
+    // The till remembers its drawer; if it was closed elsewhere (Cash Drawers
+    // screen, another device), forget it and pick up the open one / ask again.
+    if (this.currentDrawerSession) {
+      try {
+        const open = await this.api('GET', `/drawers/sessions?employee_id=${this.currentUser.id}&status=open`);
+        if (open.some(s => s.id === this.currentDrawerSession.id)) return;
+        this.currentDrawerSession = null;
+        this.updateDrawerBadge();
+      } catch { return; }
+    }
     if (!this.can('drawers')) { this._posHasDrawers = false; this.renderPOSBranchBar(); return; }
 
     const branches = this._posBranches(); // no till at a warehouse

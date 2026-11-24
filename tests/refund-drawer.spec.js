@@ -87,3 +87,35 @@ test('the return dialog asks how the refund is paid, defaulting to how the sale 
   await page.locator('input[name="ret-resolution"][value="replacement"]').check();
   await expect(select).toBeHidden();
 });
+
+// The cashier's case (2026-11-24): the till still remembered a drawer that was
+// closed elsewhere; she opened another, and the return kept being refused
+// ("That cash drawer isn't open any more"). The closed one sent by the till
+// now falls through to her open drawer, for refunds and for sales.
+test('a till that still remembers a closed drawer refunds and sells on the open one', async ({ page }) => {
+  const pin = await signInAsManager(page);
+  const me = await page.evaluate(() => App.currentUser.id);
+  const d1 = await api(page, 'POST', '/drawers', { name: `Old drawer ${stamp()}`, branch_id: 1 });
+  const d2 = await api(page, 'POST', '/drawers', { name: `New drawer ${stamp()}`, branch_id: 1 });
+  const old = await api(page, 'POST', '/drawers/sessions', { drawer_id: d1.id, branch_id: 1, employee_id: me, opening_float: 0 });
+  const cashSale = await sale(page, 'cash', old.id);
+  await page.evaluate(s => { App.currentDrawerSession = s; }, old);
+  // Closed from the Cash Drawers screen; a new one opened there.
+  await api(page, 'PATCH', `/drawers/sessions/${old.id}/close`, {});
+  const fresh = await api(page, 'POST', '/drawers/sessions', { drawer_id: d2.id, branch_id: 1, employee_id: me, opening_float: 500 });
+
+  // The till still sends the old one.
+  const ret = await api(page, 'POST', `/transactions/${cashSale.id}/return`, returnBody(cashSale, pin, { refund_method: 'cash', drawer_session_id: old.id }));
+  expect(ret).toMatchObject({ refund_method: 'cash', drawer_session_id: fresh.id });
+  const next = await sale(page, 'cash', old.id);
+  expect(next.drawer_session_id).toBe(fresh.id);
+
+  // Back on the POS, the till drops the closed drawer and picks up the open one.
+  await page.evaluate(() => App.checkPOSDrawer());
+  expect(await page.evaluate(() => App.currentDrawerSession?.id)).toBe(fresh.id);
+
+  // With nothing open, the message says so.
+  await api(page, 'PATCH', `/drawers/sessions/${fresh.id}/close`, {});
+  const later = await sale(page, 'cash', null);
+  expect(await attempt(page, 'POST', `/transactions/${later.id}/return`, returnBody(later, pin, { refund_method: 'cash', drawer_session_id: old.id }))).toContain('no other drawer open');
+});

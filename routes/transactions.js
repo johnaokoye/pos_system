@@ -712,6 +712,17 @@ router.post('/', requirePermission('pos'), async (req, res) => {
     if (!branch_id && req.apiKey) {
       branch_id = (await require('../lib/websiteBranch').onlineRetailBranchId(db)) || branch_id;
     }
+    // A till can still remember a drawer that was closed elsewhere (Cash
+    // Drawers screen, another device): book the sale to the cashier's one open
+    // drawer instead, so cash never lands on a drawer that's been counted.
+    let saleDrawerId = drawer_session_id || null;
+    if (saleDrawerId && !req.apiKey) {
+      const { rows: [open] } = await db.execute({ sql: "SELECT id FROM drawer_sessions WHERE id = ? AND status = 'open'", args: [saleDrawerId] });
+      if (!open && req.employee) {
+        const { rows: mine } = await db.execute({ sql: "SELECT id FROM drawer_sessions WHERE employee_id = ? AND status = 'open'", args: [req.employee.id] });
+        if (mine.length === 1) saleDrawerId = mine[0].id;
+      }
+    }
     // Online orders may be filled from a warehouse (woo_sync_branch_id); till sales never are.
     if (!req.apiKey) { const whErr = await warehouseSaleError(db, branch_id); if (whErr) return res.status(400).json({ error: whErr }); }
     { const homeErr = await homeBranchError(db, req, branch_id); if (homeErr) return res.status(400).json({ error: homeErr, code: 'home_branch' }); }
@@ -1055,7 +1066,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         throw Object.assign(new Error('This held ticket is no longer on hold — it may already have been completed at another till. Check Transactions before taking payment again.'), { status: 409, holdGone: true });
       }
       const txSource = req.apiKey ? 'online' : 'pos';
-      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,created_by,salesperson_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,promotion_code,promotion_name,total,payment_method,amount_tendered,change_amount,is_credit,notes,source_return_id,store_credit_applied,cash_back_applied,tax_exempt,tax_exemption_number,approval_code,source,discount_pre_tax,po_number,discount_override_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id || null, employee_id || 1, createdBy, salespersonId, branch_id || null, drawer_session_id || null, subtotal, tax_amount, disc, salePromoCode, salePromoName, total, method, tendered, change > 0 ? change : 0, isCredit ? 1 : 0, notes || null, source_return_id || null, storeCredit > 0 ? storeCredit : 0, cashBack > 0 ? cashBack : 0, isTaxExempt, tax_exemption_number || null, finalApprovalCode, txSource, discountPreTax, poNumber, ticketDiscountOverrideBy] });
+      const txResult = await tx.execute({ sql: `INSERT INTO transactions (transaction_number,customer_id,employee_id,created_by,salesperson_id,branch_id,drawer_session_id,subtotal,tax_amount,discount_amount,promotion_code,promotion_name,total,payment_method,amount_tendered,change_amount,is_credit,notes,source_return_id,store_credit_applied,cash_back_applied,tax_exempt,tax_exemption_number,approval_code,source,discount_pre_tax,po_number,discount_override_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [transaction_number, customer_id || null, employee_id || 1, createdBy, salespersonId, branch_id || null, saleDrawerId, subtotal, tax_amount, disc, salePromoCode, salePromoName, total, method, tendered, change > 0 ? change : 0, isCredit ? 1 : 0, notes || null, source_return_id || null, storeCredit > 0 ? storeCredit : 0, cashBack > 0 ? cashBack : 0, isTaxExempt, tax_exemption_number || null, finalApprovalCode, txSource, discountPreTax, poNumber, ticketDiscountOverrideBy] });
       const txId = Number(txResult.lastInsertRowid);
 
       const paymentLegs = tenderLegs || [{ payment_method: method, amount: total, approval_code: finalApprovalCode }];
@@ -1323,15 +1334,18 @@ async function refundTender({ method, drawerSessionId, employeeId, amount }) {
   if (!REFUND_METHODS.includes(method)) return { error: 'Choose how the refund is paid: cash, card, cheque or bank transfer', code: 'refund_method_required' };
   let session = null;
   if (drawerSessionId) {
+    // A till can still remember a drawer closed elsewhere (Cash Drawers
+    // screen, another device): fall through to the person's own open one.
     ({ rows: [session] } = await db.execute({ sql: "SELECT id FROM drawer_sessions WHERE id = ? AND status = 'open'", args: [drawerSessionId] }));
-    if (!session && method === 'cash') return { error: "That cash drawer isn't open any more. Open a drawer to refund cash, or refund by card, cheque or bank transfer.", code: 'drawer_required' };
   }
   if (!session && employeeId) {
     const { rows } = await db.execute({ sql: "SELECT id FROM drawer_sessions WHERE employee_id = ? AND status = 'open' ORDER BY opened_at DESC", args: [employeeId] });
     if (rows.length > 1 && method === 'cash') return { error: 'You have more than one cash drawer open. Refund cash from the POS, on the drawer the cash comes out of.', code: 'drawer_ambiguous' };
     session = rows[0] || null;
   }
-  if (method === 'cash' && !session) return { error: 'A cash refund comes out of a cash drawer. Open one first, or refund by card, cheque or bank transfer.', code: 'drawer_required' };
+  if (method === 'cash' && !session) return { error: drawerSessionId
+    ? "That cash drawer isn't open any more and you have no other drawer open. Open a drawer to refund cash, or refund by card, cheque or bank transfer."
+    : 'A cash refund comes out of a cash drawer. Open one first, or refund by card, cheque or bank transfer.', code: 'drawer_required' };
   // Same limit as petty cash: no more cash out than the drawer holds.
   if (method === 'cash' && amount != null) {
     const { loadDrawerSession } = require('../lib/drawerReport');
