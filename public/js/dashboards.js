@@ -428,7 +428,7 @@ Object.assign(App, {
         <div class="modal-body">
           <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">From ${this.escapeAttr(a.customer_name || '—')} · due ${this.fmtDate(a.due_date)}. Enter how many of each came back and what condition it's in.</div>
           ${out.map(i => `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:8px">
-              <div class="fw-600" style="font-size:13px">${this.escapeAttr(i.product_name)}${i.parent_item_id ? ' <span class="badge-pill badge-secondary" style="font-size:10px">accessory</span>' : ''} <span style="font-weight:400;color:var(--text-muted);font-size:12px">(${i.quantity - i.quantity_returned} out)</span></div>
+              <div class="fw-600" style="font-size:13px">${this.escapeAttr(i.product_name)}${this._rentalSkuTag(i.sku)}${i.parent_item_id ? ' <span class="badge-pill badge-secondary" style="font-size:10px">accessory</span>' : ''} <span style="font-weight:400;color:var(--text-muted);font-size:12px">(${i.quantity - i.quantity_returned} out)</span></div>
               <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
                 <div class="form-group" style="margin:0;width:90px"><label style="font-size:11px">Back</label><input type="number" class="gc-qty" data-item="${i.id}" value="${i.quantity - i.quantity_returned}" min="0" max="${i.quantity - i.quantity_returned}" step="1"></div>
                 <div class="form-group" style="margin:0;flex:1;min-width:180px"><label style="font-size:11px">Condition</label><input class="gc-cond" data-item="${i.id}" placeholder="e.g. Good, or describe any damage"></div>

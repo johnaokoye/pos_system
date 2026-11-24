@@ -347,7 +347,7 @@ Object.assign(App, {
         <div class="modal-header"><span class="modal-title">Schedule ${isDelivery ? 'Delivery' : 'Pickup'} — ${a.agreement_number}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;line-height:1.6">
-            ${a.customer_name || '—'} · ${a.items.filter(i => !i.parent_item_id).map(i => `${i.product_name} ×${i.quantity}`).join(', ')}<br>
+            ${a.customer_name || '—'} · ${a.items.filter(i => !i.parent_item_id).map(i => `${this._rentalNameSku(i)} ×${i.quantity}`).join(', ')}<br>
             📍 ${(isDelivery ? a.delivery_address : this._rentalPickupAddress(a)) || 'No address on file'}<br>
             Due back ${this.fmtDate(a.due_date)}
           </div>
@@ -1693,7 +1693,7 @@ Object.assign(App, {
                 if (i.rate_basis && i.rate_basis.length) rateParts.splice(0, rateParts.length, this._rateBasisLabel(i.rate_basis));
               }
               return `<tr>
-              <td>${i.product_name}${tag}</td>
+              <td>${i.product_name}${this._rentalSkuTag(i.sku)}${tag}</td>
               <td style="font-size:12px;color:var(--text-muted)">${i.is_mandatory ? 'Included, no charge' : rateParts.join(' · ')}</td>
               <td>${i.rental_classification==='equipment'?'Equipment':'Tool'}</td>
               <td>${i.quantity}</td>
@@ -1833,7 +1833,7 @@ Object.assign(App, {
           <div class="form-group" id="pr-maint-items" style="display:none"><label>Item(s) going in</label>
             ${outstanding.map(i => `<label style="display:flex;align-items:center;gap:8px;font-weight:normal;text-transform:none;font-size:13px;margin:4px 0;cursor:pointer">
               <input type="checkbox" class="pr-maint-item" value="${i.id}" ${outstanding.length === 1 || !i.parent_item_id ? 'checked' : ''} style="width:16px;height:16px;margin:0">
-              ${i.parent_item_id ? '↳ ' : ''}${i.product_name} × ${i.quantity - i.quantity_returned}</label>`).join('')}
+              ${i.parent_item_id ? '↳ ' : ''}${i.product_name}${this._rentalSkuTag(i.sku)} × ${i.quantity - i.quantity_returned}</label>`).join('')}
             <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Each gets a record in Rentals → In Maintenance, where the work is logged. The notes below are its first entry.</div>
           </div>
           <div class="form-group"><label>Notes</label><textarea id="pr-notes" rows="3" placeholder="What's happening and why"></textarea></div>
@@ -2215,7 +2215,7 @@ Object.assign(App, {
     const itemRows = a.items.filter(i => !i.parent_item_id).map(i => {
       const accs = a.items.filter(x => x.parent_item_id === i.id);
       return `<tr>
-        <td style="padding:8px;border-bottom:1px solid #e8e8e8">${i.product_name}${accs.length ? `<div style="font-size:11px;color:#777">+ ${accs.map(x=>x.product_name).join(', ')}</div>` : ''}</td>
+        <td style="padding:8px;border-bottom:1px solid #e8e8e8">${i.product_name}${i.sku ? ` <span style="font-family:monospace;font-size:11px;color:#555">${i.sku}</span>` : ''}${accs.length ? `<div style="font-size:11px;color:#777">+ ${accs.map(x=>this._rentalNameSku(x)).join(', ')}</div>` : ''}</td>
         <td style="padding:8px;border-bottom:1px solid #e8e8e8;text-align:center">${i.quantity}</td>
         <td style="padding:8px;border-bottom:1px solid #e8e8e8">${dueLabel}</td>
       </tr>`;
@@ -3182,8 +3182,8 @@ Object.assign(App, {
             ${a.items.filter(i=>!i.parent_item_id).map(i => {
               const accs = a.items.filter(x => x.parent_item_id === i.id);
               return `<div style="font-size:13px;margin-bottom:4px;display:flex;justify-content:space-between">
-                <span><strong>${i.product_name}</strong> × ${i.quantity}
-                ${accs.length ? `<div style="font-size:11px;color:var(--text-muted)">+ ${accs.map(x=>x.product_name).join(', ')}</div>` : ''}</span>
+                <span><strong>${i.product_name}</strong>${this._rentalSkuTag(i.sku)} × ${i.quantity}
+                ${accs.length ? `<div style="font-size:11px;color:var(--text-muted)">+ ${accs.map(x=>this._rentalNameSku(x)).join(', ')}</div>` : ''}</span>
                 <span>${this.fmt(i.estimated_rental_fee || 0)}</span>
               </div>`;
             }).join('')}
@@ -3373,6 +3373,13 @@ Object.assign(App, {
   // item(s), uploaded as it's taken (POST /rentals/agreements/:id/photos).
   // "Take Photo" opens the camera on a phone or tablet. Return shows the
   // photos from when it went out, to compare.
+  // An item's SKU beside its name on every handover step, so the person can
+  // check the tag on the item against the agreement.
+  _rentalSkuTag(sku) {
+    return sku ? ` <span style="font-family:monospace;font-size:11px;font-weight:400;color:var(--text-muted);background:var(--bg-secondary,#f1f5f9);border-radius:3px;padding:0 4px">${this.escapeAttr(sku)}</span>` : '';
+  },
+  _rentalNameSku(i) { return `${i.product_name}${i.sku ? ` [${i.sku}]` : ''}`; },
+
   _rentalPhotoLabels: { issue: 'Photos at Issue', pickup: 'Photos at Pickup', return: 'Photos at Return' },
 
   _rentalPhotoPickerHtml(id, stage) {
@@ -3478,8 +3485,8 @@ Object.assign(App, {
           <div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:12px">
             ${a.items.filter(i=>!i.parent_item_id).map(i => {
               const accs = a.items.filter(x => x.parent_item_id === i.id);
-              return `<div style="font-size:13px;margin-bottom:4px"><strong>${i.product_name}</strong> × ${i.quantity}
-                ${accs.length ? `<div style="font-size:11px;color:var(--text-muted)">+ ${accs.map(x=>x.product_name).join(', ')}</div>` : ''}</div>`;
+              return `<div style="font-size:13px;margin-bottom:4px"><strong>${i.product_name}</strong>${this._rentalSkuTag(i.sku)} × ${i.quantity}
+                ${accs.length ? `<div style="font-size:11px;color:var(--text-muted)">+ ${accs.map(x=>this._rentalNameSku(x)).join(', ')}</div>` : ''}</div>`;
             }).join('')}
           </div>
           <div class="form-group" style="margin-bottom:12px">
@@ -3626,7 +3633,7 @@ Object.assign(App, {
             const remaining = i.quantity - i.quantity_returned;
             const tag = i.parent_item_id ? (i.is_mandatory ? ' <span class="badge-pill badge-success" style="font-size:10px">included, no charge</span>' : ' <span class="badge-pill badge-secondary" style="font-size:10px">accessory</span>') : '';
             return `<div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:8px">
-              <div class="fw-600" style="margin-bottom:6px">${i.product_name}${tag} <span style="font-weight:400;color:var(--text-muted);font-size:12px">(${remaining} outstanding)</span></div>
+              <div class="fw-600" style="margin-bottom:6px">${i.product_name}${this._rentalSkuTag(i.sku)}${tag} <span style="font-weight:400;color:var(--text-muted);font-size:12px">(${remaining} outstanding)</span></div>
               <div class="input-row">
                 <div class="form-group"><label style="font-size:11px">Qty Returned</label><input type="number" id="rr-qty-${i.id}" value="${checkin ? (checkinLine(i.id)?.quantity || 0) : remaining}" min="0" max="${remaining}"></div>
                 <div class="form-group"><label style="font-size:11px">Damage Fee</label><input type="number" id="rr-fee-${i.id}" value="0" min="0" step="0.01"></div>

@@ -97,7 +97,7 @@ router.get('/agreements', requireRentalsManage, async (req, res) => {
       rce.first_name || ' ' || rce.last_name as return_checkin_by_name,
       rde.first_name || ' ' || rde.last_name as return_driver_employee_name,
       (SELECT COUNT(*) FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_count,
-      (SELECT GROUP_CONCAT(product_name || ' x' || quantity, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_summary,
+      (SELECT GROUP_CONCAT(product_name || COALESCE(' [' || NULLIF(sku, '') || ']', '') || ' x' || quantity, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_summary,
       (SELECT started_at FROM rental_agreement_pauses WHERE agreement_id = ra.id AND ended_at IS NULL LIMIT 1) as current_pause_started_at,
       (SELECT reason FROM rental_agreement_pauses WHERE agreement_id = ra.id AND ended_at IS NULL LIMIT 1) as current_pause_reason,
       (SELECT scheduled_resume_at FROM rental_agreement_pauses WHERE agreement_id = ra.id AND ended_at IS NULL LIMIT 1) as current_pause_resume_at,
@@ -155,7 +155,7 @@ router.get('/agreements/pickup-reminders', requireRentalsManage, async (req, res
     const { rows } = await db.execute({ sql: `SELECT ra.*, c.first_name || ' ' || c.last_name as customer_name,
       c.phone as customer_phone, c.email as customer_email,
       b.name as branch_name,
-      (SELECT GROUP_CONCAT(product_name || ' x' || quantity, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_summary
+      (SELECT GROUP_CONCAT(product_name || COALESCE(' [' || NULLIF(sku, '') || ']', '') || ' x' || quantity, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_summary
       FROM rental_agreements ra
       LEFT JOIN customers c ON ra.customer_id = c.id
       LEFT JOIN branches b ON ra.branch_id = b.id
@@ -200,9 +200,9 @@ router.get('/agreements/guard-queue', requireAuth, async (req, res) => {
       ra.issue_security_employee_id, ra.issue_security_confirmed_at, ra.return_security_employee_id, ra.return_security_confirmed_at,
       ra.is_paused, ra.pickup_confirmed_at, ra.return_checkin_at, ra.return_checkin_by, ce.first_name || ' ' || ce.last_name as return_checkin_by_name,
       c.first_name || ' ' || c.last_name as customer_name,
-      (SELECT GROUP_CONCAT(product_name || ' x' || quantity, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_summary,
-      (SELECT GROUP_CONCAT(product_name, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NOT NULL) as accessory_summary,
-      (SELECT json_group_array(json_object('id', i.id, 'product_name', i.product_name, 'quantity', i.quantity, 'quantity_returned', i.quantity_returned, 'parent_item_id', i.parent_item_id))
+      (SELECT GROUP_CONCAT(product_name || COALESCE(' [' || NULLIF(sku, '') || ']', '') || ' x' || quantity, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_summary,
+      (SELECT GROUP_CONCAT(product_name || COALESCE(' [' || NULLIF(sku, '') || ']', ''), ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NOT NULL) as accessory_summary,
+      (SELECT json_group_array(json_object('id', i.id, 'product_name', i.product_name, 'sku', i.sku, 'quantity', i.quantity, 'quantity_returned', i.quantity_returned, 'parent_item_id', i.parent_item_id))
          FROM rental_agreement_items i WHERE i.agreement_id = ra.id) as items_json,
       CASE WHEN ra.status = 'awaiting_issue' AND ra.delivery_driver_confirmed_at IS NOT NULL THEN 'out_for_delivery'
            WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused'
@@ -228,7 +228,7 @@ router.get('/agreements/driver-queue', requireAuth, async (req, res) => {
       ra.return_driver_employee_id,
       c.first_name || ' ' || c.last_name as customer_name, c.phone as customer_phone,
       c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
-      (SELECT GROUP_CONCAT(product_name || ' x' || quantity, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_summary,
+      (SELECT GROUP_CONCAT(product_name || COALESCE(' [' || NULLIF(sku, '') || ']', '') || ' x' || quantity, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_summary,
       CASE WHEN ra.status = 'awaiting_issue' AND ra.delivery_driver_confirmed_at IS NOT NULL THEN 'out_for_delivery'
            WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused'
            WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' ELSE ra.status END as display_status
@@ -1107,7 +1107,7 @@ const DISPATCH_SELECT = `SELECT ra.id, ra.agreement_number, ra.status, ra.is_pau
     c.address as customer_address, c.city as customer_city, c.state as customer_state, c.zip as customer_zip,
     b.name as branch_name,
     dd.first_name || ' ' || dd.last_name as delivery_driver_name, pd.first_name || ' ' || pd.last_name as pickup_driver_name,
-    (SELECT GROUP_CONCAT(product_name || ' x' || quantity, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_summary
+    (SELECT GROUP_CONCAT(product_name || COALESCE(' [' || NULLIF(sku, '') || ']', '') || ' x' || quantity, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_summary
   FROM rental_agreements ra
   LEFT JOIN customers c ON ra.customer_id = c.id
   LEFT JOIN branches b ON ra.branch_id = b.id
