@@ -3215,4 +3215,65 @@ async function documentEmailContent(asPdf, s, model, htmlContent, { message } = 
   return { html: withMessage(buildPdfCoverHtml(model, s), message), attachments: [{ filename, content: pdf, contentType: 'application/pdf' }] };
 }
 
+// Website rental application outcome (routes/customers.js POST
+// /:id/rental-application/review). action: 'approve' | 'request_changes' |
+// 'decline'. Uses Settings → Email (SMTP) like every other document email;
+// the storefront's address (for the "browse rentals" / "update your
+// application" links) is Settings → Website → Website URL (website_url).
+// Throws if SMTP isn't configured or the send fails — the caller records the
+// decision first and only reports the email failure.
+async function sendRentalApplicationEmail(customer, action, note) {
+  if (!customer.email) throw new Error('Customer has no email address on file');
+  const s = await getSettings();
+  const transporter = createTransporter(s);
+  const store = s.store_name || 'Our Store';
+  const site = String(s.website_url || '').replace(/\/+$/, '');
+  const name = esc(customer.first_name || 'there');
+  const button = (href, label) => site
+    ? `<p><a href="${esc(site + href)}" style="display:inline-block;background:#008038;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:700">${esc(label)}</a></p>`
+    : '';
+  const noteHtml = note ? `<p style="background:#fff8e1;border-left:4px solid #ffd800;padding:10px 14px;margin:16px 0;white-space:pre-line">${esc(note)}</p>` : '';
+  const contact = [s.store_phone, s.store_email].filter(Boolean).map(esc).join(' · ');
+
+  const content = {
+    approve: {
+      subject: `You're approved for rentals at ${store}`,
+      body: `<p>Hi ${name},</p>
+        <p>Good news — we've checked your details and your account is now <strong>approved for rentals</strong>.</p>
+        <p>You can request any rental item on our website and our team will confirm your booking. Bring your photo ID when you collect.</p>
+        ${button('/rentals', 'Browse Rentals')}`,
+    },
+    request_changes: {
+      subject: `Action needed on your rental application — ${store}`,
+      body: `<p>Hi ${name},</p>
+        <p>Thanks for applying for rental approval. We need a little more from you before we can approve it:</p>
+        ${noteHtml}
+        <p>Please sign in and update your application.</p>
+        ${button('/rentals/apply', 'Update My Application')}`,
+    },
+    decline: {
+      subject: `Your rental application — ${store}`,
+      body: `<p>Hi ${name},</p>
+        <p>Thank you for applying for rental approval. Unfortunately we're unable to approve your application at this time.</p>
+        ${noteHtml}
+        <p>If you have any questions, please get in touch with us${contact ? ` (${contact})` : ''}.</p>`,
+    },
+  }[action];
+  if (!content) throw new Error(`Unknown rental application action: ${action}`);
+
+  const fromName = s.email_from_name || store;
+  const fromAddr = s.email_smtp_user || s.store_email || '';
+  await transporter.sendMail({
+    from: `"${fromName}" <${fromAddr}>`,
+    to: customer.email,
+    subject: content.subject,
+    html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;color:#1a1a1a;font-size:14px;line-height:1.5">
+      <div style="background:#008038;color:#fff;padding:16px 20px;font-weight:900;font-size:16px">${esc(store)}</div>
+      <div style="padding:20px">${content.body}</div>
+      <div style="padding:12px 20px;font-size:12px;color:#777;border-top:1px solid #eee">${contact || esc(store)}</div>
+    </div>`,
+  });
+}
+
 module.exports = router;
+module.exports.sendRentalApplicationEmail = sendRentalApplicationEmail;

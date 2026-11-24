@@ -677,6 +677,170 @@ router.get('/rental-incomplete', requirePermission('customers_missing_rental_inf
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Website rental applications ─────────────────────────────────────────────
+// The storefront's /rentals/apply lets a signed-in customer fill in the same
+// rental compliance fields as the Add/Edit Customer form (documents go up
+// through the existing /:id/id-scan, /:id/address-proof and /:id/reference-id
+// routes). Submitting marks the application 'submitted' but never sets
+// is_rental_customer — that only happens when an employee approves it below,
+// so the create-agreement gate (lib/rentals.js assertRentalCustomerEligible)
+// is untouched. See the rental_application_* columns in database.js.
+
+const RENTAL_APPLICATION_TEXT_FIELDS = [
+  'rental_id_type', 'rental_id_number', 'rental_address_proof_type',
+  'rental_reference_name', 'rental_reference_phone', 'rental_reference_relationship', 'rental_reference_address',
+  'rental_reference2_name', 'rental_reference2_phone', 'rental_reference2_relationship',
+  'rental_reference3_name', 'rental_reference3_phone', 'rental_reference3_relationship',
+];
+// Same choices as the customer form's dropdowns (public/js/customers.js).
+const RENTAL_ID_TYPES = ["Driver's License", 'Passport', 'National ID', 'Voter ID', 'Other'];
+const RENTAL_ADDRESS_PROOF_TYPES = ['Utility Bill', 'Bank Statement', 'Lease Agreement', 'Government Letter', 'Other'];
+const RENTAL_APPLICATION_ACTIONS = { approve: 'approved', request_changes: 'changes_requested', decline: 'declined' };
+
+// Same "can rent today" test as the customer list's rental_approved badge.
+const isRentalApproved = c => !!c.is_rental_customer && (!!c.rental_preapproved || getMissingRentalFields(c).length === 0);
+
+// Review queue. Placed before GET /:id so "rental-applications" isn't read as an id.
+router.get('/rental-applications', requirePermission('customers_rental_review'), async (req, res) => {
+  try {
+    const status = ['submitted', 'changes_requested', 'approved', 'declined'].includes(req.query.status) ? req.query.status : 'submitted';
+    const { rows } = await db.execute({ sql: `SELECT * FROM customers WHERE rental_application_status = ? AND active = 1
+      ORDER BY rental_application_submitted_at`, args: [status] });
+    res.json(rows.map(c => ({
+      id: c.id, customer_number: c.customer_number, first_name: c.first_name, last_name: c.last_name,
+      email: c.email, phone: c.phone, status: c.rental_application_status,
+      submitted_at: c.rental_application_submitted_at, reviewed_at: c.rental_application_reviewed_at,
+      missing: getMissingRentalFields(c).map(m => m.label),
+    })));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Which active customers a website sign-up's email/phone already belong to —
+// the same matching (and phone normalisation) as the hard-duplicate 409 on
+// create, so the storefront can offer "link your existing store account"
+// instead of failing. Returns only what that decision needs; never notes,
+// phone numbers or other personal details. has_web_account: the record
+// already has a website password (the storefront keeps it in notes as
+// __pwdhash:…).
+router.get('/match', requireAuth, async (req, res) => {
+  try {
+    const email = String(req.query.email || '').trim();
+    const phone = String(req.query.phone || '').trim();
+    if (!email && !phone) return res.json([]);
+    // No name: name-only matches aren't hard duplicates and say nothing about ownership.
+    const matches = await findDuplicateCustomers({ email, phone });
+    res.json(matches.filter(isHardDuplicate).map(m => ({
+      id: m.id,
+      first_name: m.first_name,
+      email: m.email || null,
+      match_on: m.match_on.filter(f => f !== 'name'),
+      has_web_account: /__pwdhash:[a-f0-9]{64}/.test(m.notes || ''),
+    })));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Application status + the customer's own entries (to pre-fill the website
+// form when changes were requested). Document paths are never returned —
+// only whether each one is on file.
+router.get('/:id/rental-application', requireAuth, async (req, res) => {
+  try {
+    const { rows: [c] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.id] });
+    if (!c) return res.status(404).json({ error: 'Customer not found' });
+    res.json({
+      status: c.rental_application_status || null,
+      submitted_at: c.rental_application_submitted_at || null,
+      reviewed_at: c.rental_application_reviewed_at || null,
+      note: c.rental_application_note || null,
+      is_rental_customer: !!c.is_rental_customer,
+      rental_approved: isRentalApproved(c),
+      missing: getMissingRentalFields(c).map(m => m.label),
+      fields: Object.fromEntries(RENTAL_APPLICATION_TEXT_FIELDS.map(k => [k, c[k] || ''])),
+      documents: {
+        id_scan: !!c.rental_id_scan_path,
+        address_proof: !!c.rental_address_proof_path,
+        reference_id: !!c.rental_reference_id_path,
+      },
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Save the application's text fields and submit it for review. Fields are
+// saved even when something is still missing (so nothing typed is lost), but
+// the application is only marked 'submitted' once every RENTAL_REQUIREMENTS
+// item — documents included — is on file.
+router.put('/:id/rental-application', requirePermission('customers_edit'), async (req, res) => {
+  try {
+    const { rows: [c] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.id] });
+    if (!c) return res.status(404).json({ error: 'Customer not found' });
+    if (isRentalApproved(c) || c.rental_application_status === 'approved') return res.status(409).json({ error: 'This customer is already approved for rentals' });
+    if (c.rental_application_status === 'submitted') return res.status(409).json({ error: 'This application has already been submitted and is under review' });
+    if (c.rental_application_status === 'declined') return res.status(409).json({ error: 'This application was declined — please contact the store' });
+
+    const body = req.body || {};
+    const values = {};
+    for (const key of RENTAL_APPLICATION_TEXT_FIELDS) {
+      values[key] = String(body[key] ?? '').trim().slice(0, 200) || null;
+    }
+    if (values.rental_id_type && !RENTAL_ID_TYPES.includes(values.rental_id_type)) return res.status(400).json({ error: 'Unknown ID type' });
+    if (values.rental_address_proof_type && !RENTAL_ADDRESS_PROOF_TYPES.includes(values.rental_address_proof_type)) return res.status(400).json({ error: 'Unknown proof of address type' });
+
+    await db.execute({
+      sql: `UPDATE customers SET ${RENTAL_APPLICATION_TEXT_FIELDS.map(k => `${k} = ?`).join(', ')} WHERE id = ?`,
+      args: [...RENTAL_APPLICATION_TEXT_FIELDS.map(k => values[k]), c.id],
+    });
+    const missing = getMissingRentalFields({ ...c, ...values });
+    if (missing.length) {
+      return res.status(400).json({ error: `Your application is missing ${missing.map(m => m.sentence).join(', ')}.`, missing: missing.map(m => m.label) });
+    }
+    await db.execute({
+      sql: `UPDATE customers SET rental_application_status = 'submitted', rental_application_submitted_at = ?,
+        rental_application_note = NULL, rental_application_reviewed_by = NULL, rental_application_reviewed_at = NULL WHERE id = ?`,
+      args: [new Date().toISOString(), c.id],
+    });
+    res.json({ status: 'submitted' });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Staff decision on a submitted application: approve (staff have ticked
+// "approval checks complete" in the UI — sets is_rental_customer = 1),
+// request_changes (note required — the customer fixes and resubmits on the
+// website) or decline. Employees only: an API key bypasses requirePermission
+// (lib/permissions.js), and a decision needs a person to attribute it to.
+// The customer is emailed afterwards; an email failure doesn't undo the
+// decision, it's reported back as email_sent/email_error.
+router.post('/:id/rental-application/review', requirePermission('customers_rental_review'), async (req, res) => {
+  if (req.apiKey || !req.employee) return res.status(403).json({ error: 'Rental applications must be reviewed by a signed-in employee' });
+  try {
+    const action = req.body?.action;
+    const newStatus = RENTAL_APPLICATION_ACTIONS[action];
+    if (!newStatus) return res.status(400).json({ error: 'action must be approve, request_changes or decline' });
+    const note = String(req.body?.note ?? '').trim().slice(0, 1000) || null;
+    if (action === 'request_changes' && !note) return res.status(400).json({ error: 'Tell the customer what needs to change' });
+
+    const { rows: [c] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.id] });
+    if (!c) return res.status(404).json({ error: 'Customer not found' });
+    if (c.rental_application_status !== 'submitted') return res.status(409).json({ error: 'Only a submitted application can be reviewed' });
+    if (action === 'approve') {
+      const missing = getMissingRentalFields(c);
+      if (missing.length) return res.status(400).json({ error: `Can't approve — the record is missing ${missing.map(m => m.sentence).join(', ')}.` });
+    }
+
+    await db.execute({
+      sql: `UPDATE customers SET rental_application_status = ?, rental_application_note = ?,
+        rental_application_reviewed_by = ?, rental_application_reviewed_at = ?
+        ${action === 'approve' ? ', is_rental_customer = 1' : ''} WHERE id = ?`,
+      args: [newStatus, action === 'approve' ? null : note, req.employee.id, new Date().toISOString(), c.id],
+    });
+
+    let emailSent = false, emailError = null;
+    try {
+      await require('./email').sendRentalApplicationEmail(c, action, note);
+      emailSent = true;
+    } catch (e) { emailError = e.message; }
+    res.json({ status: newStatus, email_sent: emailSent, email_error: emailError });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Discount card fields (name/percent/active) come from a LEFT JOIN so the
 // POS can decide whether to auto-apply it (discount_card_type_active must
 // also be true — deactivating a type retires it for every customer holding
@@ -694,6 +858,7 @@ const CUSTOMER_WITH_CARD_SELECT = `SELECT c.*, dct.name as discount_card_type_na
   cbct.min_redeem_amount as cash_back_min_redeem_amount, cbct.min_redeem_days as cash_back_min_redeem_days, cbct.active as cash_back_card_type_active,
   cc.name as customer_category_name, cc.discount_percent as customer_category_discount_percent, cc.active as customer_category_active,
   rpe.first_name || ' ' || rpe.last_name as rental_preapproved_by_name,
+  (SELECT rae.first_name || ' ' || rae.last_name FROM employees rae WHERE rae.id = c.rental_application_reviewed_by) as rental_application_reviewed_by_name,
   EXISTS (SELECT 1 FROM customer_import_batch_items cibi WHERE cibi.customer_id = c.id AND cibi.action = 'created') as created_by_import
   FROM customers c LEFT JOIN discount_card_types dct ON c.discount_card_type_id = dct.id
   LEFT JOIN cash_back_card_types cbct ON c.cash_back_card_type_id = cbct.id
@@ -1106,7 +1271,8 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
     if (cardError) return res.status(400).json({ error: cardError });
     const cashBackCardError = await validateCashBackCard(cash_back_card_type_id, cash_back_card_number, req.params.id);
     if (cashBackCardError) return res.status(400).json({ error: cashBackCardError });
-    const { rows: [existing] } = await db.execute({ sql: 'SELECT phone, email, rental_preapproved, rental_preapproved_by, rental_preapproved_at, customer_type, credit_terms_days, credit_limit, active, account_balance, customer_category_id FROM customers WHERE id = ?', args: [req.params.id] });
+    const { rows: [existing] } = await db.execute({ sql: `SELECT phone, email, rental_preapproved, rental_preapproved_by, rental_preapproved_at, customer_type, credit_terms_days, credit_limit, active, account_balance, customer_category_id,
+      rental_application_status, ${RENTAL_APPLICATION_TEXT_FIELDS.join(', ')} FROM customers WHERE id = ?`, args: [req.params.id] });
     if (!existing) return res.status(404).json({ error: 'Customer not found' });
     if (active != null && !Number(active) && existing.active) {
       const owes = owesBlockError(existing);
@@ -1134,6 +1300,17 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
     const creditEnabled = type === 'credit' ? 1 : 0;
     const taxExempt = tax_exempt ? 1 : 0;
     const isRentalCust = is_rental_customer ? 1 : 0;
+    // The rental ID/reference fields are cleared when the customer isn't a
+    // rental customer — except for a customer with a website rental
+    // application (pending, or approved and later un-ticked): saving their
+    // record with "Rental Customer" off — including from a form opened
+    // before the application was approved — must not wipe what they
+    // submitted. Their values are kept (the caller's if sent, else stored);
+    // un-ticking Rental Customer still revokes eligibility via the flag.
+    const hasApplication = ['submitted', 'changes_requested', 'approved'].includes(existing?.rental_application_status);
+    const rf = (value, key) => isRentalCust ? (value || null)
+      : hasApplication ? (value ? value : (existing[key] ?? null))
+      : null;
     const preapproval = resolveRentalPreapproval(req, existing, isRentalCust, !!rental_preapproved, await createdByImport(req.params.id));
     await db.execute({ sql: `UPDATE customers SET first_name=?,last_name=?,email=?,phone=?,address=?,city=?,state=?,zip=?,notes=?,active=?,customer_type=?,credit_terms_days=?,credit_limit=?,credit_enabled=?,tax_exempt=?,tax_exemption_number=?,
       is_rental_customer=?,rental_id_type=?,rental_id_number=?,rental_address_proof_type=?,
@@ -1143,10 +1320,10 @@ router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
       rental_preapproved=?,rental_preapproved_by=?,rental_preapproved_at=?,
       discount_card_type_id=?,discount_card_number=?,cash_back_card_type_id=?,cash_back_card_number=?,customer_category_id=? WHERE id=?`,
       args: [first_name, last_name, email||null, phone||null, address||null, city||null, state||null, zip||null, notes||null, active??1, type, terms, limit, creditEnabled, taxExempt, tax_exemption_number||null,
-        isRentalCust, isRentalCust ? (rental_id_type||null) : null, isRentalCust ? (rental_id_number||null) : null, isRentalCust ? (rental_address_proof_type||null) : null,
-        isRentalCust ? (rental_reference_name||null) : null, isRentalCust ? (rental_reference_phone||null) : null, isRentalCust ? (rental_reference_relationship||null) : null, isRentalCust ? (rental_reference_address||null) : null,
-        isRentalCust ? (rental_reference2_name||null) : null, isRentalCust ? (rental_reference2_phone||null) : null, isRentalCust ? (rental_reference2_relationship||null) : null,
-        isRentalCust ? (rental_reference3_name||null) : null, isRentalCust ? (rental_reference3_phone||null) : null, isRentalCust ? (rental_reference3_relationship||null) : null,
+        isRentalCust, rf(rental_id_type, 'rental_id_type'), rf(rental_id_number, 'rental_id_number'), rf(rental_address_proof_type, 'rental_address_proof_type'),
+        rf(rental_reference_name, 'rental_reference_name'), rf(rental_reference_phone, 'rental_reference_phone'), rf(rental_reference_relationship, 'rental_reference_relationship'), rf(rental_reference_address, 'rental_reference_address'),
+        rf(rental_reference2_name, 'rental_reference2_name'), rf(rental_reference2_phone, 'rental_reference2_phone'), rf(rental_reference2_relationship, 'rental_reference2_relationship'),
+        rf(rental_reference3_name, 'rental_reference3_name'), rf(rental_reference3_phone, 'rental_reference3_phone'), rf(rental_reference3_relationship, 'rental_reference3_relationship'),
         preapproval.rental_preapproved, preapproval.rental_preapproved_by, preapproval.rental_preapproved_at,
         discount_card_type_id || null, discount_card_type_id ? (discount_card_number || null) : null,
         cash_back_card_type_id || null, cash_back_card_type_id ? (cash_back_card_number || null) : null,

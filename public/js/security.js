@@ -56,6 +56,7 @@ Object.assign(App, {
       { key: 'customers_missing_rental_info', label: 'Missing Rental Info Report' },
       { key: 'customers_print_history', label: 'Print Customer History' },
       { key: 'customers_rental_preapprove', label: 'Preapprove Rental Customers With Incomplete Info' },
+      { key: 'customers_rental_review', label: 'Review Website Rental Applications' },
     ]},
     { key: 'transactions', label: 'Transactions', subs: [
       { key: 'transactions_export', label: 'Export Transactions' },

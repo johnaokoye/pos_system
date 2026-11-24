@@ -165,6 +165,32 @@ Object.assign(App, {
             <button class="btn btn-primary" onclick="App.saveCloudinarySettings()">Save</button>
           </div>
           <div class="card" style="margin-top:16px">
+            <div class="card-header"><span class="card-title">Website</span></div>
+            <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">What the customer-facing website offers. Turning a side off hides its catalogue, links and pages on the website; nothing in the POS is changed. (Separate from Ecommerce Sync below.)</p>
+            <div class="form-group">
+              <label>Website Mode</label>
+              <select id="s-website-mode">
+                <option value="rentals" ${s.website_mode==='rentals'?'selected':''}>Rentals only — rental catalogue &amp; rental requests</option>
+                <option value="retail" ${s.website_mode==='retail'?'selected':''}>Retail only — product catalogue, cart &amp; checkout</option>
+                <option value="both" ${(!s.website_mode||s.website_mode==='both')?'selected':''}>Rentals &amp; Retail</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Website URL <span style="font-weight:400;color:var(--text-muted)">(used for links in customer emails, e.g. rental application decisions)</span></label>
+              <input id="s-website-url" maxlength="200" placeholder="https://www.totaltoolsja.com" value="${this.escapeAttr(s.website_url||'')}">
+            </div>
+            <div class="form-group">
+              <label>Rentals Banner <span style="font-weight:400;color:var(--text-muted)">(shown across the top of the rental pages)</span></label>
+              <input id="s-website-banner-rentals" maxlength="300" placeholder="e.g. Free delivery on weekly equipment rentals in St. Ann" value="${this.escapeAttr(s.website_banner_rentals||'')}">
+            </div>
+            <div class="form-group">
+              <label>Retail Banner <span style="font-weight:400;color:var(--text-muted)">(shown across the top of the shop pages)</span></label>
+              <input id="s-website-banner-retail" maxlength="300" placeholder="e.g. 10% off all DeWalt power tools this week" value="${this.escapeAttr(s.website_banner_retail||'')}">
+            </div>
+            <p style="font-size:11px;color:var(--text-muted);margin:-4px 0 12px">Leave a banner empty to hide it. With retail off, the rentals banner shows on every page. Changes take effect on the website within about 30 seconds.</p>
+            <button class="btn btn-primary" onclick="App.saveWebsiteMode()">Save</button>
+          </div>
+          <div class="card" style="margin-top:16px">
             <div class="card-header">
               <span class="card-title">Ecommerce Sync</span>
               <span id="woo-conn-status" style="font-size:12px"></span>
@@ -700,6 +726,19 @@ Object.assign(App, {
   },
 
   _SETTINGS_FORM_IDS: ['s-name', 's-addr', 's-phone', 's-email', 's-drawer-email', 's-footer', 's-tax', 's-currency', 's-loyalty', 's-lowstock', 's-max-discount', 's-layaway-deposit', 's-layaway-markup', 's-closed-return-by', 's-store-tz', 's-public-holidays', 's-layaway-fee-type', 's-layaway-fee-value', 's-smtp-host', 's-smtp-port', 's-smtp-user', 's-smtp-pass', 's-smtp-name', 's-smtp-secure'],
+
+  async saveWebsiteMode() {
+    try {
+      const { website_mode } = await this.api('PUT', '/settings/website', {
+        website_mode: document.getElementById('s-website-mode').value,
+        website_banner_rentals: document.getElementById('s-website-banner-rentals').value,
+        website_banner_retail: document.getElementById('s-website-banner-retail').value,
+        website_url: document.getElementById('s-website-url').value,
+      });
+      const labels = { rentals: 'Rentals only', retail: 'Retail only', both: 'Rentals & Retail' };
+      this.alert(`Website settings saved — mode: ${labels[website_mode]}`, 'success');
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
 
   async saveSettings() {
     const data = {

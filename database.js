@@ -3488,6 +3488,20 @@ async function _init() {
     'ALTER TABLE customers ADD COLUMN rental_preapproved INTEGER DEFAULT 0',
     'ALTER TABLE customers ADD COLUMN rental_preapproved_by INTEGER REFERENCES employees(id)',
     'ALTER TABLE customers ADD COLUMN rental_preapproved_at DATETIME',
+    // Website rental application (the storefront's /rentals/apply): the
+    // customer fills in the same rental compliance fields above, which marks
+    // the application 'submitted' but deliberately does NOT set
+    // is_rental_customer — only a staff review (POST
+    // /customers/:id/rental-application/review, permission
+    // customers_rental_review) does that, on 'approve'. Unrelated to
+    // rental_preapproved (the legacy-migration paperwork waiver).
+    // status: NULL (never applied) | submitted | changes_requested | approved | declined.
+    // note: the reason sent to the customer for changes_requested/declined.
+    'ALTER TABLE customers ADD COLUMN rental_application_status TEXT',
+    'ALTER TABLE customers ADD COLUMN rental_application_submitted_at DATETIME',
+    'ALTER TABLE customers ADD COLUMN rental_application_reviewed_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE customers ADD COLUMN rental_application_reviewed_at DATETIME',
+    'ALTER TABLE customers ADD COLUMN rental_application_note TEXT',
     // Shelf within a zone (bay) for a bin: Location → Zone / Bay → Shelf → Bin.
     // Bins can be made from the product's Bin Locations tab
     // (POST /warehouse/bins/locate).

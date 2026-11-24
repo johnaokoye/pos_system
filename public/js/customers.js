@@ -198,6 +198,7 @@ Object.assign(App, {
           ${this.can('customers_import_history') ? `<button class="btn btn-secondary btn-sm" style="white-space:nowrap" onclick="App.showCustomerImportHistory()" title="Review or reverse past CSV imports">Import History</button>` : ''}
           ${this.can('customers_export_balances') ? `<button class="btn btn-secondary btn-sm" style="white-space:nowrap" onclick="App.showCustomerBalancesExport()" title="Export AR balance, credit note total, and status by customer type">Export Balances</button>` : ''}
           ${this.can('customers_missing_rental_info') ? `<button class="btn btn-secondary btn-sm" style="white-space:nowrap" onclick="App.showRentalIncompleteReport()" title="Rental customers missing the ID/reference/document info required to create a rental">🔑 Missing Rental Info</button>` : ''}
+          ${this.can('customers_rental_review') ? `<button class="btn btn-secondary btn-sm" style="white-space:nowrap" onclick="App.showRentalApplications()" title="Rental approval applications submitted from the website, waiting for review">🌐 Rental Applications<span id="cust-rental-apps-count"></span></button>` : ''}
           ${this.can('customers_merge') ? `<button class="btn btn-secondary btn-sm" style="white-space:nowrap" onclick="App.renderCustomerDuplicates()" title="Customers sharing a phone number or email — review and merge">Find Duplicates</button>` : ''}
           ${this.can('sales_manager') ? `<button class="btn btn-secondary btn-sm" style="white-space:nowrap" onclick="App.renderCustomerAssign()" title="Assign many customers to salespeople at once">Assign Salespeople</button>` : ''}
           ${this.can('customers_add') ? `<button class="btn btn-primary" style="white-space:nowrap" onclick="App.showCustomerForm()">+ Add Customer</button>` : ''}
@@ -242,6 +243,7 @@ Object.assign(App, {
     // Search once typing pauses (Enter at once); _custLoad ignores replies
     // to anything but the latest request.
     let searchTimer;
+    this._loadRentalApplicationCount();
     const searchEl = document.getElementById('cust-search');
     searchEl.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => this._custLoad(), 250); });
     searchEl.addEventListener('keydown', e => { if (e.key === 'Enter') { clearTimeout(searchTimer); this._custLoad(); } });
@@ -309,10 +311,11 @@ Object.assign(App, {
         const taxExemptBadge = c.tax_exempt ? ' <span class="badge-pill" style="background:#e8f5e9;color:#2e7d32;border:1px solid #a5d6a7">Tax Exempt</span>' : '';
         const rentalBadge = c.is_rental_customer ? ' <span class="badge-pill badge-purple">🔑 Rental</span>' : '';
         const preapprovedBadge = c.is_rental_customer && c.rental_preapproved ? ' <span class="badge-pill badge-success" title="Can be rented to despite incomplete compliance info">Preapproved</span>' : '';
+        const applicationBadge = c.rental_application_status === 'submitted' ? ' <span class="badge-pill badge-warning" title="Website rental application waiting for review">Application pending</span>' : '';
         return `<tr>
         <td style="font-family:monospace;font-size:12px">${c.customer_number}</td>
         <td class="fw-600">${c.first_name} ${c.last_name}${c.customer_kind === 'business' ? ' <span class="badge-pill badge-secondary" style="font-size:10px">Business</span>' : ''}${this._custSalespersonLine(c.salesperson_id)}</td>
-        <td style="white-space:nowrap">${typeBadge}${taxExemptBadge}${rentalBadge}${preapprovedBadge}${c.active ? '' : ` <span class="badge-pill badge-secondary">${c.merged_into_customer_id ? 'Merged' : 'Inactive'}</span>${Number(c.account_balance) > 0.005 ? ` <span class="badge-pill badge-danger">Owes ${this.fmt(c.account_balance)}</span>` : ''}`}</td>
+        <td style="white-space:nowrap">${typeBadge}${taxExemptBadge}${rentalBadge}${preapprovedBadge}${applicationBadge}${c.active ? '' : ` <span class="badge-pill badge-secondary">${c.merged_into_customer_id ? 'Merged' : 'Inactive'}</span>${Number(c.account_balance) > 0.005 ? ` <span class="badge-pill badge-danger">Owes ${this.fmt(c.account_balance)}</span>` : ''}`}</td>
         <td style="color:var(--text-muted)">${c.email||'—'}</td>
         <td>${c.phone||'—'}</td>
         <td style="color:var(--text-muted)">${c.city||'—'}</td>
@@ -340,6 +343,11 @@ Object.assign(App, {
     const isCredit = (c.customer_type || 'cash') === 'credit';
     const isTaxExempt = c.tax_exempt ? true : false;
     const isRentalCust = c.is_rental_customer ? true : false;
+    // A pending website rental application: show (and save) the rental
+    // fields even though "Rental Customer" isn't ticked yet — that's where
+    // staff review what the customer sent. See PUT /customers/:id.
+    const rentalAppPending = ['submitted', 'changes_requested'].includes(c.rental_application_status);
+    this._custFormRentalAppPending = !!id && rentalAppPending;
     const isBusiness = c.customer_kind === 'business';
     // A business always offers at least 3 contact rows.
     const contactRows = [...(c.contacts || [])];
@@ -435,7 +443,8 @@ Object.assign(App, {
               <input type="checkbox" id="cf-rental-customer" ${isRentalCust?'checked':''} onchange="App.toggleRentalCustomerFields()" style="margin:0">
             </label>
             <p style="font-size:11px;color:var(--text-muted);margin:2px 0 0">Required for anyone renting equipment — a valid photo ID, an uploaded proof of address, and three references on file.</p>
-            <div id="cf-rental-customer-fields" style="display:${isRentalCust?'block':'none'};margin-top:10px">
+            ${id && c.rental_application_status ? this._rentalApplicationPanelHtml(c) : ''}
+            <div id="cf-rental-customer-fields" style="display:${isRentalCust || rentalAppPending ?'block':'none'};margin-top:10px">
               <strong style="font-size:12px;color:var(--text-muted);text-transform:uppercase">Photo ID</strong>
               <div class="input-row" style="margin-top:6px">
                 <div class="form-group"><label>ID Type</label>
@@ -737,6 +746,7 @@ Object.assign(App, {
     const customerType = document.getElementById('cf-type')?.value || 'cash';
     const taxExempt = document.getElementById('cf-tax-exempt')?.checked ? 1 : 0;
     const isRentalCustomer = document.getElementById('cf-rental-customer')?.checked ? 1 : 0;
+    const sendRentalFields = isRentalCustomer || (id && this._custFormRentalAppPending);
     const customerKind = document.querySelector('input[name="cf-kind"]:checked')?.value === 'business' ? 'business' : 'individual';
     const data = {
       customer_kind: customerKind,
@@ -762,19 +772,19 @@ Object.assign(App, {
       tax_exempt: taxExempt,
       tax_exemption_number: taxExempt ? (document.getElementById('cf-tax-ref')?.value.trim() || null) : null,
       is_rental_customer: isRentalCustomer,
-      rental_id_type: isRentalCustomer ? (document.getElementById('cf-id-type')?.value || null) : null,
-      rental_id_number: isRentalCustomer ? (document.getElementById('cf-id-number')?.value.trim() || null) : null,
-      rental_address_proof_type: isRentalCustomer ? (document.getElementById('cf-address-proof-type')?.value || null) : null,
-      rental_reference_name: isRentalCustomer ? (document.getElementById('cf-ref-name')?.value.trim() || null) : null,
-      rental_reference_phone: isRentalCustomer ? (document.getElementById('cf-ref-phone')?.value.trim() || null) : null,
-      rental_reference_relationship: isRentalCustomer ? (document.getElementById('cf-ref-relationship')?.value.trim() || null) : null,
-      rental_reference_address: isRentalCustomer ? (document.getElementById('cf-ref-address')?.value.trim() || null) : null,
-      rental_reference2_name: isRentalCustomer ? (document.getElementById('cf-ref2-name')?.value.trim() || null) : null,
-      rental_reference2_phone: isRentalCustomer ? (document.getElementById('cf-ref2-phone')?.value.trim() || null) : null,
-      rental_reference2_relationship: isRentalCustomer ? (document.getElementById('cf-ref2-relationship')?.value.trim() || null) : null,
-      rental_reference3_name: isRentalCustomer ? (document.getElementById('cf-ref3-name')?.value.trim() || null) : null,
-      rental_reference3_phone: isRentalCustomer ? (document.getElementById('cf-ref3-phone')?.value.trim() || null) : null,
-      rental_reference3_relationship: isRentalCustomer ? (document.getElementById('cf-ref3-relationship')?.value.trim() || null) : null,
+      rental_id_type: sendRentalFields ? (document.getElementById('cf-id-type')?.value || null) : null,
+      rental_id_number: sendRentalFields ? (document.getElementById('cf-id-number')?.value.trim() || null) : null,
+      rental_address_proof_type: sendRentalFields ? (document.getElementById('cf-address-proof-type')?.value || null) : null,
+      rental_reference_name: sendRentalFields ? (document.getElementById('cf-ref-name')?.value.trim() || null) : null,
+      rental_reference_phone: sendRentalFields ? (document.getElementById('cf-ref-phone')?.value.trim() || null) : null,
+      rental_reference_relationship: sendRentalFields ? (document.getElementById('cf-ref-relationship')?.value.trim() || null) : null,
+      rental_reference_address: sendRentalFields ? (document.getElementById('cf-ref-address')?.value.trim() || null) : null,
+      rental_reference2_name: sendRentalFields ? (document.getElementById('cf-ref2-name')?.value.trim() || null) : null,
+      rental_reference2_phone: sendRentalFields ? (document.getElementById('cf-ref2-phone')?.value.trim() || null) : null,
+      rental_reference2_relationship: sendRentalFields ? (document.getElementById('cf-ref2-relationship')?.value.trim() || null) : null,
+      rental_reference3_name: sendRentalFields ? (document.getElementById('cf-ref3-name')?.value.trim() || null) : null,
+      rental_reference3_phone: sendRentalFields ? (document.getElementById('cf-ref3-phone')?.value.trim() || null) : null,
+      rental_reference3_relationship: sendRentalFields ? (document.getElementById('cf-ref3-relationship')?.value.trim() || null) : null,
       rental_preapproved: isRentalCustomer ? (document.getElementById('cf-rental-preapproved')?.checked ? 1 : 0) : 0,
       discount_card_type_id: document.getElementById('cf-discount-card-type')?.value || null,
       discount_card_number: document.getElementById('cf-discount-card-number')?.value.trim() || null,
@@ -970,6 +980,114 @@ Object.assign(App, {
   // customers bulk-imported from a previous system a row at a time via
   // "Edit", since the ID/reference/document requirements can't be satisfied
   // from a CSV alone (the three scanned documents need an upload).
+  // ─── Website rental applications ─────────────────────────────
+  // Applications customers submit on the website (/rentals/apply) — see
+  // routes/customers.js. Staff review the documents in the customer form,
+  // then approve (sets Rental Customer), request changes or decline; the
+  // customer is emailed either way.
+  async _loadRentalApplicationCount() {
+    const el = document.getElementById('cust-rental-apps-count');
+    if (!el) return;
+    try {
+      const rows = await this.api('GET', '/customers/rental-applications');
+      el.textContent = rows.length ? ` (${rows.length})` : '';
+    } catch { /* leave the button without a count */ }
+  },
+
+  async showRentalApplications() {
+    const rows = await this.api('GET', '/customers/rental-applications');
+    const esc = v => this.escapeAttr(v || '');
+    this.showModal(`
+      <div class="modal" style="max-width:760px">
+        <div class="modal-header"><span class="modal-title">Website Rental Applications</span><button class="modal-close">✕</button></div>
+        <div class="modal-body" style="padding:0">
+          ${!rows.length ? '<div class="empty-state" style="padding:20px"><p>No rental applications waiting for review.</p></div>' : `
+          <p style="font-size:12px;color:var(--text-muted);margin:12px 12px 0">${rows.length} application${rows.length === 1 ? '' : 's'} waiting. Open one to check the ID, proof of address and references, then approve, request changes or decline it.</p>
+          <table style="width:100%;border-collapse:collapse;margin-top:8px">
+            <thead><tr style="background:var(--bg-secondary,#f9fafb)">
+              <th style="padding:8px 12px;text-align:left;font-size:12px">Submitted</th>
+              <th style="padding:8px 12px;text-align:left;font-size:12px">Name</th>
+              <th style="padding:8px 12px;text-align:left;font-size:12px">Contact</th>
+              <th style="padding:8px 12px;text-align:left;font-size:12px">Record</th>
+              <th style="padding:8px 12px"></th>
+            </tr></thead>
+            <tbody>
+              ${rows.map(r => `<tr style="border-top:1px solid var(--border,#e5e7eb)">
+                <td style="padding:8px 12px;font-size:12px;white-space:nowrap">${r.submitted_at ? this.fmtDateTime(r.submitted_at) : '—'}</td>
+                <td style="padding:8px 12px;font-size:12px">${esc(r.first_name)} ${esc(r.last_name)}<div style="font-family:monospace;color:var(--text-muted)">${esc(r.customer_number)}</div></td>
+                <td style="padding:8px 12px;font-size:12px">${esc(r.email) || '—'}<div>${esc(r.phone)}</div></td>
+                <td style="padding:8px 12px;font-size:12px">${r.missing.length ? r.missing.map(m => `<span class="badge-pill badge-danger" style="margin:2px">${esc(m)}</span>`).join(' ') : '<span class="badge-pill badge-success">Complete</span>'}</td>
+                <td style="padding:8px 12px"><button class="btn btn-primary btn-sm" onclick="App.closeModal();App.showCustomerForm(${r.id})">Review</button></td>
+              </tr>`).join('')}
+            </tbody>
+          </table>`}
+        </div>
+      </div>`);
+  },
+
+  _rentalApplicationPanelHtml(c) {
+    const esc = v => this.escapeAttr(v || '');
+    const status = c.rental_application_status;
+    const labels = {
+      submitted: ['badge-warning', 'Waiting for review'],
+      changes_requested: ['badge-info', 'Changes requested — waiting for the customer'],
+      approved: ['badge-success', 'Approved'],
+      declined: ['badge-danger', 'Declined'],
+    };
+    const [cls, label] = labels[status] || ['badge-secondary', status];
+    const canReview = status === 'submitted' && this.can('customers_rental_review');
+    return `<div style="border:1px solid var(--border);border-left:3px solid #ffd800;border-radius:6px;padding:10px 12px;margin-top:10px;background:var(--bg-card)">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+        <strong style="font-size:12px;text-transform:uppercase;color:var(--text-muted)">🌐 Website Rental Application</strong>
+        <span class="badge-pill ${cls}">${label}</span>
+      </div>
+      <p style="font-size:12px;color:var(--text-muted);margin:6px 0 0">
+        ${c.rental_application_submitted_at ? `Submitted ${this.fmtDateTime(c.rental_application_submitted_at)}.` : ''}
+        ${c.rental_application_reviewed_at ? ` Reviewed ${this.fmtDateTime(c.rental_application_reviewed_at)}${c.rental_application_reviewed_by_name ? ` by ${esc(c.rental_application_reviewed_by_name)}` : ''}.` : ''}
+      </p>
+      ${c.rental_application_note ? `<p style="font-size:12px;margin:6px 0 0"><strong>Note sent to customer:</strong> ${esc(c.rental_application_note)}</p>` : ''}
+      ${canReview ? `
+        <p style="font-size:12px;margin:8px 0 6px">Check the photo ID, proof of address and references below, then record your decision. The customer is emailed.</p>
+        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-weight:600;font-size:13px">
+          <input type="checkbox" id="cf-rental-app-checks" style="margin:2px 0 0" onchange="document.getElementById('cf-rental-app-approve').disabled = !this.checked">
+          Approval checks complete — photo ID, proof of address and references verified
+        </label>
+        <div class="form-group" style="margin-top:8px"><label>Note to customer <span style="font-weight:400;color:var(--text-muted)">(required to request changes; optional for decline)</span></label>
+          <textarea id="cf-rental-app-note" rows="2" maxlength="1000" placeholder="e.g. Please upload a clearer photo of your driver's license (both sides)"></textarea>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button type="button" class="btn btn-success btn-sm" id="cf-rental-app-approve" disabled onclick="App.reviewRentalApplication(${c.id}, 'approve')">✓ Approve</button>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="App.reviewRentalApplication(${c.id}, 'request_changes')">Request Changes</button>
+          <button type="button" class="btn btn-danger btn-sm" onclick="App.reviewRentalApplication(${c.id}, 'decline')">Decline</button>
+        </div>` : ''}
+    </div>`;
+  },
+
+  async reviewRentalApplication(id, action) {
+    const note = document.getElementById('cf-rental-app-note')?.value.trim() || '';
+    if (action === 'approve' && !document.getElementById('cf-rental-app-checks')?.checked) {
+      this.alert('Tick "Approval checks complete" first', 'error'); return;
+    }
+    if (action === 'request_changes' && !note) { this.alert('Add a note telling the customer what to change', 'error'); return; }
+    if (action === 'decline' && !confirm('Decline this rental application? The customer will be emailed.')) return;
+    // Close the form before sending: the request includes emailing the
+    // customer and can take several seconds, and a Save on the still-open
+    // (now stale) form would overwrite the decision — e.g. un-tick the
+    // Rental Customer an approval just set. Reopened fresh afterwards.
+    this.closeModal();
+    this.alert('Saving decision and emailing the customer…');
+    try {
+      const r = await this.api('POST', `/customers/${id}/rental-application/review`, { action, note });
+      const done = { approve: 'Approved — customer is now a rental customer', request_changes: 'Changes requested', decline: 'Application declined' }[action];
+      this.alert(r.email_sent ? `${done}. Customer emailed.` : `${done}, but the email wasn't sent: ${r.email_error}`, r.email_sent ? 'success' : 'warning');
+    } catch (e) {
+      this.alert(e.message, 'error');
+    }
+    this.showCustomerForm(id);
+    this._loadRentalApplicationCount();
+    if (this.section === 'customers' && this._custLoad) this._custLoad();
+  },
+
   async showRentalIncompleteReport() {
     const rows = await this.api('GET', '/customers/rental-incomplete');
     this.showModal(`
@@ -1118,7 +1236,7 @@ Object.assign(App, {
     this.showModal(`
       <div class="modal" style="max-width:660px">
         <div class="modal-header">
-          <span class="modal-title">${c.first_name} ${c.last_name}${isCredit ? ` <span style="font-size:12px;padding:2px 8px;border-radius:4px;background:#e3f2fd;color:#1565c0;margin-left:6px">Credit</span>` : ''}${c.account_blocked ? ` <span style="font-size:12px;padding:2px 8px;border-radius:4px;background:#ffebee;color:#c62828;margin-left:4px">BLOCKED</span>` : ''}${c.is_rental_customer ? ` <span class="badge-pill badge-purple" style="font-size:12px;margin-left:4px">🔑 Rental</span>` : ''}${c.is_rental_customer && c.rental_preapproved ? ` <span class="badge-pill badge-success" style="font-size:12px;margin-left:4px" title="Can be rented to despite incomplete compliance info">Preapproved</span>` : ''}</span>
+          <span class="modal-title">${c.first_name} ${c.last_name}${isCredit ? ` <span style="font-size:12px;padding:2px 8px;border-radius:4px;background:#e3f2fd;color:#1565c0;margin-left:6px">Credit</span>` : ''}${c.account_blocked ? ` <span style="font-size:12px;padding:2px 8px;border-radius:4px;background:#ffebee;color:#c62828;margin-left:4px">BLOCKED</span>` : ''}${c.is_rental_customer ? ` <span class="badge-pill badge-purple" style="font-size:12px;margin-left:4px">🔑 Rental</span>` : ''}${c.is_rental_customer && c.rental_preapproved ? ` <span class="badge-pill badge-success" style="font-size:12px;margin-left:4px" title="Can be rented to despite incomplete compliance info">Preapproved</span>` : ''}${c.rental_application_status === 'submitted' ? ` <span class="badge-pill badge-warning" style="font-size:12px;margin-left:4px" title="Website rental application waiting for review — open Edit to review it">Application pending</span>` : ''}</span>
           <button class="modal-close">✕</button>
         </div>
         <div class="modal-body">
