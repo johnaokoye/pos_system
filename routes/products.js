@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { onlineRetailBranchId } = require('../lib/websiteBranch');
 const { syncBinQty } = require('../lib/binSync');
 const { syncToBranch } = require('../lib/stockLots');
 const multer = require('multer');
@@ -167,8 +168,7 @@ router.get('/', requireAuth, async (req, res) => {
     let sql;
 
     if (online === '1' || online === 'true') {
-      const { rows: [setting] } = await db.execute({ sql: "SELECT value FROM settings WHERE key='woo_sync_branch_id'", args: [] });
-      const syncBranchId = setting?.value;
+      const syncBranchId = await onlineRetailBranchId(db);
       const onlineParams = [];
       let stockExpr, joinClause = '';
       if (syncBranchId) {
@@ -1106,8 +1106,7 @@ router.get('/:id', requireAuth, async (req, res) => {
   try {
     const { online, branch_id } = req.query;
     if (online === '1' || online === 'true') {
-      const { rows: [setting] } = await db.execute({ sql: "SELECT value FROM settings WHERE key='woo_sync_branch_id'", args: [] });
-      const syncBranchId = setting?.value;
+      const syncBranchId = await onlineRetailBranchId(db);
       const onlineParams = [req.params.id];
       let stockExpr, joinClause = '';
       if (syncBranchId) {

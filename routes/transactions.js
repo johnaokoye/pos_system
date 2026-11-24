@@ -707,10 +707,10 @@ router.post('/', requirePermission('pos'), async (req, res) => {
     }
     let salespersonId;
 
-    // For API-authenticated (online) orders with no branch, use the ecommerce sync branch
+    // API-key (online) orders with no branch: the website's Online Retail Store
+    // (else the Ecommerce Sync branch) — lib/websiteBranch.js.
     if (!branch_id && req.apiKey) {
-      const { rows: [setting] } = await db.execute({ sql: "SELECT value FROM settings WHERE key='woo_sync_branch_id'", args: [] });
-      if (setting?.value) branch_id = setting.value;
+      branch_id = (await require('../lib/websiteBranch').onlineRetailBranchId(db)) || branch_id;
     }
     // Online orders may be filled from a warehouse (woo_sync_branch_id); till sales never are.
     if (!req.apiKey) { const whErr = await warehouseSaleError(db, branch_id); if (whErr) return res.status(400).json({ error: whErr }); }

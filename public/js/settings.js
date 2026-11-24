@@ -176,6 +176,13 @@ Object.assign(App, {
               </select>
             </div>
             <div class="form-group">
+              <label>Online Retail Store <span style="font-weight:400;color:var(--text-muted)">(the website's shop shows this branch's stock and its orders are placed here; rentals show every branch)</span></label>
+              <select id="s-website-retail-branch">
+                <option value="">Same as Ecommerce Sync branch${s.woo_sync_branch_id ? ` (${this.escapeAttr((branches.find(b => b.id == s.woo_sync_branch_id) || {}).name || '')})` : ' (company-wide stock)'}</option>
+                ${branches.filter(b => b.active !== 0).map(b => `<option value="${b.id}" ${s.website_retail_branch_id==b.id?'selected':''}>${this.escapeAttr(b.name)}${b.is_warehouse?' (Warehouse)':''}</option>`).join('')}
+              </select>
+            </div>
+            <div class="form-group">
               <label>Website URL <span style="font-weight:400;color:var(--text-muted)">(used for links in customer emails, e.g. rental application decisions)</span></label>
               <input id="s-website-url" maxlength="200" placeholder="https://www.totaltoolsja.com" value="${this.escapeAttr(s.website_url||'')}">
             </div>
@@ -734,6 +741,7 @@ Object.assign(App, {
         website_banner_rentals: document.getElementById('s-website-banner-rentals').value,
         website_banner_retail: document.getElementById('s-website-banner-retail').value,
         website_url: document.getElementById('s-website-url').value,
+        website_retail_branch_id: document.getElementById('s-website-retail-branch').value || null,
       });
       const labels = { rentals: 'Rentals only', retail: 'Retail only', both: 'Rentals & Retail' };
       this.alert(`Website settings saved — mode: ${labels[website_mode]}`, 'success');

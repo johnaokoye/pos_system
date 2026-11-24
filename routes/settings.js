@@ -85,10 +85,21 @@ const WEBSITE_BANNER_MAX = 300;
 // emails the POS sends about the website (e.g. rental application decisions).
 
 
+// website_retail_branch_id: the Online Retail Store — the one branch whose
+// stock the website's retail catalogue shows and where its orders are raised
+// (lib/websiteBranch.js; blank = the Ecommerce Sync branch). Rentals aren't
+// tied to it: the website shows rental availability at every branch.
 async function websiteSettings() {
-  const { rows } = await db.execute({ sql: "SELECT key, value FROM settings WHERE key IN ('website_mode','website_banner_rentals','website_banner_retail','website_url')", args: [] });
+  const { rows } = await db.execute({ sql: "SELECT key, value FROM settings WHERE key IN ('website_mode','website_banner_rentals','website_banner_retail','website_url','website_retail_branch_id')", args: [] });
   const s = Object.fromEntries(rows.map(r => [r.key, r.value]));
+  const { onlineRetailBranchId } = require('../lib/websiteBranch');
+  const retailBranchId = await onlineRetailBranchId(db);
+  const retailBranch = retailBranchId
+    ? (await db.execute({ sql: 'SELECT id, name, city, address, phone FROM branches WHERE id = ?', args: [retailBranchId] })).rows[0] || null
+    : null;
   return {
+    website_retail_branch_id: Number(s.website_retail_branch_id) || null,
+    retail_branch: retailBranch ? { id: retailBranch.id, name: retailBranch.name, city: retailBranch.city, address: retailBranch.address, phone: retailBranch.phone } : null,
     website_mode: WEBSITE_MODES.includes(s.website_mode) ? s.website_mode : 'both',
     website_banner_rentals: s.website_banner_rentals || '',
     website_banner_retail: s.website_banner_retail || '',
@@ -117,6 +128,14 @@ router.put('/website', requirePermission('settings'), async (req, res) => {
       const text = String(body[key] ?? '').replace(/\s+/g, ' ').trim();
       if (text.length > WEBSITE_BANNER_MAX) return res.status(400).json({ error: `Banner text must be ${WEBSITE_BANNER_MAX} characters or fewer` });
       updates.push([key, text]);
+    }
+    if ('website_retail_branch_id' in body) {
+      const id = body.website_retail_branch_id ? Number(body.website_retail_branch_id) : null;
+      if (id) {
+        const { rows: [b] } = await db.execute({ sql: 'SELECT id, active FROM branches WHERE id = ?', args: [id] });
+        if (!b || b.active === 0) return res.status(400).json({ error: 'Choose an active branch for the Online Retail Store' });
+      }
+      updates.push(['website_retail_branch_id', id ? String(id) : '']);
     }
     if ('website_url' in body) {
       const url = String(body.website_url ?? '').trim().replace(/\/+$/, '');
