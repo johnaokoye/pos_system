@@ -54,6 +54,16 @@ test('the website sees rental availability for its dates, with an API key limite
   ({ body } = await get(`product_id=${item.id}&start=${d19}&end=${d21}&quantity=3`));
   expect(at(body)).toMatchObject({ available: 2, next_available: d26 });
 
+  // days=1: units free on each day (the website's calendar) — 1 until the counter hold is back, 3, then 2 during the project.
+  ({ body } = await get(`product_id=${item.id}&start=${today}&end=${d26}&days=1`));
+  const perDay = at(body).days;
+  expect(perDay.length).toBe(27);
+  expect(perDay.slice(0, 6)).toEqual([1, 1, 1, 1, 1, 1]);
+  expect(perDay.slice(6, 20)).toEqual(Array(14).fill(3));
+  expect(perDay.slice(20, 26)).toEqual(Array(6).fill(2));
+  expect(perDay[26]).toBe(3);
+  expect((await get(`start=${today}&days=1`)).status).toBe(400);
+
   // Every website rental item when no ids are given; several by id.
   ({ body } = await get(''));
   expect(body.items.some(i => i.product_id === item.id)).toBe(true);

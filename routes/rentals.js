@@ -401,7 +401,10 @@ router.get('/online-availability', requireRentalsManage, async (req, res) => {
     const range = parseRange(req.query, storeToday());
     if (range.error) return res.status(400).json({ error: range.error });
     const quantity = Math.max(1, parseInt(req.query.quantity, 10) || 1);
-    res.json(await onlineRentalAvailability(db, { productIds: ids, ...range, quantity }));
+    // days=1: free units per day (the website's calendar) — a few items at a time.
+    const days = req.query.days === '1';
+    if (days && (!ids.length || ids.length > 20)) return res.status(400).json({ error: 'days=1 needs 1 to 20 item ids' });
+    res.json(await onlineRentalAvailability(db, { productIds: ids, ...range, quantity, days }));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
