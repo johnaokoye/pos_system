@@ -61,6 +61,9 @@ test('a website rental request finds its customer and becomes a filled-in rental
   // Back on the lead, now with its quote.
   await expect(page.locator('.modal-body')).toContainText('Quotes from this lead');
   const after = await api(page, 'GET', `/crm/leads/${lead.id}`);
+  // The quote exists: the lead offers it, not another one.
+  await expect(page.locator('.modal-footer button', { hasText: `View ${after.quotes[0].quote_number}` })).toBeVisible();
+  await expect(page.locator('.modal-footer button:has-text("Create Rental Quote")')).toHaveCount(0);
   expect(after.status).toBe('proposal');
   expect(after.quotes).toHaveLength(1);
   const quote = await api(page, 'GET', `/quotations/${after.quotes[0].id}`);
@@ -109,4 +112,31 @@ test('a lead whose details match several customers lists them, and Link ties it 
   const linked = await api(page, 'GET', `/crm/leads/${lead.id}`);
   expect(linked.customer_id).toBe(b.id);
   expect(linked.status).toBe('new');
+});
+
+test('a request from two branches gets a quote per branch, each button turning into View once its quote is made', async ({ page }) => {
+  const s = `${Date.now()}`;
+  const branches = (await api(page, 'GET', '/branches')).filter(b => b.active !== 0 && !b.is_warehouse).slice(0, 2);
+  test.skip(branches.length < 2, 'needs two branches');
+  const [a, b] = await Promise.all(branches.map((br, i) => api(page, 'POST', '/products', { sku: `LEAD2-${s}-${i}`, name: `Two Branch ${s} ${i}`, is_rental: 1, rental_rate: 50, branch_id: br.id, stock_qty: 2 })));
+  const customer = await api(page, 'POST', '/customers', { first_name: 'Two', last_name: `Branches ${s}`, email: `two${s}@example.com`, customer_type: 'cash', force: true });
+  const day = n => page.evaluate(k => App._storeDay(new Date(Date.now() + k * 86400000)), n);
+  const request = { start_date: await day(2), end_date: await day(4), fulfilment: 'pickup', items: [
+    { product_id: a.id, name: a.name, quantity: 1, branch_id: branches[0].id, branch_name: branches[0].name, accessory_ids: [], accessory_names: [] },
+    { product_id: b.id, name: b.name, quantity: 1, branch_id: branches[1].id, branch_name: branches[1].name, accessory_ids: [], accessory_names: [] },
+  ] };
+  const lead = await api(page, 'POST', '/crm/leads', { first_name: 'Two', last_name: `Branches ${s}`, email: customer.email, source: 'website', customer_id: customer.id, request });
+  const q = await api(page, 'POST', '/quotations', { customer_id: customer.id, branch_id: branches[0].id, quote_type: 'rental', due_date: request.end_date, items: [{ product_id: a.id, quantity: 1 }], lead_id: lead.id });
+
+  await page.evaluate(() => App.showSection('crm'));
+  await page.evaluate(id => App.viewLead(id), lead.id);
+  const footer = page.locator('.modal-footer');
+  await expect(footer.locator('button', { hasText: `View ${q.quote_number}` })).toBeVisible();
+  await expect(footer.locator('button', { hasText: `Create Quote — ${branches[0].name}` })).toHaveCount(0);
+  await expect(footer.locator('button', { hasText: `Create Quote — ${branches[1].name}` })).toBeVisible();
+
+  // Declined: that branch can be quoted again.
+  await api(page, 'PATCH', `/quotations/${q.id}/status`, { status: 'declined' });
+  await page.evaluate(id => App.viewLead(id), lead.id);
+  await expect(footer.locator('button', { hasText: `Create Quote — ${branches[0].name}` })).toBeVisible();
 });

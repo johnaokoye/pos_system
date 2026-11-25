@@ -98,7 +98,7 @@ router.get('/leads/:id', async (req, res) => {
     const { rows: opportunities } = await db.execute({ sql: `SELECT o.*, e.first_name || ' ' || e.last_name as employee_name FROM crm_opportunities o LEFT JOIN employees e ON o.employee_id = e.id WHERE o.lead_id = ? ORDER BY o.created_at DESC`, args: [lead.id] });
     lead.activities = activities;
     lead.opportunities = opportunities;
-    const { rows: quotes } = await db.execute({ sql: `SELECT q.id, q.quote_number, q.quote_type, q.status, q.total, q.created_at, b.name as branch_name FROM quotations q LEFT JOIN branches b ON q.branch_id = b.id WHERE q.lead_id = ? ORDER BY q.created_at`, args: [lead.id] });
+    const { rows: quotes } = await db.execute({ sql: `SELECT q.id, q.quote_number, q.quote_type, q.status, q.total, q.created_at, b.name as branch_name, (SELECT GROUP_CONCAT(qi.product_id) FROM quotation_items qi WHERE qi.quote_id = q.id) as product_ids FROM quotations q LEFT JOIN branches b ON q.branch_id = b.id WHERE q.lead_id = ? ORDER BY q.created_at`, args: [lead.id] });
     lead.quotes = quotes;
     // Not linked yet: the active customers its email/phone (or name) belong
     // to, for staff to link with one click.

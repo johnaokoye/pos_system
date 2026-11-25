@@ -682,18 +682,29 @@ Object.assign(App, {
   },
 
   // Create Quote: one button, or one per branch when a website request asks
-  // for items from several branches (a rental quote is for one branch).
+  // for items from several branches (a rental quote is for one branch). Once
+  // a quote is made for those items it's a View button instead — a declined
+  // or cancelled one doesn't count, so a new quote can be made.
   _leadQuoteButtonsHtml(lead) {
-    if (!this.can('quotations_create')) return '';
+    const live = (lead.quotes || []).filter(q => !['declined', 'cancelled'].includes(q.status));
+    const view = q => `<button class="btn btn-outline" onclick="App.closeModal();App.viewQuote(${q.id})" title="A quote was already made from this lead">View ${this.escapeAttr(q.quote_number)}</button>`;
+    const canCreate = this.can('quotations_create');
     const items = lead.request?.items || [];
     const groups = [...new Set(items.map(i => i.branch_id || 0))];
+    // The live quote holding any of these products (a branch's items).
+    const quoteFor = productIds => live.find(q => String(q.product_ids || '').split(',').some(id => productIds.includes(Number(id))));
     if (groups.length > 1) {
       return groups.map(b => {
-        const n = items.filter(i => (i.branch_id || 0) === b).length;
-        const name = items.find(i => (i.branch_id || 0) === b)?.branch_name || 'No branch';
-        return `<button class="btn btn-primary" onclick="App._quoteFromLead(${lead.id}, ${b})" title="Rental quote for the ${n} item${n>1?'s':''} requested from ${this.escapeAttr(name)}">Create Quote — ${this.escapeAttr(name)}</button>`;
+        const group = items.filter(i => (i.branch_id || 0) === b);
+        const name = group[0]?.branch_name || 'No branch';
+        const done = quoteFor(group.map(i => Number(i.product_id)));
+        if (done) return view(done);
+        if (!canCreate) return '';
+        return `<button class="btn btn-primary" onclick="App._quoteFromLead(${lead.id}, ${b})" title="Rental quote for the ${group.length} item${group.length>1?'s':''} requested from ${this.escapeAttr(name)}">Create Quote — ${this.escapeAttr(name)}</button>`;
       }).join('');
     }
+    if (live.length) return live.map(view).join('');
+    if (!canCreate) return '';
     return `<button class="btn btn-primary" onclick="App._quoteFromLead(${lead.id})" title="${items.length ? 'Rental quote filled in from the request — customer, items, accessories, return date and delivery' : 'New quote for this lead\'s customer'}">${items.length ? 'Create Rental Quote' : 'Create Quote'}</button>`;
   },
 
