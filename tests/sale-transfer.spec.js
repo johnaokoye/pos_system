@@ -226,3 +226,27 @@ test('the inventory team sees a paid customer order, and is warned before sendin
   await page.click('#tsend-btn');
   await expect.poll(async () => (await api(page, 'GET', `/transfers/${trf.id}`)).status).toBe('pending');
 });
+
+// A sent transfer nobody received stays on the Transfers screen however old
+// (it lists the latest 100 plus every open one), the search reaches every
+// transfer, and the Collections card opens or receives it.
+test('an open sale transfer can always be found and received from Collections', async ({ page }) => {
+  const s = await setup(page);
+  const sale = await sell(page, s);
+  const trf = (await api(page, 'GET', `/transactions/${sale.id}`)).sale_transfers[0];
+  const full = await api(page, 'GET', `/transfers/${trf.id}`);
+  await api(page, 'PATCH', `/transfers/${trf.id}/send`, { items: full.items.map(i => ({ item_id: i.id, quantity: i.quantity_requested })) });
+
+  expect((await api(page, 'GET', '/transfers?open=1&limit=1000')).some(t => t.id === trf.id)).toBeTruthy();
+  expect((await api(page, 'GET', `/transfers?q=${trf.transfer_number}`)).map(t => t.id)).toContain(trf.id);
+  expect((await api(page, 'GET', `/transfers?q=${sale.transaction_number}`)).map(t => t.id)).toContain(trf.id);
+
+  await page.evaluate(() => App.showSection('transfers'));
+  await expect(page.locator(`#trf-tbody tr[data-trf-id="${trf.id}"]`)).toBeVisible();
+
+  await page.evaluate(id => { App.posBranch = { id }; return App.showCollections(); }, s.here.id);
+  const card = page.locator('#coll-list .card', { hasText: sale.transaction_number });
+  await expect(card.locator('a', { hasText: trf.transfer_number })).toBeVisible();
+  await card.locator('button:has-text("Receive")').click();
+  await expect(page.locator('.modal-title')).toContainText(trf.transfer_number);
+});

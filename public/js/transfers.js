@@ -1,36 +1,11 @@
 // Branch transfers and transfer dispatch.
 Object.assign(App, {
   // ─── Branch Transfers ─────────────────────────────────────
-  async renderTransfers() {
-    const c = document.getElementById('content');
-    c.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
-    const [transfers] = await Promise.all([
-      this.api('GET', '/transfers?limit=100'),
-    ]);
-    if (this.section !== 'transfers') return;
-    const branches = this.currentUser.branches || [];
+  // One row of the Branch Transfers table (extra = an older one the search
+  // fetched from the server, removed when the search changes).
+  _transferRowHtml(t, extra = false) {
     const statusColor = this._transferStatusColor;
-    c.innerHTML = `
-      <div class="section-header">
-        <h2>Branch Transfers</h2>
-        <div style="display:flex;gap:8px">
-          ${this.can('transfers_quick') ? `<button class="btn btn-outline" onclick="App.showTransferForm(null, { quick: true })" title="Move stock between branches instantly — no request, pickup or receiving">⚡ Quick Transfer</button>` : ''}
-          ${this.can('transfers_create') ? `<button class="btn btn-primary" onclick="App.showTransferForm()">+ Request Transfer</button>` : ''}
-        </div>
-      </div>
-      <div class="card">
-        <div style="margin-bottom:10px">
-          <div class="search-bar" style="max-width:280px">
-            <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
-            <input type="text" id="trf-search" placeholder="Search transfer #..." style="width:220px">
-          </div>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Transfer #</th><th>From</th><th>To</th><th>Status</th><th>Created</th><th>Date Received</th><th>Actions</th></tr></thead>
-            <tbody id="trf-tbody">
-              ${transfers.length ? transfers.map(t => `
-                <tr data-trf-num="${(t.transfer_number||'').toLowerCase()}">
+    return `                <tr data-trf-id="${t.id}" data-trf-num="${(t.transfer_number||'').toLowerCase()}" data-trf-sale="${(t.sale_number||'').toLowerCase()}"${extra ? ' data-trf-extra="1"' : ''}>
                   <td class="fw-600">${t.transfer_number}${this._transferCustomerOrderBadge(t)}</td>
                   <td>${t.from_branch_name||'-'}</td>
                   <td>${t.to_branch_name||'-'}</td>
@@ -43,18 +18,68 @@ Object.assign(App, {
                     ${t.status==='requested'||t.status==='pending' ? `<button class="btn btn-sm btn-outline" onclick="App.printTransferPickList(${t.id})" title="Print Pick List">🗒 Pick List</button>` : ''}
                     ${(t.status==='pending'||t.status==='in_transit') && this.can('transfers_receive') ? `<button class="btn btn-sm btn-success" onclick="App.showReceiveTransfer(${t.id})">Receive</button>` : ''}
                   </td>
-                </tr>`).join('') : '<tr><td colspan="7" class="empty-state">No transfers yet</td></tr>'}
+                </tr>`;
+  },
+
+  async renderTransfers() {
+    const c = document.getElementById('content');
+    c.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    // The latest 100, plus every transfer still open however old (a sent
+    // transfer nobody received used to drop off the list).
+    const [latest, open] = await Promise.all([
+      this.api('GET', '/transfers?limit=100'),
+      this.api('GET', '/transfers?open=1&limit=1000'),
+    ]);
+    const seen = new Set();
+    const transfers = [...open, ...latest].filter(t => !seen.has(t.id) && seen.add(t.id))
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)) || b.id - a.id);
+    if (this.section !== 'transfers') return;
+    const branches = this.currentUser.branches || [];
+    const statusColor = this._transferStatusColor;
+    c.innerHTML = `
+      <div class="section-header">
+        <h2>Branch Transfers</h2>
+        <div style="display:flex;gap:8px">
+          ${this.can('transfers_quick') ? `<button class="btn btn-outline" onclick="App.showTransferForm(null, { quick: true })" title="Move stock between branches instantly — no request, pickup or receiving">⚡ Quick Transfer</button>` : ''}
+          ${this.can('transfers_create') ? `<button class="btn btn-primary" onclick="App.showTransferForm()">+ Request Transfer</button>` : ''}
+        </div>
+      </div>
+      <div class="card">
+        <div style="margin-bottom:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+          <div class="search-bar" style="max-width:280px">
+            <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+            <input type="text" id="trf-search" placeholder="Search transfer # or sale #..." style="width:220px">
+          </div>
+          <span style="font-size:12px;color:var(--text-muted)">Shows the latest 100 and every transfer not yet received; the search looks through all of them.</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Transfer #</th><th>From</th><th>To</th><th>Status</th><th>Created</th><th>Date Received</th><th>Actions</th></tr></thead>
+            <tbody id="trf-tbody">
+              ${transfers.length ? transfers.map(t => this._transferRowHtml(t)).join('') : '<tr><td colspan="7" class="empty-state">No transfers yet</td></tr>'}
             </tbody>
           </table>
         </div>
       </div>`;
     const trfSearch = document.getElementById('trf-search');
     if (trfSearch) {
+      let timer = null;
       trfSearch.addEventListener('input', () => {
         const q = trfSearch.value.toLowerCase().trim();
         document.querySelectorAll('#trf-tbody tr[data-trf-num]').forEach(row => {
-          row.style.display = !q || row.dataset.trfNum.includes(q) ? '' : 'none';
+          if (row.dataset.trfExtra) { row.remove(); return; }
+          row.style.display = !q || row.dataset.trfNum.includes(q) || (row.dataset.trfSale || '').includes(q) ? '' : 'none';
         });
+        // Older transfers aren't on the page: ask the server for matches.
+        clearTimeout(timer);
+        if (q.length < 3) return;
+        timer = setTimeout(async () => {
+          const found = await this.api('GET', `/transfers?q=${encodeURIComponent(q)}&limit=50`).catch(() => []);
+          if (trfSearch.value.toLowerCase().trim() !== q) return;
+          const tbody = document.getElementById('trf-tbody');
+          const shown = new Set([...tbody.querySelectorAll('tr[data-trf-id]')].map(r => r.dataset.trfId));
+          for (const t of found) if (!shown.has(String(t.id))) tbody.insertAdjacentHTML('beforeend', this._transferRowHtml(t, true));
+        }, 300);
       });
     }
     this._transferBranches = branches;

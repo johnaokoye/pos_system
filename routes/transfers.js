@@ -12,7 +12,8 @@ router.use(requireAuth);
 // GET all transfers
 router.get('/', requireTransfersManage, async (req, res) => {
   try {
-    const { status, from_branch_id, to_branch_id, limit = 100 } = req.query;
+    const { status, from_branch_id, to_branch_id } = req.query;
+    const limit = Math.min(parseInt(req.query.limit) || 100, 1000);
     let sql = `SELECT t.*, fb.name as from_branch_name, tb.name as to_branch_name, e.first_name || ' ' || e.last_name as employee_name,
       COALESCE(dr.first_name || ' ' || dr.last_name, t.driver_name) as driver_display_name, (SELECT first_name || ' ' || last_name FROM employees WHERE id = t.dropped_off_by) as dropped_off_by_name,
       (SELECT GROUP_CONCAT(product_name || ' x' || quantity_requested, ', ') FROM branch_transfer_items WHERE transfer_id = t.id) as item_summary,
@@ -21,10 +22,16 @@ router.get('/', requireTransfersManage, async (req, res) => {
       LEFT JOIN employees dr ON dr.id = t.driver_id LEFT JOIN transactions st ON st.id = t.transaction_id LEFT JOIN customers sc ON sc.id = st.customer_id WHERE 1=1`;
     const params = [];
     if (status) { sql += ' AND t.status = ?'; params.push(status); }
+    // open=1: every transfer not yet received or cancelled, however old — the
+    // Transfers screen lists them on top of the latest 100 so a sent transfer
+    // nobody received doesn't drop out of sight.
+    if (req.query.open === '1') sql += " AND t.status IN ('requested', 'pending', 'in_transit')";
+    // q: transfer # or the sale it's for, over every transfer (the screen's search).
+    if (req.query.q) { const like = `%${String(req.query.q).trim()}%`; sql += ' AND (t.transfer_number LIKE ? OR st.transaction_number LIKE ?)'; params.push(like, like); }
     if (from_branch_id) { sql += ' AND t.from_branch_id = ?'; params.push(from_branch_id); }
     if (to_branch_id) { sql += ' AND t.to_branch_id = ?'; params.push(to_branch_id); }
     sql += ' ORDER BY t.created_at DESC LIMIT ?';
-    params.push(parseInt(limit));
+    params.push(limit);
     const { rows } = await db.execute({ sql, args: params });
     res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
