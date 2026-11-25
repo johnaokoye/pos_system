@@ -289,3 +289,13 @@ test('transfers sent but not received are listed with Receive', async ({ page })
   try { expect((await api(page, 'GET', '/transfers/not-received')).transfers.some(t => t.id === trf.id)).toBeFalsy(); }
   finally { await api(page, 'PUT', '/settings', { transfer_not_received_days: '2' }); }
 });
+
+test('Settings → Branch Transfers sets the not-received reminder days', async ({ page }) => {
+  await page.evaluate(() => App.showSection('settings'));
+  const box = page.locator('#s-trf-late-days');
+  await expect(box).toHaveValue('2');
+  await box.fill('3');
+  await page.locator('.card', { has: box }).locator('button:has-text("Save Settings")').click();
+  await expect.poll(async () => (await api(page, 'GET', '/transfers/not-received')).days).toBe(3);
+  await api(page, 'PUT', '/settings', { transfer_not_received_days: '2' });
+});

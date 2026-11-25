@@ -68,6 +68,15 @@ Object.assign(App, {
             <button class="btn btn-primary" onclick="App.saveSettings()">Save Settings</button>
           </div>
           <div class="card" style="margin-bottom:16px">
+            <div class="card-header"><span class="card-title">Branch Transfers</span></div>
+            <div class="input-row">
+              <div class="form-group"><label>Remind about transfers not received after (days)</label><input type="number" id="s-trf-late-days" value="${s.transfer_not_received_days || 2}" min="0.5" step="0.5"></div>
+              <div class="form-group"></div>
+            </div>
+            <p style="font-size:11px;color:var(--text-muted);margin:0 0 8px">A transfer sent this many days ago and still not received shows in the <strong>Transfers not received</strong> box on Home and Branch Transfers, with a notice once a day — for the receiving branch and the team that sent it.</p>
+            <button class="btn btn-primary" onclick="App.saveSettings()">Save Settings</button>
+          </div>
+          <div class="card" style="margin-bottom:16px">
             <div class="card-header"><span class="card-title">Rental Returns — Closed Days</span></div>
             <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">At branches marked <strong>Closed on Sundays &amp; public holidays</strong> (Branch Management), a rental due back on a Sunday or one of the holidays below can be returned by the return-by time on the next open day with no late charge.</p>
             <div class="input-row">
@@ -787,6 +796,7 @@ Object.assign(App, {
         staff_purchase_limit_manager: document.getElementById('s-staff-limit-manager').value || '0',
       } : {}),
       layaway_deposit_percent: document.getElementById('s-layaway-deposit').value,
+      transfer_not_received_days: String(Math.max(0.5, parseFloat(document.getElementById('s-trf-late-days').value) || 2)),
       layaway_markup_percent: document.getElementById('s-layaway-markup').value,
       closed_day_return_by: document.getElementById('s-closed-return-by').value || '08:00',
       store_timezone: document.getElementById('s-store-tz').value.trim(),
