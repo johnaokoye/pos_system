@@ -148,8 +148,6 @@ router.get('/inventory', requirePermission('reports'), async (req, res) => {
 router.get('/dashboard', requireAuth, async (req, res) => {
   try {
     const { branch_id } = req.query;
-    const today = new Date().toISOString().slice(0, 10);
-    const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10);
     const bf = branch_id ? ' AND t.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
     // t.branch_id IS NULL first: SQL's `NULL NOT IN (...)` is NULL (not true),
@@ -189,16 +187,31 @@ router.get('/dashboard', requireAuth, async (req, res) => {
 
     // Cross-branch/company performance has no place on a salesperson's
     // personal view — only computed for everyone else.
-    const byLocation = mine ? [] : (await db.execute({ sql: `SELECT b.id, b.name, b.city, b.state,
-        COALESCE(SUM(CASE WHEN date(t.created_at) = date(?) THEN t.total ELSE 0 END), 0) as today_sales,
-        COUNT(CASE WHEN date(t.created_at) = date(?) THEN 1 END) as today_transactions,
-        COALESCE(SUM(CASE WHEN date(t.created_at) >= date(?) THEN t.total ELSE 0 END), 0) as month_sales,
-        COUNT(CASE WHEN date(t.created_at) >= date(?) THEN 1 END) as month_transactions
+    // Same store day and month as the headline cards above. It used the UTC
+    // day (5 hours ahead): until 7pm the cards also counted yesterday
+    // evening, and after 7pm they dropped this evening, so the locations
+    // didn't add up to Today's Sales. Sales with no branch (online)
+    // or at a branch since deactivated count in the headline too, so they get
+    // their own card when there are any.
+    const monthStartDay = `${storeDayToday.slice(0, 7)}-01`;
+    const locSums = `COALESCE(SUM(CASE WHEN date(t.created_at, ?) = date(?) THEN t.total ELSE 0 END), 0) as today_sales,
+        COUNT(CASE WHEN date(t.created_at, ?) = date(?) THEN 1 END) as today_transactions,
+        COALESCE(SUM(t.total), 0) as month_sales,
+        COUNT(t.id) as month_transactions`;
+    const locArgs = [storeOffset, storeDayToday, storeOffset, storeDayToday];
+    let byLocation = [];
+    if (!mine) {
+      byLocation = (await db.execute({ sql: `SELECT b.id, b.name, b.city, b.state, ${locSums}
       FROM branches b
-      LEFT JOIN transactions t ON t.branch_id = b.id AND t.status = 'completed'
+      LEFT JOIN transactions t ON t.branch_id = b.id AND t.status = 'completed' AND date(t.created_at, ?) >= date(?)
       WHERE b.active = 1 AND b.is_warehouse = 0
       GROUP BY b.id
-      ORDER BY b.name`, args: [today, today, monthStart, monthStart] })).rows;
+      ORDER BY b.name`, args: [...locArgs, storeOffset, monthStartDay] })).rows;
+      const { rows: [other] } = await db.execute({ sql: `SELECT ${locSums} FROM transactions t
+        WHERE t.status = 'completed' AND date(t.created_at, ?) >= date(?)
+          AND (t.branch_id IS NULL OR t.branch_id IN (SELECT id FROM branches WHERE active = 0 AND is_warehouse = 0))`, args: [...locArgs, storeOffset, monthStartDay] });
+      if (other && other.month_transactions > 0) byLocation.push({ id: null, name: 'Online / no location', city: null, state: null, ...other });
+    }
 
     res.json({ todayStats, monthStats, totalCustomers, lowStock, recentTx, last7Days, byLocation });
   } catch(e) { res.status(500).json({ error: e.message }); }
