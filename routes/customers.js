@@ -34,6 +34,22 @@ const uploadDoc = multer({
 // "+1 876 555 1234"), so compare digits only. Numbers of 10+ digits are
 // matched on their last 10 so an optional leading country code doesn't
 // hide a duplicate; anything shorter must match in full.
+// A merged-away customer (merged_into_customer_id) is retired: anything
+// still holding its id — an old website session, a stale screen — must not
+// keep editing it, or the changes never reach the customer that was kept.
+// 409 code 'customer_merged' names the kept id so the caller can switch.
+async function refuseMergedWrite(req, res, next) {
+  try {
+    const { rows: [c] } = await db.execute({ sql: 'SELECT merged_into_customer_id FROM customers WHERE id = ?', args: [req.params.id] });
+    if (c?.merged_into_customer_id) {
+      const { rows: [kept] } = await db.execute({ sql: 'SELECT customer_number FROM customers WHERE id = ?', args: [c.merged_into_customer_id] });
+      return res.status(409).json({ code: 'customer_merged', merged_into_customer_id: c.merged_into_customer_id,
+        error: `This customer was merged into ${kept?.customer_number || `customer #${c.merged_into_customer_id}`} — make changes there` });
+    }
+    next();
+  } catch (e) { res.status(500).json({ error: e.message }); }
+}
+
 function normalizePhone(phone) {
   const digits = String(phone || '').replace(/\D/g, '');
   return digits.length > 10 ? digits.slice(-10) : digits;
@@ -768,7 +784,7 @@ router.get('/:id/rental-application', requireAuth, async (req, res) => {
 // saved even when something is still missing (so nothing typed is lost), but
 // the application is only marked 'submitted' once every RENTAL_REQUIREMENTS
 // item — documents included — is on file.
-router.put('/:id/rental-application', requirePermission('customers_edit'), async (req, res) => {
+router.put('/:id/rental-application', requirePermission('customers_edit'), refuseMergedWrite, async (req, res) => {
   try {
     const { rows: [c] } = await db.execute({ sql: 'SELECT * FROM customers WHERE id = ?', args: [req.params.id] });
     if (!c) return res.status(404).json({ error: 'Customer not found' });
@@ -1242,7 +1258,7 @@ router.post('/', requirePermission('customers_add'), async (req, res) => {
   }
 });
 
-router.put('/:id', requirePermission('customers_edit'), async (req, res) => {
+router.put('/:id', requirePermission('customers_edit'), refuseMergedWrite, async (req, res) => {
   const {
     email, phone, address, city, state, zip, notes, active, customer_type, credit_terms_days, credit_limit, tax_exempt, tax_exemption_number,
     is_rental_customer, rental_id_type, rental_id_number, rental_address_proof_type,
@@ -1501,7 +1517,7 @@ router.post('/import', requirePermission('customers_import'), async (req, res) =
 
 // POST upload rental customer's ID scan — same Cloudinary-or-local fallback
 // pattern as product images (see routes/products.js POST /:id/image).
-router.post('/:id/id-scan', requirePermission('customers_edit'), upload.single('id_scan'), async (req, res) => {
+router.post('/:id/id-scan', requirePermission('customers_edit'), refuseMergedWrite, upload.single('id_scan'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   try {
     const { rows: [existing] } = await db.execute({ sql: 'SELECT rental_id_scan_path FROM customers WHERE id = ?', args: [req.params.id] });
@@ -1559,7 +1575,7 @@ router.delete('/:id/id-scan', requirePermission('customers_edit'), async (req, r
 // POST upload a photo ID for reference 1 (the "main" reference — the one
 // with an address on file) — same Cloudinary-or-local pattern and image-only
 // restriction as the customer's own ID scan above.
-router.post('/:id/reference-id', requirePermission('customers_edit'), upload.single('reference_id'), async (req, res) => {
+router.post('/:id/reference-id', requirePermission('customers_edit'), refuseMergedWrite, upload.single('reference_id'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   try {
     const { rows: [existing] } = await db.execute({ sql: 'SELECT rental_reference_id_path FROM customers WHERE id = ?', args: [req.params.id] });
@@ -1618,7 +1634,7 @@ router.delete('/:id/reference-id', requirePermission('customers_edit'), async (r
 // PDF too (bank statements/utility bills are usually PDFs, not photos), so
 // resource_type is 'auto' at upload time and destroy needs the stored mime
 // to know whether Cloudinary filed it as 'image' or 'raw'.
-router.post('/:id/address-proof', requirePermission('customers_edit'), uploadDoc.single('address_proof'), async (req, res) => {
+router.post('/:id/address-proof', requirePermission('customers_edit'), refuseMergedWrite, uploadDoc.single('address_proof'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded, or file type not allowed (images and PDF only)' });
   try {
     const { rows: [existing] } = await db.execute({ sql: 'SELECT rental_address_proof_path, rental_address_proof_mime FROM customers WHERE id = ?', args: [req.params.id] });

@@ -96,6 +96,22 @@ test.describe('Merge Customer In', () => {
     expect(await api(page, 'POST', '/customers/merge', { keep_id: keep.id, merge_ids: [dup.id] })).toMatchObject({ merged: 1 });
   });
 
+  test('a merged-away customer refuses edits and names the kept one (an old website session can follow it)', async ({ page }) => {
+    const s = stamp();
+    const keep = await customer(page, `Kept ${s}`);
+    const merged = await customer(page, `Gone ${s}`, { address: 'Old address' });
+    await api(page, 'POST', '/customers/merge', { keep_id: keep.id, merge_ids: [merged.id] });
+    const full = await api(page, 'GET', `/customers/${merged.id}`);
+    const res = await page.request.put(`/api/customers/${merged.id}`, { data: { ...full, address: 'New address' } });
+    expect(res.status()).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe('customer_merged');
+    expect(body.merged_into_customer_id).toBe(keep.id);
+    expect(body.error).toContain(keep.customer_number);
+    expect((await page.request.put(`/api/customers/${merged.id}/rental-application`, { data: {} })).status()).toBe(409);
+    expect((await api(page, 'GET', `/customers/${merged.id}`)).address).toBe('Old address');
+  });
+
   test('reactivating is refused for a merged customer and on a phone clash', async ({ page }) => {
     const refused = (id) => page.evaluate(i => App.api('POST', `/customers/${i}/reactivate`).then(() => 'accepted', e => e.message), id);
     const s = stamp();
