@@ -6,17 +6,24 @@ const { SERIAL_NUMBER_SKU } = require('../lib/serialNumber');
 const { refreshStoreTz, storeToday, storeOffsetModifier, storeDay } = require('../lib/storeTime');
 const { oldestOpenLegacySql, oldestUnpaidSaleSql, earliestDate } = require('../lib/legacyInvoices');
 
+// Report dates are store days (Settings → Store Time Zone): a timestamp's day
+// is sd(col) — date(col, '<offset>') — never date(col), which is the UTC day
+// and puts a sale after 7pm Jamaica time on the next day. Defaults use
+// storeToday()/storeDay(), not toISOString() (also UTC).
+const sd = col => `date(${col}, '${storeOffsetModifier()}')`;
+router.use(async (req, res, next) => { await refreshStoreTz(); next(); });
+
 // Sales summary for a date range
 router.get('/sales', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const bf = branch_id ? ' AND branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
 
-    const { rows: [summary] } = await db.execute({ sql: `SELECT COUNT(*) as transaction_count, SUM(total) as gross_sales, SUM(tax_amount) as total_tax, SUM(discount_amount) as total_discounts, AVG(total) as avg_order FROM transactions WHERE status='completed' AND date(created_at) BETWEEN date(?) AND date(?)${bf}`, args: [s, e, ...bp] });
-    const { rows: byDay } = await db.execute({ sql: `SELECT date(created_at) as date, COUNT(*) as transactions, SUM(total) as sales FROM transactions WHERE status='completed' AND date(created_at) BETWEEN date(?) AND date(?)${bf} GROUP BY date(created_at) ORDER BY date`, args: [s, e, ...bp] });
+    const { rows: [summary] } = await db.execute({ sql: `SELECT COUNT(*) as transaction_count, SUM(total) as gross_sales, SUM(tax_amount) as total_tax, SUM(discount_amount) as total_discounts, AVG(total) as avg_order FROM transactions WHERE status='completed' AND ${sd('created_at')} BETWEEN date(?) AND date(?)${bf}`, args: [s, e, ...bp] });
+    const { rows: byDay } = await db.execute({ sql: `SELECT ${sd('created_at')} as date, COUNT(*) as transactions, SUM(total) as sales FROM transactions WHERE status='completed' AND ${sd('created_at')} BETWEEN date(?) AND date(?)${bf} GROUP BY ${sd('created_at')} ORDER BY date`, args: [s, e, ...bp] });
     // Sums per-leg amounts from transaction_payments (so a split-tender
     // sale's cash portion and card portion land in separate buckets),
     // falling back to the whole transaction total for any transaction with
@@ -27,11 +34,11 @@ router.get('/sales', requirePermission('reports'), async (req, res) => {
       FROM (
         SELECT tp.transaction_id, tp.payment_method, tp.amount
         FROM transaction_payments tp JOIN transactions t ON t.id = tp.transaction_id
-        WHERE t.status='completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bfAliased}
+        WHERE t.status='completed' AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bfAliased}
         UNION ALL
         SELECT t.id as transaction_id, t.payment_method, t.total as amount
         FROM transactions t
-        WHERE t.status='completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bfAliased} AND NOT EXISTS (SELECT 1 FROM transaction_payments tp2 WHERE tp2.transaction_id = t.id)
+        WHERE t.status='completed' AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bfAliased} AND NOT EXISTS (SELECT 1 FROM transaction_payments tp2 WHERE tp2.transaction_id = t.id)
       )
       GROUP BY payment_method`, args: [s, e, ...bp, s, e, ...bp] });
 
@@ -43,8 +50,8 @@ router.get('/sales', requirePermission('reports'), async (req, res) => {
 router.get('/top-products', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, limit = 10, branch_id, category_id } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const bf = branch_id ? ' AND t.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
     // Filtering by category requires joining products — this also has the side
@@ -70,7 +77,7 @@ router.get('/top-products', requirePermission('reports'), async (req, res) => {
             FROM transaction_items ti
             JOIN transactions t ON ti.transaction_id = t.id
             JOIN products p ON ti.product_id = p.id
-            WHERE t.status='completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}${cf}
+            WHERE t.status='completed' AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bf}${cf}
               AND upper(COALESCE(p.sku, '')) != ? AND (ti.serial_number IS NULL OR ti.serial_number = '')
               AND COALESCE(ti.is_comment, 0) = 0 AND COALESCE(ti.is_delivery, 0) = 0
               AND NOT EXISTS (SELECT 1 FROM rental_agreements ra WHERE ra.checkout_transaction_id = t.id OR ra.settlement_transaction_id = t.id)
@@ -85,12 +92,12 @@ router.get('/top-products', requirePermission('reports'), async (req, res) => {
 router.get('/by-category', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const bf = branch_id ? ' AND t.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
 
-    const { rows: data } = await db.execute({ sql: `SELECT c.name as category, SUM(ti.quantity * COALESCE(ti.units_per, 1)) as units_sold, SUM(ti.total) as revenue FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id JOIN products p ON ti.product_id = p.id JOIN categories c ON p.category_id = c.id WHERE t.status='completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf} AND upper(COALESCE(p.sku, '')) != ? AND (ti.serial_number IS NULL OR ti.serial_number = '') GROUP BY c.id ORDER BY revenue DESC`, args: [s, e, ...bp, SERIAL_NUMBER_SKU] });
+    const { rows: data } = await db.execute({ sql: `SELECT c.name as category, SUM(ti.quantity * COALESCE(ti.units_per, 1)) as units_sold, SUM(ti.total) as revenue FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id JOIN products p ON ti.product_id = p.id JOIN categories c ON p.category_id = c.id WHERE t.status='completed' AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bf} AND upper(COALESCE(p.sku, '')) != ? AND (ti.serial_number IS NULL OR ti.serial_number = '') GROUP BY c.id ORDER BY revenue DESC`, args: [s, e, ...bp, SERIAL_NUMBER_SKU] });
     res.json(data);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -221,15 +228,15 @@ router.get('/dashboard', requireAuth, async (req, res) => {
 router.get('/ar-collections', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const bf = branch_id ? ' AND p.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
 
-    const { rows: [summary] } = await db.execute({ sql: `SELECT COUNT(*) as payment_count, COALESCE(SUM(amount), 0) as total_collected FROM account_payments p WHERE p.payment_method NOT IN ('credit_note', 'tax_exempt', 'contra') AND date(p.created_at) BETWEEN date(?) AND date(?)${bf}`, args: [s, e, ...bp] });
-    const { rows: byDay } = await db.execute({ sql: `SELECT date(p.created_at) as date, COUNT(*) as payments, COALESCE(SUM(p.amount), 0) as collected FROM account_payments p WHERE p.payment_method NOT IN ('credit_note', 'tax_exempt', 'contra') AND date(p.created_at) BETWEEN date(?) AND date(?)${bf} GROUP BY date(p.created_at) ORDER BY date`, args: [s, e, ...bp] });
-    const { rows: byMethod } = await db.execute({ sql: `SELECT p.payment_method, COUNT(*) as count, COALESCE(SUM(p.amount), 0) as total FROM account_payments p WHERE p.payment_method NOT IN ('credit_note', 'tax_exempt', 'contra') AND date(p.created_at) BETWEEN date(?) AND date(?)${bf} GROUP BY p.payment_method ORDER BY total DESC`, args: [s, e, ...bp] });
-    const { rows: byCustomer } = await db.execute({ sql: `SELECT c.customer_number, c.first_name || ' ' || c.last_name as customer_name, COUNT(*) as payments, COALESCE(SUM(p.amount), 0) as total_paid, c.account_balance as outstanding FROM account_payments p JOIN customers c ON p.customer_id = c.id WHERE p.payment_method NOT IN ('credit_note', 'tax_exempt', 'contra') AND date(p.created_at) BETWEEN date(?) AND date(?)${bf} GROUP BY p.customer_id ORDER BY total_paid DESC`, args: [s, e, ...bp] });
+    const { rows: [summary] } = await db.execute({ sql: `SELECT COUNT(*) as payment_count, COALESCE(SUM(amount), 0) as total_collected FROM account_payments p WHERE p.payment_method NOT IN ('credit_note', 'tax_exempt', 'contra') AND ${sd('p.created_at')} BETWEEN date(?) AND date(?)${bf}`, args: [s, e, ...bp] });
+    const { rows: byDay } = await db.execute({ sql: `SELECT ${sd('p.created_at')} as date, COUNT(*) as payments, COALESCE(SUM(p.amount), 0) as collected FROM account_payments p WHERE p.payment_method NOT IN ('credit_note', 'tax_exempt', 'contra') AND ${sd('p.created_at')} BETWEEN date(?) AND date(?)${bf} GROUP BY ${sd('p.created_at')} ORDER BY date`, args: [s, e, ...bp] });
+    const { rows: byMethod } = await db.execute({ sql: `SELECT p.payment_method, COUNT(*) as count, COALESCE(SUM(p.amount), 0) as total FROM account_payments p WHERE p.payment_method NOT IN ('credit_note', 'tax_exempt', 'contra') AND ${sd('p.created_at')} BETWEEN date(?) AND date(?)${bf} GROUP BY p.payment_method ORDER BY total DESC`, args: [s, e, ...bp] });
+    const { rows: byCustomer } = await db.execute({ sql: `SELECT c.customer_number, c.first_name || ' ' || c.last_name as customer_name, COUNT(*) as payments, COALESCE(SUM(p.amount), 0) as total_paid, c.account_balance as outstanding FROM account_payments p JOIN customers c ON p.customer_id = c.id WHERE p.payment_method NOT IN ('credit_note', 'tax_exempt', 'contra') AND ${sd('p.created_at')} BETWEEN date(?) AND date(?)${bf} GROUP BY p.customer_id ORDER BY total_paid DESC`, args: [s, e, ...bp] });
 
     res.json({ summary, byDay, byMethod, byCustomer });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -239,13 +246,13 @@ router.get('/ar-collections', requirePermission('reports'), async (req, res) => 
 router.get('/promotions', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const bf = branch_id ? ' AND branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
 
-    const { rows: byPromotion } = await db.execute({ sql: `SELECT promotion_name, promotion_code, COUNT(*) as times_used, SUM(discount_amount) as total_discount, SUM(total) as total_sales FROM transactions WHERE status='completed' AND promotion_code IS NOT NULL AND date(created_at) BETWEEN date(?) AND date(?)${bf} GROUP BY promotion_code ORDER BY total_discount DESC`, args: [s, e, ...bp] });
-    const { rows: [totals] } = await db.execute({ sql: `SELECT COUNT(*) as promo_transactions, COALESCE(SUM(discount_amount),0) as total_discount, COALESCE(SUM(total),0) as total_sales FROM transactions WHERE status='completed' AND promotion_code IS NOT NULL AND date(created_at) BETWEEN date(?) AND date(?)${bf}`, args: [s, e, ...bp] });
+    const { rows: byPromotion } = await db.execute({ sql: `SELECT promotion_name, promotion_code, COUNT(*) as times_used, SUM(discount_amount) as total_discount, SUM(total) as total_sales FROM transactions WHERE status='completed' AND promotion_code IS NOT NULL AND ${sd('created_at')} BETWEEN date(?) AND date(?)${bf} GROUP BY promotion_code ORDER BY total_discount DESC`, args: [s, e, ...bp] });
+    const { rows: [totals] } = await db.execute({ sql: `SELECT COUNT(*) as promo_transactions, COALESCE(SUM(discount_amount),0) as total_discount, COALESCE(SUM(total),0) as total_sales FROM transactions WHERE status='completed' AND promotion_code IS NOT NULL AND ${sd('created_at')} BETWEEN date(?) AND date(?)${bf}`, args: [s, e, ...bp] });
 
     res.json({ totals, byPromotion });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -259,8 +266,8 @@ router.get('/promotions', requirePermission('reports'), async (req, res) => {
 router.get('/special-projects-margin', requireAnyPermission('special_projects', 'special_projects_approve'), async (req, res) => {
   try {
     const { start, end, branch_id, status } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const bf = branch_id ? ' AND q.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
     const sf = status ? ' AND q.status = ?' : '';
@@ -280,7 +287,7 @@ router.get('/special-projects-margin', requireAnyPermission('special_projects', 
             LEFT JOIN customers c ON q.customer_id = c.id
             LEFT JOIN employees e ON q.employee_id = e.id
             LEFT JOIN employees oe ON q.original_employee_id = oe.id
-            WHERE q.quote_type = 'special_project' AND date(q.created_at) BETWEEN date(?) AND date(?)${bf}${sf}
+            WHERE q.quote_type = 'special_project' AND ${sd('q.created_at')} BETWEEN date(?) AND date(?)${bf}${sf}
             GROUP BY q.id
             ORDER BY q.created_at DESC`,
       args: [s, e, ...bp, ...sp],
@@ -322,7 +329,7 @@ router.get('/special-projects-margin', requireAnyPermission('special_projects', 
             JOIN quotation_items qi ON qi.quote_id = q.id
             LEFT JOIN employees e ON q.employee_id = e.id
             LEFT JOIN employees oe ON q.original_employee_id = oe.id
-            WHERE q.quote_type = 'special_project' AND date(q.created_at) BETWEEN date(?) AND date(?)${bf}${sf}
+            WHERE q.quote_type = 'special_project' AND ${sd('q.created_at')} BETWEEN date(?) AND date(?)${bf}${sf}
             GROUP BY COALESCE(oe.id, e.id)
             ORDER BY revenue DESC`,
       args: [s, e, ...bp, ...sp],
@@ -345,8 +352,8 @@ router.get('/special-projects-margin', requireAnyPermission('special_projects', 
 router.get('/lead-source-performance', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
 
     const { rows: bySource } = await db.execute({
       sql: `SELECT l.source,
@@ -356,7 +363,7 @@ router.get('/lead-source-performance', requirePermission('reports'), async (req,
               COALESCE(SUM(CASE WHEN o.won = 1 THEN o.value ELSE 0 END), 0) as won_value
             FROM crm_leads l
             LEFT JOIN crm_opportunities o ON o.lead_id = l.id
-            WHERE date(l.created_at) BETWEEN date(?) AND date(?)
+            WHERE ${sd('l.created_at')} BETWEEN date(?) AND date(?)
             GROUP BY l.source
             ORDER BY lead_count DESC`,
       args: [s, e],
@@ -385,8 +392,8 @@ router.get('/lead-source-performance', requirePermission('reports'), async (req,
 router.get('/customer-segments', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const bf = branch_id ? ' AND t.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
 
@@ -398,7 +405,7 @@ router.get('/customer-segments', requirePermission('reports'), async (req, res) 
               COALESCE(SUM(t.discount_amount), 0) as total_discount
             FROM customer_categories cc
             LEFT JOIN customers c ON c.customer_category_id = cc.id
-            LEFT JOIN transactions t ON t.customer_id = c.id AND t.status='completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}
+            LEFT JOIN transactions t ON t.customer_id = c.id AND t.status='completed' AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bf}
             WHERE cc.active = 1
             GROUP BY cc.id
             ORDER BY revenue DESC`,
@@ -408,7 +415,7 @@ router.get('/customer-segments', requirePermission('reports'), async (req, res) 
       sql: `SELECT cc.id as category_id, COALESCE(SUM(ti.quantity * COALESCE(ti.units_per, 1) * COALESCE(p.cost, 0)), 0) as cost
             FROM customer_categories cc
             LEFT JOIN customers c ON c.customer_category_id = cc.id
-            LEFT JOIN transactions t ON t.customer_id = c.id AND t.status='completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}
+            LEFT JOIN transactions t ON t.customer_id = c.id AND t.status='completed' AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bf}
             LEFT JOIN transaction_items ti ON ti.transaction_id = t.id
             LEFT JOIN products p ON ti.product_id = p.id
             WHERE cc.active = 1
@@ -420,7 +427,7 @@ router.get('/customer-segments', requirePermission('reports'), async (req, res) 
       sql: `SELECT COUNT(DISTINCT t.id) as order_count, COUNT(DISTINCT t.customer_id) as customer_count,
               COALESCE(SUM(t.subtotal - t.discount_amount), 0) as revenue, COALESCE(SUM(t.discount_amount), 0) as total_discount
             FROM transactions t JOIN customers c ON t.customer_id = c.id
-            WHERE c.customer_category_id IS NULL AND t.status='completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}`,
+            WHERE c.customer_category_id IS NULL AND t.status='completed' AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bf}`,
       args: [s, e, ...bp],
     });
     const { rows: [uncategorizedCost] } = await db.execute({
@@ -428,7 +435,7 @@ router.get('/customer-segments', requirePermission('reports'), async (req, res) 
             FROM transactions t JOIN customers c ON t.customer_id = c.id
             JOIN transaction_items ti ON ti.transaction_id = t.id
             LEFT JOIN products p ON ti.product_id = p.id
-            WHERE c.customer_category_id IS NULL AND t.status='completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}`,
+            WHERE c.customer_category_id IS NULL AND t.status='completed' AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bf}`,
       args: [s, e, ...bp],
     });
 
@@ -459,14 +466,14 @@ router.get('/customer-segments', requirePermission('reports'), async (req, res) 
 router.get('/loyalty-engagement', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const bf = branch_id ? ' AND t.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
 
     const { rows: [issued] } = await db.execute({
       sql: `SELECT COALESCE(SUM(CAST(t.total * 0.5 AS INTEGER)), 0) as points_issued, COUNT(*) as earning_transactions
-            FROM transactions t WHERE t.status='completed' AND t.customer_id IS NOT NULL AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}`,
+            FROM transactions t WHERE t.status='completed' AND t.customer_id IS NOT NULL AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bf}`,
       args: [s, e, ...bp],
     });
     // Points-equivalent redeemed is approximated using each customer's
@@ -479,14 +486,14 @@ router.get('/loyalty-engagement', requirePermission('reports'), async (req, res)
             FROM transactions t
             LEFT JOIN customers c ON t.customer_id = c.id
             LEFT JOIN cash_back_card_types cbct ON c.cash_back_card_type_id = cbct.id
-            WHERE t.status='completed' AND t.cash_back_applied > 0 AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}`,
+            WHERE t.status='completed' AND t.cash_back_applied > 0 AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bf}`,
       args: [s, e, ...bp],
     });
     const { rows: topEarners } = await db.execute({
       sql: `SELECT t.customer_id, c.first_name || ' ' || c.last_name as customer_name, c.customer_number,
               COALESCE(SUM(CAST(t.total * 0.5 AS INTEGER)), 0) as points_earned, c.loyalty_points as current_balance
             FROM transactions t JOIN customers c ON t.customer_id = c.id
-            WHERE t.status='completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}
+            WHERE t.status='completed' AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bf}
             GROUP BY t.customer_id ORDER BY points_earned DESC LIMIT 10`,
       args: [s, e, ...bp],
     });
@@ -514,8 +521,8 @@ router.get('/loyalty-engagement', requirePermission('reports'), async (req, res)
 router.get('/discount-card-utilization', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const bf = branch_id ? ' AND t.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
 
@@ -533,7 +540,7 @@ router.get('/discount-card-utilization', requirePermission('reports'), async (re
               COUNT(DISTINCT t.id) as uses, COUNT(DISTINCT t.customer_id) as customers_used,
               COALESCE(SUM(t.discount_amount), 0) as total_discount_given
             FROM transactions t JOIN customers c ON t.customer_id = c.id
-            WHERE t.status='completed' AND t.promotion_name LIKE '%Discount Card%' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}
+            WHERE t.status='completed' AND t.promotion_name LIKE '%Discount Card%' AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bf}
             GROUP BY c.discount_card_type_id`,
       args: [s, e, ...bp],
     });
@@ -548,14 +555,14 @@ router.get('/discount-card-utilization', requirePermission('reports'), async (re
     const { rows: [neverUsedCount] } = await db.execute({
       sql: `SELECT COUNT(*) as c FROM customers c
             WHERE c.discount_card_number IS NOT NULL AND c.discount_card_number != '' AND c.active = 1
-              AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.customer_id = c.id AND t.status='completed' AND t.promotion_name LIKE '%Discount Card%' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf})`,
+              AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.customer_id = c.id AND t.status='completed' AND t.promotion_name LIKE '%Discount Card%' AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bf})`,
       args: [s, e, ...bp],
     });
     const { rows: neverUsed } = await db.execute({
       sql: `SELECT c.id, c.customer_number, c.first_name || ' ' || c.last_name as customer_name, dct.name as card_type, c.discount_card_number
             FROM customers c JOIN discount_card_types dct ON c.discount_card_type_id = dct.id
             WHERE c.discount_card_number IS NOT NULL AND c.discount_card_number != '' AND c.active = 1
-              AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.customer_id = c.id AND t.status='completed' AND t.promotion_name LIKE '%Discount Card%' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf})
+              AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.customer_id = c.id AND t.status='completed' AND t.promotion_name LIKE '%Discount Card%' AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bf})
             ORDER BY c.first_name LIMIT 50`,
       args: [s, e, ...bp],
     });
@@ -575,21 +582,21 @@ router.get('/discount-card-utilization', requirePermission('reports'), async (re
 router.get('/customer-retention', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const bf = branch_id ? ' AND t.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
 
     const { rows: [summary] } = await db.execute({
       sql: `WITH first_tx AS (
-              SELECT customer_id, MIN(date(created_at)) as first_date
+              SELECT customer_id, MIN(${sd('created_at')}) as first_date
               FROM transactions WHERE status='completed' AND customer_id IS NOT NULL
               GROUP BY customer_id
             ),
             active AS (
               SELECT DISTINCT t.customer_id, t.total, t.id
               FROM transactions t
-              WHERE t.status='completed' AND t.customer_id IS NOT NULL AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}
+              WHERE t.status='completed' AND t.customer_id IS NOT NULL AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bf}
             )
             SELECT
               COUNT(DISTINCT CASE WHEN ft.first_date >= date(?) THEN a.customer_id END) as new_customers,
@@ -601,16 +608,16 @@ router.get('/customer-retention', requirePermission('reports'), async (req, res)
     });
     const { rows: byDay } = await db.execute({
       sql: `WITH first_tx AS (
-              SELECT customer_id, MIN(date(created_at)) as first_date
+              SELECT customer_id, MIN(${sd('created_at')}) as first_date
               FROM transactions WHERE status='completed' AND customer_id IS NOT NULL
               GROUP BY customer_id
             )
-            SELECT date(t.created_at) as date,
-              COUNT(DISTINCT CASE WHEN ft.first_date = date(t.created_at) THEN t.customer_id END) as new_customers,
-              COUNT(DISTINCT CASE WHEN ft.first_date != date(t.created_at) THEN t.customer_id END) as repeat_customers
+            SELECT ${sd('t.created_at')} as date,
+              COUNT(DISTINCT CASE WHEN ft.first_date = ${sd('t.created_at')} THEN t.customer_id END) as new_customers,
+              COUNT(DISTINCT CASE WHEN ft.first_date != ${sd('t.created_at')} THEN t.customer_id END) as repeat_customers
             FROM transactions t JOIN first_tx ft ON ft.customer_id = t.customer_id
-            WHERE t.status='completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}
-            GROUP BY date(t.created_at) ORDER BY date`,
+            WHERE t.status='completed' AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bf}
+            GROUP BY ${sd('t.created_at')} ORDER BY date`,
       args: [s, e, ...bp],
     });
 
@@ -633,8 +640,8 @@ router.get('/customer-retention', requirePermission('reports'), async (req, res)
 router.get('/salesperson-leaderboard', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, quote_type } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const tf = quote_type ? ' AND q.quote_type = ?' : '';
     const tp = quote_type ? [quote_type] : [];
 
@@ -646,7 +653,7 @@ router.get('/salesperson-leaderboard', requirePermission('reports'), async (req,
             FROM quotations q
             LEFT JOIN employees e ON q.employee_id = e.id
             LEFT JOIN employees oe ON q.original_employee_id = oe.id
-            WHERE date(q.created_at) BETWEEN date(?) AND date(?)${tf}
+            WHERE ${sd('q.created_at')} BETWEEN date(?) AND date(?)${tf}
             GROUP BY COALESCE(oe.id, e.id)
             ORDER BY credited_sales DESC`,
       args: [s, e, ...tp],
@@ -673,13 +680,13 @@ router.get('/salesperson-leaderboard', requirePermission('reports'), async (req,
 router.get('/quote-funnel', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, quote_type } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const tf = quote_type ? ' AND quote_type = ?' : '';
     const tp = quote_type ? [quote_type] : [];
 
     const { rows: funnel } = await db.execute({
-      sql: `SELECT status, COUNT(*) as count FROM quotations WHERE date(created_at) BETWEEN date(?) AND date(?)${tf} GROUP BY status ORDER BY count DESC`,
+      sql: `SELECT status, COUNT(*) as count FROM quotations WHERE ${sd('created_at')} BETWEEN date(?) AND date(?)${tf} GROUP BY status ORDER BY count DESC`,
       args: [s, e, ...tp],
     });
 
@@ -694,7 +701,7 @@ router.get('/quote-funnel', requirePermission('reports'), async (req, res) => {
               COUNT(CASE WHEN submitted_at IS NOT NULL THEN 1 END) as draft_to_submitted_n,
               AVG(CASE WHEN approved_at IS NOT NULL AND submitted_at IS NOT NULL THEN julianday(approved_at) - julianday(submitted_at) END) as submitted_to_approved_days,
               COUNT(CASE WHEN approved_at IS NOT NULL AND submitted_at IS NOT NULL THEN 1 END) as submitted_to_approved_n
-            FROM quotations WHERE date(created_at) BETWEEN date(?) AND date(?)${tf}`,
+            FROM quotations WHERE ${sd('created_at')} BETWEEN date(?) AND date(?)${tf}`,
       args: [s, e, ...tp],
     });
     // Needs a join (converted-to timestamp lives on the linked transaction
@@ -704,7 +711,7 @@ router.get('/quote-funnel', requirePermission('reports'), async (req, res) => {
             FROM quotations q
             LEFT JOIN transactions t ON t.id = q.converted_to_tx
             LEFT JOIN rental_agreements ra ON ra.id = q.converted_to_agreement_id
-            WHERE q.accepted_at IS NOT NULL AND q.status = 'converted' AND date(q.created_at) BETWEEN date(?) AND date(?)${tfAliased}`,
+            WHERE q.accepted_at IS NOT NULL AND q.status = 'converted' AND ${sd('q.created_at')} BETWEEN date(?) AND date(?)${tfAliased}`,
       args: [s, e, ...tp],
     });
 
@@ -728,8 +735,8 @@ router.get('/quote-funnel', requirePermission('reports'), async (req, res) => {
 router.get('/crm-pipeline', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end } = req.query;
-    const s = start || new Date().toISOString().slice(0, 10);
-    const e = end || new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10);
+    const s = start || storeToday();
+    const e = end || storeDay(Date.now() + 90 * 86400000);
 
     const { rows: byStage } = await db.execute({
       sql: `SELECT o.stage, COUNT(*) as opp_count, COALESCE(SUM(o.value), 0) as total_value,
@@ -770,8 +777,8 @@ router.get('/crm-pipeline', requirePermission('reports'), async (req, res) => {
 router.get('/rental-utilization', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const bf = branch_id ? ' AND ra.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
 
@@ -821,8 +828,8 @@ router.get('/rental-utilization', requirePermission('reports'), async (req, res)
 router.get('/cash-variance', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const bf = branch_id ? ' AND ds.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
 
@@ -848,7 +855,7 @@ router.get('/cash-variance', requirePermission('reports'), async (req, res) => {
             JOIN drawer_sessions ds ON dr.session_id = ds.id
             LEFT JOIN employees e ON ds.employee_id = e.id
             LEFT JOIN branches b ON ds.branch_id = b.id
-            WHERE date(dr.reconciled_at) BETWEEN date(?) AND date(?)${bf}
+            WHERE ${sd('dr.reconciled_at')} BETWEEN date(?) AND date(?)${bf}
             ORDER BY dr.reconciled_at DESC`,
       args: [s, e, ...bp],
     });
@@ -936,26 +943,26 @@ const TAXABLE_SQL = (t = '') => `COALESCE(SUM(${t}subtotal - CASE WHEN ${t}disco
 router.get('/tax-collected', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const bf = branch_id ? ' AND branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
 
     const { rows: [summary] } = await db.execute({
       sql: `SELECT COUNT(*) as tx_count, ${TAXABLE_SQL()} as taxable_sales, COALESCE(SUM(tax_amount), 0) as tax_collected
-            FROM transactions WHERE status = 'completed' AND date(created_at) BETWEEN date(?) AND date(?)${bf}`,
+            FROM transactions WHERE status = 'completed' AND ${sd('created_at')} BETWEEN date(?) AND date(?)${bf}`,
       args: [s, e, ...bp],
     });
     const { rows: byDay } = await db.execute({
-      sql: `SELECT date(created_at) as date, ${TAXABLE_SQL()} as taxable_sales, COALESCE(SUM(tax_amount), 0) as tax_collected
-            FROM transactions WHERE status = 'completed' AND date(created_at) BETWEEN date(?) AND date(?)${bf}
-            GROUP BY date(created_at) ORDER BY date`,
+      sql: `SELECT ${sd('created_at')} as date, ${TAXABLE_SQL()} as taxable_sales, COALESCE(SUM(tax_amount), 0) as tax_collected
+            FROM transactions WHERE status = 'completed' AND ${sd('created_at')} BETWEEN date(?) AND date(?)${bf}
+            GROUP BY ${sd('created_at')} ORDER BY date`,
       args: [s, e, ...bp],
     });
     const { rows: byBranch } = await db.execute({
       sql: `SELECT t.branch_id, b.name as branch_name, ${TAXABLE_SQL('t.')} as taxable_sales, COALESCE(SUM(t.tax_amount), 0) as tax_collected
             FROM transactions t LEFT JOIN branches b ON t.branch_id = b.id
-            WHERE t.status = 'completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}
+            WHERE t.status = 'completed' AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bf}
             GROUP BY t.branch_id ORDER BY tax_collected DESC`,
       args: [s, e, ...bp],
     });
@@ -971,28 +978,28 @@ router.get('/tax-collected', requirePermission('reports'), async (req, res) => {
 router.get('/writeoffs', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const bf = branch_id ? ' AND p.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
 
     const { rows: [summary] } = await db.execute({
       sql: `SELECT COUNT(*) as writeoff_count, COALESCE(SUM(amount), 0) as total_written_off
-            FROM account_payments p WHERE p.payment_method = 'writeoff' AND date(p.created_at) BETWEEN date(?) AND date(?)${bf}`,
+            FROM account_payments p WHERE p.payment_method = 'writeoff' AND ${sd('p.created_at')} BETWEEN date(?) AND date(?)${bf}`,
       args: [s, e, ...bp],
     });
     const { rows: byCustomer } = await db.execute({
       sql: `SELECT c.id as customer_id, c.customer_number, c.first_name || ' ' || c.last_name as customer_name,
               COUNT(*) as writeoff_count, COALESCE(SUM(p.amount), 0) as total_written_off
             FROM account_payments p JOIN customers c ON p.customer_id = c.id
-            WHERE p.payment_method = 'writeoff' AND date(p.created_at) BETWEEN date(?) AND date(?)${bf}
+            WHERE p.payment_method = 'writeoff' AND ${sd('p.created_at')} BETWEEN date(?) AND date(?)${bf}
             GROUP BY c.id ORDER BY total_written_off DESC`,
       args: [s, e, ...bp],
     });
     const { rows: byBranch } = await db.execute({
       sql: `SELECT p.branch_id, b.name as branch_name, COUNT(*) as writeoff_count, COALESCE(SUM(p.amount), 0) as total_written_off
             FROM account_payments p LEFT JOIN branches b ON p.branch_id = b.id
-            WHERE p.payment_method = 'writeoff' AND date(p.created_at) BETWEEN date(?) AND date(?)${bf}
+            WHERE p.payment_method = 'writeoff' AND ${sd('p.created_at')} BETWEEN date(?) AND date(?)${bf}
             GROUP BY p.branch_id ORDER BY total_written_off DESC`,
       args: [s, e, ...bp],
     });
@@ -1004,7 +1011,7 @@ router.get('/writeoffs', requirePermission('reports'), async (req, res) => {
             JOIN customers c ON p.customer_id = c.id
             LEFT JOIN employees emp ON p.employee_id = emp.id
             LEFT JOIN branches b ON p.branch_id = b.id
-            WHERE p.payment_method = 'writeoff' AND date(p.created_at) BETWEEN date(?) AND date(?)${bf}
+            WHERE p.payment_method = 'writeoff' AND ${sd('p.created_at')} BETWEEN date(?) AND date(?)${bf}
             ORDER BY p.created_at DESC`,
       args: [s, e, ...bp],
     });
@@ -1020,15 +1027,15 @@ router.get('/writeoffs', requirePermission('reports'), async (req, res) => {
 router.get('/gross-margin', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const bf = branch_id ? ' AND t.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
 
     const { rows: [summary] } = await db.execute({
       sql: `SELECT COALESCE(SUM(ti.total), 0) as revenue, COALESCE(SUM(ti.quantity * COALESCE(ti.units_per, 1) * COALESCE(p.cost, 0)), 0) as cost
             FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id LEFT JOIN products p ON ti.product_id = p.id
-            WHERE t.status = 'completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}`,
+            WHERE t.status = 'completed' AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bf}`,
       args: [s, e, ...bp],
     });
     summary.margin = parseFloat((summary.revenue - summary.cost).toFixed(2));
@@ -1039,7 +1046,7 @@ router.get('/gross-margin', requirePermission('reports'), async (req, res) => {
               COALESCE(SUM(ti.total), 0) as revenue, COALESCE(SUM(ti.quantity * COALESCE(ti.units_per, 1) * COALESCE(p.cost, 0)), 0) as cost
             FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id
             LEFT JOIN products p ON ti.product_id = p.id LEFT JOIN categories c ON p.category_id = c.id
-            WHERE t.status = 'completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}
+            WHERE t.status = 'completed' AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bf}
             GROUP BY c.id ORDER BY revenue DESC`,
       args: [s, e, ...bp],
     });
@@ -1048,7 +1055,7 @@ router.get('/gross-margin', requirePermission('reports'), async (req, res) => {
               COALESCE(SUM(ti.total), 0) as revenue, COALESCE(SUM(ti.quantity * COALESCE(ti.units_per, 1) * COALESCE(p.cost, 0)), 0) as cost
             FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id
             LEFT JOIN products p ON ti.product_id = p.id LEFT JOIN branches b ON t.branch_id = b.id
-            WHERE t.status = 'completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}
+            WHERE t.status = 'completed' AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bf}
             GROUP BY t.branch_id ORDER BY revenue DESC`,
       args: [s, e, ...bp],
     });
@@ -1078,8 +1085,8 @@ const SUPPLIER_PERIOD_SQL = {
 router.get('/supplier-item-sales', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id, supplier_id } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const period = SUPPLIER_PERIOD_SQL[req.query.period] ? req.query.period : 'month';
     const tbf = branch_id ? ' AND t.branch_id = ?' : '';
     const rbf = branch_id ? ' AND r.branch_id = ?' : '';
@@ -1087,13 +1094,13 @@ router.get('/supplier-item-sales', requirePermission('reports'), async (req, res
 
     // Sale and return lines in range, each tagged with its item's supplier.
     const base = `WITH lines AS (
-        SELECT ti.product_id, t.created_at AS at, ti.quantity * COALESCE(ti.units_per, 1) AS units, ti.total AS sales, 0 AS ret_units, 0 AS returns
+        SELECT ti.product_id, datetime(t.created_at, '${storeOffsetModifier()}') AS at, ti.quantity * COALESCE(ti.units_per, 1) AS units, ti.total AS sales, 0 AS ret_units, 0 AS returns
         FROM transaction_items ti JOIN transactions t ON t.id = ti.transaction_id
-        WHERE t.status = 'completed' AND ti.product_id IS NOT NULL AND date(t.created_at) BETWEEN date(?) AND date(?)${tbf}
+        WHERE t.status = 'completed' AND ti.product_id IS NOT NULL AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${tbf}
         UNION ALL
-        SELECT ri.product_id, r.created_at, 0, 0, ri.quantity * COALESCE(ti.units_per, 1), ri.total
+        SELECT ri.product_id, datetime(r.created_at, '${storeOffsetModifier()}'), 0, 0, ri.quantity * COALESCE(ti.units_per, 1), ri.total
         FROM return_items ri JOIN returns r ON r.id = ri.return_id LEFT JOIN transaction_items ti ON ti.id = ri.transaction_item_id
-        WHERE r.status != 'cancelled' AND ri.product_id IS NOT NULL AND date(r.created_at) BETWEEN date(?) AND date(?)${rbf}
+        WHERE r.status != 'cancelled' AND ri.product_id IS NOT NULL AND ${sd('r.created_at')} BETWEEN date(?) AND date(?)${rbf}
       ),
       attr AS (
         SELECT p.id AS product_id, COALESCE(p.supplier_id, (
@@ -1173,8 +1180,8 @@ router.get('/supplier-item-sales', requirePermission('reports'), async (req, res
 router.get('/items-sold', requireAnyPermission('reports', 'inventory'), async (req, res) => {
   try {
     const { start, end, branch_id, category_id, brand, q } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const tbf = branch_id ? ' AND t.branch_id = ?' : '';
     const rbf = branch_id ? ' AND r.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
@@ -1198,11 +1205,11 @@ router.get('/items-sold', requireAnyPermission('reports', 'inventory'), async (r
       sql: `WITH lines AS (
           SELECT ti.product_id, t.id AS tx_id, ti.quantity * COALESCE(ti.units_per, 1) AS units, ti.total AS sales, 0 AS ret_units, 0 AS returns
           FROM transaction_items ti JOIN transactions t ON t.id = ti.transaction_id
-          WHERE t.status = 'completed' AND ti.product_id IS NOT NULL AND date(t.created_at) BETWEEN date(?) AND date(?)${tbf}
+          WHERE t.status = 'completed' AND ti.product_id IS NOT NULL AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${tbf}
           UNION ALL
           SELECT ri.product_id, NULL, 0, 0, ri.quantity * COALESCE(ti.units_per, 1), ri.total
           FROM return_items ri JOIN returns r ON r.id = ri.return_id LEFT JOIN transaction_items ti ON ti.id = ri.transaction_item_id
-          WHERE r.status != 'cancelled' AND ri.product_id IS NOT NULL AND date(r.created_at) BETWEEN date(?) AND date(?)${rbf}
+          WHERE r.status != 'cancelled' AND ri.product_id IS NOT NULL AND ${sd('r.created_at')} BETWEEN date(?) AND date(?)${rbf}
         )
         SELECT p.id AS product_id, p.sku, p.name AS product_name, COALESCE(c.name, 'Uncategorized') AS category_name, p.brand,
           COUNT(DISTINCT l.tx_id) AS sales_count,
@@ -1258,8 +1265,8 @@ router.get('/items-sold', requireAnyPermission('reports', 'inventory'), async (r
 router.get('/items-returned', requireAnyPermission('reports', 'inventory'), async (req, res) => {
   try {
     const { start, end, branch_id, category_id, brand, q, resolution } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     let rf = " AND r.status != 'cancelled'";
     const rp = [];
     if (branch_id) { rf += ' AND r.branch_id = ?'; rp.push(Number(branch_id)); }
@@ -1283,7 +1290,7 @@ router.get('/items-returned', requireAnyPermission('reports', 'inventory'), asyn
             JOIN products p ON p.id = ri.product_id
             LEFT JOIN transaction_items ti ON ti.id = ri.transaction_item_id
             LEFT JOIN customers c ON c.id = r.customer_id
-            WHERE date(r.created_at) BETWEEN date(?) AND date(?)${rf}
+            WHERE ${sd('r.created_at')} BETWEEN date(?) AND date(?)${rf}
               AND upper(COALESCE(p.sku, '')) != ?${pf}
             ORDER BY r.created_at`,
       args: [s, e, ...rp, SERIAL_NUMBER_SKU, ...pp],
@@ -1297,7 +1304,7 @@ router.get('/items-returned', requireAnyPermission('reports', 'inventory'), asyn
       for (const r of prows) products.set(r.id, r);
       const { rows: srows } = await db.execute({
         sql: `SELECT ti.product_id, SUM(ti.quantity * COALESCE(ti.units_per, 1)) AS units FROM transaction_items ti JOIN transactions t ON t.id = ti.transaction_id
-              WHERE t.status = 'completed' AND ti.product_id IN (${ph}) AND date(t.created_at) BETWEEN date(?) AND date(?)${branch_id ? ' AND t.branch_id = ?' : ''}
+              WHERE t.status = 'completed' AND ti.product_id IN (${ph}) AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${branch_id ? ' AND t.branch_id = ?' : ''}
               GROUP BY ti.product_id`,
         args: [...ids, s, e, ...(branch_id ? [Number(branch_id)] : [])],
       });
@@ -1428,8 +1435,8 @@ router.get('/rental-deposits', requirePermission('reports'), async (req, res) =>
   try {
     const { start, end, branch_id } = req.query;
     const basis = req.query.basis === 'settled' ? 'settled' : 'deposit';
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const dateExpr = basis === 'settled' ? 'ra.returned_at' : 'COALESCE(co.created_at, ra.created_at)';
     const bf = branch_id ? ' AND ra.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
@@ -1528,8 +1535,8 @@ const SALES_DEPARTMENTS = ['retail', 'rental', 'work_order', 'special_project'];
 router.get('/sales-by-department', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const bf = branch_id ? ' AND t.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
 
@@ -1548,7 +1555,7 @@ router.get('/sales-by-department', requirePermission('reports'), async (req, res
                   - COALESCE((SELECT SUM(ra.deposit_total) FROM rental_agreements ra WHERE ra.checkout_transaction_id = t.id), 0)
                   + COALESCE((SELECT SUM(ra.deposit_total) FROM rental_agreements ra WHERE ra.settlement_transaction_id = t.id), 0) as amount
               FROM transactions t
-              WHERE t.status = 'completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}
+              WHERE t.status = 'completed' AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bf}
             ) x
             LEFT JOIN branches b ON x.branch_id = b.id
             GROUP BY x.branch_id, x.department`,
@@ -1589,8 +1596,8 @@ router.get('/sales-by-department', requirePermission('reports'), async (req, res
 router.get('/sales-by-promotion', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const bf = branch_id ? ' AND t.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
 
@@ -1603,14 +1610,14 @@ router.get('/sales-by-promotion', requirePermission('reports'), async (req, res)
             LEFT JOIN branches b ON t.branch_id = b.id
             WHERE t.status = 'completed' AND t.promotion_name IS NOT NULL AND t.promotion_name <> ''
               AND t.promotion_name NOT LIKE '%Discount Card%'
-              AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}
+              AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bf}
             GROUP BY t.branch_id, t.promotion_name`,
       args: [s, e, ...bp],
     });
     // All completed sales per branch, so promo sales can be shown as a share.
     const { rows: allSales } = await db.execute({
       sql: `SELECT t.branch_id, COALESCE(SUM(t.total), 0) as total FROM transactions t
-            WHERE t.status = 'completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}
+            WHERE t.status = 'completed' AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bf}
             GROUP BY t.branch_id`,
       args: [s, e, ...bp],
     });
@@ -1648,11 +1655,11 @@ router.get('/sales-by-promotion', requirePermission('reports'), async (req, res)
 router.get('/online-sales', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const bf = branch_id ? ' AND t.branch_id = ?' : '';
     const bp = branch_id ? [branch_id] : [];
-    const base = `t.status = 'completed' AND date(t.created_at) BETWEEN date(?) AND date(?)${bf}`;
+    const base = `t.status = 'completed' AND ${sd('t.created_at')} BETWEEN date(?) AND date(?)${bf}`;
     const online = `t.source IN ('online','woocommerce')`;
     const counted = `${online} AND COALESCE(t.fulfillment_status,'') <> 'cancelled'`;
     const args = [s, e, ...bp];
@@ -1664,7 +1671,7 @@ router.get('/online-sales', requirePermission('reports'), async (req, res) => {
       db.execute({ sql: `SELECT t.source, ${agg} FROM transactions t WHERE ${base} AND ${counted} GROUP BY t.source ORDER BY total DESC`, args }),
       db.execute({ sql: `SELECT COALESCE(t.fulfillment_status, 'pending') as fulfillment_status, ${agg} FROM transactions t WHERE ${base} AND ${online} GROUP BY 1 ORDER BY order_count DESC`, args }),
       db.execute({ sql: `SELECT t.branch_id, b.name as branch_name, ${agg} FROM transactions t LEFT JOIN branches b ON t.branch_id = b.id WHERE ${base} AND ${counted} GROUP BY t.branch_id ORDER BY total DESC`, args }),
-      db.execute({ sql: `SELECT date(t.created_at) as date, ${agg} FROM transactions t WHERE ${base} AND ${counted} GROUP BY date(t.created_at) ORDER BY date`, args }),
+      db.execute({ sql: `SELECT ${sd('t.created_at')} as date, ${agg} FROM transactions t WHERE ${base} AND ${counted} GROUP BY ${sd('t.created_at')} ORDER BY date`, args }),
       db.execute({ sql: `SELECT ti.product_name, ti.sku, SUM(ti.quantity) as quantity, COUNT(DISTINCT t.id) as order_count, COALESCE(SUM(ti.total), 0) as total
             FROM transaction_items ti JOIN transactions t ON ti.transaction_id = t.id
             WHERE ${base} AND ${counted}
@@ -1683,8 +1690,8 @@ router.get('/online-sales', requirePermission('reports'), async (req, res) => {
 router.get('/hourly-sales', requirePermission('reports'), async (req, res) => {
   try {
     const { start, end, branch_id } = req.query;
-    const s = start || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const e = end || new Date().toISOString().slice(0, 10);
+    const s = start || storeDay(Date.now() - 30 * 86400000);
+    const e = end || storeToday();
     const { rows: tzRows } = await db.execute({ sql: "SELECT value FROM settings WHERE key = 'store_timezone'", args: [] });
     let timeZone = (tzRows[0]?.value || '').trim() || 'America/Jamaica';
     try { new Intl.DateTimeFormat('en-US', { timeZone }); } catch (err) { timeZone = 'America/Jamaica'; }

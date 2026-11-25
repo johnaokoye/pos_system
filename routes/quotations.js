@@ -12,7 +12,7 @@ const { feeFor, getBranchStock, buildRentalLines, revalidateQuoteLines, insertPe
 const { ratePlanError } = require('../lib/rentalPricing');
 const { allocateTicketDiscount } = require('../lib/ticketDiscount');
 const { RENT_PERIOD_UNITS, quoteLineForSale } = require('../lib/quoteLines');
-const { storeToday } = require('../lib/storeTime');
+const { storeToday, storeOffsetModifier } = require('../lib/storeTime');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -62,8 +62,8 @@ router.get('/', async (req, res) => {
     if (quote_type) { sql += ' AND q.quote_type = ?'; params.push(quote_type); }
     if (customer_id) { sql += ' AND q.customer_id = ?'; params.push(customer_id); }
     if (quote_number) { sql += ' AND q.quote_number LIKE ?'; params.push(`%${quote_number}%`); }
-    if (start) { sql += ' AND date(q.created_at) >= ?'; params.push(start); }
-    if (end) { sql += ' AND date(q.created_at) <= ?'; params.push(end); }
+    if (start) { sql += ' AND date(q.created_at, ?) >= ?'; params.push(storeOffsetModifier(), start); }
+    if (end) { sql += ' AND date(q.created_at, ?) <= ?'; params.push(storeOffsetModifier(), end); }
     if (special_order === '1') { sql += ` AND ${IS_SPECIAL_ORDER_SQL}`; }
     // Special Projects stay invisible to anyone without special_projects/
     // special_projects_approve, even in the unfiltered list — "only a few

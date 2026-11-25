@@ -6,6 +6,7 @@
 // required. A receipt is reversed as a unit, like a PO receipt.
 const express = require('express');
 const router = express.Router();
+const { storeOffsetModifier } = require('../lib/storeTime');
 const { db } = require('../database');
 const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
@@ -206,9 +207,9 @@ router.get('/', async (req, res) => {
     if (supplier_id) { where.push('r.supplier_id = ?'); args.push(supplier_id); }
     if (branch_id) { where.push('r.branch_id = ?'); args.push(branch_id); }
     if (status) { where.push('r.status = ?'); args.push(status); }
-    // received_at is UTC; the dates are store days, close enough for a filter.
-    if (start) { where.push('date(r.received_at) >= ?'); args.push(start); }
-    if (end) { where.push('date(r.received_at) <= ?'); args.push(end); }
+    // received_at is UTC; the dates are store days.
+    if (start) { where.push('date(r.received_at, ?) >= ?'); args.push(storeOffsetModifier(), start); }
+    if (end) { where.push('date(r.received_at, ?) <= ?'); args.push(storeOffsetModifier(), end); }
     if (q) {
       const like = `%${String(q).trim()}%`;
       where.push(`(r.receipt_number LIKE ? OR r.vendor_invoice_number LIKE ? OR r.notes LIKE ? OR s.name LIKE ?

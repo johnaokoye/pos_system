@@ -27,7 +27,7 @@ function selfOverrideError(overrideId, ticketPeople) {
   return 'A discount over the store limit must be approved by another manager — not the person who created or is ringing up this ticket';
 }
 const { nextNumber } = require('../lib/nextNumber');
-const { refreshStoreTz, storeToday } = require('../lib/storeTime');
+const { refreshStoreTz, storeToday, storeOffsetModifier } = require('../lib/storeTime');
 const { blockedMessage, creditLimitError, quoteCreditHold } = require('../lib/creditBlock');
 const { resolveUnit, lineName, parseQty, stockUnits } = require('../lib/units');
 const { isSerialNumberProduct, serialNumberLabel, serialNumberOf, serialClashError } = require('../lib/serialNumber');
@@ -279,8 +279,8 @@ router.get('/', requireTransactionsList, async (req, res) => {
       WHERE 1=1`;
     const params = [];
     if (transaction_number) { sql += ' AND t.transaction_number LIKE ?'; params.push(`%${transaction_number}%`); }
-    if (start) { sql += ' AND date(t.created_at) >= date(?)'; params.push(start); }
-    if (end) { sql += ' AND date(t.created_at) <= date(?)'; params.push(end); }
+    if (start) { sql += ' AND date(t.created_at, ?) >= date(?)'; params.push(storeOffsetModifier(), start); }
+    if (end) { sql += ' AND date(t.created_at, ?) <= date(?)'; params.push(storeOffsetModifier(), end); }
     if (customer_id) { sql += ' AND t.customer_id = ?'; params.push(customer_id); }
     if (customer_name) { sql += " AND (c.first_name || ' ' || c.last_name) LIKE ?"; params.push(`%${customer_name}%`); }
     if (status) { sql += ' AND t.status = ?'; params.push(status); }
@@ -548,8 +548,8 @@ router.get('/returns', requirePermission('transactions'), async (req, res) => {
       LEFT JOIN branches b ON r.branch_id = b.id
       WHERE 1=1`;
     const args = [];
-    if (start) { sql += ' AND date(r.created_at) >= date(?)'; args.push(start); }
-    if (end) { sql += ' AND date(r.created_at) <= date(?)'; args.push(end); }
+    if (start) { sql += ' AND date(r.created_at, ?) >= date(?)'; args.push(storeOffsetModifier(), start); }
+    if (end) { sql += ' AND date(r.created_at, ?) <= date(?)'; args.push(storeOffsetModifier(), end); }
     if (branch_id) { sql += ' AND r.branch_id = ?'; args.push(branch_id); }
     if (resolution) { sql += ' AND r.resolution = ?'; args.push(resolution); }
     if (customer_name) { sql += " AND (c.first_name || ' ' || c.last_name) LIKE ?"; args.push(`%${customer_name}%`); }
@@ -587,8 +587,8 @@ router.get('/customer-payments', requirePermission('transactions'), async (req, 
       LEFT JOIN branches b ON p.branch_id = b.id
       WHERE p.payment_method NOT IN ('writeoff', 'credit_note', 'tax_exempt', 'contra')`;
     const args = [];
-    if (start) { sql += ' AND date(p.created_at) >= date(?)'; args.push(start); }
-    if (end) { sql += ' AND date(p.created_at) <= date(?)'; args.push(end); }
+    if (start) { sql += ' AND date(p.created_at, ?) >= date(?)'; args.push(storeOffsetModifier(), start); }
+    if (end) { sql += ' AND date(p.created_at, ?) <= date(?)'; args.push(storeOffsetModifier(), end); }
     if (branch_id) { sql += ' AND p.branch_id = ?'; args.push(branch_id); }
     if (payment_method) { sql += ' AND p.payment_method = ?'; args.push(payment_method); }
     if (customer_name) { sql += " AND ((c.first_name || ' ' || c.last_name) LIKE ? OR c.customer_number LIKE ?)"; args.push(`%${customer_name}%`, `%${customer_name}%`); }

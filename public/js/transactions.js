@@ -2,8 +2,8 @@
 Object.assign(App, {
   // ─── Transactions ─────────────────────────────────────────
   async renderTransactions() {
-    const today = new Date().toISOString().slice(0,10);
-    const weekAgo = new Date(Date.now() - 7*86400000).toISOString().slice(0,10);
+    const today = this._storeDay(new Date());
+    const weekAgo = this._storeDay(new Date(Date.now() - 7*86400000));
     const branches = this.currentUser.branches || [];
     // A sales manager can filter by who rang a sale up / who it's credited
     // to and change the credit (one sale or a selection).
@@ -67,8 +67,8 @@ Object.assign(App, {
   // ─── Online Orders Dashboard ───────────────────────────────────────────────
 
   async renderOnlineOrders() {
-    const today = new Date().toISOString().slice(0,10);
-    const weekAgo = new Date(Date.now()-7*86400000).toISOString().slice(0,10);
+    const today = this._storeDay(new Date());
+    const weekAgo = this._storeDay(new Date(Date.now()-7*86400000));
     const [txs, settingRows] = await Promise.all([
       this.api('GET', `/transactions?source=online&start=${weekAgo}&end=${today}`),
       this.api('GET', '/settings').catch(() => [])

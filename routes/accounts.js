@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const { storeOffsetModifier, storeToday } = require('../lib/storeTime');
 const { db } = require('../database');
 const { runCreditCheck } = require('./customers');
 const { requirePermission, can } = require('../lib/permissions');
@@ -139,8 +140,8 @@ router.get('/stats', async (req, res) => {
     const scope = arBranch(req);
     const rows = await arAccounts(scope);
     const owed = r => scope.by === 'invoice' && scope.branch ? r.branch_balance : (Number(r.account_balance) || 0);
-    let paySql = "SELECT COALESCE(SUM(p.amount), 0) AS n FROM account_payments p LEFT JOIN customers c ON c.id = p.customer_id WHERE date(p.created_at) = date('now')";
-    const payArgs = [];
+    let paySql = "SELECT COALESCE(SUM(p.amount), 0) AS n FROM account_payments p LEFT JOIN customers c ON c.id = p.customer_id WHERE date(p.created_at, ?) = ?";
+    const payArgs = [storeOffsetModifier(), storeToday()];
     if (scope.branch && scope.by === 'home') { paySql += HOME_SQL(scope); if (scope.branch !== 'none') payArgs.push(scope.branch); }
     if (scope.branch && scope.by === 'invoice') { paySql += scope.branch === 'none' ? ' AND p.branch_id IS NULL' : ' AND p.branch_id = ?'; if (scope.branch !== 'none') payArgs.push(scope.branch); }
     const { rows: [{ n }] } = await db.execute({ sql: paySql, args: payArgs });
@@ -367,8 +368,8 @@ router.get('/statement/:customer_id', async (req, res) => {
                FROM account_payments p LEFT JOIN employees e ON p.employee_id = e.id
                WHERE p.customer_id = ?`;
     const params = [req.params.customer_id];
-    if (start) { sql += ' AND date(p.created_at) >= ?'; params.push(start); }
-    if (end)   { sql += ' AND date(p.created_at) <= ?'; params.push(end); }
+    if (start) { sql += ' AND date(p.created_at, ?) >= ?'; params.push(storeOffsetModifier(), start); }
+    if (end)   { sql += ' AND date(p.created_at, ?) <= ?'; params.push(storeOffsetModifier(), end); }
     sql += ' ORDER BY p.created_at ASC';
     const { rows: payments } = await db.execute({ sql, args: params });
     for (const p of payments) {
@@ -424,8 +425,8 @@ router.get('/payments', async (req, res) => {
     const scope = arBranch(req);
     if (scope.branch && scope.by === 'home') { sql += HOME_SQL(scope); if (scope.branch !== 'none') params.push(scope.branch); }
     if (scope.branch && scope.by === 'invoice') { sql += scope.branch === 'none' ? ' AND p.branch_id IS NULL' : ' AND p.branch_id = ?'; if (scope.branch !== 'none') params.push(scope.branch); }
-    if (start) { sql += ' AND date(p.created_at) >= ?'; params.push(start); }
-    if (end) { sql += ' AND date(p.created_at) <= ?'; params.push(end); }
+    if (start) { sql += ' AND date(p.created_at, ?) >= ?'; params.push(storeOffsetModifier(), start); }
+    if (end) { sql += ' AND date(p.created_at, ?) <= ?'; params.push(storeOffsetModifier(), end); }
     // Free-text search: payment #, reference, method, customer (name,
     // business, number) or the employee who took it.
     if (q && String(q).trim()) {

@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const { storeOffsetModifier } = require('../lib/storeTime');
 const { db } = require('../database');
 const { requirePermission, can } = require('../lib/permissions');
 const { resolveApprovalSignature } = require('../lib/signatures');
@@ -63,8 +64,8 @@ router.get('/', async (req, res) => {
     if (request_type) { sql += ' AND pr.request_type = ?'; params.push(request_type); }
     if (branch_id) { sql += ' AND pr.branch_id = ?'; params.push(branch_id); }
     if (employee_id) { sql += ' AND pr.employee_id = ?'; params.push(employee_id); }
-    if (start) { sql += ' AND date(pr.created_at) >= ?'; params.push(start); }
-    if (end) { sql += ' AND date(pr.created_at) <= ?'; params.push(end); }
+    if (start) { sql += ' AND date(pr.created_at, ?) >= ?'; params.push(storeOffsetModifier(), start); }
+    if (end) { sql += ' AND date(pr.created_at, ?) <= ?'; params.push(storeOffsetModifier(), end); }
     // Free-text search: PR number, department, notes, requester, supplier, the
     // PO it became, or any line's item name or SKU.
     if (q && String(q).trim()) {

@@ -14,7 +14,7 @@ const path = require('path');
 const fs = require('fs');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 const { getMissingRentalFields, RENTAL_APPROVED_SQL } = require('../lib/rentals');
-const { storeToday } = require('../lib/storeTime');
+const { storeToday, storeOffsetModifier } = require('../lib/storeTime');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -1003,8 +1003,8 @@ router.get('/:id/transactions', requireAuth, async (req, res) => {
     const { start, end } = req.query;
     let sql = 'SELECT * FROM transactions WHERE customer_id = ?';
     const args = [req.params.id];
-    if (start) { sql += ' AND date(created_at) >= ?'; args.push(start); }
-    if (end) { sql += ' AND date(created_at) <= ?'; args.push(end); }
+    if (start) { sql += ' AND date(created_at, ?) >= ?'; args.push(storeOffsetModifier(), start); }
+    if (end) { sql += ' AND date(created_at, ?) <= ?'; args.push(storeOffsetModifier(), end); }
     sql += ' ORDER BY created_at DESC';
     const { rows: transactions } = await db.execute({ sql, args });
     res.json(transactions);
@@ -1020,8 +1020,8 @@ router.get('/:id/payments', requireAuth, async (req, res) => {
     const { start, end } = req.query;
     let sql = 'SELECT id, payment_number, created_at, amount, payment_method, notes FROM account_payments WHERE customer_id = ?';
     const args = [req.params.id];
-    if (start) { sql += ' AND date(created_at) >= ?'; args.push(start); }
-    if (end) { sql += ' AND date(created_at) <= ?'; args.push(end); }
+    if (start) { sql += ' AND date(created_at, ?) >= ?'; args.push(storeOffsetModifier(), start); }
+    if (end) { sql += ' AND date(created_at, ?) <= ?'; args.push(storeOffsetModifier(), end); }
     sql += ' ORDER BY created_at DESC';
     const { rows } = await db.execute({ sql, args });
     res.json(rows);

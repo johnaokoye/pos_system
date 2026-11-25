@@ -1635,8 +1635,8 @@ Object.assign(App, {
   // ─── CRM Pipeline / Weighted Forecast ───────────────────────────────────
 
   showCrmPipelineReport() {
-    const today = new Date().toISOString().slice(0,10);
-    const in90 = new Date(Date.now() + 90*86400000).toISOString().slice(0,10);
+    const today = this._storeDay(new Date());
+    const in90 = this._storeDay(new Date(Date.now() + 90*86400000));
     const filters = `<input type="date" id="cp-start" value="${today}" style="width:150px"><span>to</span><input type="date" id="cp-end" value="${in90}" style="width:150px">`;
     this._showReportModal('CRM Pipeline / Weighted Forecast', filters, 'loadCrmPipelineReport');
   },
@@ -1821,8 +1821,9 @@ Object.assign(App, {
   },
 
   _reportDateRangeFilters(startId, endId, monthsBack = 1) {
-    const today = new Date().toISOString().slice(0,10);
-    const start = new Date(new Date().getFullYear(), new Date().getMonth() - (monthsBack - 1), 1).toISOString().slice(0,10);
+    const today = this._storeDay(new Date());
+    const [y, m] = today.split('-').map(Number);
+    const start = new Date(Date.UTC(y, m - 1 - (monthsBack - 1), 1)).toISOString().slice(0,10);
     return `<input type="date" id="${startId}" value="${start}" style="width:150px">
       <span>to</span>
       <input type="date" id="${endId}" value="${today}" style="width:150px">`;
@@ -2155,8 +2156,8 @@ Object.assign(App, {
   },
 
   async renderReports() {
-    const today = new Date().toISOString().slice(0,10);
-    const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0,10);
+    const today = this._storeDay(new Date());
+    const monthStart = `${today.slice(0, 7)}-01`;
     const branches = await this.api('GET', '/branches').catch(() => []);
 
     // The user may have navigated to a different section while /branches was

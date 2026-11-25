@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { storeOffsetModifier, storeToday } = require('../lib/storeTime');
 const { syncPhoneKeys } = require('../lib/phoneKeys');
 const { calcCommission } = require('./commissions');
 const { findDuplicateCustomers, isHardDuplicate, hardDuplicateError } = require('./customers');
@@ -53,7 +54,7 @@ router.get('/dashboard', async (req, res) => {
     const { rows: leadsByStatus } = await db.execute({ sql: `SELECT status, COUNT(*) as count, COALESCE(SUM(estimated_value),0) as value FROM crm_leads WHERE 1=1${leadScope} GROUP BY status`, args: leadArgs });
     const { rows: oppsByStage } = await db.execute({ sql: `SELECT stage, COUNT(*) as count, COALESCE(SUM(value),0) as value FROM crm_opportunities WHERE stage NOT IN ('closed_won','closed_lost')${oppScope} GROUP BY stage`, args: oppArgs });
     const { rows: [pipelineTotal] } = await db.execute({ sql: `SELECT COALESCE(SUM(value),0) as total FROM crm_opportunities WHERE stage NOT IN ('closed_won','closed_lost')${oppScope}`, args: oppArgs });
-    const { rows: [wonThisMonth] } = await db.execute({ sql: `SELECT COUNT(*) as count, COALESCE(SUM(value),0) as value FROM crm_opportunities WHERE stage = 'closed_won' AND strftime('%Y-%m', won_at) = strftime('%Y-%m', 'now')${oppScope}`, args: oppArgs });
+    const { rows: [wonThisMonth] } = await db.execute({ sql: `SELECT COUNT(*) as count, COALESCE(SUM(value),0) as value FROM crm_opportunities WHERE stage = 'closed_won' AND strftime('%Y-%m', won_at, ?) = ?${oppScope}`, args: [storeOffsetModifier(), storeToday().slice(0, 7), ...oppArgs] });
     const { rows: upcomingActivities } = await db.execute({ sql: `SELECT a.*, e.first_name || ' ' || e.last_name as employee_name, l.first_name || ' ' || l.last_name as lead_name, l.company as lead_company, c.first_name || ' ' || c.last_name as customer_name FROM crm_activities a LEFT JOIN employees e ON a.employee_id = e.id LEFT JOIN crm_leads l ON a.lead_id = l.id LEFT JOIN customers c ON a.customer_id = c.id WHERE a.completed = 0 AND a.due_date >= datetime('now')${actScope} ORDER BY a.due_date ASC LIMIT 10`, args: mine ? [meId] : [] });
     const { rows: [overdueActivities] } = await db.execute({ sql: `SELECT COUNT(*) as count FROM crm_activities a WHERE a.completed = 0 AND a.due_date < datetime('now')${actScope}`, args: mine ? [meId] : [] });
     const { rows: recentLeads } = await db.execute({ sql: `SELECT l.*, e.first_name || ' ' || e.last_name as assigned_name FROM crm_leads l LEFT JOIN employees e ON l.assigned_to = e.id WHERE 1=1${leadScope} ORDER BY l.created_at DESC LIMIT 5`, args: leadArgs });

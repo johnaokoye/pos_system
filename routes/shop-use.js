@@ -3,6 +3,7 @@ const router = express.Router();
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const { storeOffsetModifier } = require('../lib/storeTime');
 const { db } = require('../database');
 const { can, requireAnyPermission, requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
@@ -394,8 +395,8 @@ router.get('/requests', inModule, async (req, res) => {
       }
     }
     if (q.department) { sql += ' AND LOWER(r.department) = LOWER(?)'; args.push(q.department); }
-    if (q.from) { sql += ' AND COALESCE(r.requested_date, date(r.created_at)) >= ?'; args.push(q.from); }
-    if (q.to) { sql += ' AND COALESCE(r.requested_date, date(r.created_at)) <= ?'; args.push(q.to); }
+    if (q.from) { sql += ' AND COALESCE(r.requested_date, date(r.created_at, ?)) >= ?'; args.push(storeOffsetModifier(), q.from); }
+    if (q.to) { sql += ' AND COALESCE(r.requested_date, date(r.created_at, ?)) <= ?'; args.push(storeOffsetModifier(), q.to); }
     if (q.q && String(q.q).trim()) {
       const like = `%${String(q.q).trim()}%`;
       sql += ` AND (r.request_number LIKE ? OR r.reason LIKE ? OR r.equipment_ref LIKE ? OR r.project_ref LIKE ? OR (e.first_name || ' ' || e.last_name) LIKE ?
@@ -1882,8 +1883,8 @@ async function buildReport(type, q) {
     if (q.branch_id) { sql += ' AND t.branch_id = ?'; args.push(q.branch_id); }
     if (q.department) { sql += ' AND LOWER(t.department) = LOWER(?)'; args.push(q.department); }
     if (q.tool_status) { sql += ' AND t.status = ?'; args.push(q.tool_status); }
-    if (q.from) { sql += ' AND date(t.issued_at) >= ?'; args.push(q.from); }
-    if (q.to) { sql += ' AND date(t.issued_at) <= ?'; args.push(q.to); }
+    if (q.from) { sql += ' AND date(t.issued_at, ?) >= ?'; args.push(storeOffsetModifier(), q.from); }
+    if (q.to) { sql += ' AND date(t.issued_at, ?) <= ?'; args.push(storeOffsetModifier(), q.to); }
     sql += ' ORDER BY t.tool_number';
     const { rows } = await db.execute({ sql, args });
     return {
@@ -1934,8 +1935,8 @@ router.get('/audit', requireAnyPermission('shop_use_finance', 'shop_use_reports'
   try {
     let sql = 'SELECT a.*, r.request_number FROM shop_use_audit a LEFT JOIN shop_use_requests r ON r.id = a.request_id WHERE 1=1';
     const args = [];
-    if (req.query.from) { sql += ' AND date(a.created_at) >= ?'; args.push(req.query.from); }
-    if (req.query.to) { sql += ' AND date(a.created_at) <= ?'; args.push(req.query.to); }
+    if (req.query.from) { sql += ' AND date(a.created_at, ?) >= ?'; args.push(storeOffsetModifier(), req.query.from); }
+    if (req.query.to) { sql += ' AND date(a.created_at, ?) <= ?'; args.push(storeOffsetModifier(), req.query.to); }
     if (req.query.entity) { sql += ' AND a.entity = ?'; args.push(req.query.entity); }
     sql += ' ORDER BY a.id DESC LIMIT 2000';
     const { rows } = await db.execute({ sql, args });

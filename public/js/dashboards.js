@@ -535,8 +535,8 @@ Object.assign(App, {
 
     const days = [];
     for (let i = 6; i >= 0; i--) {
-      const d = new Date(); d.setDate(d.getDate() - i);
-      days.push(d.toISOString().slice(0, 10));
+      // Store-clock days, the same ones the server's last7Days is keyed by.
+      days.push(this._storeDay(new Date(Date.now() - i * 86400000)));
     }
     const dayMap = {};
     data.last7Days.forEach(r => { dayMap[r.date] = r.sales; });

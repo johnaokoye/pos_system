@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const { storeOffsetModifier } = require('../lib/storeTime');
 const { db } = require('../database');
 const { resolvePurchaseUnit, lineName, stockUnits } = require('../lib/units');
 const { syncBinQty } = require('../lib/binSync');
@@ -106,8 +107,8 @@ router.get('/', async (req, res) => {
     if (status) { sql += ' AND po.status = ?'; params.push(status); }
     if (supplier_id) { sql += ' AND po.supplier_id = ?'; params.push(supplier_id); }
     if (branch_id) { sql += ' AND po.branch_id = ?'; params.push(branch_id); }
-    if (start) { sql += ' AND date(po.created_at) >= ?'; params.push(start); }
-    if (end) { sql += ' AND date(po.created_at) <= ?'; params.push(end); }
+    if (start) { sql += ' AND date(po.created_at, ?) >= ?'; params.push(storeOffsetModifier(), start); }
+    if (end) { sql += ' AND date(po.created_at, ?) <= ?'; params.push(storeOffsetModifier(), end); }
     // Free-text search: PO/vendor order number, supplier, notes, or any line's
     // item name or SKU.
     if (q && String(q).trim()) {
