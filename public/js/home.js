@@ -155,11 +155,13 @@ Object.assign(App, {
           <div class="home-hours" id="home-hours"></div>
         </div>
         <div class="home-side">
+          <div class="home-card" id="home-trf-late" style="display:none;border-left:4px solid var(--danger)"></div>
           <div class="home-card"><h3>Sun today</h3><div id="home-sun"><div style="color:var(--text-muted);font-size:13px">—</div></div></div>
           <div class="home-card"><h3>Next 3 days</h3><div id="home-forecast" class="home-forecast"><div style="color:var(--text-muted);font-size:13px;grid-column:1/-1">—</div></div></div>
           ${links.length ? `<div class="home-card"><h3>Go to</h3><div class="home-links">${links.map(t => `<div class="home-link" style="background:${t.color}" onclick="App.showSection('${t.section}')"><svg viewBox="0 0 24 24" fill="currentColor">${t.icon}</svg>${t.label}</div>`).join('')}</div></div>` : ''}
         </div>
       </div>`;
+    this._paintHomeTransfersLate();
     const stars = document.getElementById('home-stars');
     stars.innerHTML = Array.from({ length: 40 }, (_, i) => `<i style="left:${(i * 37) % 100}%;top:${(i * 53) % 70}%;animation-delay:${(i % 7) * .4}s"></i>`).join('');
 

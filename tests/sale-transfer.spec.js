@@ -250,3 +250,42 @@ test('an open sale transfer can always be found and received from Collections', 
   await card.locator('button:has-text("Receive")').click();
   await expect(page.locator('.modal-title')).toContainText(trf.transfer_number);
 });
+
+// A transfer sent and not received within transfer_not_received_days (default
+// 2) is listed for the receiving branch and the senders: Home card, Branch
+// Transfers banner (with Receive) and a once-a-day notice.
+test('transfers sent but not received are listed with Receive', async ({ page }) => {
+  const s = await setup(page);
+  const sale = await sell(page, s);
+  const trf = (await api(page, 'GET', `/transactions/${sale.id}`)).sale_transfers[0];
+  const full = await api(page, 'GET', `/transfers/${trf.id}`);
+  await api(page, 'PATCH', `/transfers/${trf.id}/send`, { items: full.items.map(i => ({ item_id: i.id, quantity: i.quantity_requested })) });
+
+  // Just sent: not late at the default 2 days.
+  expect((await api(page, 'GET', '/transfers/not-received')).transfers.some(t => t.id === trf.id)).toBeFalsy();
+  await api(page, 'PUT', '/settings', { transfer_not_received_days: '0.00001' }); // ~1 second
+  await page.waitForTimeout(1500);
+  try {
+    const late = await api(page, 'GET', '/transfers/not-received');
+    const row = late.transfers.find(t => t.id === trf.id);
+    expect(row).toMatchObject({ transfer_number: trf.transfer_number, sale_number: sale.transaction_number, to_branch_id: s.here.id });
+
+    await page.evaluate(() => App.showSection('transfers'));
+    const banner = page.locator('#trf-late-banner');
+    await expect(banner).toContainText('not received');
+    await expect(banner).toContainText(trf.transfer_number);
+    await banner.locator('div', { hasText: trf.transfer_number }).locator('button:has-text("Receive")').last().click();
+    await expect(page.locator('.modal-title')).toContainText(trf.transfer_number);
+    await page.evaluate(() => App.closeModal());
+
+    await page.evaluate(() => App._pollTransfersNotReceived().then(() => App.showSection('home')));
+    await expect(page.locator('#home-trf-late')).toContainText(trf.transfer_number);
+  } finally {
+    await api(page, 'PUT', '/settings', { transfer_not_received_days: '2' });
+  }
+  // Received: off the list.
+  await api(page, 'PATCH', `/transfers/${trf.id}/receive`, { delivered_by_name: 'Test Driver', items: full.items.map(i => ({ item_id: i.id, quantity_received: 2 })) });
+  await api(page, 'PUT', '/settings', { transfer_not_received_days: '0.00001' });
+  try { expect((await api(page, 'GET', '/transfers/not-received')).transfers.some(t => t.id === trf.id)).toBeFalsy(); }
+  finally { await api(page, 'PUT', '/settings', { transfer_not_received_days: '2' }); }
+});

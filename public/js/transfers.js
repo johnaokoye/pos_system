@@ -1,6 +1,87 @@
 // Branch transfers and transfer dispatch.
 Object.assign(App, {
   // ─── Branch Transfers ─────────────────────────────────────
+  // ─── Transfers sent but not received ─────────────────────────────────
+  // GET /transfers/not-received: sent (pending / in transit) at least
+  // `days` (setting transfer_not_received_days, default 2) ago and still not
+  // received — coming to the person's branches (transfers_receive) or sent
+  // from them (transfers_approve). Checked at sign-in and every 15 minutes;
+  // a notice once a store day while there are any, a card on Home and a
+  // banner on Branch Transfers.
+  _startTransfersNotReceived() {
+    clearInterval(this._trfLateTimer);
+    this._trfLate = null;
+    if (!this.can('transfers_receive') && !this.can('transfers_approve')) return;
+    this._pollTransfersNotReceived();
+    this._trfLateTimer = setInterval(() => this._pollTransfersNotReceived(), 15 * 60000);
+  },
+
+  _stopTransfersNotReceived() {
+    clearInterval(this._trfLateTimer);
+    this._trfLateTimer = null;
+    this._trfLate = null;
+  },
+
+  async _pollTransfersNotReceived() {
+    if (!this.currentUser) return;
+    let late;
+    try { late = await this.api('GET', '/transfers/not-received'); } catch { return; }
+    if (!this.currentUser) return;
+    this._trfLate = late;
+    if (this.section === 'home') this._paintHomeTransfersLate();
+    if (!late.count) return;
+    const key = `trfLateNotified:${this.currentUser.id}`;
+    const today = this._storeDay(new Date());
+    if (localStorage.getItem(key) === today) return;
+    try { localStorage.setItem(key, today); } catch {}
+    const customer = late.transfers.filter(t => t.transaction_id && t.sale_status === 'completed').length;
+    this._notify({
+      title: `🚚 ${late.count} transfer${late.count === 1 ? '' : 's'} sent but not received`,
+      body: `Sent ${late.days}+ days ago and still not counted in at ${[...new Set(late.transfers.map(t => this.escapeAttr(t.to_branch_name)))].join(', ')}${customer ? ` — <strong>${customer} for paid customer orders</strong>` : ''}. If the goods arrived, receive them; if they never left, the sending branch cancels the transfer.`,
+      actions: [{ label: 'Open Branch Transfers', primary: true, run: () => this.showSection('transfers') }],
+    });
+  },
+
+  // One line per late transfer, with View and (if it can be received here) Receive.
+  _transfersLateListHtml(list, { compact = false } = {}) {
+    const esc = v => this.escapeAttr(v == null ? '' : String(v));
+    return list.map(t => `<div style="display:flex;gap:8px;align-items:center;justify-content:space-between;padding:6px 0;border-top:1px solid var(--border);font-size:${compact ? 12 : 13}px">
+      <div style="min-width:0">
+        <div><strong>${esc(t.transfer_number)}</strong> ${esc(t.from_branch_name)} → ${esc(t.to_branch_name)} · <span style="color:var(--danger);font-weight:600">${Math.floor(t.days_since_sent)} day${Math.floor(t.days_since_sent) === 1 ? '' : 's'}</span>${t.transaction_id && t.sale_status === 'completed' ? ` <span class="badge-pill" style="background:#ede7f6;color:#5e35b1">Customer order${t.sale_number ? ` ${esc(t.sale_number)}` : ''}</span>` : ''}</div>
+        <div style="color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(t.item_summary)}</div>
+      </div>
+      <div style="display:flex;gap:4px;flex-shrink:0">
+        <button class="btn btn-sm btn-secondary" onclick="App.viewTransfer(${t.id})">View</button>
+        ${this.can('transfers_receive') ? `<button class="btn btn-sm btn-success" onclick="App.showReceiveTransfer(${t.id})">Receive</button>` : ''}
+      </div>
+    </div>`).join('');
+  },
+
+  async _paintTransfersLateBanner() {
+    if (!this.can('transfers_receive') && !this.can('transfers_approve')) return;
+    const late = await this.api('GET', '/transfers/not-received').catch(() => null);
+    const el = document.getElementById('trf-late-banner');
+    if (!el || !late) return;
+    this._trfLate = late;
+    el.innerHTML = late.count ? `<div class="card" style="margin-bottom:12px;border-left:4px solid var(--danger)">
+      <div class="fw-600" style="margin-bottom:4px">🚚 ${late.count} transfer${late.count === 1 ? '' : 's'} sent ${late.days}+ days ago and not received</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px">If the goods arrived, Receive them so the stock (and any customer order) is right. If they never left, the sending branch opens the transfer and cancels it, which puts its stock back.</div>
+      ${this._transfersLateListHtml(late.transfers)}
+    </div>` : '';
+  },
+
+  _paintHomeTransfersLate() {
+    const el = document.getElementById('home-trf-late');
+    const late = this._trfLate;
+    if (!el) return;
+    if (!late?.count) { el.style.display = 'none'; return; }
+    el.style.display = '';
+    el.innerHTML = `<h3>🚚 Transfers not received</h3>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px">Sent ${late.days}+ days ago. Receive them if the goods arrived; the sending branch cancels any that never left.</div>
+      ${this._transfersLateListHtml(late.transfers.slice(0, 6), { compact: true })}
+      ${late.count > 6 ? `<div style="font-size:12px;margin-top:6px"><a href="#" onclick="event.preventDefault();App.showSection('transfers')">All ${late.count} on Branch Transfers →</a></div>` : ''}`;
+  },
+
   // One row of the Branch Transfers table (extra = an older one the search
   // fetched from the server, removed when the search changes).
   _transferRowHtml(t, extra = false) {
@@ -44,6 +125,7 @@ Object.assign(App, {
           ${this.can('transfers_create') ? `<button class="btn btn-primary" onclick="App.showTransferForm()">+ Request Transfer</button>` : ''}
         </div>
       </div>
+      <div id="trf-late-banner"></div>
       <div class="card">
         <div style="margin-bottom:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
           <div class="search-bar" style="max-width:280px">
@@ -61,6 +143,7 @@ Object.assign(App, {
           </table>
         </div>
       </div>`;
+    this._paintTransfersLateBanner();
     const trfSearch = document.getElementById('trf-search');
     if (trfSearch) {
       let timer = null;

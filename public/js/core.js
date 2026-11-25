@@ -316,6 +316,7 @@ const App = {
     this.showSection(firstSection);
     this.checkLowStock();
     this._startTransferInbox();
+    this._startTransfersNotReceived();
     this._startShopUseInbox();
     this._startCollectionsInbox();
     this._startPayablesInbox();
@@ -843,6 +844,7 @@ const App = {
     // the next person signs in would otherwise write this session's cookie
     // back over theirs.
     this._stopTransferInbox();
+    this._stopTransfersNotReceived();
     this._stopShopUseInbox();
     this._stopCollectionsInbox();
     this._stopPayablesInbox();
@@ -924,6 +926,7 @@ const App = {
       // 401 and shouldn't bounce the user off the login screen they're on).
       if (res.status === 401 && url !== '/employees/login' && this.currentUser) {
         this._stopTransferInbox();
+    this._stopTransfersNotReceived();
         this._stopShopUseInbox();
         this._stopCollectionsInbox();
         this._stopPayablesInbox();

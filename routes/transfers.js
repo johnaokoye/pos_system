@@ -4,7 +4,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { createTransfer, deductTransferStock, addTransferStock } = require('../lib/transfers');
 const { receiveTransferLots, returnTransferLots, releaseTransferReservations } = require('../lib/stockLots');
-const { requirePermission, requireAnyPermission, requireAuth, requireTransfersManage } = require('../lib/permissions');
+const { requirePermission, requireAnyPermission, requireAuth, requireTransfersManage, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 
 router.use(requireAuth);
@@ -56,6 +56,47 @@ router.get('/inbox', requirePermission('transfers_approve'), async (req, res) =>
       LEFT JOIN employees e ON e.id = t.employee_id LEFT JOIN transactions st ON st.id = t.transaction_id LEFT JOIN customers sc ON sc.id = st.customer_id
       WHERE t.status = 'requested'${scope} AND COALESCE(t.employee_id, 0) != ? ORDER BY t.id DESC LIMIT 50`, args: [...branchIds, empId || 0] });
     res.json({ count: rows.length, requests: rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET not-received — transfers sent (pending / in transit) at least
+// `transfer_not_received_days` (setting, default 2) days ago and still not
+// received: the receiving branch's people (transfers_receive) see those
+// coming to their branches, the inventory team (transfers_approve) those sent
+// from theirs; no branches = every branch. Home's "Transfers not received"
+// card, the Branch Transfers banner and a once-a-day notice. A transfer whose
+// goods actually arrived is received as usual; one that never left is
+// cancelled by the sending branch. Registered before GET /:id.
+router.get('/not-received', requireAnyPermission('transfers_receive', 'transfers_approve'), async (req, res) => {
+  try {
+    const { rows: [setting] } = await db.execute("SELECT value FROM settings WHERE key = 'transfer_not_received_days'");
+    const setDays = parseFloat(setting?.value);
+    const days = setDays > 0 ? setDays : 2;
+    const empId = req.employee?.id;
+    const perms = req.employee?.permissions || {};
+    const { rows: mine } = empId ? await db.execute({ sql: `SELECT branch_id FROM employee_branches WHERE employee_id = ?
+      UNION SELECT default_branch_id FROM employees WHERE id = ? AND default_branch_id IS NOT NULL`, args: [empId, empId] }) : { rows: [] };
+    const branchIds = mine.map(r => r.branch_id).filter(Boolean);
+    const sides = [];
+    const args = [days];
+    const inList = branchIds.map(() => '?').join(',');
+    if (!branchIds.length || !req.employee) sides.push('1=1');
+    else {
+      if (can(perms, 'transfers_receive')) { sides.push(`t.to_branch_id IN (${inList})`); args.push(...branchIds); }
+      if (can(perms, 'transfers_approve')) { sides.push(`t.from_branch_id IN (${inList})`); args.push(...branchIds); }
+    }
+    if (!sides.length) return res.json({ days, count: 0, transfers: [] });
+    const { rows } = await db.execute({ sql: `SELECT t.id, t.transfer_number, t.status, t.from_branch_id, t.to_branch_id, t.sent_at, t.dispatched_at, t.dropped_off_at,
+        fb.name AS from_branch_name, tb.name AS to_branch_name,
+        ROUND(julianday('now') - julianday(COALESCE(t.sent_at, t.created_at)), 1) AS days_since_sent,
+        (SELECT GROUP_CONCAT(product_name || ' x' || quantity_requested, ', ') FROM branch_transfer_items WHERE transfer_id = t.id) AS item_summary,
+        t.transaction_id, st.transaction_number AS sale_number, st.status AS sale_status, sc.first_name || ' ' || sc.last_name AS sale_customer_name
+      FROM branch_transfers t LEFT JOIN branches fb ON fb.id = t.from_branch_id LEFT JOIN branches tb ON tb.id = t.to_branch_id
+      LEFT JOIN transactions st ON st.id = t.transaction_id LEFT JOIN customers sc ON sc.id = st.customer_id
+      WHERE t.status IN ('pending', 'in_transit') AND julianday('now') - julianday(COALESCE(t.sent_at, t.created_at)) >= ?
+        AND (${sides.join(' OR ')})
+      ORDER BY COALESCE(t.sent_at, t.created_at)`, args });
+    res.json({ days, count: rows.length, transfers: rows });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
