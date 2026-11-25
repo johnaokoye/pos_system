@@ -979,7 +979,14 @@ router.get('/:id/rental-requests', requirePermission('customers'), async (req, r
     });
     const ids = rows.map(r => r.id);
     const { rows: quotes } = ids.length ? await db.execute({
-      sql: `SELECT lead_id, quote_number, status, total, due_date, created_at FROM quotations WHERE lead_id IN (${ids.map(() => '?').join(',')}) ORDER BY created_at`,
+      // With the rental agreement each one became (status as the customer's
+      // own rentals list shows it: paused / overdue / else the agreement's).
+      sql: `SELECT q.lead_id, q.quote_number, q.status, q.total, q.due_date, q.created_at,
+              ra.id as agreement_id, ra.agreement_number,
+              CASE WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused'
+                   WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' ELSE ra.status END as agreement_status
+            FROM quotations q LEFT JOIN rental_agreements ra ON ra.id = q.converted_to_agreement_id
+            WHERE q.lead_id IN (${ids.map(() => '?').join(',')}) ORDER BY q.created_at`,
       args: ids,
     }) : { rows: [] };
     res.json(rows.map(r => {

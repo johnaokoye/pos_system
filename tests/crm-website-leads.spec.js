@@ -74,6 +74,21 @@ test('a website rental request finds its customer and becomes a filled-in rental
   expect(mine.status).toBe('proposal');
   expect(mine.request.items[0].quantity).toBe(2);
   expect(mine.quotes[0].quote_number).toBe(after.quotes[0].quote_number);
+  expect(mine.quotes[0].agreement_number).toBeNull();
+
+  // The quote becomes a rental agreement: the lead is won and the website
+  // shows the agreement (its RA number and status) instead of the quote.
+  await api(page, 'POST', `/quotations/${quote.id}/convert`, { employee_id: 1, branch_id: branch.id });
+  expect((await api(page, 'GET', `/crm/leads/${lead.id}`)).status).toBe('won');
+  const converted = (await api(page, 'GET', `/customers/${kept.id}/rental-requests`)).find(r => r.id === lead.id);
+  expect(converted.quotes[0].agreement_number).toMatch(/^RA-/);
+  expect(converted.quotes[0].agreement_status).toBe('pending');
+
+  // Cancelled before it went out: the quote is open again, the lead back to Proposal.
+  await api(page, 'PATCH', `/rentals/agreements/${converted.quotes[0].agreement_id}/cancel`, { reason: 'Customer changed plans', employee_id: 1 });
+  expect((await api(page, 'GET', `/crm/leads/${lead.id}`)).status).toBe('proposal');
+  const reopened = (await api(page, 'GET', `/customers/${kept.id}/rental-requests`)).find(r => r.id === lead.id);
+  expect(reopened.quotes[0].agreement_number).toBeNull();
 });
 
 test('a lead whose details match several customers lists them, and Link ties it without closing it', async ({ page }) => {

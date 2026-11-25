@@ -2058,6 +2058,11 @@ router.patch('/agreements/:id/cancel', requirePermission('rentals_returns'), asy
       // isn't left stranded in 'converted' with no way to re-convert it
       // (mirrors DELETE /transactions/:id/hold's revert for a cancelled
       // retail hold sourced from a quote).
+      // Its CRM lead (Create Quote on the lead) goes back to Proposal unless
+      // another of the lead's quotes is still a rental.
+      await tx.execute({ sql: `UPDATE crm_leads SET status = 'proposal', updated_at = datetime('now') WHERE status = 'won'
+        AND id IN (SELECT lead_id FROM quotations WHERE converted_to_agreement_id = ? AND lead_id IS NOT NULL)
+        AND NOT EXISTS (SELECT 1 FROM quotations q2 WHERE q2.lead_id = crm_leads.id AND q2.converted_to_agreement_id IS NOT NULL AND q2.converted_to_agreement_id != ?)`, args: [req.params.id, req.params.id] });
       await tx.execute({ sql: `UPDATE quotations SET status = 'accepted', converted_to_agreement_id = NULL WHERE converted_to_agreement_id = ?`, args: [req.params.id] });
       await tx.execute({ sql: "UPDATE rental_agreements SET status = 'cancelled', cancellation_reason = ?, cancelled_by = ?, cancelled_at = CURRENT_TIMESTAMP WHERE id = ?", args: [reason || null, employee_id || null, req.params.id] });
       await tx.execute({ sql: "UPDATE rental_scheduled_pauses SET status = 'cancelled', cancel_reason = 'Rental cancelled' WHERE agreement_id = ? AND status = 'scheduled'", args: [req.params.id] });

@@ -1177,6 +1177,8 @@ router.post('/:id/convert', async (req, res) => {
           discount_amount: quote.discount_amount, rate_plan: quote.rate_plan,
         });
         await tx.execute({ sql: 'UPDATE quotations SET status = ?, converted_to_agreement_id = ? WHERE id = ?', args: ['converted', agreementId, quote.id] });
+        // A quote made from a CRM lead: the lead is won once it's a rental.
+        if (quote.lead_id) await tx.execute({ sql: "UPDATE crm_leads SET status = 'won', updated_at = datetime('now') WHERE id = ? AND status NOT IN ('won','lost')", args: [quote.lead_id] });
         await tx.commit();
         committed = true;
 
