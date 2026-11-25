@@ -14,7 +14,7 @@ const path = require('path');
 const fs = require('fs');
 const { cloudUpload, cloudDestroy } = require('../lib/cloudinary');
 const { getMissingRentalFields, RENTAL_APPROVED_SQL } = require('../lib/rentals');
-const { storeToday, storeOffsetModifier } = require('../lib/storeTime');
+const { storeToday, storeOffsetModifier, storeTodaySql } = require('../lib/storeTime');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -984,7 +984,7 @@ router.get('/:id/rental-requests', requirePermission('customers'), async (req, r
       sql: `SELECT q.lead_id, q.quote_number, q.status, q.total, q.due_date, q.created_at,
               ra.id as agreement_id, ra.agreement_number,
               CASE WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused'
-                   WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' ELSE ra.status END as agreement_status
+                   WHEN ra.status = 'active' AND ra.due_date < ${storeTodaySql()} THEN 'overdue' ELSE ra.status END as agreement_status
             FROM quotations q LEFT JOIN rental_agreements ra ON ra.id = q.converted_to_agreement_id
             WHERE q.lead_id IN (${ids.map(() => '?').join(',')}) ORDER BY q.created_at`,
       args: ids,

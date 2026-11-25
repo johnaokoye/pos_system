@@ -12,7 +12,7 @@ const { feeFor, getBranchStock, buildRentalLines, revalidateQuoteLines, insertPe
 const { ratePlanError } = require('../lib/rentalPricing');
 const { allocateTicketDiscount } = require('../lib/ticketDiscount');
 const { RENT_PERIOD_UNITS, quoteLineForSale } = require('../lib/quoteLines');
-const { storeToday, storeOffsetModifier } = require('../lib/storeTime');
+const { storeToday, storeOffsetModifier, storeTodaySql } = require('../lib/storeTime');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -325,7 +325,7 @@ async function attachSpecialProjectRentals(items) {
         st.transaction_number as settlement_transaction_number,
         CASE WHEN ra.status = 'awaiting_issue' AND ra.delivery_driver_confirmed_at IS NOT NULL THEN 'out_for_delivery'
              WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused'
-             WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue'
+             WHEN ra.status = 'active' AND ra.due_date < ${storeTodaySql()} THEN 'overdue'
              WHEN ra.status = 'returned' AND ra.settlement_transaction_id IS NULL AND (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total + ra.service_adjustment_total) > 0 THEN 'returned_unpaid'
              ELSE ra.status END as display_status
       FROM rental_agreements ra

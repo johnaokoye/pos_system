@@ -6,6 +6,7 @@ const compression = require('compression');
 const path = require('path');
 
 const { ensureReady, db } = require('./database');
+const { storeTodaySql } = require('./lib/storeTime');
 const { router: woocommerceRouter, runSyncAll: wooSyncAll } = require('./routes/woocommerce');
 const { apiKeyAuth } = require('./lib/apiKeyAuth');
 const { sessionAuth } = require('./lib/sessionAuth');
@@ -235,7 +236,7 @@ setInterval(async () => {
   try {
     await ensureReady();
     const { rows: overdue } = await db.execute({
-      sql: "SELECT * FROM rental_agreements WHERE status='active' AND due_date < date('now') AND overdue_notified_at IS NULL",
+      sql: `SELECT * FROM rental_agreements WHERE status='active' AND due_date < ${storeTodaySql()} AND overdue_notified_at IS NULL`,
       args: [],
     });
     for (const agreement of overdue) {

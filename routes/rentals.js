@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
+const { storeTodaySql } = require('../lib/storeTime');
 const { CUSTOMER_SALESPERSON_SQL } = require('../lib/salesCredit');
 const { getOutstandingQty, getOutOfServiceQty } = require('../lib/rentalAvailability');
 const { onlineRentalAvailability, parseRange } = require('../lib/rentalOnlineAvailability');
@@ -103,7 +104,7 @@ router.get('/agreements', requireRentalsManage, async (req, res) => {
       (SELECT reason FROM rental_agreement_pauses WHERE agreement_id = ra.id AND ended_at IS NULL LIMIT 1) as current_pause_reason,
       (SELECT scheduled_resume_at FROM rental_agreement_pauses WHERE agreement_id = ra.id AND ended_at IS NULL LIMIT 1) as current_pause_resume_at,
       (SELECT starts_at FROM rental_scheduled_pauses WHERE agreement_id = ra.id AND status = 'scheduled' ORDER BY starts_at LIMIT 1) as next_scheduled_pause_at,
-      CASE WHEN ra.status = 'awaiting_issue' AND ra.delivery_driver_confirmed_at IS NOT NULL THEN 'out_for_delivery' WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused' WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' WHEN ra.status = 'returned' AND ra.settlement_transaction_id IS NULL AND (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total + ra.service_adjustment_total) > 0 THEN 'returned_unpaid' ELSE ra.status END as display_status,
+      CASE WHEN ra.status = 'awaiting_issue' AND ra.delivery_driver_confirmed_at IS NOT NULL THEN 'out_for_delivery' WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused' WHEN ra.status = 'active' AND ra.due_date < ${storeTodaySql()} THEN 'overdue' WHEN ra.status = 'returned' AND ra.settlement_transaction_id IS NULL AND (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total + ra.service_adjustment_total) > 0 THEN 'returned_unpaid' ELSE ra.status END as display_status,
       (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total + ra.service_adjustment_total) as balance_due
       FROM rental_agreements ra
       LEFT JOIN customers c ON ra.customer_id = c.id
@@ -124,7 +125,7 @@ router.get('/agreements', requireRentalsManage, async (req, res) => {
     const params = [];
     if (customer_id) { sql += ' AND ra.customer_id = ?'; params.push(customer_id); }
     if (branch_id) { sql += ' AND ra.branch_id = ?'; params.push(branch_id); }
-    if (view === 'overdue') { sql += " AND ra.status = 'active' AND ra.due_date < date('now')"; }
+    if (view === 'overdue') { sql += " AND ra.status = 'active' AND ra.due_date < " + storeTodaySql(); }
     else if (view === 'active') { sql += " AND ra.status = 'active'"; }
     // Physically returned (item's back in stock) but the balance owed on a
     // non-credit checkout hasn't been collected yet — see needsCashierHold
@@ -207,7 +208,7 @@ router.get('/agreements/guard-queue', requireAuth, async (req, res) => {
          FROM rental_agreement_items i WHERE i.agreement_id = ra.id) as items_json,
       CASE WHEN ra.status = 'awaiting_issue' AND ra.delivery_driver_confirmed_at IS NOT NULL THEN 'out_for_delivery'
            WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused'
-           WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' ELSE ra.status END as display_status
+           WHEN ra.status = 'active' AND ra.due_date < ${storeTodaySql()} THEN 'overdue' ELSE ra.status END as display_status
       FROM rental_agreements ra LEFT JOIN customers c ON ra.customer_id = c.id LEFT JOIN branches b ON b.id = ra.branch_id
       LEFT JOIN employees ce ON ce.id = ra.return_checkin_by
       WHERE ra.status IN ('awaiting_issue','active') OR (ra.status = 'returned' AND (ra.issue_security_employee_id = ? OR ra.return_security_employee_id = ?) AND ra.returned_at >= datetime('now', '-30 days'))
@@ -232,7 +233,7 @@ router.get('/agreements/driver-queue', requireAuth, async (req, res) => {
       (SELECT GROUP_CONCAT(product_name || COALESCE(' [' || NULLIF(sku, '') || ']', '') || ' x' || quantity, ', ') FROM rental_agreement_items WHERE agreement_id = ra.id AND parent_item_id IS NULL) as item_summary,
       CASE WHEN ra.status = 'awaiting_issue' AND ra.delivery_driver_confirmed_at IS NOT NULL THEN 'out_for_delivery'
            WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused'
-           WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' ELSE ra.status END as display_status
+           WHEN ra.status = 'active' AND ra.due_date < ${storeTodaySql()} THEN 'overdue' ELSE ra.status END as display_status
       FROM rental_agreements ra
       LEFT JOIN customers c ON ra.customer_id = c.id
       WHERE (ra.delivery_required = 1 OR ra.pickup_required = 1) AND ra.status IN ('awaiting_issue','active','returned')
@@ -264,7 +265,7 @@ router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
       rde.first_name || ' ' || rde.last_name as return_driver_employee_name,
       cne.first_name || ' ' || cne.last_name as credit_note_issued_by_name,
       dre.first_name || ' ' || dre.last_name as deposit_return_recorded_by_name,
-      CASE WHEN ra.status = 'awaiting_issue' AND ra.delivery_driver_confirmed_at IS NOT NULL THEN 'out_for_delivery' WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused' WHEN ra.status = 'active' AND ra.due_date < date('now') THEN 'overdue' WHEN ra.status = 'returned' AND ra.settlement_transaction_id IS NULL AND (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total + ra.service_adjustment_total) > 0 THEN 'returned_unpaid' ELSE ra.status END as display_status,
+      CASE WHEN ra.status = 'awaiting_issue' AND ra.delivery_driver_confirmed_at IS NOT NULL THEN 'out_for_delivery' WHEN ra.status = 'active' AND ra.is_paused = 1 THEN 'paused' WHEN ra.status = 'active' AND ra.due_date < ${storeTodaySql()} THEN 'overdue' WHEN ra.status = 'returned' AND ra.settlement_transaction_id IS NULL AND (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total + ra.service_adjustment_total) > 0 THEN 'returned_unpaid' ELSE ra.status END as display_status,
       (ra.damage_fee_total + ra.duration_adjustment_total - ra.deposit_total + ra.tax_adjustment_total + ra.service_adjustment_total) as balance_due
       FROM rental_agreements ra
       LEFT JOIN customers c ON ra.customer_id = c.id

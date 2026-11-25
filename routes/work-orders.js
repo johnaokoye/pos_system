@@ -1254,7 +1254,7 @@ router.patch('/:id/status', requirePermission('work_orders'), async (req, res) =
       if (!ACTIVE_WORK_STATUSES.includes(wo.status)) return res.status(400).json({ error: `This work order is ${wo.status}, not in progress` });
       newStatus = status;
       // Not Worth Fixing ends the job — the customer's 30-day pickup window starts now
-      await db.execute({ sql: `UPDATE work_orders SET status = ?${newStatus === 'not_worth_fixing' ? ", pickup_due_date = date('now','+30 days')" : ''} WHERE id = ?`, args: [newStatus, req.params.id] });
+      await db.execute({ sql: `UPDATE work_orders SET status = ?${newStatus === 'not_worth_fixing' ? `, pickup_due_date = date('now', '${storeOffsetModifier()}', '+30 days')` : ''} WHERE id = ?`, args: [newStatus, req.params.id] });
     }
     await logStatus(db, req.params.id, newStatus, comment.trim(), employee_id);
     const { rows: [updated] } = await db.execute({ sql: `${WO_LIST_SELECT} WHERE wo.id = ?`, args: [req.params.id] });
@@ -1620,7 +1620,7 @@ router.patch('/:id/signoff', requirePermission('wo_signoff'), async (req, res) =
     const incomplete = tasks.filter(t => t.status !== 'complete');
     if (incomplete.length) return res.status(400).json({ error: `${incomplete.length} task(s) are not yet marked complete` });
 
-    await db.execute({ sql: `UPDATE work_orders SET status = 'complete', completed_at = CURRENT_TIMESTAMP, completed_by = ?, pickup_due_date = date('now','+30 days') WHERE id = ?`, args: [employee_id || null, req.params.id] });
+    await db.execute({ sql: `UPDATE work_orders SET status = 'complete', completed_at = CURRENT_TIMESTAMP, completed_by = ?, pickup_due_date = date('now', '${storeOffsetModifier()}', '+30 days') WHERE id = ?`, args: [employee_id || null, req.params.id] });
     await logStatus(db, req.params.id, 'complete', comment || 'Signed off by supervisor', employee_id);
     const { rows: [updated] } = await db.execute({ sql: `${WO_LIST_SELECT} WHERE wo.id = ?`, args: [req.params.id] });
     res.json(updated);

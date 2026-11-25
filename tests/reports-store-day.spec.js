@@ -31,3 +31,13 @@ test('every report runs for today on the store day', async ({ page }) => {
   const tax = await api(page, 'GET', `/reports/tax-collected?start=${today}&end=${today}`);
   for (const d of tax.byDay || []) expect(d.date).toBe(today);
 });
+
+// Overdue flags (rentals, layaways, the overdue CRM activity) compare a due
+// date with storeTodaySql() — the store-clock day in SQL, not date('now').
+test('storeTodaySql is the store-clock day', async () => {
+  const { storeTodaySql, storeToday } = (await import('../lib/storeTime.js')).default;
+  const { createClient } = await import('@libsql/client');
+  const db = createClient({ url: ':memory:' });
+  const { rows: [r] } = await db.execute(`SELECT ${storeTodaySql()} AS d`);
+  expect(r.d).toBe(storeToday());
+});

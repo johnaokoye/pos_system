@@ -1539,7 +1539,7 @@ Object.assign(App, {
   // ─── Day-ahead technician schedule ──────────────────────────────────────────
 
   async renderWOSchedule() {
-    this.woScheduleDate = this.woScheduleDate || new Date().toISOString().slice(0,10);
+    this.woScheduleDate = this.woScheduleDate || this._storeDay(new Date());
     document.getElementById('content').innerHTML = `
       <div class="section-header"><h2>Technician Schedule</h2></div>
       <div class="form-group" style="max-width:220px;margin-bottom:14px">

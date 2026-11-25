@@ -1533,7 +1533,7 @@ router.get('/dashboard', inModule, async (req, res) => {
         SUM(p.recon_status = 'unreconciled' AND p.status != 'not_required') AS unreconciled
       FROM shop_use_postings p JOIN shop_use_requests r ON r.id = p.request_id WHERE 1=1${scope}`);
     const month = await one(`SELECT COALESCE(SUM(CASE WHEN p.source_type = 'issue' THEN p.amount ELSE -p.amount END), 0) AS v
-      FROM shop_use_postings p JOIN shop_use_requests r ON r.id = p.request_id WHERE p.posting_date >= date('now', 'localtime', 'start of month')${scope}`);
+      FROM shop_use_postings p JOIN shop_use_requests r ON r.id = p.request_id WHERE p.posting_date >= date('now', '${storeOffsetModifier()}', 'start of month')${scope}`);
     const tools = await one("SELECT COUNT(*) AS n FROM shop_use_tools WHERE status = 'assigned'");
     const list = async (where, args = []) => {
       const { rows } = await db.execute({ sql: `${REQ_SELECT} WHERE ${where}${scope} ORDER BY r.id LIMIT 25`, args });

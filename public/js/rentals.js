@@ -1814,7 +1814,7 @@ Object.assign(App, {
                 <input type="time" id="pr-e-time" value="07:00" style="flex:1;min-width:0"></div></div>
             </div>
             <div class="input-row">
-              <div class="form-group"><label>Starting</label><input type="date" id="pr-from" value="${new Date().toISOString().slice(0, 10)}"></div>
+              <div class="form-group"><label>Starting</label><input type="date" id="pr-from" value="${this._storeDay(new Date())}"></div>
               <div class="form-group"><label>Until <span style="color:var(--text-muted);font-weight:400;font-size:11px">(blank = until returned)</span></label><input type="date" id="pr-until"></div>
             </div>
             <div id="pr-series-hint" style="font-size:11px;color:var(--text-muted);margin:-4px 0 10px">Times are store time. If the resume time is earlier than the stop time, it resumes the next day.</div>
@@ -2089,7 +2089,7 @@ Object.assign(App, {
 
   async showMissedPickupConfirmModal(id) {
     const a = await this.api('GET', `/rentals/agreements/${id}`);
-    const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+    const tomorrow = this._storeDay(new Date(Date.now() + 86400000));
     this.showModal(`
       <div class="modal" style="max-width:460px">
         <div class="modal-header">
@@ -2104,7 +2104,7 @@ Object.assign(App, {
               <option value="stop">Stop the rental</option>
             </select>
           </div>
-          <div class="form-group" id="mpd-due-date-group"><label>New Pickup Date</label><input type="date" id="mpd-due-date" value="${tomorrow}" min="${new Date().toISOString().slice(0,10)}"></div>
+          <div class="form-group" id="mpd-due-date-group"><label>New Pickup Date</label><input type="date" id="mpd-due-date" value="${tomorrow}" min="${this._storeDay(new Date())}"></div>
           <div class="form-group"><label>Notes</label><textarea id="mpd-notes" rows="3" placeholder="What was discussed/agreed"></textarea></div>
           <div class="form-group"><label style="display:flex;align-items:center;gap:6px">
             <input type="checkbox" id="mpd-send-email" ${a.customer_email ? 'checked' : 'disabled'} style="width:auto"> Send confirmation email to customer${a.customer_email ? '' : ' (no email on file)'}
@@ -2385,7 +2385,7 @@ Object.assign(App, {
     this._rentalProducts = products.filter(p => (p.stock_qty - (p.rental_outstanding_qty||0)) > 0);
     this._rentalCustomers = [];
     this._rentalLineIdx = 0;
-    const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0,10);
+    const tomorrow = this._storeDay(new Date(Date.now() + 86400000));
     this.showModal(`
       <div class="modal" style="max-width:640px">
         <div class="modal-header">
@@ -2899,7 +2899,7 @@ Object.assign(App, {
     const n = parseInt(document.getElementById('rc-duedate-daysinput')?.value);
     if (!n || n < 1) return;
     const dateEl = document.getElementById('rc-duedate');
-    if (dateEl) dateEl.value = new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
+    if (dateEl) dateEl.value = this._storeDay(new Date(Date.now() + n * 86400000));
     this._onRentalDueDateChange();
   },
 

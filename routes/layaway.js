@@ -7,7 +7,7 @@ const { syncBinQty } = require('../lib/binSync');
 const { takeFromLots, recordLayawayAllocation, qualifyLayaway, releaseLayawayItem } = require('../lib/stockLots');
 const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
-const { storeToday } = require('../lib/storeTime');
+const { storeToday, storeTodaySql } = require('../lib/storeTime');
 const { branchStockQty, warehouseSaleError, homeBranchError } = require('../lib/branchStock');
 
 async function getSetting(key, fallback) {
@@ -23,10 +23,10 @@ function addInterval(dateStr, frequency) {
   return d.toISOString().slice(0, 10);
 }
 
-const detailJoin = `SELECT lp.*, c.first_name || ' ' || c.last_name as customer_name, c.phone as customer_phone, c.email as customer_email,
+const detailJoin = () => `SELECT lp.*, c.first_name || ' ' || c.last_name as customer_name, c.phone as customer_phone, c.email as customer_email,
   e.first_name || ' ' || e.last_name as employee_name, ce.first_name || ' ' || ce.last_name as cancelled_by_name,
   b.name as branch_name,
-  CASE WHEN lp.status = 'active' AND lp.next_due_date IS NOT NULL AND lp.next_due_date < date('now') THEN 1 ELSE 0 END as is_overdue
+  CASE WHEN lp.status = 'active' AND lp.next_due_date IS NOT NULL AND lp.next_due_date < ${storeTodaySql()} THEN 1 ELSE 0 END as is_overdue
   FROM layaway_plans lp
   LEFT JOIN customers c ON lp.customer_id = c.id
   LEFT JOIN employees e ON lp.employee_id = e.id
@@ -46,9 +46,9 @@ async function attachItemsAndPayments(plan) {
 router.get('/plans', requirePermission('layaway'), async (req, res) => {
   try {
     const { view } = req.query;
-    let sql = detailJoin + ' WHERE 1=1';
-    if (view === 'active') sql += " AND lp.status = 'active' AND (lp.next_due_date IS NULL OR lp.next_due_date >= date('now'))";
-    else if (view === 'overdue') sql += " AND lp.status = 'active' AND lp.next_due_date IS NOT NULL AND lp.next_due_date < date('now')";
+    let sql = detailJoin() + ' WHERE 1=1';
+    if (view === 'active') sql += ` AND lp.status = 'active' AND (lp.next_due_date IS NULL OR lp.next_due_date >= ${storeTodaySql()})`;
+    else if (view === 'overdue') sql += ` AND lp.status = 'active' AND lp.next_due_date IS NOT NULL AND lp.next_due_date < ${storeTodaySql()}`;
     else if (view === 'completed') sql += " AND lp.status = 'completed'";
     else if (view === 'cancelled') sql += " AND lp.status = 'cancelled'";
     sql += ' ORDER BY lp.created_at DESC';
@@ -59,7 +59,7 @@ router.get('/plans', requirePermission('layaway'), async (req, res) => {
 
 router.get('/plans/:id', requirePermission('layaway'), async (req, res) => {
   try {
-    const { rows: [plan] } = await db.execute({ sql: detailJoin + ' WHERE lp.id = ?', args: [req.params.id] });
+    const { rows: [plan] } = await db.execute({ sql: detailJoin() + ' WHERE lp.id = ?', args: [req.params.id] });
     if (!plan) return res.status(404).json({ error: 'Not found' });
     await attachItemsAndPayments(plan);
     res.json(plan);
@@ -156,7 +156,7 @@ router.post('/plans', requirePermission('layaway_create'), async (req, res) => {
       await tx.commit();
       committed = true;
 
-      const { rows: [plan] } = await db.execute({ sql: detailJoin + ' WHERE lp.id = ?', args: [planId] });
+      const { rows: [plan] } = await db.execute({ sql: detailJoin() + ' WHERE lp.id = ?', args: [planId] });
       await attachItemsAndPayments(plan);
       res.status(201).json(plan);
     } catch(e) {
@@ -212,7 +212,7 @@ router.patch('/plans/:id/payments', requirePermission('layaway_payments'), async
       await tx.commit();
       committed = true;
 
-      const { rows: [updated] } = await db.execute({ sql: detailJoin + ' WHERE lp.id = ?', args: [plan.id] });
+      const { rows: [updated] } = await db.execute({ sql: detailJoin() + ' WHERE lp.id = ?', args: [plan.id] });
       await attachItemsAndPayments(updated);
       res.json(updated);
     } catch(e) {
@@ -267,7 +267,7 @@ router.patch('/plans/:id/cancel', requirePermission('layaway_cancel'), async (re
       await tx.commit();
       committed = true;
 
-      const { rows: [updated] } = await db.execute({ sql: detailJoin + ' WHERE lp.id = ?', args: [plan.id] });
+      const { rows: [updated] } = await db.execute({ sql: detailJoin() + ' WHERE lp.id = ?', args: [plan.id] });
       await attachItemsAndPayments(updated);
       res.json(updated);
     } catch(e) {
