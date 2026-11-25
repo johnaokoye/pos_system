@@ -421,7 +421,10 @@ Object.assign(App, {
       </div>`}`;
   },
 
-  async showQuoteForm(editId, initialType) {
+  // `prefill` (new quotes only, from a CRM lead — App._quoteFromLead):
+  // { lead_id, customer, notes, due_date, branch_id, items: [{ product_id,
+  // quantity, accessory_ids }], delivery_address }. Saving links the quote to the lead.
+  async showQuoteForm(editId, initialType, prefill = null) {
     const [employees, products] = await Promise.all([
       this.api('GET', '/employees'),
       this.api('GET', '/products?for_sale=1'),
@@ -438,7 +441,9 @@ Object.assign(App, {
     this._spRentalProducts = null;
     this._spRentalAvail = null;
     const q = editId ? await this.api('GET', `/quotations/${editId}`) : null;
-    const quoteCustomer = q?.customer_id ? await this._customerById(q.customer_id) : null;
+    if (editId) prefill = null;
+    this._quoteLeadId = prefill?.lead_id || null;
+    const quoteCustomer = q?.customer_id ? await this._customerById(q.customer_id) : (prefill?.customer || null);
     const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0,10);
     // A Special Project is wider: its rental item search shows each item's
     // details and availability.
@@ -457,7 +462,7 @@ Object.assign(App, {
           </div>` : ''}
           <div class="input-row">
             <div class="form-group"><label>Customer</label>
-              ${this._customerPickerHtml('qt-cust', quoteCustomer ? [quoteCustomer] : [], q && q.customer_id, { emptyLabel: '-- Walk-in / No Customer --', remote: '' })}
+              ${this._customerPickerHtml('qt-cust', quoteCustomer ? [quoteCustomer] : [], q ? q.customer_id : quoteCustomer?.id, { emptyLabel: '-- Walk-in / No Customer --', remote: '' })}
               <p id="qt-cust-hint" style="display:none;font-size:11px;color:var(--text-muted);margin:4px 0 0">Only rental-approved or preapproved customers are listed.</p>
             </div>
             <div class="form-group"><label>Branch</label>
@@ -476,13 +481,13 @@ Object.assign(App, {
                 <input id="qt-valid" type="date" value="${q&&q.valid_until?String(q.valid_until).slice(0,10):''}" oninput="App._syncQuoteExpiryPreset()">
               </div>
             </div>
-            <div class="form-group" id="qt-duedate-group" style="display:none"><label>Due Date *</label><input id="qt-duedate" type="date" value="${q&&q.due_date?String(q.due_date).slice(0,10):tomorrow}" oninput="App._refreshQuoteRatePlan()"></div>
+            <div class="form-group" id="qt-duedate-group" style="display:none"><label>Due Date *</label><input id="qt-duedate" type="date" value="${q&&q.due_date?String(q.due_date).slice(0,10):(prefill?.due_date||tomorrow)}" oninput="App._refreshQuoteRatePlan()"></div>
             <div id="qt-rateplan-group" style="display:none;flex:1">${this._ratePlanSelectHtml('qt-rateplan', 'App._refreshQuoteRatePlan()', q && q.rate_plan)}</div>
             <div class="form-group"><label>Discount ($)</label><input id="qt-disc" type="number" step="0.01" value="${q?q.discount_amount:0}" oninput="App.calcQuoteTotal()"></div>
           </div>
           <div class="input-row">
             <div class="form-group" id="qt-po-group" style="flex:0 0 220px"><label>Customer P.O. #</label><input id="qt-po" value="${this.escapeAttr(q&&q.po_number)}" placeholder="Optional — prints on the invoice"></div>
-            <div class="form-group"><label>Notes</label><input id="qt-notes" value="${this.escapeAttr(q&&q.notes)}"></div>
+            <div class="form-group"><label>Notes</label><input id="qt-notes" value="${this.escapeAttr(q ? q.notes : prefill?.notes)}"></div>
           </div>
           <div id="qt-retail-items-section" style="margin-bottom:10px">
             <div class="card-header"><span class="card-title">Items</span>
@@ -569,14 +574,26 @@ Object.assign(App, {
       }
     } else if (initialType === 'rental') {
       this._applyQuoteTypeVisibility('rental');
+      // Someone with no default branch picks one: start at the branch asked for.
+      const branchSel = document.getElementById('qt-branch');
+      if (branchSel && !branchSel.value && prefill?.branch_id && branchSel.querySelector(`option[value="${prefill.branch_id}"]`)) branchSel.value = String(prefill.branch_id);
       await this._refreshRentalQuoteBranch();
-      this.addRentalQuoteLine();
+      if (prefill?.items?.length) prefill.items.forEach(it => this.addRentalQuoteLine(it));
+      else this.addRentalQuoteLine();
+      if (prefill?.delivery_address) {
+        const cb = document.getElementById('qt-delivery');
+        if (cb) { cb.checked = true; this._toggleQuoteService('delivery'); }
+        const addr = document.getElementById('qt-delivery-address');
+        if (addr) addr.value = prefill.delivery_address;
+      }
+      this.calcQuoteTotal();
     } else if (initialType === 'special_project') {
       this._applyQuoteTypeVisibility('special_project');
       this.addQuoteItem();
     } else {
       this._applyQuoteTypeVisibility('retail');
-      this.addQuoteItem();
+      if (prefill?.items?.length) prefill.items.forEach(it => this.addQuoteItem(it));
+      else this.addQuoteItem();
     }
     // Item lines are added dynamically (addQuoteItem/addRentalQuoteLine), so
     // this closes whichever qti-prod-dd-*/rql-prod-dd-* dropdown is
@@ -1573,6 +1590,7 @@ Object.assign(App, {
         // fixing a line item) doesn't silently reassign it; that's what the
         // dedicated Reassign action (PATCH /:id/reassign) is for.
         if (!this._editingQuoteId) payload.employee_id = this.currentUser.id;
+        if (!this._editingQuoteId && this._quoteLeadId) payload.lead_id = this._quoteLeadId;
         if (this._editingQuoteId) {
           await this.api('PUT', `/quotations/${this._editingQuoteId}`, payload);
           this.alert('Rental quotation updated');
@@ -1582,6 +1600,7 @@ Object.assign(App, {
           await this._posQuoteSaved();
         }
         this.closeModal();
+        if (this._quoteSavedBackToLead()) return;
         this.renderQuotations();
       } catch(e) { this.alert(e.message, 'error'); }
       return;
@@ -1686,6 +1705,7 @@ Object.assign(App, {
       const payload = { customer_id: customer_id||null, branch_id: branch_id||null, discount_amount, notes, valid_until: valid_until||null, po_number: document.getElementById('qt-po')?.value.trim() || null, items };
       // Only on create — see the matching comment on the rental branch above.
       if (!this._editingQuoteId) payload.employee_id = this.currentUser.id;
+      if (!this._editingQuoteId && this._quoteLeadId) payload.lead_id = this._quoteLeadId;
       if (isSpecialProject && !this._editingQuoteId) payload.quote_type = 'special_project';
       if (this._editingQuoteId) {
         await this.api('PUT', `/quotations/${this._editingQuoteId}`, payload);
@@ -1696,8 +1716,20 @@ Object.assign(App, {
         await this._posQuoteSaved();
       }
       this.closeModal();
+      if (this._quoteSavedBackToLead()) return;
       if (isSpecialProject) this.renderSpecialProjects(); else this.renderQuotations();
     } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // A quote made from a CRM lead goes back to that lead (now showing the
+  // quote) instead of the Quotations list.
+  _quoteSavedBackToLead() {
+    const leadId = !this._editingQuoteId && this._quoteLeadId;
+    this._quoteLeadId = null;
+    if (!leadId) return false;
+    if (this.section === 'crm') this.renderCrmTab();
+    this.viewLead(leadId);
+    return true;
   },
 
   // Under a Special Project rental line on viewQuote: its hold (rental

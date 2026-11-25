@@ -6,6 +6,7 @@ const { calcCommission } = require('./commissions');
 const { findDuplicateCustomers, isHardDuplicate, hardDuplicateError } = require('./customers');
 const { requirePermission, can } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
+const { liveCustomer, leadCustomerId } = require('../lib/crmLeads');
 
 // Thin insert wrapper other modules can call directly (not an HTTP route,
 // so it isn't gated by the router.use(requirePermission('crm')) below) —
@@ -20,6 +21,17 @@ async function logActivity({ customerId, employeeId, type, subject, description,
   });
   const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM crm_activities WHERE id = ?', args: [Number(result.lastInsertRowid)] });
   return row;
+}
+
+const LEAD_SELECT = `SELECT l.*, e.first_name || ' ' || e.last_name as assigned_name, c.customer_number, c.first_name || ' ' || c.last_name as customer_name,
+  c.is_rental_customer as customer_is_rental, c.rental_preapproved as customer_rental_preapproved
+  FROM crm_leads l LEFT JOIN employees e ON l.assigned_to = e.id LEFT JOIN customers c ON l.customer_id = c.id`;
+
+function parseRequest(lead) {
+  if (!lead) return lead;
+  try { lead.request = lead.request_json ? JSON.parse(lead.request_json) : null; } catch { lead.request = null; }
+  delete lead.request_json;
+  return lead;
 }
 
 router.use(requirePermission('crm'));
@@ -56,7 +68,9 @@ router.get('/dashboard', async (req, res) => {
 router.get('/leads', async (req, res) => {
   try {
     const { status, assigned_to, search, limit = 200 } = req.query;
-    let sql = `SELECT l.*, e.first_name || ' ' || e.last_name as assigned_name, c.customer_number, c.first_name || ' ' || c.last_name as customer_name, (SELECT COUNT(*) FROM crm_activities WHERE lead_id = l.id AND completed = 0) as open_activities, (SELECT COUNT(*) FROM crm_opportunities WHERE lead_id = l.id) as opportunities FROM crm_leads l LEFT JOIN employees e ON l.assigned_to = e.id LEFT JOIN customers c ON l.customer_id = c.id WHERE 1=1`;
+    let sql = `SELECT l.id, l.lead_number, l.company, l.first_name, l.last_name, l.email, l.phone, l.source, l.status, l.estimated_value, l.assigned_to, l.customer_id, l.created_at, l.updated_at, l.notes,
+      e.first_name || ' ' || e.last_name as assigned_name, c.customer_number, c.first_name || ' ' || c.last_name as customer_name, (SELECT COUNT(*) FROM crm_activities WHERE lead_id = l.id AND completed = 0) as open_activities, (SELECT COUNT(*) FROM crm_opportunities WHERE lead_id = l.id) as opportunities,
+      (SELECT COUNT(*) FROM quotations WHERE lead_id = l.id) as quotes, (l.request_json IS NOT NULL) as has_request FROM crm_leads l LEFT JOIN employees e ON l.assigned_to = e.id LEFT JOIN customers c ON l.customer_id = c.id WHERE 1=1`;
     const params = [];
     if (status) { sql += ' AND l.status = ?'; params.push(status); }
     // A salesperson's own leads always win over whatever assigned_to the
@@ -77,25 +91,35 @@ router.get('/leads', async (req, res) => {
 
 router.get('/leads/:id', async (req, res) => {
   try {
-    const { rows: [lead] } = await db.execute({ sql: `SELECT l.*, e.first_name || ' ' || e.last_name as assigned_name, c.customer_number, c.first_name || ' ' || c.last_name as customer_name FROM crm_leads l LEFT JOIN employees e ON l.assigned_to = e.id LEFT JOIN customers c ON l.customer_id = c.id WHERE l.id = ?`, args: [req.params.id] });
+    const { rows: [lead] } = await db.execute({ sql: `${LEAD_SELECT} WHERE l.id = ?`, args: [req.params.id] });
     if (!lead) return res.status(404).json({ error: 'Not found' });
     if (req.employee?.is_salesperson && lead.assigned_to !== req.employee.id) return res.status(403).json({ error: 'Not assigned to you' });
     const { rows: activities } = await db.execute({ sql: `SELECT a.*, e.first_name || ' ' || e.last_name as employee_name FROM crm_activities a LEFT JOIN employees e ON a.employee_id = e.id WHERE a.lead_id = ? ORDER BY a.due_date DESC, a.created_at DESC`, args: [lead.id] });
     const { rows: opportunities } = await db.execute({ sql: `SELECT o.*, e.first_name || ' ' || e.last_name as employee_name FROM crm_opportunities o LEFT JOIN employees e ON o.employee_id = e.id WHERE o.lead_id = ? ORDER BY o.created_at DESC`, args: [lead.id] });
     lead.activities = activities;
     lead.opportunities = opportunities;
-    res.json(lead);
+    const { rows: quotes } = await db.execute({ sql: `SELECT q.id, q.quote_number, q.quote_type, q.status, q.total, q.created_at, b.name as branch_name FROM quotations q LEFT JOIN branches b ON q.branch_id = b.id WHERE q.lead_id = ? ORDER BY q.created_at`, args: [lead.id] });
+    lead.quotes = quotes;
+    // Not linked yet: the active customers its email/phone (or name) belong
+    // to, for staff to link with one click.
+    lead.customer_matches = lead.customer_id ? [] : (await findDuplicateCustomers({ email: lead.email, phone: lead.phone, first_name: lead.first_name, last_name: lead.last_name }))
+      .slice(0, 10).map(m => ({ id: m.id, customer_number: m.customer_number, first_name: m.first_name, last_name: m.last_name, email: m.email, phone: m.phone, match_on: m.match_on }));
+    res.json(parseRequest(lead));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 router.post('/leads', async (req, res) => {
-  const { first_name, last_name, company, email, phone, source, status, estimated_value, assigned_to, notes } = req.body;
+  const { first_name, last_name, company, email, phone, source, status, estimated_value, assigned_to, notes, customer_id, request } = req.body;
   if (!first_name || !last_name) return res.status(400).json({ error: 'First and last name required' });
   try {
     const lead_number = await nextNumber(db, 'crm_leads', 'lead_number', 'LEAD-', 5);
-    const result = await db.execute({ sql: `INSERT INTO crm_leads (lead_number,first_name,last_name,company,email,phone,source,status,estimated_value,assigned_to,notes) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, args: [lead_number, first_name, last_name, company||null, email||null, phone||null, source||'other', status||'new', parseFloat(estimated_value||0), assigned_to||null, notes||null] });
+    // Linked to the customer it's from when that's known (not converted: the
+    // lead stays open until it's won or lost).
+    const custId = await leadCustomerId({ customer_id, email, phone });
+    const requestJson = request && typeof request === 'object' ? JSON.stringify(request).slice(0, 20000) : null;
+    const result = await db.execute({ sql: `INSERT INTO crm_leads (lead_number,first_name,last_name,company,email,phone,source,status,estimated_value,assigned_to,notes,customer_id,request_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, args: [lead_number, first_name, last_name, company||null, email||null, phone||null, source||'other', status||'new', parseFloat(estimated_value||0), assigned_to||null, notes||null, custId, requestJson] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM crm_leads WHERE id = ?', args: [Number(result.lastInsertRowid)] });
-    res.status(201).json(row);
+    res.status(201).json(parseRequest(row));
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
 
@@ -118,6 +142,25 @@ router.patch('/leads/:id/status', async (req, res) => {
     await db.execute({ sql: "UPDATE crm_leads SET status=?,updated_at=datetime('now') WHERE id=?", args: [status, req.params.id] });
     const { rows: [row] } = await db.execute({ sql: 'SELECT * FROM crm_leads WHERE id = ?', args: [req.params.id] });
     res.json(row);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Ties a lead to an existing customer without closing it (Convert to
+// Customer marks it won) — e.g. a website request from someone already in
+// the POS. customer_id null unlinks.
+router.patch('/leads/:id/customer', async (req, res) => {
+  try {
+    const { rows: [lead] } = await db.execute({ sql: 'SELECT id FROM crm_leads WHERE id = ?', args: [req.params.id] });
+    if (!lead) return res.status(404).json({ error: 'Not found' });
+    let custId = null;
+    if (req.body?.customer_id) {
+      const c = await liveCustomer(req.body.customer_id);
+      if (!c) return res.status(404).json({ error: 'That customer is not active' });
+      custId = c.id;
+    }
+    await db.execute({ sql: "UPDATE crm_leads SET customer_id=?,updated_at=datetime('now') WHERE id=?", args: [custId, lead.id] });
+    const { rows: [row] } = await db.execute({ sql: `${LEAD_SELECT} WHERE l.id = ?`, args: [lead.id] });
+    res.json(parseRequest(row));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

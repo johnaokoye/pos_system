@@ -182,6 +182,16 @@ app.listen(PORT, () => {
   console.log(`\n  POS System running at http://localhost:${PORT}\n`);
 });
 
+// One-time: website CRM leads from before the website linked its signed-in
+// customer and sent the request form get both, read from their notes.
+setTimeout(async () => {
+  try {
+    await ensureReady();
+    const r = await require('./lib/crmLeads').backfillWebsiteLeads();
+    if (!r.skipped) console.log('[crm] website leads backfilled:', JSON.stringify(r));
+  } catch (e) { console.error('[crm] website lead backfill:', e.message); }
+}, 3000);
+
 // Scheduled database backups (Settings → Backups, lib/backups.js) —
 // checked every minute; a no-op unless the schedule is on and due.
 setInterval(async () => {

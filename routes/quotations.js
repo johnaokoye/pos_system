@@ -821,6 +821,19 @@ router.post('/', async (req, res) => {
       } else {
         await insertQuoteLines(tx, quoteId, processedItems);
       }
+      // Made from a CRM lead (Create Quote on the lead): link it, move the lead
+      // on to Proposal, and give the lead the quote's customer if it had none.
+      if (req.body.lead_id) {
+        const { rows: [lead] } = await tx.execute({ sql: 'SELECT id, status, customer_id FROM crm_leads WHERE id = ?', args: [Number(req.body.lead_id)] });
+        if (lead) {
+          await tx.execute({ sql: 'UPDATE quotations SET lead_id = ? WHERE id = ?', args: [lead.id, quoteId] });
+          await tx.execute({
+            sql: `UPDATE crm_leads SET status = CASE WHEN status IN ('new','contacted','qualified') THEN 'proposal' ELSE status END,
+                  customer_id = COALESCE(customer_id, ?), updated_at = datetime('now') WHERE id = ?`,
+            args: [customer_id || null, lead.id],
+          });
+        }
+      }
       await tx.commit();
       committed = true;
       const { rows: [quote] } = await db.execute({ sql: `SELECT q.*, c.first_name || ' ' || c.last_name as customer_name FROM quotations q LEFT JOIN customers c ON q.customer_id = c.id WHERE q.id = ?`, args: [quoteId] });

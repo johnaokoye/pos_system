@@ -293,7 +293,7 @@ Object.assign(App, {
     return leads.map(l => `
       <tr>
         <td style="font-family:monospace;font-size:12px">${l.lead_number}</td>
-        <td><div style="font-weight:600">${l.first_name} ${l.last_name}</div>${l.company?`<div style="font-size:11px;color:var(--text-muted)">${l.company}</div>`:''}</td>
+        <td><div style="font-weight:600">${l.first_name} ${l.last_name}</div>${l.company?`<div style="font-size:11px;color:var(--text-muted)">${l.company}</div>`:''}${l.customer_id?`<div style="font-size:11px;color:var(--success)" title="Linked to an existing customer">✓ Customer ${this.escapeAttr(l.customer_number||'')}</div>`:''}${l.quotes>0?`<div style="font-size:11px;color:var(--accent)">${l.quotes} quote${l.quotes>1?'s':''}</div>`:''}</td>
         <td><div style="font-size:12px">${l.email||''}</div><div style="font-size:12px;color:var(--text-muted)">${l.phone||''}</div></td>
         <td style="font-size:12px">${sourceLabel(l.source)}</td>
         <td style="font-weight:600">${this.fmt(l.estimated_value)}</td>
@@ -581,7 +581,9 @@ Object.assign(App, {
             <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Assigned To</label><div style="font-size:13px">${lead.assigned_name||'Unassigned'}</div></div>
             <div><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Created</label><div style="font-size:13px">${this.fmtDate(lead.created_at)}</div></div>
           </div>
-          ${lead.notes?`<div style="margin-bottom:16px"><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Notes</label><div style="font-size:13px;padding:8px;background:#f9f9f9;border-radius:4px;margin-top:4px">${lead.notes}</div></div>`:''}
+          ${this._leadCustomerBoxHtml(lead)}
+          ${this._leadRequestHtml(lead)}
+          ${lead.notes?`<div style="margin-bottom:16px"><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Notes</label><div style="font-size:13px;padding:8px;background:#f9f9f9;border-radius:4px;margin-top:4px;white-space:pre-wrap">${this.escapeAttr(lead.notes)}</div></div>`:''}
 
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
             <strong style="font-size:14px">Activities (${lead.activities.length})</strong>
@@ -614,11 +616,112 @@ Object.assign(App, {
           ` : ''}
         </div>
         <div class="modal-footer">
-          ${!lead.customer_id ? `<button class="btn btn-success" onclick="App.convertLead(${lead.id})">Convert to Customer</button>` : `<span style="font-size:12px;color:var(--success)">Converted: ${lead.customer_number}</span>`}
+          ${this._leadQuoteButtonsHtml(lead)}
+          ${!lead.customer_id ? `<button class="btn btn-success" onclick="App.convertLead(${lead.id})">Convert to Customer</button>` : ''}
           <button class="btn btn-outline" onclick="App.showLeadModal(${lead.id})">Edit</button>
           <button class="btn btn-secondary" onclick="App.closeModal()">Close</button>
         </div>
       </div>`);
+  },
+
+  // Who the lead is: the linked customer (website sign-ins and single
+  // email/phone matches are linked when the lead comes in), else the
+  // customers its details match, each one click to link.
+  _leadCustomerBoxHtml(lead) {
+    const box = (inner, color) => `<div style="margin-bottom:12px;padding:10px;border:1px solid ${color};border-radius:6px;font-size:13px">${inner}</div>`;
+    if (lead.customer_id) {
+      const rental = lead.customer_is_rental || lead.customer_rental_preapproved;
+      return box(`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <div><strong style="color:var(--success)">✓ Existing customer</strong> — ${this.escapeAttr(lead.customer_name||'')} (${this.escapeAttr(lead.customer_number||'')})
+            ${lead.request && !rental ? `<div style="font-size:11px;color:var(--warning);margin-top:2px">Not rental approved yet — their documents are needed before checkout.</div>` : ''}</div>
+          <div style="display:flex;gap:6px;flex-shrink:0">
+            <button class="btn btn-sm btn-outline" onclick="App.closeModal();App.viewCustomer(${lead.customer_id})">View</button>
+            <button class="btn btn-sm btn-outline" onclick="App._linkLeadCustomer(${lead.id}, null)" title="Not this customer">Unlink</button>
+          </div></div>`, 'var(--success)');
+    }
+    const matches = lead.customer_matches || [];
+    if (!matches.length) return box(`<span style="color:var(--text-muted)">New contact — no customer has this email or phone. Create Quote works without one; Convert to Customer makes the record.</span>`, 'var(--border)');
+    const on = m => m.match_on.map(f => f === 'phone' ? 'phone' : f).join(' + ');
+    return box(`<strong style="color:var(--warning)">Possible existing customer</strong>
+      ${matches.map(m => `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-top:1px solid var(--border);margin-top:6px">
+        <div>${this.escapeAttr(`${m.first_name} ${m.last_name}`)} (${this.escapeAttr(m.customer_number)}) <span style="font-size:11px;color:var(--text-muted)">same ${on(m)} · ${this.escapeAttr(m.email||'')} ${this.escapeAttr(m.phone||'')}</span></div>
+        <button class="btn btn-sm btn-success" onclick="App._linkLeadCustomer(${lead.id}, ${m.id})">Link</button></div>`).join('')}`, 'var(--warning)');
+  },
+
+  async _linkLeadCustomer(leadId, customerId) {
+    try {
+      await this.api('PATCH', `/crm/leads/${leadId}/customer`, { customer_id: customerId });
+      if (this.section === 'crm') this.renderCrmTab();
+      this.viewLead(leadId);
+    } catch (e) { this.alert(e.message, 'error'); }
+  },
+
+  // A website rental request's items, dates and fulfilment, plus the quotes
+  // already made from the lead.
+  _leadRequestHtml(lead) {
+    const r = lead.request;
+    const quotes = lead.quotes || [];
+    let html = '';
+    if (r && Array.isArray(r.items)) {
+      const fulfil = r.fulfilment === 'delivery'
+        ? `Delivery to ${this.escapeAttr([r.delivery_address, r.delivery_parish].filter(Boolean).join(', '))}`
+        : 'Customer picks up';
+      html += `<div style="margin-bottom:12px"><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Requested on the website</label>
+        <div style="font-size:13px;margin:4px 0">${this.fmtDate(r.start_date)} → ${this.fmtDate(r.end_date)} · ${fulfil}</div>
+        <table style="width:100%;font-size:12px"><thead><tr><th style="text-align:left">Item</th><th>Qty</th><th style="text-align:left">From</th></tr></thead><tbody>
+        ${r.items.map(i => `<tr><td>${this.escapeAttr(i.name || `#${i.product_id}`)}${i.sku?` <span style="color:var(--text-muted)">${this.escapeAttr(i.sku)}</span>`:''}${(i.accessory_names||[]).length?`<div style="color:var(--text-muted)">+ ${i.accessory_names.map(n => this.escapeAttr(n)).join(', ')}</div>`:''}</td>
+          <td style="text-align:center">${i.quantity}</td><td>${this.escapeAttr(i.branch_name || '—')}</td></tr>`).join('')}
+        </tbody></table></div>`;
+    }
+    if (quotes.length) {
+      html += `<div style="margin-bottom:12px"><label style="font-size:11px;color:var(--text-muted);text-transform:uppercase">Quotes from this lead</label>
+        ${quotes.map(q => `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:13px;cursor:pointer" onclick="App.closeModal();App.viewQuote(${q.id})">
+          <span><strong>${this.escapeAttr(q.quote_number)}</strong> · ${q.quote_type === 'rental' ? 'Rental' : 'Retail'}${q.branch_name?` · ${this.escapeAttr(q.branch_name)}`:''} · ${this.escapeAttr(q.status)}</span><span>${this.fmt(q.total)}</span></div>`).join('')}</div>`;
+    }
+    return html;
+  },
+
+  // Create Quote: one button, or one per branch when a website request asks
+  // for items from several branches (a rental quote is for one branch).
+  _leadQuoteButtonsHtml(lead) {
+    if (!this.can('quotations_create')) return '';
+    const items = lead.request?.items || [];
+    const groups = [...new Set(items.map(i => i.branch_id || 0))];
+    if (groups.length > 1) {
+      return groups.map(b => {
+        const n = items.filter(i => (i.branch_id || 0) === b).length;
+        const name = items.find(i => (i.branch_id || 0) === b)?.branch_name || 'No branch';
+        return `<button class="btn btn-primary" onclick="App._quoteFromLead(${lead.id}, ${b})" title="Rental quote for the ${n} item${n>1?'s':''} requested from ${this.escapeAttr(name)}">Create Quote — ${this.escapeAttr(name)}</button>`;
+      }).join('');
+    }
+    return `<button class="btn btn-primary" onclick="App._quoteFromLead(${lead.id})" title="${items.length ? 'Rental quote filled in from the request — customer, items, accessories, return date and delivery' : 'New quote for this lead\'s customer'}">${items.length ? 'Create Rental Quote' : 'Create Quote'}</button>`;
+  },
+
+  async _quoteFromLead(leadId, branchId = null) {
+    try {
+      const lead = await this.api('GET', `/crm/leads/${leadId}`);
+      const r = lead.request;
+      const items = (r?.items || []).filter(i => branchId == null || (i.branch_id || 0) === branchId);
+      const customer = lead.customer_id ? await this._customerById(lead.customer_id) : null;
+      const home = this._homeBranch();
+      const from = [...new Set(items.map(i => i.branch_name).filter(Boolean))].join(' + ');
+      const notes = [
+        `From ${lead.lead_number}${r ? ' (website request)' : ''}`,
+        r ? `requested ${r.start_date} to ${r.end_date}` : null,
+        from && home && !items.every(i => !i.branch_id || i.branch_id === home.id) ? `asked for from ${from}` : null,
+        !customer ? `${lead.first_name} ${lead.last_name}${lead.phone ? ' ' + lead.phone : ''}${lead.email ? ' ' + lead.email : ''}` : null,
+      ].filter(Boolean).join(' · ');
+      this.closeModal();
+      await this.showQuoteForm(null, items.length ? 'rental' : 'retail', {
+        lead_id: lead.id,
+        customer,
+        notes,
+        due_date: r?.end_date ? String(r.end_date).slice(0, 10) : null,
+        branch_id: items.find(i => i.branch_id)?.branch_id || null,
+        items: items.map(i => ({ product_id: i.product_id, quantity: i.quantity, accessory_ids: (i.accessory_ids || []).map(String) })),
+        delivery_address: r?.fulfilment === 'delivery' ? [r.delivery_address, r.delivery_parish].filter(Boolean).join(', ') : null,
+      });
+    } catch (e) { this.alert(e.message, 'error'); }
   },
 
   async completeActivityAndRefreshLead(actId, leadId) {

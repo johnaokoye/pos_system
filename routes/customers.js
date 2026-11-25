@@ -967,6 +967,30 @@ router.get('/:id', requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// The customer's requests sent from the website (CRM leads with a request
+// form, linked to them), newest first, with any quotes made from each — for
+// the website's account page. Only what the customer gave and its progress.
+router.get('/:id/rental-requests', requirePermission('customers'), async (req, res) => {
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT id, lead_number, status, request_json, created_at, updated_at FROM crm_leads
+            WHERE customer_id = ? AND request_json IS NOT NULL ORDER BY created_at DESC LIMIT 50`,
+      args: [req.params.id],
+    });
+    const ids = rows.map(r => r.id);
+    const { rows: quotes } = ids.length ? await db.execute({
+      sql: `SELECT lead_id, quote_number, status, total, due_date, created_at FROM quotations WHERE lead_id IN (${ids.map(() => '?').join(',')}) ORDER BY created_at`,
+      args: ids,
+    }) : { rows: [] };
+    res.json(rows.map(r => {
+      let request = null;
+      try { request = JSON.parse(r.request_json); } catch {}
+      return { id: r.id, lead_number: r.lead_number, status: r.status, created_at: r.created_at, updated_at: r.updated_at, request,
+        quotes: quotes.filter(q => q.lead_id === r.id).map(({ lead_id, ...q }) => q) };
+    }));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/:id/transactions', requireAuth, async (req, res) => {
   try {
     const { start, end } = req.query;

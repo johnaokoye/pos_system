@@ -3666,6 +3666,12 @@ async function _init() {
     // (a blank write-in line when empty). Set on the quote or at the POS;
     // a sale from a quote takes the quote's unless the cashier typed one.
     'ALTER TABLE quotations ADD COLUMN po_number TEXT',
+    // A website rental request's structured form (items with product/branch/
+    // qty/accessories, dates, fulfilment) — the lead's notes are the readable
+    // copy; this lets Create Quote fill the quote form (routes/crm.js).
+    'ALTER TABLE crm_leads ADD COLUMN request_json TEXT',
+    // The CRM lead a quote was made from (Create Quote on the lead).
+    'ALTER TABLE quotations ADD COLUMN lead_id INTEGER REFERENCES crm_leads(id)',
     // A quote for a blocked credit customer can be made, but not turned into
     // an invoice (Convert, or sold at the POS) until the account is cleared or
     // someone with customers_credit_block releases that one quote
