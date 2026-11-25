@@ -2983,6 +2983,52 @@ Object.assign(App, {
     return amt > 0 && gross > 0 ? parseFloat((amt / gross * 100).toFixed(2)) : 0;
   },
 
+  // The items on layaway behind a layaway deposit/payment/refund (tx.layaway
+  // from GET /transactions/:id) — the sale itself is one money line, so the
+  // printout lists what's on the plan and where it stands. Mirrors
+  // layawayItemsHtml() in routes/email.js.
+  _layawaySummaryRows(l) {
+    return [
+      ['Layaway Total', this.fmt(l.total)],
+      l.kind === 'refund' ? null : ['Paid to Date', this.fmt(l.paid_to_date)],
+      l.kind === 'refund' ? ['Refunded', this.fmt(l.refunded_amount)] : ['Balance Remaining', this.fmt(l.balance)],
+      l.kind === 'refund' && l.forfeited_amount > 0 ? ['Forfeited (cancellation fee)', this.fmt(l.forfeited_amount)] : null,
+    ].filter(Boolean);
+  },
+
+  _layawayReceiptNote(l) {
+    return l.kind === 'refund' ? 'Layaway cancelled — items returned to stock.' : l.completed ? 'Paid in full — ready for pickup.' : 'Items are held for you until the layaway is paid in full.';
+  },
+
+  _layawayReceiptHtml(tx) {
+    const l = tx.layaway;
+    if (!l) return '';
+    const esc = v => this.escapeAttr(v ?? '');
+    return `<hr><div style="font-weight:700;margin-bottom:4px">ITEMS ON LAYAWAY ${esc(l.plan_number)}</div>
+      ${l.items.map(i => `<div class="receipt-item">
+        <div>${i.sku ? `<span style="font-size:11px;color:#555">${esc(i.sku)}</span> ` : ''}${esc(i.product_name)}</div>
+        <div class="receipt-row"><span style="padding-left:8px">${i.quantity} x ${this.fmt(i.unit_price)}</span><span>${this.fmt(i.line_total)}</span></div>
+      </div>`).join('')}
+      ${this._layawaySummaryRows(l).map(([k, v]) => `<div class="receipt-row"><span>${k}</span><span>${v}</span></div>`).join('')}
+      <div style="font-size:11px;color:#666;margin-top:2px">${this._layawayReceiptNote(l)}</div>`;
+  },
+
+  _layawayLetterHtml(tx) {
+    const l = tx.layaway;
+    if (!l) return '';
+    const esc = v => this.escapeAttr(v ?? '');
+    const td = 'padding:8px;border-bottom:1px solid #e8e8e8';
+    return `<div style="margin-top:20px">
+      <div style="font-size:11px;font-weight:bold;text-transform:uppercase;color:#555;margin-bottom:6px">Items on Layaway ${esc(l.plan_number)}</div>
+      <table>
+        <thead><tr><th>SKU</th><th>Item</th><th style="text-align:center">Qty</th><th style="text-align:right">Unit Price</th><th style="text-align:right">Total</th></tr></thead>
+        <tbody>${l.items.map(i => `<tr><td style="${td};color:#555">${esc(i.sku)}</td><td style="${td}">${esc(i.product_name)}</td><td style="${td};text-align:center">${i.quantity}</td><td style="${td};text-align:right">${this.fmt(i.unit_price)}</td><td style="${td};text-align:right">${this.fmt(i.line_total)}</td></tr>`).join('')}</tbody>
+      </table>
+      <table class="totals">${this._layawaySummaryRows(l).map(([k, v]) => `<tr><td>${k}</td><td style="text-align:right">${v}</td></tr>`).join('')}</table>
+      <div style="font-size:12px;color:#555;margin-top:6px;text-align:right">${this._layawayReceiptNote(l)}</div>
+    </div>`;
+  },
+
   showReceipt(tx, change = 0, cashResult = null, splitForeignCash = null) {
     const items = tx.items || [];
     const storeName = this.settings.store_name || 'My Store';
@@ -3034,6 +3080,7 @@ Object.assign(App, {
             ${tx.payment_method === 'split' ? this._splitPaymentReceiptRows(tx, splitForeignCash) : `<div class="receipt-row"><span>Payment</span><span>${tx.payment_method.replace(/_/g, ' ').toUpperCase()}</span></div>
             ${tx.amount_tendered > tx.total ? (cashResult?.rate && cashResult.rate !== 1 ? `<div class="receipt-row"><span>Tendered (${cashResult.currency})</span><span>${cashResult.currency} ${this._n2(cashResult.tenderedAlt)}</span></div><div class="receipt-row" style="font-size:10px;color:#666"><span>Equivalent</span><span>${this.fmt(tx.amount_tendered)}</span></div><div class="receipt-row"><span>Change</span><span>${this._changeDisplay(cashResult, change)}</span></div>` : `<div class="receipt-row"><span>Tendered</span><span>${this.fmt(tx.amount_tendered)}</span></div><div class="receipt-row"><span>Change</span><span>${this._changeDisplay(cashResult, change)}</span></div>`) : ''}
             ${tx.approval_code ? `<div class="receipt-row"><span>${tx.payment_method === 'direct_deposit' ? 'Deposit Ref #' : tx.payment_method === 'tax_exempt_tender' ? 'Exemption Ref #' : tx.payment_method === 'gift_card' ? 'Gift Card #' : 'Approval Code'}</span><span style="font-family:monospace;font-weight:600">${tx.approval_code}</span></div>` : ''}`}
+            ${this._layawayReceiptHtml(tx)}
             <hr>
             <div style="text-align:center;margin-top:4px">${footer}</div>
           </div>
@@ -3248,6 +3295,7 @@ Object.assign(App, {
       <tr><td>Payment</td><td style="text-align:right">${tx.payment_method.replace(/_/g, ' ').toUpperCase()}</td></tr>
       ${tenderRows.map(([l,v]) => `<tr><td>${l}</td><td style="text-align:right">${v}</td></tr>`).join('')}
     </table>
+    ${this._layawayLetterHtml(tx)}
     ${tx.rental_pauses?.length ? `
     <div style="margin-top:20px">
       <div style="font-size:11px;font-weight:bold;text-transform:uppercase;color:#555;margin-bottom:6px">Paused Periods</div>

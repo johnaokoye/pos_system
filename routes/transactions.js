@@ -3,6 +3,7 @@ const router = express.Router();
 const { db } = require('../database');
 const { calcCommission } = require('./commissions');
 const { customerSalesperson } = require('../lib/salesCredit');
+const { layawayForTransaction } = require('../lib/layawayReceipt');
 const { getWcSettings, wcRequest } = require('./woocommerce');
 const { syncBinQty } = require('../lib/binSync');
 const saleTransfers = require('../lib/saleTransfers');
@@ -657,6 +658,8 @@ router.get('/:id', requireAuth, async (req, res) => {
       FROM salesperson_changes sc LEFT JOIN employees o ON o.id = sc.old_salesperson_id LEFT JOIN employees n ON n.id = sc.new_salesperson_id LEFT JOIN employees cb ON cb.id = sc.changed_by
       WHERE sc.transaction_id = ? ORDER BY sc.changed_at, sc.id`, args: [req.params.id] });
     tx.salesperson_changes = spChanges;
+    // A layaway deposit/payment/refund: the plan's items for the receipt.
+    if ((items[0]?.sku || '').startsWith('LAYAWAY-')) tx.layaway = await layawayForTransaction(tx.id);
     res.json(tx);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

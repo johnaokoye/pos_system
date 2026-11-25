@@ -7,6 +7,7 @@ const nodemailer = require('nodemailer');
 const { db } = require('../database');
 const { requireAuth, requirePermission, requireAnyPermission, can, drawerScope } = require('../lib/permissions');
 const { customerArDetail, customerStatement } = require('../lib/arDetail');
+const { layawayForTransaction } = require('../lib/layawayReceipt');
 const { inlineProtectedImages } = require('../lib/protectedUploads');
 const { orderLineUnit } = require('../lib/units');
 const { rentalQuoteSummary, attachRentalRates, attachRateBasis, rentalWindow, rateBasisLabel } = require('../lib/rentals');
@@ -180,6 +181,32 @@ function lineDiscountTotal(tx) {
   return Math.round((tx?.items || []).reduce((sum, i) => sum + (i.is_comment ? 0 : parseFloat(i.discount_amount) || 0), 0) * 100) / 100;
 }
 
+// The items on layaway behind a layaway deposit/payment/refund receipt
+// (tx.layaway from lib/layawayReceipt.js), with where the plan stands.
+function layawaySummaryRows(l) {
+  return [
+    ['Layaway Total', fmt(l.total)],
+    l.kind === 'refund' ? null : ['Paid to Date', fmt(l.paid_to_date)],
+    l.kind === 'refund' ? ['Refunded', fmt(l.refunded_amount)] : ['Balance Remaining', fmt(l.balance)],
+    l.kind === 'refund' && parseFloat(l.forfeited_amount) > 0 ? ['Forfeited (cancellation fee)', fmt(l.forfeited_amount)] : null,
+  ].filter(Boolean);
+}
+function layawayItemsHtml(tx) {
+  const l = tx.layaway;
+  if (!l) return '';
+  const note = l.kind === 'refund' ? 'Layaway cancelled — items returned to stock.' : l.completed ? 'Paid in full — ready for pickup.' : 'Items are held for you until the layaway is paid in full.';
+  return `
+      <div style="margin-top:16px;font-size:13px;font-weight:700;color:${BRAND.black}">Items on Layaway ${l.plan_number}</div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px;margin-top:6px">
+        <thead><tr style="background:#f9fafb"><th style="padding:8px;text-align:left;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Item</th><th style="padding:8px;text-align:right;font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">Amount</th></tr></thead>
+        <tbody>${l.items.map(i => `<tr><td style="padding:6px 8px;border-bottom:1px solid #f0f0f0">${i.product_name}<br><span style="color:#888;font-size:11px">${i.sku || ''} × ${i.quantity} @ ${fmt(i.unit_price)}</span></td><td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right">${fmt(i.line_total)}</td></tr>`).join('')}</tbody>
+      </table>
+      <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;color:#444;margin-top:8px">
+        ${layawaySummaryRows(l).map(([k, v]) => `<tr><td style="padding:2px 0">${k}</td><td style="text-align:right">${v}</td></tr>`).join('')}
+      </table>
+      <div style="font-size:12px;color:#666;margin-top:4px">${note}</div>`;
+}
+
 function buildReceiptHtml(tx, s) {
   const storeName = s.store_name || 'My Store';
   const storeAddr = tx.branch_address
@@ -239,6 +266,7 @@ function buildReceiptHtml(tx, s) {
         <tr><td style="font-size:16px;font-weight:700;color:${BRAND.black}">TOTAL</td><td style="font-size:16px;font-weight:700;color:${BRAND.black};text-align:right">${fmt(tx.total)}</td></tr>
         ${parseFloat(tx.change_amount) > 0 ? `<tr><td style="padding:3px 0;color:${BRAND.green}">Change</td><td style="text-align:right;color:${BRAND.green}">${fmt(tx.change_amount)}</td></tr>` : ''}
       </table>
+      ${layawayItemsHtml(tx)}
       ${wantsInvoiceSignatures(tx) ? signatureLinesHtml(blankSignatureLabels()) : ''}
       <div style="text-align:center;margin-top:20px;font-size:13px;color:#666;font-style:italic">${footer}</div>
     </td></tr>
@@ -1070,6 +1098,7 @@ router.post('/send-receipt/:id', requireAuth, async (req, res) => {
     if (!tx) return res.status(404).json({ error: 'Transaction not found' });
     const { rows: items } = await db.execute({ sql: 'SELECT * FROM transaction_items WHERE transaction_id = ?', args: [req.params.id] });
     tx.items = items;
+    if ((items[0]?.sku || '').startsWith('LAYAWAY-')) tx.layaway = await layawayForTransaction(tx.id);
 
     const s = await getSettings();
     try {
@@ -2971,7 +3000,12 @@ function receiptPdfModel(tx, s) {
       const gross = (parseFloat(i.unit_price) || 0) * (parseFloat(i.quantity) || 0);
       const pct = parseFloat(i.discount_percent) || (parseFloat(i.discount_amount) > 0 && gross > 0 ? parseFloat((i.discount_amount / gross * 100).toFixed(2)) : 0);
       return { cells: [i.product_name, i.quantity, fmt(i.unit_price), fmt(i.total)], sub: [i.sku, pct > 0 ? `less ${i.discount_fixed > 0 ? fmt(i.discount_amount) : `${pct}% (-${fmt(i.discount_amount)})`}` : ''].filter(Boolean).join(' · ') };
-    }) }],
+    }) },
+      ...(tx.layaway ? [{ heading: `Items on Layaway ${tx.layaway.plan_number}`, columns: ITEM_COLUMNS, rows: [
+        ...tx.layaway.items.map(i => ({ cells: [i.product_name, i.quantity, fmt(i.unit_price), fmt(i.line_total)], sub: i.sku || '' })),
+      ] }] : []),
+    ],
+    notes: tx.layaway ? [`Layaway ${tx.layaway.plan_number}: ${layawaySummaryRows(tx.layaway).map(([k, v]) => `${k} ${v}`).join(', ')}`] : [],
     totals: [
       ...(ld => ld > 0 ? [{ label: 'Before Discounts', value: fmt(parseFloat(tx.subtotal) + ld) }, { label: 'Line Discounts', value: `-${fmt(ld)}`, style: 'green' }] : [])(lineDiscountTotal(tx)),
       { label: 'Subtotal', value: fmt(tx.subtotal) },

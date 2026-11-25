@@ -342,6 +342,17 @@ Object.assign(App, {
       // to whatever (if anything) happens to be sitting in this.cart.
       if (this._layawayFromPOSCart) { this._layawayFromPOSCart = false; this._dropRecalledHold(); this.clearCart(); }
       this.renderLayaway();
+      this._printLayawayReceipt(plan.deposit_transaction_id);
+    } catch(e) { this.alert(e.message, 'error'); }
+  },
+
+  // The receipt for a layaway deposit/payment/refund — the transaction's
+  // printout lists the items on the plan and the balance after it.
+  async _printLayawayReceipt(txId) {
+    if (!txId) return;
+    try {
+      const tx = await this.api('GET', `/transactions/${txId}`);
+      this.showReceipt(tx, tx.change_amount || 0);
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
@@ -378,8 +389,8 @@ Object.assign(App, {
           </div>
           <strong>Payment History</strong>
           <table class="table">
-            <thead><tr><th>Payment #</th><th>Date</th><th>Amount</th><th>Method</th><th>Type</th></tr></thead>
-            <tbody>${p.payments.map(pay => `<tr><td>${pay.payment_number}</td><td>${this.fmtDateTime(pay.created_at)}</td><td>${this.fmt(pay.amount)}</td><td>${(pay.payment_method||'').replace(/_/g, ' ')}</td><td>${pay.is_deposit ? 'Deposit' : 'Installment'}</td></tr>`).join('')}</tbody>
+            <thead><tr><th>Payment #</th><th>Date</th><th>Amount</th><th>Method</th><th>Type</th><th></th></tr></thead>
+            <tbody>${p.payments.map(pay => `<tr><td>${pay.payment_number}</td><td>${this.fmtDateTime(pay.created_at)}</td><td>${this.fmt(pay.amount)}</td><td>${(pay.payment_method||'').replace(/_/g, ' ')}</td><td>${pay.is_deposit ? 'Deposit' : 'Installment'}</td><td>${pay.transaction_id ? `<button class="btn btn-sm btn-outline" onclick="App._printLayawayReceipt(${pay.transaction_id})">🧾 Receipt</button>` : ''}</td></tr>`).join('')}</tbody>
           </table>
         </div>
         <div class="modal-footer">
@@ -433,6 +444,7 @@ Object.assign(App, {
       this.closeModal();
       this.alert(plan.status === 'completed' ? `Layaway ${plan.plan_number} fully paid — ready for pickup!` : 'Payment recorded');
       this.renderLayaway();
+      this._printLayawayReceipt([...(plan.payments || [])].sort((a, b) => b.id - a.id)[0]?.transaction_id);
     } catch(e) { this.alert(e.message, 'error'); }
   },
 
