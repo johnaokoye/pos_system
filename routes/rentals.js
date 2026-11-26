@@ -14,6 +14,7 @@ const { runCreditCheck } = require('./customers');
 const { nextNumber } = require('../lib/nextNumber');
 const { calcRentalCommission } = require('./commissions');
 const { logActivity } = require('./crm');
+const fleethub = require('../lib/fleethub');
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
@@ -359,6 +360,7 @@ router.get('/agreements/:id', requireRentalsManage, async (req, res) => {
     attachClosedDayGrace(agreement, await loadClosedDaySettings(db));
     agreement.photos = await rentalPhotos(agreement.id);
     agreement.reminders = await require('../lib/rentalReminders').remindersFor(db, agreement.id);
+    agreement.fleet_units = await fleethub.unitsForAgreement(db, agreement.id);
     res.json(agreement);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -906,6 +908,34 @@ router.delete('/agreements/:id/photos/:pid', requireAnyPermission('rentals_issue
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ─── FleetHub units (lib/fleethub.js) ─────────────────────────────────────
+// For the Issue / Hand Over / Security Sign-Off pickers: the fleet-tracked
+// lines still to go out with FleetHub's units and their readiness. For Check
+// In / Process Return / Replace Item: the units out on each line (local, so
+// it works with FleetHub down). No amounts, so guards may read it.
+router.get('/agreements/:id/fleet-units', requireAuth, async (req, res) => {
+  try {
+    const p = req.employee && req.employee.permissions;
+    if (!req.apiKey && !(canManageRentals(p) || can(p, 'rentals_issue') || can(p, 'rentals_security_signoff') || can(p, 'rentals_returns'))) return res.status(403).json({ error: 'Missing permission: rentals' });
+    const { rows: [a] } = await db.execute({ sql: 'SELECT id, status FROM rental_agreements WHERE id = ?', args: [req.params.id] });
+    if (!a) return res.status(404).json({ error: 'Not found' });
+    const out = { enabled: fleethub.enabled(), issue: [], issued: await fleethub.issuedUnits(db, a.id) };
+    if (a.status === 'awaiting_issue' && out.enabled) {
+      try { out.issue = await fleethub.issuePlan(db, a.id); }
+      catch (e) { if (e instanceof fleethub.FleetHubError) return res.status(502).json({ error: e.message }); throw e; }
+    }
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// FleetHub's units for a rental item's SKU — Replace Item's replacement picker.
+router.get('/fleet-units', requireRentalsManage, async (req, res) => {
+  try {
+    if (!fleethub.enabled()) return res.json({ enabled: false, units: [] });
+    res.json({ enabled: true, units: await fleethub.unitsForSku(String(req.query.sku || '').trim()) });
+  } catch (e) { res.status(e instanceof fleethub.FleetHubError ? 502 : 500).json({ error: e.message }); }
+});
+
 router.patch('/agreements/:id/issue', requireAnyPermission('rentals_issue', 'rentals_confirm_delivery', 'rentals_security_signoff'), async (req, res) => {
   try {
     // Whether delivery/an operator is needed, and what it costs, was already
@@ -979,6 +1009,25 @@ router.patch('/agreements/:id/issue', requireAnyPermission('rentals_issue', 'ren
     const securityConfirmedAt = securityAlreadyDone ? agreement.issue_security_confirmed_at : issuedAt.toISOString();
     const deliveryDriverId = agreement.delivery_required ? (delivery_driver_id || agreement.delivery_driver_id || null) : null;
 
+    // FleetHub gate (lib/fleethub.js): each fleet-tracked unit going out is
+    // checked out there first — refused unless it passed its pre-rental
+    // checklist — and undone if the agreement then can't be issued. A
+    // delivery's units were already checked out at security sign-off.
+    let fleetOut = [];
+    if (fleethub.enabled()) {
+      try {
+        const plan = await fleethub.issuePlan(db, agreement.id);
+        if (plan.some(p => p.need) && !can(req.employee.permissions, 'rentals_issue') && !isGuard(req.employee)) {
+          return res.status(409).json({ error: "The fleet units for this delivery weren't picked at security sign-off — the rental desk has to issue it", code: 'fleet_units_required' });
+        }
+        fleetOut = await fleethub.checkOut(db, agreement, fleethub.chosenUnits(plan, req.body.fleet_units), { employeeId: req.employee.id });
+      } catch (e) {
+        if (e instanceof fleethub.FleetHubError) return res.status(409).json({ error: e.message, code: 'fleet_unit' });
+        throw e;
+      }
+    }
+
+    try {
     await db.execute({
       sql: `UPDATE rental_agreements SET
         status = 'active',
@@ -996,6 +1045,11 @@ router.patch('/agreements/:id/issue', requireAnyPermission('rentals_issue', 'ren
         req.params.id,
       ],
     });
+    } catch (e) {
+      await fleethub.undoCheckout(db, fleetOut);
+      throw e;
+    }
+    try { await fleethub.markIssued(db, agreement.id, issuedAt.toISOString()); } catch (e) { console.error('[fleethub] mark issued failed:', e.message); }
     await stampPhotos(db, agreement.id, 'issue', issuedAt.toISOString());
 
     const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
@@ -1029,7 +1083,25 @@ router.patch('/agreements/:id/security-signoff', requirePermission('rentals_secu
     if (agreement.issue_security_employee_id) return res.status(400).json({ error: 'Security has already signed off on this delivery' });
     const sigPath = await uploadSignature(security_signature, `rental-${req.params.id}-issue-guard`);
     if (!sigPath) return res.status(400).json({ error: 'Signature is required to sign off' });
-    await db.execute({ sql: 'UPDATE rental_agreements SET issue_security_employee_id = ?, issue_security_confirmed_at = ?, issue_security_signature = ? WHERE id = ?', args: [req.employee.id, new Date().toISOString(), sigPath, req.params.id] });
+    // The guard sees what's loaded, so a delivery's fleet units are picked
+    // and checked out in FleetHub here (lib/fleethub.js); the driver's issue
+    // later just marks them issued.
+    let fleetOut = [];
+    if (fleethub.enabled()) {
+      try {
+        const plan = await fleethub.issuePlan(db, agreement.id);
+        fleetOut = await fleethub.checkOut(db, agreement, fleethub.chosenUnits(plan, req.body.fleet_units), { employeeId: req.employee.id });
+      } catch (e) {
+        if (e instanceof fleethub.FleetHubError) return res.status(409).json({ error: e.message, code: 'fleet_unit' });
+        throw e;
+      }
+    }
+    try {
+      await db.execute({ sql: 'UPDATE rental_agreements SET issue_security_employee_id = ?, issue_security_confirmed_at = ?, issue_security_signature = ? WHERE id = ?', args: [req.employee.id, new Date().toISOString(), sigPath, req.params.id] });
+    } catch (e) {
+      await fleethub.undoCheckout(db, fleetOut);
+      throw e;
+    }
     const { rows: [updated] } = await db.execute({ sql: 'SELECT * FROM rental_agreements WHERE id = ?', args: [req.params.id] });
     res.json(updated);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -1765,6 +1837,24 @@ router.post('/agreements/:id/replace-item', requireRentalsManage, async (req, re
     const rateSegments = JSON.stringify(segments);
     const newRates = [product.rental_classification || 'tool', product.rental_rate || 0, product.rental_weekly_rate || 0, product.rental_monthly_rate || 0, product.rental_hourly_rate || 0];
 
+    // FleetHub (lib/fleethub.js): the unit(s) swapped out come back — they
+    // need a checklist before renting again — and a fleet-tracked
+    // replacement is checked out like any unit going out.
+    let fleetBack = [], fleetOut = [];
+    try {
+      fleetBack = await fleethub.unitsComingBack(db, agreement.id, [item], [{ item_id: item.id, quantity: qty, units: req.body.return_units }]);
+      if (fleethub.enabled() && product.sku) {
+        const candidates = await fleethub.unitsForSku(product.sku);
+        if (candidates.length) {
+          const plan = [{ item_id: item.id, product_name: product.name, sku: product.sku, quantity: qty, units: candidates, picked: [], need: qty }];
+          fleetOut = await fleethub.checkOut(db, agreement, fleethub.chosenUnits(plan, { [item.id]: req.body.fleet_units }), { status: 'issued', employeeId: req.employee.id });
+        }
+      }
+    } catch (e) {
+      if (e instanceof fleethub.FleetHubError) return res.status(400).json({ error: e.message, code: 'fleet_unit' });
+      throw e;
+    }
+
     const tx = await db.transaction('write');
     let committed = false;
     try {
@@ -1793,12 +1883,15 @@ router.post('/agreements/:id/replace-item', requireRentalsManage, async (req, re
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         args: [agreement.id, openPause.id, newItemId, item.id, qty, item.product_id, item.product_name, item.sku, product.id, product.name, product.sku, billableMsBefore, notes.trim(), employee_id || null] });
       const replacementId = Number(rep.lastInsertRowid);
+      await fleethub.markReturned(tx, fleetBack, { employeeId: req.employee.id });
+      for (const u of fleetOut) await tx.execute({ sql: 'UPDATE rental_fleet_units SET item_id = ? WHERE id = ?', args: [newItemId, u.id] });
       if (item.product_id) {
         await tx.execute({ sql: 'INSERT INTO rental_out_of_service (product_id,branch_id,quantity,reason,agreement_id,replacement_id,created_by) VALUES (?,?,?,?,?,?,?)',
           args: [item.product_id, agreement.branch_id || null, qty, `Swapped out of ${agreement.agreement_number}: ${notes.trim()}`, agreement.id, replacementId, employee_id || null] });
       }
       await tx.commit();
       committed = true;
+      if (fleetBack.length) await fleethub.syncPending(db, agreement.id);
       try {
         await logActivity({
           customerId: agreement.customer_id, employeeId: employee_id,
@@ -1808,7 +1901,7 @@ router.post('/agreements/:id/replace-item', requireRentalsManage, async (req, re
       } catch(e) {}
       res.json({ replacement_id: replacementId, item_id: newItemId });
     } catch(e) {
-      if (!committed) await tx.rollback();
+      if (!committed) { await tx.rollback(); await fleethub.undoCheckout(db, fleetOut); }
       res.status(committed ? 500 : 400).json({ error: e.message });
     }
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -2067,7 +2160,9 @@ router.patch('/agreements/:id/cancel', requirePermission('rentals_returns'), asy
       await tx.execute({ sql: `UPDATE quotations SET status = 'accepted', converted_to_agreement_id = NULL WHERE converted_to_agreement_id = ?`, args: [req.params.id] });
       await tx.execute({ sql: "UPDATE rental_agreements SET status = 'cancelled', cancellation_reason = ?, cancelled_by = ?, cancelled_at = CURRENT_TIMESTAMP WHERE id = ?", args: [reason || null, employee_id || null, req.params.id] });
       await tx.execute({ sql: "UPDATE rental_scheduled_pauses SET status = 'cancelled', cancel_reason = 'Rental cancelled' WHERE agreement_id = ? AND status = 'scheduled'", args: [req.params.id] });
+      await fleethub.releaseForCancel(tx, agreement, req.employee.id);
       await tx.commit();
+      await fleethub.syncPending(db, agreement.id);
       if (reversedCreditCustomerId) { try { await runCreditCheck(reversedCreditCustomerId); } catch(e) {} }
       try {
         await logActivity({
@@ -2124,9 +2219,19 @@ router.patch('/agreements/:id/return-checkin', requirePermission('rentals_securi
       const qty = Number(it.quantity) || 0;
       if (qty < 0 || !Number.isInteger(qty)) return res.status(400).json({ error: `Enter a whole number for ${row.product_name}` });
       if (qty > row.quantity - row.quantity_returned) return res.status(400).json({ error: `Only ${row.quantity - row.quantity_returned} of ${row.product_name} is still out` });
-      if (qty > 0) lines.push({ item_id: row.id, quantity: qty, condition: String(it.condition || '').trim().slice(0, 300) || null });
+      if (qty > 0) lines.push({ item_id: row.id, quantity: qty, condition: String(it.condition || '').trim().slice(0, 300) || null, units: Array.isArray(it.units) ? it.units : [] });
     }
     if (!lines.length) return res.status(400).json({ error: 'Enter how many of each item came back' });
+    // Fleet units (lib/fleethub.js): the guard ticks which units came back,
+    // with their odometer / engine hours — kept for the cashier's return.
+    try {
+      const back = await fleethub.unitsComingBack(db, a.id, agItems, lines);
+      for (const l of lines) l.units = back.filter(u => (l.units || []).some(x => String((x && x.unit_number) || x) === u.unit_number))
+        .map(u => ({ unit_number: u.unit_number, odometer: u.odometer, meter_hours: u.meter_hours }));
+    } catch (e) {
+      if (e instanceof fleethub.FleetHubError) return res.status(400).json({ error: e.message, code: 'fleet_unit' });
+      throw e;
+    }
     if (!(await pendingPhotoCount(a.id, 'return'))) return res.status(400).json({ error: photoRequiredError('return'), code: 'photos_required' });
     const sigPath = await uploadSignature(security_signature, `rental-${a.id}-return-guard`);
     if (!sigPath) return res.status(400).json({ error: 'Your signature is required to check this in' });
@@ -2186,6 +2291,22 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
     const coveredIds = items.map(i => i.item_id);
     const missing = outstandingIds.filter(id => !coveredIds.includes(id));
     if (missing.length) return res.status(400).json({ error: 'Every outstanding item on this agreement must be included in the return' });
+
+    // Which fleet units came back (lib/fleethub.js) — each one individually,
+    // so a part return frees exactly those units for their next checklist.
+    let fleetBack = [];
+    try {
+      // Not sent: the units security ticked at check-in.
+      let checkinLines = [];
+      try { checkinLines = agreement.return_checkin_items ? JSON.parse(agreement.return_checkin_items) : []; } catch (e) {}
+      fleetBack = await fleethub.unitsComingBack(db, agreement.id, existingItems, items.map(i => ({
+        item_id: i.item_id, quantity: parseInt(i.quantity_returned) || 0,
+        units: Array.isArray(i.fleet_units) ? i.fleet_units : ((checkinLines.find(l => l.item_id === Number(i.item_id)) || {}).units || []),
+      })));
+    } catch (e) {
+      if (e instanceof fleethub.FleetHubError) return res.status(400).json({ error: e.message, code: 'fleet_unit' });
+      throw e;
+    }
 
     const checkoutDateTime = agreement.checkout_datetime || `${agreement.checkout_date}T00:00:00.000Z`;
     // Defaults to the moment this request is processed, but staff can back-date
@@ -2391,9 +2512,11 @@ router.patch('/agreements/:id/return', requirePermission('rentals_returns'), asy
 
       await tx.execute({ sql: `UPDATE rental_agreements SET settlement_transaction_id = ?, deposit_refunded = ?, duration_adjustment_total = duration_adjustment_total + ?, tax_adjustment_total = tax_adjustment_total + ?, damage_fee_total = damage_fee_total + ?, pickup_driver_id = ?, status = ?, returned_at = ?, return_security_employee_id = ?, return_security_confirmed_at = ?, return_security_signature = ?, return_driver_employee_id = ?, return_driver_confirmed_at = ?, return_driver_signature = ?, deposit_return_method = ? WHERE id = ?`, args: [settlementTxId, depositRefunded, durationAdjustmentTotal, taxAdjustmentTotal, damageFeeTotal, pickupDriverId, newStatus, allReturned ? now.toISOString() : agreement.returned_at, securityEmployeeId, securityConfirmedAt || now.toISOString(), guardSigPath, returnDriverId, returnDriverConfirmedAt, driverSigPath, depositReturnMethod, req.params.id] });
       await stampPhotos(tx, agreement.id, 'return', now.toISOString());
+      await fleethub.markReturned(tx, fleetBack, { employeeId: req.employee.id, at: now.toISOString() });
       await tx.execute({ sql: 'UPDATE rental_agreements SET return_checkin_at = NULL, return_checkin_by = NULL, return_checkin_signature = NULL, return_checkin_items = NULL WHERE id = ?', args: [agreement.id] });
       await tx.commit();
       if (checkoutIsCredit) { try { await runCreditCheck(agreement.customer_id); } catch(e) {} }
+      if (fleetBack.length) await fleethub.syncPending(db, agreement.id);
     } catch(e) {
       await tx.rollback();
       return res.status(400).json({ error: e.message });

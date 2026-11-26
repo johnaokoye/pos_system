@@ -15,6 +15,12 @@ process.env.PORT = process.env.POS_TEST_PORT;
 // Consignment is built in phases and switched off elsewhere until selling is
 // in place (lib/stockLots.js); the tests run it.
 process.env.CONSIGNMENT_ENABLED = '1';
+// FleetHub (lib/fleethub.js) on: a mock of its POS API that tracks only the
+// SKUs a test registers (tests/rental-fleethub.spec.js).
+process.env.FLEETHUB_TEST_PORT = process.env.FLEETHUB_TEST_PORT || String(Number(process.env.POS_TEST_PORT) + 1);
+process.env.FLEETHUB_URL = `http://localhost:${process.env.FLEETHUB_TEST_PORT}`;
+process.env.FLEETHUB_API_KEY = 'test-fleethub-key';
+require('./mock-fleethub').startMockFleetHub(Number(process.env.FLEETHUB_TEST_PORT), process.env.FLEETHUB_API_KEY);
 
 const { ensureReady, db } = require('../../database');
 

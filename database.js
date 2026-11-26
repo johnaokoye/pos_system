@@ -347,6 +347,28 @@ async function _init() {
       sent_day TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )` },
+    // FleetHub units (lib/fleethub.js): which physical unit went out on each
+    // rental line. status out (checked out in FleetHub at a delivery's
+    // security sign-off, not yet issued) → issued → returned, or cancelled
+    // (never left). sync_pending = FleetHub not yet told of the return/cancel.
+    { sql: `CREATE TABLE IF NOT EXISTS rental_fleet_units (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agreement_id INTEGER NOT NULL REFERENCES rental_agreements(id),
+      item_id INTEGER NOT NULL REFERENCES rental_agreement_items(id),
+      unit_number TEXT NOT NULL,
+      pos_ref TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL DEFAULT 'out',
+      sync_pending INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      odometer INTEGER,
+      meter_hours REAL,
+      checked_out_by INTEGER REFERENCES employees(id),
+      returned_by INTEGER REFERENCES employees(id),
+      issued_at DATETIME,
+      returned_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )` },
+    { sql: 'CREATE INDEX IF NOT EXISTS idx_rental_fleet_units_agreement ON rental_fleet_units(agreement_id)' },
     { sql: `CREATE TABLE IF NOT EXISTS rental_agreement_photos (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       agreement_id INTEGER NOT NULL REFERENCES rental_agreements(id),

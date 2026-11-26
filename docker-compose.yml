@@ -20,6 +20,11 @@ services:
       # CONSIGNMENT_ENABLED=1 in its environment — on the test server first,
       # production only once it's approved.
       CONSIGNMENT_ENABLED: ${CONSIGNMENT_ENABLED:-0}
+      # FleetHub (fleet unit checklists, lib/fleethub.js): off while
+      # FLEETHUB_URL is blank. Set both in the stack's environment — the key
+      # comes from FleetHub's Admin → POS connection.
+      FLEETHUB_URL: ${FLEETHUB_URL:-}
+      FLEETHUB_API_KEY: ${FLEETHUB_API_KEY:-}
     volumes:
       - ./data:/app/data
       - ./uploads:/app/uploads

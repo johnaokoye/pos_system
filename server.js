@@ -266,6 +266,15 @@ setInterval(async () => {
   } catch (e) {}
 }, 5 * 60000);
 
+// FleetHub (lib/fleethub.js): a return never waits on FleetHub, so any unit
+// whose return/cancel didn't reach it is sent again here.
+setInterval(async () => {
+  try {
+    await ensureReady();
+    await require('./lib/fleethub').syncPending(db);
+  } catch (e) {}
+}, 5 * 60000);
+
 // Scheduled rental stops/resumptions (operator / negotiated stops) — the
 // pause records use the booked times regardless of when this notices them;
 // running every minute just keeps the Paused status on screen current.

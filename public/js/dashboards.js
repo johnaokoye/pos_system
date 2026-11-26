@@ -374,6 +374,7 @@ Object.assign(App, {
         <div class="modal-header"><span class="modal-title">Security Sign-Off — ${a.agreement_number}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">${a.item_summary || 'Item'} is going out for delivery. Sign below to confirm it's clear to leave.</p>
+          <div id="ss-fleet-units"></div>
           ${this._rentalPhotoPickerHtml(id, 'issue').replace('(required — at least one of the item(s) as it goes out)', '(optional — the item(s) as they leave)')}
           ${this._sigPadHtml('ss-guard-sig', 'Guard Signature', 'required — confirms this item is clear to leave')}
         </div>
@@ -384,6 +385,7 @@ Object.assign(App, {
       </div>`);
     this._sigPadInit('ss-guard-sig');
     this._rentalPhotoLoad(id, 'issue');
+    this._fleetIssuePickerLoad(id, 'ss-fleet-units');
   },
 
   // Customer collecting at the counter (no delivery): the guard hands it
@@ -401,6 +403,7 @@ Object.assign(App, {
             ${a.accessory_summary ? `<div style="font-size:12px;color:var(--text-muted)">+ ${this.escapeAttr(a.accessory_summary)}</div>` : ''}
             <div style="font-size:12px;color:var(--text-muted);margin-top:4px">For ${this.escapeAttr(a.customer_name || '—')} · due back ${this.fmtDate(a.due_date)}</div>
           </div>
+          <div id="gi-fleet-units"></div>
           ${this._rentalPhotoPickerHtml(id, 'issue')}
           ${this._sigPadHtml('gi-guard-sig', 'Guard Signature', 'required — you confirm the item(s) are clear to leave')}
           <div class="form-group" style="margin-top:12px"><label>Collected By *</label><input id="gi-customer-name" placeholder="Full name" value="${this.escapeAttr(a.customer_name || '')}"></div>
@@ -414,6 +417,7 @@ Object.assign(App, {
     this._sigPadInit('gi-guard-sig');
     this._sigPadInit('gi-customer-sig');
     this._rentalPhotoLoad(id, 'issue');
+    this._fleetIssuePickerLoad(id, 'gi-fleet-units');
   },
 
   // Return check-in at the gate: what came back and its condition, photos,
@@ -433,6 +437,7 @@ Object.assign(App, {
                 <div class="form-group" style="margin:0;width:90px"><label style="font-size:11px">Back</label><input type="number" class="gc-qty" data-item="${i.id}" value="${i.quantity - i.quantity_returned}" min="0" max="${i.quantity - i.quantity_returned}" step="1"></div>
                 <div class="form-group" style="margin:0;flex:1;min-width:180px"><label style="font-size:11px">Condition</label><input class="gc-cond" data-item="${i.id}" placeholder="e.g. Good, or describe any damage"></div>
               </div>
+              <div id="gc-fleet-${i.id}"></div>
             </div>`).join('')}
           ${this._rentalPhotoPickerHtml(id, 'return')}
           ${this._sigPadHtml('gc-guard-sig', 'Guard Signature', 'required — you confirm what came back')}
@@ -444,6 +449,10 @@ Object.assign(App, {
       </div>`);
     this._sigPadInit('gc-guard-sig');
     this._rentalPhotoLoad(id, 'return');
+    this._fleetReturnPickerLoad(id, 'gc', {
+      qtyInput: itemId => document.querySelector(`.gc-qty[data-item="${itemId}"]`),
+      outstanding: Object.fromEntries(out.map(i => [i.id, i.quantity - i.quantity_returned])),
+    });
   },
 
   async submitGuardCheckIn(id) {
@@ -451,6 +460,7 @@ Object.assign(App, {
       item_id: Number(el.dataset.item),
       quantity: Number(el.value) || 0,
       condition: document.querySelector(`.gc-cond[data-item="${el.dataset.item}"]`)?.value.trim() || null,
+      units: this._fleetReturnSelections('gc', el.dataset.item),
     }));
     if (!items.some(i => i.quantity > 0)) { this.alert('Enter how many of each item came back', 'error'); return; }
     if (!this._rentalPhotoReady('return')) return;
@@ -479,8 +489,11 @@ Object.assign(App, {
     const name = document.getElementById('gi-customer-name').value.trim();
     if (!name) { this.alert('Enter the name of the person collecting it', 'error'); return; }
     if (!this._sigPadHasDrawn('gi-customer-sig')) { this.alert('Customer signature is required', 'error'); return; }
+    const fleetUnits = this._fleetIssueSelections('gi-fleet-units');
+    if (fleetUnits === false) return;
     try {
       await this.api('PATCH', `/rentals/agreements/${id}/issue`, {
+        fleet_units: fleetUnits,
         customer_name: name,
         security_signature: this._sigPadDataUrl('gi-guard-sig'),
         customer_signature: this._sigPadDataUrl('gi-customer-sig'),
@@ -493,8 +506,10 @@ Object.assign(App, {
 
   async submitSecuritySignoff(id) {
     if (!this._sigPadHasDrawn('ss-guard-sig')) { this.alert('Signature is required to sign off', 'error'); return; }
+    const fleetUnits = this._fleetIssueSelections('ss-fleet-units');
+    if (fleetUnits === false) return;
     try {
-      await this.api('PATCH', `/rentals/agreements/${id}/security-signoff`, { security_signature: this._sigPadDataUrl('ss-guard-sig') });
+      await this.api('PATCH', `/rentals/agreements/${id}/security-signoff`, { security_signature: this._sigPadDataUrl('ss-guard-sig'), fleet_units: fleetUnits });
       this.closeModal();
       this.alert('Signed off — this delivery is now available to drivers');
       this.renderGuardDashboard();

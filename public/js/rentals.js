@@ -1694,6 +1694,7 @@ Object.assign(App, {
             ${a.status==='returned' ? `<div>Return — ${a.return_security_employee_name ? `Security: ${a.return_security_employee_name} (${this.fmtDateTime(a.return_security_confirmed_at)})` : '<span style="color:var(--text-muted)">no security record</span>'}${a.return_driver_employee_name ? `, Collected by: ${a.return_driver_employee_name}` : ''}
               ${this._sigButton(a.return_security_signature, 'View Guard Signature')}</div>` : ''}
             ${this._rentalPhotoRecordHtml(a.photos || [])}
+            ${this._fleetUnitsRecordHtml(a.fleet_units)}
           </div>` : ''}
           ${this._rentalReminderLogHtml(a.reminders || [])}
           <table class="table" style="margin-bottom:12px">
@@ -1993,13 +1994,15 @@ Object.assign(App, {
               ${lines.map(i => `<option value="${i.id}" data-out="${i.quantity - i.quantity_returned}" data-product="${i.product_id || ''}">${esc(i.product_name)}${i.sku ? ` (${esc(i.sku)})` : ''} — ${i.quantity - i.quantity_returned} out</option>`).join('')}
             </select>
           </div>
-          <div class="form-group"><label>Quantity to replace</label><input type="number" id="rpl-qty" min="1" value="1"></div>
+          <div class="form-group"><label>Quantity to replace</label><input type="number" id="rpl-qty" min="1" value="1" onchange="App._fleetReplaceRender()"></div>
+          <div id="rpl-fleet-back"></div>
           <div class="form-group"><label>Replacement item</label>
             <select id="rpl-product" onchange="App._replaceItemChanged()">
               ${this._replaceProducts.map(p => `<option value="${p.id}">${esc(p.name)}${p.sku ? ` (${esc(p.sku)})` : ''} — ${p.available} available</option>`).join('')}
             </select>
             <div id="rpl-rates" style="font-size:12px;color:var(--text-muted);margin-top:4px"></div>
           </div>
+          <div id="rpl-fleet-new"></div>
           <div class="form-group"><label>Condition Out (replacement)</label><input id="rpl-cond" placeholder="e.g. Good condition"></div>
           <div class="form-group"><label>Notes</label><textarea id="rpl-notes" rows="3" placeholder="What was wrong with the original unit"></textarea></div>
           <div id="rpl-err" style="color:var(--danger);font-size:13px;min-height:16px;text-align:center"></div>
@@ -2015,6 +2018,7 @@ Object.assign(App, {
     const same = this._replaceProducts.find(p => String(p.id) === sel.selectedOptions[0].dataset.product);
     if (same) document.getElementById('rpl-product').value = same.id;
     this._replaceItemChanged();
+    this._fleetReplaceLoad(a.id);
   },
 
   _replaceItemChanged() {
@@ -2032,6 +2036,7 @@ Object.assign(App, {
       if (p.rental_monthly_rate) parts.push(`${this.fmt(p.rental_monthly_rate)}/mo`);
       ratesEl.textContent = `Billed at ${parts.join(' · ')} from the swap on`;
     }
+    this._fleetReplaceRender();
   },
 
   async submitReplaceRentalItem(id) {
@@ -2043,10 +2048,12 @@ Object.assign(App, {
     const condition_out = document.getElementById('rpl-cond').value.trim();
     if (!notes) { errEl.textContent = 'Notes are required.'; return; }
     if (!quantity || quantity < 1) { errEl.textContent = 'Enter a quantity.'; return; }
+    const fleet = this._fleetReplaceSelections();
+    if (fleet === false) return;
     const btn = document.getElementById('rpl-submit');
     btn.disabled = true;
     try {
-      await this.api('POST', `/rentals/agreements/${id}/replace-item`, { item_id, quantity, product_id, notes, condition_out: condition_out || null, employee_id: this.currentUser.id });
+      await this.api('POST', `/rentals/agreements/${id}/replace-item`, { item_id, quantity, product_id, notes, condition_out: condition_out || null, employee_id: this.currentUser.id, ...fleet });
       this.closeModal();
       this.alert('Item replaced — the original is held out of service');
       this.viewRentalAgreement(id);
@@ -3575,6 +3582,7 @@ Object.assign(App, {
           </div>
           ${this._sigPadHtml('ri-guard-sig', 'Guard Signature', 'required — the security employee above signs to confirm')}`}
           </div>
+          <div id="ri-fleet-units"></div>
           ${this._rentalPhotoPickerHtml(id, 'issue')}
           ${this._sigPadHtml('ri-customer-sig', 'Customer Signature', 'required — confirms receipt')}
         </div>
@@ -3586,6 +3594,7 @@ Object.assign(App, {
     this._sigPadInit('ri-guard-sig');
     this._sigPadInit('ri-customer-sig');
     this._rentalPhotoLoad(id, 'issue');
+    this._fleetIssuePickerLoad(id, 'ri-fleet-units');
   },
 
   async confirmIssueRental(id) {
@@ -3608,8 +3617,11 @@ Object.assign(App, {
     // resolves it against the browser's local clock, then toISOString() makes
     // it unambiguous for the server regardless of what timezone it runs in.
     const issuedAt = new Date(issuedAtRaw).toISOString();
+    const fleetUnits = this._fleetIssueSelections('ri-fleet-units');
+    if (fleetUnits === false) return;
     try {
       const agreement = await this.api('PATCH', `/rentals/agreements/${id}/issue`, {
+        fleet_units: fleetUnits,
         employee_id: this.currentUser?.id || null,
         delivery_driver_id: deliveryDriverEl ? parseInt(deliveryDriverEl.value) || null : null,
         operator_id: operatorEl ? parseInt(operatorEl.value) || null : null,
@@ -3689,6 +3701,7 @@ Object.assign(App, {
                 <div class="form-group"><label style="font-size:11px">Condition In</label><input id="rr-cond-${i.id}" placeholder="e.g. Good condition" value="${this.escapeAttr(checkinLine(i.id)?.condition || '')}"></div>
                 <div class="form-group"><label style="font-size:11px">Damage Notes</label><input id="rr-notes-${i.id}" placeholder="Optional"></div>
               </div>
+              <div id="rr-fleet-${i.id}"></div>
             </div>`;
           }).join('')}
           ${a.pickup_required ? `<div class="form-group">
@@ -3722,6 +3735,11 @@ Object.assign(App, {
     if (!checkin) this._sigPadInit('rr-guard-sig');
     if (a.pickup_required && !a.pickup_confirmed_at) this._sigPadInit('rr-driver-sig');
     this._rentalPhotoLoad(id, 'return');
+    this._fleetReturnPickerLoad(id, 'rr', {
+      qtyInput: itemId => document.getElementById(`rr-qty-${itemId}`),
+      checkinLines: checkin ? checkin.items : [],
+      outstanding: Object.fromEntries(outstanding.map(i => [i.id, i.quantity - i.quantity_returned])),
+    });
   },
 
   async saveRentalReturn(agreementId, itemIds) {
@@ -3731,6 +3749,7 @@ Object.assign(App, {
       damage_fee: parseFloat(document.getElementById(`rr-fee-${id}`)?.value) || 0,
       condition_in: document.getElementById(`rr-cond-${id}`)?.value.trim() || null,
       damage_notes: document.getElementById(`rr-notes-${id}`)?.value.trim() || null,
+      fleet_units: this._fleetReturnSelections('rr', id),
     })).filter(i => i.quantity_returned > 0);
     if (!items.length) { this.alert('Enter at least one returned quantity', 'error'); return; }
     const pickupDriverEl = document.getElementById('rr-pickup-driver');

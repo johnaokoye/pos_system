@@ -637,3 +637,8 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   .stats-grid { grid-template-columns: 1fr; }
   .hub-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 12px; }
 }
+
+/* FleetHub unit pickers (public/js/fleet-units.js) */
+.fleet-box { border: 1px solid var(--border); border-left: 3px solid var(--primary); border-radius: 6px; padding: 8px 10px; margin-bottom: 12px; font-size: 13px; }
+.fleet-box select { width: 100%; }
+.fleet-box.fleet-error { border-left-color: var(--danger); color: var(--danger); }

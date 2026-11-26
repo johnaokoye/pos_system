@@ -14,6 +14,8 @@ const PORT = process.env.POS_TEST_PORT || '3101';
 process.env.POS_TEST_PORT = PORT;
 const BASE_URL = `http://localhost:${PORT}`;
 process.env.POS_TEST_URL = BASE_URL;
+// The mock FleetHub start-server.js runs (tests/support/mock-fleethub.js).
+process.env.FLEETHUB_TEST_PORT = process.env.FLEETHUB_TEST_PORT || String(Number(PORT) + 1);
 
 module.exports = defineConfig({
   testDir: './tests',
