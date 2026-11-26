@@ -3564,6 +3564,9 @@ async function _init() {
     // Long-form product copy for the e-commerce site (retail and rental
     // items) — `description` stays the short one-liner used in the POS.
     'ALTER TABLE products ADD COLUMN long_description TEXT',
+    // Rental items: when the unit was bought (store day), its cost and the most recent purchase cost.
+    'ALTER TABLE products ADD COLUMN acquisition_date TEXT',
+    'ALTER TABLE products ADD COLUMN last_cost REAL',
     // A Special Project custom line the user added as a "Q" item (to be
     // ordered by Purchasing), as opposed to a labour/fee line — only these
     // go into the auto-created Purchase Request when the project is

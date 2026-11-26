@@ -674,7 +674,7 @@ Object.assign(App, {
     const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `consignment-stock-${this._storeDay()}.csv`;
+    link.download = `consignment-stock-${this._storeDay(new Date())}.csv`;
     link.click();
     setTimeout(() => URL.revokeObjectURL(link.href), 1000);
   },
@@ -870,7 +870,7 @@ Object.assign(App, {
       <div style="font-weight:600;margin-bottom:8px">Enter the supplier's invoice</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;margin-bottom:8px">
         <div class="form-group" style="margin:0"><label>Invoice # *</label><input id="csi-number"></div>
-        <div class="form-group" style="margin:0"><label>Invoice date *</label><input id="csi-date" type="date" value="${this._storeDay()}"></div>
+        <div class="form-group" style="margin:0"><label>Invoice date *</label><input id="csi-date" type="date" value="${this._storeDay(new Date())}"></div>
         <div class="form-group" style="margin:0"><label>Supplier TRN</label><input id="csi-trn"></div>
         <div class="form-group" style="margin:0;display:flex;align-items:flex-end"><label style="display:flex;gap:6px;align-items:center"><input id="csi-taxinv" type="checkbox"> Valid supplier tax invoice (GCT)</label></div>
       </div>

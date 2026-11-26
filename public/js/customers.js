@@ -1417,7 +1417,7 @@ Object.assign(App, {
   },
 
   _showLegacyCreditForm(customerId) {
-    const today = this._storeDay();
+    const today = this._storeDay(new Date());
     const html = `<div style="position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:3000;display:flex;align-items:center;justify-content:center;padding:16px" id="lcn-overlay">
       <div class="modal" style="max-width:440px;width:100%">
         <div class="modal-header"><span class="modal-title">Add Old Credit Note</span><button class="modal-close" onclick="document.getElementById('lcn-overlay').remove()">✕</button></div>

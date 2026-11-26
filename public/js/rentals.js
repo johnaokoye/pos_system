@@ -829,7 +829,14 @@ Object.assign(App, {
             <label>Hourly Rate * <span style="font-weight:400;color:var(--text-muted)">(equipment only — bills partial days up to 8 hours)</span></label>
             <input type="number" id="rf-hourly" value="${p.rental_hourly_rate||0}" min="0" step="0.01">
           </div>
-          <div class="form-group"><label>Replacement Value</label><input type="number" id="rf-replval" value="${p.replacement_value||0}" min="0" step="0.01"></div>
+          <div class="input-row">
+            <div class="form-group"><label>Acquisition Date</label><input type="date" id="rf-acq-date" value="${this.escapeAttr(p.acquisition_date || '')}" max="${this._storeDay(new Date())}"></div>
+            <div class="form-group"><label>Replacement Value</label><input type="number" id="rf-replval" value="${p.replacement_value||0}" min="0" step="0.01"></div>
+          </div>
+          <div class="input-row">
+            <div class="form-group"><label>Cost <span style="font-weight:400;color:var(--text-muted)">(per unit, when acquired)</span></label><input type="number" id="rf-cost" value="${p.cost||0}" min="0" step="0.01"></div>
+            <div class="form-group"><label>Last Cost <span style="font-weight:400;color:var(--text-muted)">(most recent purchase)</span></label><input type="number" id="rf-last-cost" value="${p.last_cost ?? ''}" min="0" step="0.01"></div>
+          </div>
           <div class="input-row">
             <div class="form-group"><label>Status</label>
               <select id="rf-active"><option value="1" ${p.active!==0?'selected':''}>Active</option><option value="0" ${p.active===0?'selected':''}>Inactive</option></select>
@@ -927,6 +934,9 @@ Object.assign(App, {
     const allowSale = document.getElementById('rf-allow-sale').checked;
     const salePrice = parseFloat(document.getElementById('rf-sale-price').value) || 0;
     if (allowSale && salePrice <= 0) { this.alert('Enter a selling price to allow this item to be sold or quoted outright', 'error'); return; }
+    const acqDate = document.getElementById('rf-acq-date').value;
+    if (acqDate && acqDate > this._storeDay(new Date())) { this.alert("Acquisition date can't be in the future", 'error'); return; }
+    if ((parseFloat(document.getElementById('rf-cost').value) || 0) < 0 || parseFloat(document.getElementById('rf-last-cost').value) < 0) { this.alert("Costs can't be negative", 'error'); return; }
     const data = {
       sku,
       name,
@@ -946,6 +956,9 @@ Object.assign(App, {
       rental_monthly_rate: classification === 'equipment' ? (parseFloat(document.getElementById('rf-monthly').value) || 0) : 0,
       rental_hourly_rate: classification === 'equipment' ? (parseFloat(document.getElementById('rf-hourly').value) || 0) : 0,
       replacement_value: parseFloat(document.getElementById('rf-replval').value) || 0,
+      acquisition_date: document.getElementById('rf-acq-date').value || null,
+      cost: parseFloat(document.getElementById('rf-cost').value) || 0,
+      last_cost: document.getElementById('rf-last-cost').value === '' ? null : parseFloat(document.getElementById('rf-last-cost').value),
       active: parseInt(document.getElementById('rf-active').value),
       is_accessory: document.getElementById('rf-is-accessory').checked ? 1 : 0,
       is_rental: 1,
