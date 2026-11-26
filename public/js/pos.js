@@ -1390,6 +1390,18 @@ Object.assign(App, {
     this._checkAutoPromos();
   },
 
+  // Settings → Minimum Purchase for a Discount (discount_min_purchase; POST
+  // /transactions checks it too): a manual line or Ticket Discount only on a
+  // ticket worth at least that before discounts and tax. Returns the message
+  // when this ticket is short, else null. Quotes and exchanges aren't held to it.
+  _discountMinPurchaseError() {
+    const min = parseFloat(this.settings?.discount_min_purchase) || 0;
+    if (!(min > 0) || this._activeQuoteId || this._returnCredit) return null;
+    const gross = this.cart.reduce((s, i) => s + (i.is_comment ? 0 : (parseFloat(i.price) || 0) * (parseFloat(i.quantity) || 0)), 0);
+    if (gross + 0.005 >= min) return null;
+    return `A discount needs a purchase of at least ${this.fmt(min)} before tax — this ticket is ${this.fmt(gross)}.`;
+  },
+
   async applyDiscount() {
     if (this.appliedDiscountCard) { this.alert(`This customer already has a ${(this.appliedDiscountCard.label || 'Discount Card').toLowerCase()} applied — remove the customer to use a manual discount instead.`, 'error'); return; }
     let val = parseFloat(document.getElementById('discount-input')?.value) || 0;
@@ -1400,6 +1412,7 @@ Object.assign(App, {
     // line discounts, as checkout does) a manager authorizes it with their
     // PIN, like a line discount; cancelling leaves the discount as it was.
     const amount = pct != null ? parseFloat((this._ticketNet() * pct / 100).toFixed(2)) : val;
+    if (amount > 0) { const minErr = this._discountMinPurchaseError(); if (minErr) { this.alert(minErr, 'error'); return; } }
     if (amount > 0 && this._ticketDiscountOverLimit(amount)) {
       const maxPct = parseFloat(this.settings.max_discount_pct);
       const shown = pct != null ? `${pct}%` : `${this.fmt(amount)} (${(amount / (this._ticketNet() || 1) * 100).toFixed(2)}%)`;
@@ -2044,6 +2057,7 @@ Object.assign(App, {
     if (!item) return;
     if (!item.product_id) { this.alert('This line has no catalog product to check discount eligibility against', 'error'); return; }
     if (this.cartCustomer?.staff_purchase) { this.alert('Staff purchases get the staff discount only — no line discounts', 'error'); return; }
+    { const minErr = this._discountMinPurchaseError(); if (minErr) { this.alert(minErr, 'error'); return; } }
     let eligibility;
     try {
       eligibility = await this.api('GET', `/promotions/discount-eligibility/${item.product_id}`);
@@ -2247,6 +2261,11 @@ Object.assign(App, {
     if (!this.cart.length) { this.alert('Cart is empty', 'warning'); return; }
     if (this._posQItemBlocksSale()) return;
     if (this._posBlockedCustomerSale()) return;
+    // Items taken off after a discount was given can leave the ticket short.
+    if ((this._manualTicketDiscount && this.cartDiscount > 0) || this.cart.some(i => i.discountPercent > 0 || i.discountFixed > 0)) {
+      const minErr = this._discountMinPurchaseError();
+      if (minErr) { this.alert(`${minErr} Remove the discount or add to the ticket.`, 'error'); return; }
+    }
     if (!await this._staffPurchaseCheck(method)) return;
     if (!await this._salespersonReminder()) return;
     if (!await this._ticketDiscountApproved()) return;

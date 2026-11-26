@@ -14,6 +14,7 @@ const { mergeProducts } = require('../lib/productMerge');
 const { HAS_ISSUE_SQL, ISSUE_LABEL_SQL, csvEscape, rowsToCsv } = require('../lib/productIssues');
 const { getSetting } = require('../lib/settings');
 const { storeToday } = require('../lib/storeTime');
+const { layawayRules, layawayEligibleSql } = require('../lib/layawayEligibility');
 const { EACH, unitsByProduct, unitLabel, productUnits } = require('../lib/units');
 
 // CSV cells for money/quantity fields often carry currency symbols, thousands
@@ -297,7 +298,10 @@ router.get('/', requireAuth, async (req, res) => {
     // rental-only or exclude-rentals query means exactly that).
     else if (for_sale === '1' || for_sale === 'true') { sql += ` AND (p.is_rental = 0 OR p.rental_allow_sale = 1)`; }
     if (is_accessory !== undefined) { sql += ` AND p.is_accessory = ?`; params.push(is_accessory); }
-    if (is_layaway_eligible !== undefined) { sql += ` AND p.is_layaway_eligible = ?`; params.push(is_layaway_eligible); }
+    // '1' = can go on layaway under Settings → Layaway (lib/layawayEligibility.js);
+    // '0' = the item's own box unticked.
+    if (is_layaway_eligible === '1' || is_layaway_eligible === 'true') sql += ` AND ${layawayEligibleSql(await layawayRules(db))}`;
+    else if (is_layaway_eligible !== undefined) { sql += ` AND p.is_layaway_eligible = ?`; params.push(is_layaway_eligible); }
     if (is_non_inventory !== undefined) { sql += ` AND p.is_non_inventory = ?`; params.push(is_non_inventory); }
     if (low_stock === 'true') {
       if (branch_id) {

@@ -165,6 +165,18 @@ Object.assign(App, {
     dd.style.display = '';
   },
 
+  // Settings → Layaway's price rule, shown under the product form's Eligible
+  // for Layaway box (lib/layawayEligibility.js applies it).
+  _layawayRuleNote() {
+    const min = parseFloat(this.settings?.layaway_min_price) || 0;
+    const auto = String(this.settings?.layaway_auto_eligible) === '1';
+    if (!min && !auto) return '';
+    const text = auto
+      ? (min ? `Every item priced at ${this.fmt(min)} or more is eligible automatically; below that, none are.` : 'Every retail item is eligible automatically (Settings → Layaway).')
+      : `Only items priced at ${this.fmt(min)} or more can go on layaway, even when ticked.`;
+    return `<p style="font-size:11px;color:var(--text-muted);margin:6px 0 0">${text}</p>`;
+  },
+
   async _selectLayawayCustomer(id) {
     let c = (this._layawayCustomers || []).find(x => x.id === id);
     if (!c) {

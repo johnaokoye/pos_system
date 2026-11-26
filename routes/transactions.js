@@ -985,6 +985,20 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         ticketDiscountOverrideBy = overrideId;
       }
     }
+    // Minimum purchase for a manual discount (Settings → Discounts,
+    // discount_min_purchase; 0 = any): a line or Ticket Discount only on a
+    // ticket worth at least that before discounts and tax. Not a promotion /
+    // discount card / staff discount (promotion_name), a quote's prices, an
+    // exchange's return credit, or an online order.
+    if (!req.apiKey && !quote_id && !source_return_id) {
+      const minPurchase = parseFloat((await db.execute({ sql: "SELECT value FROM settings WHERE key = 'discount_min_purchase'", args: [] })).rows[0]?.value) || 0;
+      const lineDiscounts = processedItems.reduce((s, p) => s + (Number(p.discount) || 0), 0);
+      const manualTicket = disc > 0 && !salePromoName;
+      const gross = subtotal + lineDiscounts;
+      if (minPurchase > 0 && (lineDiscounts > 0.005 || manualTicket) && gross + 0.005 < minPurchase) {
+        return res.status(400).json({ code: 'discount_min_purchase', error: `A discount needs a purchase of at least ${minPurchase.toFixed(2)} before tax — this ticket is ${gross.toFixed(2)}. Remove the discount or add to the ticket.` });
+      }
+    }
     const storeCredit = parseFloat(store_credit_applied || 0);
     // Store credit can't be more than the customer's credit balance (old
     // credit notes, return credit notes) — the POS caps it, this enforces it.

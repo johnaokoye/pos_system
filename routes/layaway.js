@@ -9,6 +9,7 @@ const { requirePermission } = require('../lib/permissions');
 const { nextNumber } = require('../lib/nextNumber');
 const { storeToday, storeTodaySql } = require('../lib/storeTime');
 const { branchStockQty, warehouseSaleError, homeBranchError } = require('../lib/branchStock');
+const { layawayRules, layawayIneligibleReason } = require('../lib/layawayEligibility');
 
 async function getSetting(key, fallback) {
   const { rows: [row] } = await db.execute({ sql: 'SELECT value FROM settings WHERE key = ?', args: [key] });
@@ -90,12 +91,14 @@ router.post('/plans', requirePermission('layaway_create'), async (req, res) => {
     // shown in New Layaway match what's charged here.
     const markupPercent = Math.max(0, parseFloat(await getSetting('layaway_markup_percent', 0)) || 0);
 
+    const rules = await layawayRules(db);
     const lines = [];
     let subtotal = 0, taxAmount = 0;
     for (const item of items) {
       const { rows: [product] } = await db.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [item.product_id] });
       if (!product) return res.status(400).json({ error: `Product ${item.product_id} not found` });
-      if (!product.is_layaway_eligible) return res.status(400).json({ error: `${product.name} is not eligible for layaway` });
+      const ineligible = layawayIneligibleReason(product, rules);
+      if (ineligible) return res.status(400).json({ error: ineligible });
       // Unit of measure (lib/units.js): the unit's price, and stock checked/held in stock units.
       let unit;
       try { unit = await resolveUnit(db, product, item.uom_id ?? item.sell_unit); } catch (e) { return res.status(400).json({ error: e.message }); }

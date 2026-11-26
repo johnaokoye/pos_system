@@ -895,6 +895,7 @@ Object.assign(App, {
           <input type="checkbox" id="pf-layaway" ${p.is_layaway_eligible?'checked':''} style="width:auto;margin:0">
           <label for="pf-layaway" style="margin:0;font-weight:500;cursor:pointer">Eligible for Layaway</label>
         </div>
+        ${this._layawayRuleNote()}
       </div>
       ${id ? `<div class="form-group" style="margin-top:4px"><label>Product Image</label>
         <div style="display:flex;align-items:center;gap:10px;margin-top:4px">

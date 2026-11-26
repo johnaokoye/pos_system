@@ -46,11 +46,18 @@ Object.assign(App, {
               <div class="form-group"><label>Low Stock Threshold</label><input type="number" id="s-lowstock" value="${s.low_stock_threshold||5}" min="0"></div>
             </div>
             <div class="form-group"><label>Maximum Discount (%, 0 = unlimited) — caps the ticket discount and each line-item discount</label><input type="number" id="s-max-discount" value="${s.max_discount_pct||0}" min="0" max="100" step="0.1" placeholder="e.g. 20 for 20% max"></div>
+            <div class="form-group"><label>Minimum Purchase for a Discount <span style="color:var(--text-muted);font-weight:400;font-size:11px">(before tax and discounts, 0 = any)</span></label><input type="number" id="s-discount-min-purchase" value="${s.discount_min_purchase || 0}" min="0" step="0.01" placeholder="e.g. 5000">
+              <p style="font-size:11px;color:var(--text-muted);margin:2px 0 0">A cashier can only give a line or Ticket Discount on a ticket worth at least this much. Promotions, discount cards, the staff discount and quoted prices aren't affected.</p></div>
             <button class="btn btn-primary" onclick="App.saveSettings()">Save Settings</button>
           </div>
           <div class="card" style="margin-bottom:16px">
             <div class="card-header"><span class="card-title">Layaway</span></div>
             <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">Applies to every layaway-eligible item storewide.</p>
+            <div class="input-row">
+              <div class="form-group"><label>Minimum Item Price for Layaway <span style="color:var(--text-muted);font-weight:400;font-size:11px">(0 = no minimum)</span></label><input type="number" id="s-layaway-min-price" value="${s.layaway_min_price || 0}" min="0" step="0.01" placeholder="e.g. 10000"></div>
+              <div class="form-group"><label style="display:flex;align-items:center;gap:6px;margin-top:22px;font-weight:normal;cursor:pointer"><input type="checkbox" id="s-layaway-auto" ${String(s.layaway_auto_eligible) === '1' ? 'checked' : ''} style="width:auto;margin:0"> Make every item at or above this price eligible</label></div>
+            </div>
+            <p style="font-size:11px;color:var(--text-muted);margin:-6px 0 10px">An item priced below the minimum can't go on layaway, even if it's ticked Eligible for Layaway. With the box checked, every retail item at or above the minimum can — no need to tick each one; unchecked, only the items ticked Eligible for Layaway (and at or above the minimum) can.</p>
             <div class="input-row">
               <div class="form-group"><label>Required Deposit (% of item total)</label><input type="number" id="s-layaway-deposit" value="${s.layaway_deposit_percent||20}" min="0" max="100" step="0.1"></div>
               <div class="form-group"><label>Layaway Markup (% added to price)</label><input type="number" id="s-layaway-markup" value="${s.layaway_markup_percent||0}" min="0" step="0.1" placeholder="0 = sell at regular price"></div>
@@ -796,6 +803,9 @@ Object.assign(App, {
         staff_purchase_limit_manager: document.getElementById('s-staff-limit-manager').value || '0',
       } : {}),
       layaway_deposit_percent: document.getElementById('s-layaway-deposit').value,
+      layaway_min_price: String(Math.max(0, parseFloat(document.getElementById('s-layaway-min-price').value) || 0)),
+      layaway_auto_eligible: document.getElementById('s-layaway-auto').checked ? '1' : '0',
+      discount_min_purchase: String(Math.max(0, parseFloat(document.getElementById('s-discount-min-purchase').value) || 0)),
       transfer_not_received_days: String(Math.max(0.5, parseFloat(document.getElementById('s-trf-late-days').value) || 2)),
       layaway_markup_percent: document.getElementById('s-layaway-markup').value,
       closed_day_return_by: document.getElementById('s-closed-return-by').value || '08:00',
