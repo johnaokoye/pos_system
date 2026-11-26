@@ -27,7 +27,7 @@ test.describe('Transactions — discounts', () => {
     await api(page, 'PUT', '/settings', { max_discount_pct: '10' });
     try {
       const last = `Disc${stamp()}`;
-      const cust = await api(page, 'POST', '/customers', { first_name: 'Tx', last_name: last });
+      const cust = await api(page, 'POST', '/customers', { address: '1 Test Road', phone: `8${String(Math.random()).slice(2, 11)}`, first_name: 'Tx', last_name: last });
       const p = await product(page);
       const sell = extra => api(page, 'POST', '/transactions', { customer_id: cust.id, branch_id: 1, employee_id: 1, payment_method: 'cash', amount_tendered: 100000, ...extra });
       // Another manager approves (never the person at the till).

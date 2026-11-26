@@ -1233,6 +1233,12 @@ router.post('/', requirePermission('customers_add'), async (req, res) => {
   const contactSet = 'contacts' in req.body ? cleanContacts(req.body.contacts) : null;
   if (contactSet?.error) return res.status(400).json({ error: contactSet.error });
   if (!first_name || (!last_name && names?.kind !== 'business')) return res.status(400).json({ error: 'First and last name required' });
+  // Owner's rule (2026-11-26): staff take a phone number and address for
+  // every new customer. API keys (the website's sign-ups) are exempt.
+  if (!req.apiKey) {
+    const missing = [!String(phone || '').trim() && 'phone number', !String(address || '').trim() && 'address'].filter(Boolean);
+    if (missing.length) return res.status(400).json({ code: 'customer_info_required', missing, error: `A new customer needs a ${missing.join(' and ')}` });
+  }
   try {
     // Guard against creating a duplicate customer record: match on email,
     // phone, or full name against active customers.

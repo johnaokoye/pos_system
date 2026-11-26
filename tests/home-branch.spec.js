@@ -22,7 +22,7 @@ test('POS, layaway and quotes only use the default branch; a quote keeps its bra
   const [home, other] = stores;
   const product = await page.evaluate(() => App.api('GET', '/products').then(ps => ps.find(p => !p.is_rental && !p.is_service && p.price > 0)));
   const items = [{ product_id: product.id, quantity: 1, unit_price: product.price }];
-  const cust = await api(page, 'POST', '/customers', { first_name: 'Home', last_name: `Branch ${s}`, phone: `876${s.slice(-7)}` });
+  const cust = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Home', last_name: `Branch ${s}`, phone: `876${s.slice(-7)}` });
 
   // Two salespeople with multi-branch access, based at different branches.
   const group = await api(page, 'POST', '/security-groups', { name: `Multi ${s}`, description: '', permissions: { pos: true, quotations: true, layaway: true, layaway_create: true, multi_branch_access: true } });

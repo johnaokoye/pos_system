@@ -9,7 +9,7 @@ const product = page => page.evaluate(() => App.api('GET', '/products').then(ps 
 
 test('a blocked credit customer is quoted, converted only once released or cleared', async ({ page }) => {
   const s = String(Date.now());
-  const cust = await api(page, 'POST', '/customers', { first_name: 'Blocked', last_name: `Quote${s}`, phone: `876${s.slice(-7)}`, customer_type: 'credit', credit_enabled: 1, credit_limit: 1000000, credit_terms_days: 30 });
+  const cust = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Blocked', last_name: `Quote${s}`, phone: `876${s.slice(-7)}`, customer_type: 'credit', credit_enabled: 1, credit_limit: 1000000, credit_terms_days: 30 });
   await api(page, 'PATCH', `/customers/${cust.id}/credit-block`, { blocked: true, reason: 'test hold' });
   const p = await product(page);
 
@@ -49,7 +49,7 @@ test('a blocked credit customer is quoted, converted only once released or clear
 
 test('editing a released quote\'s total cancels the release', async ({ page }) => {
   const s = String(Date.now());
-  const cust = await api(page, 'POST', '/customers', { first_name: 'Blocked', last_name: `Edit${s}`, phone: `875${s.slice(-7)}`, customer_type: 'credit', credit_enabled: 1, credit_limit: 1000000, credit_terms_days: 30 });
+  const cust = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Blocked', last_name: `Edit${s}`, phone: `875${s.slice(-7)}`, customer_type: 'credit', credit_enabled: 1, credit_limit: 1000000, credit_terms_days: 30 });
   await api(page, 'PATCH', `/customers/${cust.id}/credit-block`, { blocked: true, reason: 'test hold' });
   const p = await product(page);
   const q = await api(page, 'POST', '/quotations', { employee_id: 1, branch_id: 1, customer_id: cust.id, items: [{ product_id: p.id, quantity: 1 }] });

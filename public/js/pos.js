@@ -3398,16 +3398,7 @@ Object.assign(App, {
     const searchId = { pos: 'cust-search-modal', rental: 'rc-customer-search', layaway: 'lc-customer-search' }[kind] || `${kind}-search`;
     const q = (document.getElementById(searchId)?.value || '').trim();
     document.querySelectorAll('.cust-picker-dd, #rc-customer-dd, #lc-customer-dd').forEach(dd => { dd.style.display = 'none'; });
-    const addTo = (list, c) => { if (list && !list.some(x => String(x.id) === String(c.id))) list.unshift(c); };
-    this.openCustomerFormOver(q, c => {
-      if (kind === 'pos') { this.closeModal(); this.setCartCustomer(c.id, `${c.first_name} ${c.last_name}`); }
-      else if (kind === 'rental') { addTo(this._rentalCustomers, c); this._selectRentalCustomer(c.id); }
-      else if (kind === 'layaway') { addTo(this._layawayCustomers, c); this._selectLayawayCustomer(c.id); }
-      else {
-        addTo((this._custPickerLists || {})[kind]?.customers, c);
-        this._selectCustomerPicker(kind, c.id);
-      }
-    });
+    this.openCustomerFormOver(q, c => this._pickCustomerIn(kind, c));
   },
 
   // Dropdown row appended to the searchable customer pickers.
@@ -3421,7 +3412,9 @@ Object.assign(App, {
   // rental, etc.). Instead the current overlay is stashed (hidden, and
   // renamed so showModal/closeModal skip it) and restored once the customer
   // form — or the duplicate-customer modal that can replace it — is gone.
-  async openCustomerFormOver(query, onCreated) {
+  // With editId it opens that customer's edit form instead (Update Customer
+  // on a record missing its name/phone/address).
+  async openCustomerFormOver(query, onCreated, { editId = null } = {}) {
     const q = (query || '').trim();
     const prefill = {};
     if (q.includes('@')) prefill.email = q;
@@ -3433,7 +3426,7 @@ Object.assign(App, {
     }
     const parents = [...document.querySelectorAll('.modal-overlay')];
     parents.forEach(el => { el.classList.replace('modal-overlay', 'modal-overlay-stashed'); el.style.display = 'none'; });
-    const stack = { onCreated };
+    const stack = { onCreated, editId };
     stack.restore = () => {
       stack.obs?.disconnect();
       if (this._customerFormStack === stack) this._customerFormStack = null;
@@ -3441,7 +3434,7 @@ Object.assign(App, {
     };
     this._customerFormStack = stack;
     try {
-      await this.showCustomerForm(null, { prefill });
+      await this.showCustomerForm(editId, editId ? {} : { prefill });
     } catch (e) {
       stack.restore();
       return this.alert(e.message, 'error');
@@ -3459,7 +3452,7 @@ Object.assign(App, {
       const c = await this.api('GET', `/customers/${customerId}`);
       this.closeModal();
       stack.restore();
-      this.alert('Customer added');
+      this.alert(stack.editId ? 'Customer updated' : 'Customer added');
       stack.onCreated(c);
     } catch (e) { this.alert(e.message, 'error'); }
   },
@@ -3497,6 +3490,7 @@ Object.assign(App, {
       `<span class="badge-pill ${isCredit ? 'badge-blue' : 'badge-success'}" title="Customer type">${isCredit ? 'Credit' : 'Cash'}</span>`,
       c.is_rental_customer ? `<span class="badge-pill badge-purple" title="Rental customer">🔑 Rental</span>` : '',
       c.account_blocked ? `<span class="badge-pill badge-danger" title="${this.escapeAttr(this._creditBlockedText(c))}">Blocked</span>` : '',
+      this._customerInfoMissing(c).length ? `<span class="badge-pill badge-warning" style="cursor:pointer" title="Missing ${esc(this._customerInfoMissing(c).join(', '))} — click to update" onclick="${this.can('customers_edit') ? `App._updateCustomerInfo(${c.id}, 'pos')` : `App.alert('Missing ${esc(this._customerInfoMissing(c).join(', '))} — ask someone who can edit customers to update it', 'warning')`}">⚠ Info missing</span>` : '',
       c.staff_purchase ? `<span class="badge-pill badge-purple" title="Staff purchase: ${c.staff_purchase.discount_pct}% off${c.staff_purchase.discount_min > 0 ? ` from ${this.fmt(c.staff_purchase.discount_min)} (before tax)` : ''}, cash or card. Limit ${this.fmt(c.staff_purchase.limit)} before tax for ${esc(c.staff_purchase.period_label)}, used ${this.fmt(c.staff_purchase.used)}">Staff · ${this.fmt(c.staff_purchase.remaining)} left (pre-tax)</span>` : '',
     ].filter(Boolean).join('');
     return `<div class="cart-cust-name">${esc(`${c.first_name || ''} ${c.last_name || ''}`.trim())}</div><div class="cart-cust-meta">${meta}</div>`;
@@ -3524,6 +3518,8 @@ Object.assign(App, {
   setCartCustomer(id, name) {
     this.api('GET', `/customers/${id}`).then(async c => {
       this.cartCustomer = c;
+      const infoMissing = this._customerInfoMissing(c);
+      if (infoMissing.length) this.alert(`${c.first_name} ${c.last_name}'s record is missing ${infoMissing.join(', ')} — ask the customer and update it (⚠ Info missing on the ticket)`, 'warning');
       this._storeCreditApplied = 0;
       this._cashBackApplied = 0;
       this._renderCartCustomer();

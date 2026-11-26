@@ -4,7 +4,15 @@ const api = (page, method, url, data) => page.evaluate(([m, u, d]) => App.api(m,
 let n = 0;
 const stamp = () => `${Date.now()}${++n}`;
 
-const customer = (page, last, extra = {}) => api(page, 'POST', '/customers', { first_name: 'Fence', last_name: last, customer_type: 'credit', credit_limit: 1000, credit_terms_days: 30, force: true, ...extra });
+// New customers need a phone and address; these tests want records without
+// contact details unless given, so the placeholder phone/address are cleared after.
+const customer = async (page, last, extra = {}) => {
+  const c = await api(page, 'POST', '/customers', { address: '1 Test Road', phone: `8${String(Math.random()).slice(2, 11)}`, first_name: 'Fence', last_name: last, customer_type: 'credit', credit_limit: 1000, credit_terms_days: 30, force: true, ...extra });
+  const clear = { ...('phone' in extra ? {} : { phone: null }), ...('address' in extra ? {} : { address: null }) };
+  if (!Object.keys(clear).length) return c;
+  const full = await api(page, 'GET', `/customers/${c.id}`);
+  return api(page, 'PUT', `/customers/${c.id}`, { ...full, ...clear });
+};
 const legacyInvoice = (page, customerId, amount) => api(page, 'POST', '/accounts/legacy-invoices', { customer_id: customerId, invoice_number: `OLD-${stamp()}`, invoice_date: '2026-10-21', amount });
 
 test.describe('Merge Customer In', () => {

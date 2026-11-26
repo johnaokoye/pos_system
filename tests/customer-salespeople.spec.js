@@ -19,7 +19,7 @@ async function createCustomers(page, count, last = `Bulk${stamp()}`) {
   const out = [];
   for (let i = 0; i < count; i += 1) {
     const s = stamp();
-    out.push(await api(page, 'POST', '/customers', { first_name: `C${i}`, last_name: last, phone: s.slice(-10), customer_type: 'cash', force: true }));
+    out.push(await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: `C${i}`, last_name: last, phone: s.slice(-10), customer_type: 'cash', force: true }));
   }
   return { rows: out, last };
 }

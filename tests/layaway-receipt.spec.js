@@ -10,7 +10,7 @@ test('a layaway deposit and payment receipt show the items on layaway and the ba
   const home = await page.evaluate(() => App._homeBranch());
   const branch = home || (await api(page, 'GET', '/branches')).find(b => b.active !== 0 && !b.is_warehouse);
   const item = await api(page, 'POST', '/products', { sku: `LAYR-${s}`, name: `Layaway Sofa ${s}`, price: 1000, tax_rate: 0, branch_id: branch.id, stock_qty: 3, is_layaway_eligible: 1 });
-  const customer = await api(page, 'POST', '/customers', { first_name: 'Lay', last_name: `Away ${s}`, customer_type: 'cash', force: true });
+  const customer = await api(page, 'POST', '/customers', { address: '1 Test Road', phone: `8${String(Math.random()).slice(2, 11)}`, first_name: 'Lay', last_name: `Away ${s}`, customer_type: 'cash', force: true });
   const plan = await api(page, 'POST', '/layaway/plans', { customer_id: customer.id, branch_id: branch.id, items: [{ product_id: item.id, quantity: 2 }], payment_method: 'cash', amount_tendered: 500, payment_frequency: 'monthly' });
 
   const deposit = await api(page, 'GET', `/transactions/${plan.deposit_transaction_id}`);

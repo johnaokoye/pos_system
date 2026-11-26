@@ -18,7 +18,7 @@ async function manager(page) {
 // A sale, returned as an exchange that's waiting in Hold Recall.
 async function waitingExchange(page, { method = 'cash', customerType = 'cash' } = {}) {
   const s = stamp();
-  const customer = await api(page, 'POST', '/customers', { first_name: 'Exch', last_name: `C${s}`, phone: s.slice(-10), customer_type: customerType, credit_limit: 100000, credit_terms_days: 30, force: true });
+  const customer = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Exch', last_name: `C${s}`, phone: s.slice(-10), customer_type: customerType, credit_limit: 100000, credit_terms_days: 30, force: true });
   const p = await product(page);
   const sale = await api(page, 'POST', '/transactions', { customer_id: customer.id, items: [{ product_id: p.id, quantity: 1 }], branch_id: 1, employee_id: 1, payment_method: method, amount_tendered: method === 'credit' ? 0 : 100000 });
   const full = await api(page, 'GET', `/transactions/${sale.id}`);

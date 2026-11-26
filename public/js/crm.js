@@ -518,6 +518,10 @@ Object.assign(App, {
       this.alert(`${opts.link_customer_id ? 'Linked to' : 'Converted to'} customer ${res.customer.customer_number}`);
       this.closeModal();
       this.renderCrmTab();
+      // A lead has no address (often no phone): ask for it now.
+      if (!opts.link_customer_id && this._customerInfoMissing(res.customer).length && this.can('customers_edit')) {
+        this.openCustomerFormOver('', () => {}, { editId: res.customer.id });
+      }
     } catch(e) {
       if (e.status === 409 && e.data && e.data.matches) return this.showLeadDuplicateModal(id, e.data.matches, !!e.data.blocking);
       this.alert(e.message, 'error');

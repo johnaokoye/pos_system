@@ -97,8 +97,8 @@ test('a website rental request finds its customer and becomes a filled-in rental
 test('a lead whose details match several customers lists them, and Link ties it without closing it', async ({ page }) => {
   const s = `${Date.now()}`;
   const phone = `878${s.slice(-7)}`;
-  const a = await api(page, 'POST', '/customers', { first_name: 'Same', last_name: `Phone ${s}`, phone, customer_type: 'cash', force: true });
-  const b = await api(page, 'POST', '/customers', { first_name: 'Other', last_name: `Email ${s}`, email: `same${s}@example.com`, customer_type: 'cash', force: true });
+  const a = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Same', last_name: `Phone ${s}`, phone, customer_type: 'cash', force: true });
+  const b = await api(page, 'POST', '/customers', { address: '1 Test Road', phone: `8${String(Math.random()).slice(2, 11)}`, first_name: 'Other', last_name: `Email ${s}`, email: `same${s}@example.com`, customer_type: 'cash', force: true });
   const lead = await api(page, 'POST', '/crm/leads', { first_name: 'Who', last_name: 'Isit', phone, email: `same${s}@example.com`, source: 'website' });
   expect(lead.customer_id).toBeNull();
   const view = await api(page, 'GET', `/crm/leads/${lead.id}`);
@@ -119,7 +119,7 @@ test('a request from two branches gets a quote per branch, each button turning i
   const branches = (await api(page, 'GET', '/branches')).filter(b => b.active !== 0 && !b.is_warehouse).slice(0, 2);
   test.skip(branches.length < 2, 'needs two branches');
   const [a, b] = await Promise.all(branches.map((br, i) => api(page, 'POST', '/products', { sku: `LEAD2-${s}-${i}`, name: `Two Branch ${s} ${i}`, is_rental: 1, rental_rate: 50, branch_id: br.id, stock_qty: 2 })));
-  const customer = await api(page, 'POST', '/customers', { first_name: 'Two', last_name: `Branches ${s}`, email: `two${s}@example.com`, customer_type: 'cash', force: true });
+  const customer = await api(page, 'POST', '/customers', { address: '1 Test Road', phone: `8${String(Math.random()).slice(2, 11)}`, first_name: 'Two', last_name: `Branches ${s}`, email: `two${s}@example.com`, customer_type: 'cash', force: true });
   const day = n => page.evaluate(k => App._storeDay(new Date(Date.now() + k * 86400000)), n);
   const request = { start_date: await day(2), end_date: await day(4), fulfilment: 'pickup', items: [
     { product_id: a.id, name: a.name, quantity: 1, branch_id: branches[0].id, branch_name: branches[0].name, accessory_ids: [], accessory_names: [] },

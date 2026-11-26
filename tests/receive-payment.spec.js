@@ -8,7 +8,7 @@ const taxedProduct = page => page.evaluate(() => App.api('GET', '/products').the
 // A credit customer, not marked Tax Exempt and with no exemption number.
 async function customer(page) {
   const stamp = `${Date.now()}${++n}`;
-  return api(page, 'POST', '/customers', { first_name: 'Exempt', last_name: `T${stamp}`, phone: stamp.slice(-10), customer_type: 'credit', credit_limit: 100000, credit_terms_days: 30, force: true });
+  return api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Exempt', last_name: `T${stamp}`, phone: stamp.slice(-10), customer_type: 'credit', credit_limit: 100000, credit_terms_days: 30, force: true });
 }
 
 // Signs in as a new member of the seeded Cashier group, with a drawer open.

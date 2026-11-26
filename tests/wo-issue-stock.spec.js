@@ -50,7 +50,7 @@ test('issue parts from stock to a work order — consignment only where the agre
 
   // A job with all three parts on it.
   const fee = await api(page, 'POST', '/products', { name: `Assessment ${s}`, sku: `AS${s}`, price: 1000, cost: 0, tax_rate: 0, is_service: 1, active: 1 });
-  const cust = await api(page, 'POST', '/customers', { first_name: 'Job', last_name: `Owner${s}`, phone: `876${s.slice(-7)}` });
+  const cust = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Job', last_name: `Owner${s}`, phone: `876${s.slice(-7)}` });
   const wo = await api(page, 'POST', '/work-orders', { customer_id: cust.id, employee_id: 1, branch_id: main.id, description: 'Service the mower', item_label: 'Mower', assessment_fee_product_id: fee.id });
   await api(page, 'PATCH', `/work-orders/${wo.id}/parts`, { items: [{ product_id: notAllowed.id, quantity: 1 }, { product_id: allowed.id, quantity: 2 }, { product_id: owned.id, quantity: 4 }] });
 

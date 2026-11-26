@@ -13,7 +13,7 @@ test('A/R filters by home branch or by invoice branch, and home branches can be 
   }
   const [b1, b2] = branches;
   const service = await api(page, 'POST', '/products', { sku: `ARB-${stamp}`, name: `AR Branch Service ${stamp}`, is_service: 1, price: 100, tax_rate: 0 });
-  const customer = (last, home) => api(page, 'POST', '/customers', {
+  const customer = (last, home) => api(page, 'POST', '/customers', { address: '1 Test Road',
     first_name: 'Branch', last_name: `${last} ${stamp}`, phone: `87${String(stamp).slice(-6)}${last === 'A' ? 1 : 2}`, customer_type: 'credit',
     credit_limit: 100000, credit_terms_days: 30, force: true, home_branch_id: home,
   });

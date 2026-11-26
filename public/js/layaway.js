@@ -99,6 +99,7 @@ Object.assign(App, {
               </select>
             </div>
           </div>
+          <div id="lc-customer-info" style="margin:-6px 0 10px"></div>
           <div class="form-group"><label>Payment Frequency</label>
             <select id="lc-frequency">
               <option value="weekly">Weekly</option>
@@ -177,6 +178,8 @@ Object.assign(App, {
     if (idEl) idEl.value = id;
     if (searchEl) searchEl.value = `${c.first_name} ${c.last_name}`;
     if (dd) dd.style.display = 'none';
+    const info = document.getElementById('lc-customer-info');
+    if (info) info.innerHTML = this._customerInfoNoticeHtml(c, 'layaway');
   },
 
   addLayawayLine() {

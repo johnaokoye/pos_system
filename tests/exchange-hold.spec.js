@@ -8,7 +8,7 @@ const stamp = () => `${Date.now()}${Math.floor(Math.random() * 1000)}`;
 
 test('a held exchange ticket keeps its credit and replaces the exchange card', async ({ page }) => {
   const s = stamp();
-  const customer = await api(page, 'POST', '/customers', { first_name: 'Hold', last_name: `Exch${s}`, phone: s.slice(-10), force: true });
+  const customer = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Hold', last_name: `Exch${s}`, phone: s.slice(-10), force: true });
   const p = await page.evaluate(() => App.api('GET', '/products').then(ps => ps.find(p => !p.is_rental && !p.has_variations && p.stock_qty > 5 && p.price > 0 && p.tax_rate > 0)));
   const sale = await api(page, 'POST', '/transactions', { customer_id: customer.id, items: [{ product_id: p.id, quantity: 1 }], branch_id: 1, employee_id: 1, payment_method: 'cash', amount_tendered: 100000 });
   const full = await api(page, 'GET', `/transactions/${sale.id}`);
@@ -65,7 +65,7 @@ test('a held exchange ticket keeps its credit and replaces the exchange card', a
 
 test('converting an exchange that is on hold takes the credit off the held ticket', async ({ page }) => {
   const s = stamp();
-  const customer = await api(page, 'POST', '/customers', { first_name: 'Hold', last_name: `Conv${s}`, phone: s.slice(-10), force: true });
+  const customer = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Hold', last_name: `Conv${s}`, phone: s.slice(-10), force: true });
   const p = await page.evaluate(() => App.api('GET', '/products').then(ps => ps.find(p => !p.is_rental && !p.has_variations && p.stock_qty > 5 && p.price > 0)));
   const sale = await api(page, 'POST', '/transactions', { customer_id: customer.id, items: [{ product_id: p.id, quantity: 1 }], branch_id: 1, employee_id: 1, payment_method: 'cash', amount_tendered: 100000 });
   const full = await api(page, 'GET', `/transactions/${sale.id}`);

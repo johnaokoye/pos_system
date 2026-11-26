@@ -16,7 +16,7 @@ test('discounted customer categories need Assign Discount Categories', async ({ 
   const ctx = await request.newContext({ baseURL: process.env.POS_TEST_URL });
   try {
     expect((await ctx.post('/api/employees/login', { data: { username: u, password: 'pw-123456' } })).ok()).toBeTruthy();
-    const body = (n, cat) => ({ first_name: 'Cat', last_name: `${n} ${stamp}`, phone: `85${String(stamp).slice(-7)}${n}`, customer_type: 'cash', force: true, customer_category_id: cat });
+    const body = (n, cat) => ({ address: '1 Test Road', first_name: 'Cat', last_name: `${n} ${stamp}`, phone: `85${String(stamp).slice(-7)}${n}`, customer_type: 'cash', force: true, customer_category_id: cat });
 
     // Full Customers access still can't assign the discounted one…
     const refused = await ctx.post('/api/customers', { data: body(1, disc.id) });

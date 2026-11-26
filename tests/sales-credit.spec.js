@@ -18,7 +18,7 @@ let n = 0;
 async function createCustomer(page, salesperson_id) {
   n += 1;
   const stamp = `${Date.now()}${n}`;
-  return api(page, 'POST', '/customers', { first_name: 'Credit', last_name: `Test${stamp}`, phone: stamp.slice(-10), customer_type: 'cash', force: true, ...(salesperson_id ? { salesperson_id } : {}) });
+  return api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Credit', last_name: `Test${stamp}`, phone: stamp.slice(-10), customer_type: 'cash', force: true, ...(salesperson_id ? { salesperson_id } : {}) });
 }
 
 async function openPos(page) {

@@ -42,7 +42,7 @@ const balance = async (page, id) => Number((await api(page, 'GET', `/customers/$
 test('a paid sale\'s credit note can be refunded instead, onto the drawer the cash came from', async ({ page }) => {
   const pin = await signInAsManager(page);
   const s = stamp();
-  const customer = await api(page, 'POST', '/customers', { first_name: 'Credit', last_name: `Cust${s}`, phone: `876${s.slice(-7)}`, customer_type: 'credit', credit_enabled: 1, credit_limit: 1000000, credit_terms_days: 30 });
+  const customer = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Credit', last_name: `Cust${s}`, phone: `876${s.slice(-7)}`, customer_type: 'credit', credit_enabled: 1, credit_limit: 1000000, credit_terms_days: 30 });
   const drawer = await api(page, 'POST', '/drawers', { name: `CN drawer ${s}`, branch_id: 1 });
   const session = await api(page, 'POST', '/drawers/sessions', { drawer_id: drawer.id, branch_id: 1, employee_id: (await page.evaluate(() => App.currentUser.id)), opening_float: 0 });
 
@@ -96,7 +96,7 @@ test('refused for a sale charged to the account, and for a credit note already u
   // Stays signed in as admin (it can apply credit notes); the manager's PIN authorizes.
   const { pin } = await createManager(page);
   const s = stamp();
-  const customer = await api(page, 'POST', '/customers', { first_name: 'Credit', last_name: `Acct${s}`, phone: `876${s.slice(-7)}`, customer_type: 'credit', credit_enabled: 1, credit_limit: 1000000, credit_terms_days: 30 });
+  const customer = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Credit', last_name: `Acct${s}`, phone: `876${s.slice(-7)}`, customer_type: 'credit', credit_enabled: 1, credit_limit: 1000000, credit_terms_days: 30 });
 
   const onAccount = await sale(page, customer.id, 'credit');
   const ret1 = await creditNoteReturn(page, onAccount, pin);

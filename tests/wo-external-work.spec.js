@@ -10,7 +10,7 @@ test('record external technician work and cost on a work order', async ({ page }
   const s = `${Date.now()}`;
   const [main] = (await api(page, 'GET', '/branches')).filter(b => b.active !== 0);
   const fee = await api(page, 'POST', '/products', { name: `Assessment X ${s}`, sku: `AX${s}`, price: 1000, cost: 0, tax_rate: 0, is_service: 1, active: 1 });
-  const cust = await api(page, 'POST', '/customers', { first_name: 'Ext', last_name: `Owner${s}`, phone: `875${s.slice(-7)}` });
+  const cust = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Ext', last_name: `Owner${s}`, phone: `875${s.slice(-7)}` });
   const sup = await api(page, 'POST', '/suppliers', { name: `Motor Rewinds ${s}`, payment_terms: 'Net 30' });
   const wo = await api(page, 'POST', '/work-orders', { customer_id: cust.id, employee_id: 1, branch_id: main.id, description: 'Generator not starting', item_label: 'Generator', assessment_fee_product_id: fee.id });
 
@@ -106,7 +106,7 @@ test('removing external work voids its A/P bill', async ({ page }) => {
   const s = `${Date.now()}`;
   const [main] = (await api(page, 'GET', '/branches')).filter(b => b.active !== 0);
   const fee = await api(page, 'POST', '/products', { name: `Assessment Y ${s}`, sku: `AY${s}`, price: 1000, cost: 0, tax_rate: 0, is_service: 1, active: 1 });
-  const cust = await api(page, 'POST', '/customers', { first_name: 'Ext', last_name: `Two${s}`, phone: `874${s.slice(-7)}` });
+  const cust = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Ext', last_name: `Two${s}`, phone: `874${s.slice(-7)}` });
   const sup = await api(page, 'POST', '/suppliers', { name: `Panel Beaters ${s}` });
   const wo = await api(page, 'POST', '/work-orders', { customer_id: cust.id, employee_id: 1, branch_id: main.id, description: 'Dented casing', item_label: 'Mixer', assessment_fee_product_id: fee.id });
   const x = await api(page, 'POST', `/work-orders/${wo.id}/external-work`, { supplier_id: sup.id, description: 'Beat out the dent', labour_hours: 1, hourly_rate: 3000 });

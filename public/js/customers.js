@@ -369,6 +369,7 @@ Object.assign(App, {
       <div class="modal">
         <div class="modal-header"><span class="modal-title">${id ? 'Edit Customer' : 'Add Customer'}</span><button class="modal-close">✕</button></div>
         <div class="modal-body">
+          ${id && this._customerInfoMissing(c).length ? `<div id="cf-info-missing" style="padding:8px 10px;background:#fff8e1;border:1px solid #f9a825;border-radius:6px;color:#8d6e00;font-size:12px;margin-bottom:12px">&#9888; This customer's record is missing ${this._customerInfoMissing(c).join(', ')}. Please ask the customer and fill it in.</div>` : ''}
           <div class="form-group" style="display:flex;gap:18px;align-items:center;margin-bottom:12px">
             <label style="margin:0;font-weight:600">Customer is</label>
             <label style="display:flex;align-items:center;gap:6px;margin:0;font-weight:normal;cursor:pointer"><input type="radio" name="cf-kind" value="individual" ${!isBusiness?'checked':''} onchange="App._toggleCustomerKind()" style="width:auto;margin:0"> Individual</label>
@@ -381,9 +382,9 @@ Object.assign(App, {
           <div class="form-group" id="cf-business-name-wrap" style="${isBusiness?'':'display:none'}"><label>Business Name *</label><input id="cf-business-name" value="${this.escapeAttr(isBusiness ? (c.business_name || c.first_name) : '')}"></div>
           <div class="input-row">
             <div class="form-group"><label>Email</label><input type="email" id="cf-email" value="${c.email||''}"></div>
-            <div class="form-group"><label>Phone</label><input id="cf-phone" value="${c.phone||''}"></div>
+            <div class="form-group"><label>Phone *</label><input id="cf-phone" value="${c.phone||''}"></div>
           </div>
-          <div class="form-group"><label id="cf-addr-label">${isBusiness ? 'Business Address' : 'Address'}</label><input id="cf-addr" value="${c.address||''}"></div>
+          <div class="form-group"><label id="cf-addr-label">${isBusiness ? 'Business Address' : 'Address'} *</label><input id="cf-addr" value="${c.address||''}"></div>
           <div class="input-row-3">
             <div class="form-group"><label>City</label><input id="cf-city" value="${c.city||''}"></div>
             <div class="form-group"><label>Parish</label><input id="cf-state" value="${c.state||''}"></div>
@@ -797,6 +798,11 @@ Object.assign(App, {
     if (customerKind === 'business' && !data.business_name) { this.alert('Business name is required', 'error'); return; }
     if (customerKind === 'individual' && (!data.first_name || !data.last_name)) { this.alert('First and last name required', 'error'); return; }
     if (data.contacts.some(ct => !ct.name && (ct.job_title || ct.phone || ct.email))) { this.alert('Each contact person needs a name', 'error'); return; }
+    // Name, phone and address: required on a new customer; an existing one
+    // missing them is asked about but can still be saved.
+    const stillMissing = this._customerInfoMissing({ ...data, first_name: customerKind === 'business' ? data.business_name : data.first_name });
+    if (!id && stillMissing.length) { this.alert(`A new customer needs: ${stillMissing.join(', ')}`, 'error'); return; }
+    if (id && stillMissing.length && !opts.force && !confirm(`This customer is still missing: ${stillMissing.join(', ')}.\n\nSave without it?`)) return;
     // A changed Block box is saved separately (needs customers_credit_block).
     const blockBox = document.getElementById('cf-block-box');
     const blockChange = blockBox && data.customer_type === 'credit' && document.getElementById('cf-blocked').checked !== (blockBox.dataset.initial === '1')
@@ -809,6 +815,7 @@ Object.assign(App, {
       if (id) {
         await this.api('PUT', `/customers/${id}`, data);
         if (blockChange) await this.api('PATCH', `/customers/${id}/credit-block`, blockChange);
+        if (this._customerFormStack?.editId === id) return this._finishStackedCustomerForm(id);
       } else {
         const created = await this.api('POST', '/customers', data);
         if (this._customerFormStack) return this._finishStackedCustomerForm(created.id);
@@ -1667,7 +1674,7 @@ Object.assign(App, {
         oninput="document.getElementById('${id}').value='';App._filterCustomerPicker('${id}',this.value)" onfocus="App._filterCustomerPicker('${id}',this.value)">
       <input type="hidden" id="${id}" value="${sel ? sel.id : ''}">
       <div id="${id}-dd" class="cust-picker-dd" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.18);z-index:200;max-height:220px;overflow-y:auto;margin-top:2px"></div>
-    </div>`;
+    </div><div id="${id}-info">${sel && allowAdd ? this._customerInfoNoticeHtml(sel, id) : ''}</div>`;
   },
 
   async _filterCustomerPicker(id, q) {
@@ -1703,6 +1710,61 @@ Object.assign(App, {
     dd.style.display = '';
   },
 
+  // Owner's rule (2026-11-26): every customer has a name, phone number and
+  // address. New ones can't be saved without them (POST /customers checks
+  // too); an existing one missing any gets this list wherever staff pick
+  // them — POS, rentals, layaways, quotes, work orders — with an Update
+  // Customer button, the way a preapproved rental customer's gaps are shown.
+  _customerInfoMissing(c) {
+    if (!c) return [];
+    const has = v => String(v ?? '').trim() !== '';
+    const out = [];
+    if (c.customer_kind === 'business') { if (!has(c.business_name || c.first_name)) out.push('business name'); }
+    else {
+      if (!has(c.first_name)) out.push('first name');
+      if (!has(c.last_name)) out.push('last name');
+    }
+    if (!has(c.phone)) out.push('phone number');
+    if (!has(c.address)) out.push('address');
+    return out;
+  },
+
+  // The notice under a customer pick; kind says where to put the customer
+  // back once updated (see _pickCustomerIn).
+  _customerInfoNoticeHtml(c, kind) {
+    const missing = this._customerInfoMissing(c);
+    if (!c?.id || !missing.length) return '';
+    const action = this.can('customers_edit')
+      ? ` <button type="button" class="btn btn-sm btn-secondary" style="margin-left:6px;padding:2px 8px" onclick="App._updateCustomerInfo(${c.id}, '${kind}')">Update Customer</button>`
+      : ' Ask someone who can edit customers to update it.';
+    return `<div class="cust-info-missing" style="padding:8px 10px;background:#fff8e1;border:1px solid #f9a825;border-radius:6px;color:#8d6e00;font-size:12px;margin-top:6px">&#9888; Customer record incomplete — missing ${missing.join(', ')}. Ask the customer and update their details.${action}</div>`;
+  },
+
+  // Opens the customer's edit form over whatever is on screen and, once
+  // saved, puts the updated customer back where they were picked.
+  _updateCustomerInfo(id, kind) {
+    this.openCustomerFormOver('', c => this._pickCustomerIn(kind, c, { updated: true }), { editId: id });
+  },
+
+  // Puts customer c into a lookup: 'pos', 'rental', 'layaway' or a shared
+  // picker's id.
+  _pickCustomerIn(kind, c, { updated = false } = {}) {
+    const addTo = (list, x) => {
+      if (!list) return;
+      const i = list.findIndex(y => String(y.id) === String(x.id));
+      if (i >= 0) list[i] = x; else list.unshift(x);
+    };
+    if (kind === 'pos') {
+      if (updated && this.cartCustomer?.id === c.id) { this.cartCustomer = { ...this.cartCustomer, ...c }; this._renderCartCustomer(); }
+      else { this.closeModal(); this.setCartCustomer(c.id, `${c.first_name} ${c.last_name}`); }
+    } else if (kind === 'rental') { addTo(this._rentalCustomers, c); this._selectRentalCustomer(c.id); }
+    else if (kind === 'layaway') { addTo(this._layawayCustomers, c); this._selectLayawayCustomer(c.id); }
+    else {
+      addTo((this._custPickerLists || {})[kind]?.customers, c);
+      this._selectCustomerPicker(kind, c.id);
+    }
+  },
+
   async _selectCustomerPicker(id, customerId) {
     const cfg = (this._custPickerLists || {})[id];
     let c = customerId != null && cfg ? cfg.customers.find(x => String(x.id) === String(customerId)) : null;
@@ -1718,6 +1780,8 @@ Object.assign(App, {
     if (idEl) idEl.value = c ? c.id : '';
     if (searchEl) searchEl.value = c ? `${c.first_name} ${c.last_name}` : '';
     if (dd) dd.style.display = 'none';
+    const info = document.getElementById(`${id}-info`);
+    if (info) info.innerHTML = c && cfg?.allowAdd ? this._customerInfoNoticeHtml(c, id) : '';
     const onSelect = (this._custPickerOnSelect || {})[id];
     if (onSelect) onSelect(c);
   },

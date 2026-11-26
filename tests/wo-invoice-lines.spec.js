@@ -15,7 +15,7 @@ test('work order invoice lines, GCT, non-refundable assessment deposit, and a si
   const [main] = (await api(page, 'GET', '/branches')).filter(b => b.active !== 0);
   const fee = await api(page, 'POST', '/products', { name: `Assess L ${s}`, sku: `AL${s}`, price: 1000, cost: 0, tax_rate: 15, is_service: 1, active: 1 });
   const part = await api(page, 'POST', '/products', { name: `Carbon brush ${s}`, sku: `CB${s}`, price: 400, cost: 100, tax_rate: 15, stock_qty: 0, active: 1 });
-  const cust = await api(page, 'POST', '/customers', { first_name: 'Line', last_name: `Owner${s}`, phone: `872${s.slice(-7)}` });
+  const cust = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Line', last_name: `Owner${s}`, phone: `872${s.slice(-7)}` });
   const wo = await api(page, 'POST', '/work-orders', { customer_id: cust.id, employee_id: 1, branch_id: main.id, description: 'Grinder sparks', item_label: 'Grinder', assessment_fee_product_id: fee.id });
   const db = testDb();
   await db.execute('PRAGMA busy_timeout = 10000');

@@ -14,7 +14,7 @@ test('work order goes on the cashier hold only when placed there by hand', async
   const s = `${Date.now()}`;
   const [main] = (await api(page, 'GET', '/branches')).filter(b => b.active !== 0);
   const fee = await api(page, 'POST', '/products', { name: `Assess H ${s}`, sku: `AH${s}`, price: 1000, cost: 0, tax_rate: 0, is_service: 1, active: 1 });
-  const cust = await api(page, 'POST', '/customers', { first_name: 'Hold', last_name: `Me${s}`, phone: `871${s.slice(-7)}` });
+  const cust = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Hold', last_name: `Me${s}`, phone: `871${s.slice(-7)}` });
   const mkWo = desc => api(page, 'POST', '/work-orders', { customer_id: cust.id, employee_id: 1, branch_id: main.id, description: `${desc} ${s}`, item_label: 'Item', assessment_fee_product_id: fee.id });
   const db = testDb();
   await db.execute('PRAGMA busy_timeout = 10000');

@@ -23,7 +23,7 @@ test('work order parts are sourced from the Warehouse only', async ({ page }) =>
     await api(page, 'PATCH', `/products/${part.id}/stock`, { adjustment: 3, branch_id: whId, reason: 'test' });
     await api(page, 'PATCH', `/products/${part.id}/stock`, { adjustment: 9, branch_id: storeId, reason: 'test' });
     const fee = await api(page, 'POST', '/products', { name: `Assess W ${s}`, sku: `AW${s}`, price: 1000, cost: 0, tax_rate: 0, is_service: 1, active: 1 });
-    const cust = await api(page, 'POST', '/customers', { first_name: 'Wh', last_name: `Parts${s}`, phone: `871${String(s).slice(-7)}` });
+    const cust = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Wh', last_name: `Parts${s}`, phone: `871${String(s).slice(-7)}` });
     const wo = await api(page, 'POST', '/work-orders', { customer_id: cust.id, employee_id: 1, branch_id: main.id, description: 'Mower belt', item_label: 'Mower', assessment_fee_product_id: fee.id });
 
     // Another store can't supply it.

@@ -2424,6 +2424,7 @@ Object.assign(App, {
             </div>
           </div>
           <div id="rc-customer-warning" style="display:none;margin-top:6px"></div>
+          <div id="rc-customer-info"></div>
           <div id="rc-unpaid-warning" style="display:none;margin-top:6px"></div>
           <p style="font-size:11px;color:var(--text-muted);margin-top:-6px">Item availability below reflects stock at the selected location.</p>
           <div class="form-group"><label>Due Date *</label>
@@ -2673,6 +2674,8 @@ Object.assign(App, {
         }
       }
     }
+    const infoEl = document.getElementById('rc-customer-info');
+    if (infoEl) infoEl.innerHTML = this._customerInfoNoticeHtml(c, 'rental');
     this._showRentalUnpaidReturnsWarning(id);
     // A credit customer pays no deposit, so the estimate depends on who's picked.
     this._recalcRentalCheckoutEstimate();

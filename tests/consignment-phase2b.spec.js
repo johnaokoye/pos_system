@@ -45,7 +45,7 @@ test('a layaway sets supplier stock aside and becomes billable only when paid of
   const { item, main } = await consignedItem(page, s, { qty: 5, cost: 100 });
   const full = await api(page, 'GET', `/products/${item.id}`);
   await api(page, 'PUT', `/products/${item.id}`, { ...full, is_layaway_eligible: 1 });
-  const cust = await api(page, 'POST', '/customers', { first_name: 'Lay', last_name: `Away${s}`, phone: `876${s.slice(-7)}` });
+  const cust = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Lay', last_name: `Away${s}`, phone: `876${s.slice(-7)}` });
 
   const plan = await api(page, 'POST', '/layaway/plans', { customer_id: cust.id, branch_id: main.id, employee_id: 1, items: [{ product_id: item.id, quantity: 2 }], payment_method: 'cash', amount_tendered: 100 });
   expect(await lots(page, item.id, main.id)).toEqual([['consignment', 3]]);

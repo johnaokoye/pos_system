@@ -16,7 +16,7 @@ test('a warehouse branch can only supply a store sale through Get from here', as
     const store = (await api(page, 'GET', '/branches')).find(b => b.id === 1);
     const p = await api(page, 'POST', '/products', { sku: `WH-${s}`, name: `Warehouse Item ${s}`, price: 100, cost: 40, tax_rate: 0 });
     await api(page, 'PATCH', `/products/${p.id}/stock`, { adjustment: 5, branch_id: whId, reason: 'test' });
-    const cust = await api(page, 'POST', '/customers', { first_name: 'Wh', last_name: `Cust ${s}`, phone: `876${String(s).slice(-7)}` });
+    const cust = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Wh', last_name: `Cust ${s}`, phone: `876${String(s).slice(-7)}` });
 
     // Server: no sale, hold or layaway at the warehouse.
     const items = [{ product_id: p.id, quantity: 1 }];

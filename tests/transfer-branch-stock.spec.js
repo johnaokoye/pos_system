@@ -52,7 +52,7 @@ test('a layaway at a branch with no stock record for the item is refused, and no
   test.skip(!(before.stock_qty > 0), 'could not stock the test item at the main branch');
   await api(page, 'PUT', `/products/${p.id}`, { ...before, is_layaway_eligible: 1 });
   const s = `${Date.now()}`;
-  const customer = await api(page, 'POST', '/customers', { first_name: 'Lay', last_name: `Away${s}`, phone: `876${s.slice(-7)}` });
+  const customer = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Lay', last_name: `Away${s}`, phone: `876${s.slice(-7)}` });
   const msg = await attempt(page, 'POST', '/layaway/plans', { customer_id: customer.id, branch_id: other.id, employee_id: 1, items: [{ product_id: p.id, quantity: 2 }], payment_method: 'cash', amount_tendered: 100 });
   expect(msg).toContain('Not enough stock');
   expect(msg).toContain('0 available');

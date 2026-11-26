@@ -20,7 +20,7 @@ test('technician task performance, on-time badges and incentive targets', async 
   const ana = await mkTech('Ana'), ben = await mkTech('Ben');
 
   const fee = await api(page, 'POST', '/products', { name: `Assess P ${s}`, sku: `AP${s}`, price: 1000, cost: 0, tax_rate: 0, is_service: 1, active: 1 });
-  const cust = await api(page, 'POST', '/customers', { first_name: 'Perf', last_name: `Owner${s}`, phone: `873${s.slice(-7)}` });
+  const cust = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Perf', last_name: `Owner${s}`, phone: `873${s.slice(-7)}` });
   const wo = await api(page, 'POST', '/work-orders', { customer_id: cust.id, employee_id: 1, branch_id: main.id, description: 'Pressure washer', item_label: 'Washer', assessment_fee_product_id: fee.id });
   const db = testDb();
   await db.execute('PRAGMA busy_timeout = 10000');

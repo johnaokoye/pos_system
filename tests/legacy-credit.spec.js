@@ -6,7 +6,7 @@ const api = (page, method, url, data) => page.evaluate(([m, u, d]) => App.api(m,
 
 test("an old credit note is added from a cash customer's History", async ({ page }) => {
   const stamp = Date.now();
-  const c = await api(page, 'POST', '/customers', { first_name: 'Legacy', last_name: `Credit ${stamp}`, phone: `876${String(stamp).slice(-7)}`, customer_type: 'cash' });
+  const c = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Legacy', last_name: `Credit ${stamp}`, phone: `876${String(stamp).slice(-7)}`, customer_type: 'cash' });
   await page.evaluate(id => App.viewCustomer(id), c.id);
   const box = page.locator('#cust-credits');
   await expect(box).toContainText('Available Credit');
@@ -21,7 +21,7 @@ test("an old credit note is added from a cash customer's History", async ({ page
   expect((await api(page, 'GET', `/customers/${c.id}/credits`)).available).toBe(250);
 
   // Not offered on a credit account's History, nor on the Edit form.
-  const credit = await api(page, 'POST', '/customers', { first_name: 'Legacy', last_name: `Account ${stamp}`, phone: `875${String(stamp).slice(-7)}`, customer_type: 'credit', credit_terms_days: 30, credit_limit: 1000 });
+  const credit = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Legacy', last_name: `Account ${stamp}`, phone: `875${String(stamp).slice(-7)}`, customer_type: 'credit', credit_terms_days: 30, credit_limit: 1000 });
   await page.evaluate(() => App.closeModal());
   await page.evaluate(id => App.viewCustomer(id), credit.id);
   await expect(page.locator('#ch-table')).toBeVisible();
@@ -34,7 +34,7 @@ test("an old credit note is added from a cash customer's History", async ({ page
 
 test('the credit left on the account prints as a Credit Statement', async ({ page }) => {
   const stamp = Date.now();
-  const c = await api(page, 'POST', '/customers', { first_name: 'Print', last_name: `Credit ${stamp}`, phone: `874${String(stamp).slice(-7)}`, customer_type: 'cash' });
+  const c = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Print', last_name: `Credit ${stamp}`, phone: `874${String(stamp).slice(-7)}`, customer_type: 'cash' });
   await api(page, 'POST', `/customers/${c.id}/legacy-credit-notes`, { credit_note_number: `PCN-${stamp}`, date: '2026-02-01', amount: 300 });
   const p = await api(page, 'POST', '/products', { sku: `PC-${stamp}`, name: `Credit Item ${stamp}`, price: 100, cost: 40, tax_rate: 0 });
   await api(page, 'PATCH', `/products/${p.id}/stock`, { adjustment: 5, branch_id: 1, reason: 'test' });
@@ -63,6 +63,6 @@ test('the credit left on the account prints as a Credit Statement', async ({ pag
   await page.click('#cse-send');
   await expect(page.locator('text=SMTP not configured')).toBeVisible();
   await expect(page.locator('#cust-credits')).toBeVisible();
-  const noNotes = await api(page, 'POST', '/customers', { first_name: 'No', last_name: `Notes ${stamp}`, phone: `873${String(stamp).slice(-7)}`, customer_type: 'cash' });
+  const noNotes = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'No', last_name: `Notes ${stamp}`, phone: `873${String(stamp).slice(-7)}`, customer_type: 'cash' });
   expect(await page.evaluate(id => App.api('POST', `/email/send-credit-statement/${id}`, { to: 'a@b.com' }).catch(e => e.message), noNotes.id)).toContain('no credit notes');
 });

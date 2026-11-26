@@ -29,7 +29,7 @@ test('item trip with Warehouse checkpoint, assessment gate and return', async ({
   const branches = (await api(page, 'GET', '/branches')).filter(b => b.active !== 0);
   const store = branches.find(b => !b.is_warehouse);
   const fee = await api(page, 'POST', '/products', { name: `Assess M ${s}`, sku: `AM${s}`, price: 1000, cost: 0, tax_rate: 0, is_service: 1, active: 1 });
-  const cust = await api(page, 'POST', '/customers', { first_name: 'Trip', last_name: `Owner${s}`, phone: `873${s.slice(-7)}` });
+  const cust = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Trip', last_name: `Owner${s}`, phone: `873${s.slice(-7)}` });
   const wo = await api(page, 'POST', '/work-orders', { customer_id: cust.id, employee_id: 1, branch_id: store.id, description: `Laptop no power ${s}`, item_label: 'Laptop',
     assessment_fee_product_id: fee.id, accessories: [{ name: 'Charger', description: 'Black 65W' }, { name: 'Bag', description: 'Grey sleeve' }] });
   const db = testDb();
@@ -142,7 +142,7 @@ test('a work order taken in at the Warehouse starts there; older work orders are
   const wh = await api(page, 'POST', '/branches', { name: `Move WH ${s}`, is_warehouse: 1 });
   await db.execute({ sql: 'UPDATE branches SET is_warehouse = 1 WHERE id = ?', args: [wh.id] });
   const fee = await api(page, 'POST', '/products', { name: `Assess W ${s}`, sku: `AW${s}`, price: 500, cost: 0, tax_rate: 0, is_service: 1, active: 1 });
-  const cust = await api(page, 'POST', '/customers', { first_name: 'Ware', last_name: `House${s}`, phone: `874${s.slice(-7)}` });
+  const cust = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Ware', last_name: `House${s}`, phone: `874${s.slice(-7)}` });
   const wo = await api(page, 'POST', '/work-orders', { customer_id: cust.id, employee_id: 1, branch_id: wh.id, description: 'Drill', item_label: 'Drill', assessment_fee_product_id: fee.id });
   let w = await api(page, 'GET', `/work-orders/${wo.id}`);
   expect(w.movement).toMatchObject({ home: 'warehouse', location: 'warehouse', warehouse_received: true, assessment_blocked: true, next: { kind: 'send', to: 'service_center' } });

@@ -7,7 +7,7 @@ test('items returned: how often, units, value, return rate and the customers', a
   const stamp = Date.now();
   const p = await api(page, 'POST', '/products', { sku: `RET-${stamp}`, name: `Returned Kettle ${stamp}`, price: 50, cost: 20, tax_rate: 0 });
   await api(page, 'PATCH', `/products/${p.id}/stock`, { adjustment: 20, branch_id: 1, reason: 'test' });
-  const cust = n => api(page, 'POST', '/customers', { first_name: 'Ret', last_name: `${n} ${stamp}`, phone: `87${String(stamp).slice(-7)}${n === 'A' ? 1 : 2}`, customer_type: 'cash', force: true });
+  const cust = n => api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Ret', last_name: `${n} ${stamp}`, phone: `87${String(stamp).slice(-7)}${n === 'A' ? 1 : 2}`, customer_type: 'cash', force: true });
   const a = await cust('A'), b = await cust('B');
   const sell = (c, qty) => api(page, 'POST', '/transactions', { customer_id: c.id, items: [{ product_id: p.id, quantity: qty }], branch_id: 1, employee_id: 1, payment_method: 'cash', amount_tendered: 10000 });
   const group = (await api(page, 'GET', '/security-groups')).find(g => g.name === 'Manager');

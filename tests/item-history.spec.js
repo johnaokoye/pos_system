@@ -8,7 +8,7 @@ test('item history: every movement of one item at a location, in and out, matchi
   const [main, other] = (await api(page, 'GET', '/branches')).filter(b => b.active !== 0 && !Number(b.is_warehouse));
   const p = await api(page, 'POST', '/products', { sku: `ITH-${stamp}`, name: `History Drill ${stamp}`, price: 40, cost: 15, tax_rate: 0 });
   await api(page, 'PATCH', `/products/${p.id}/stock`, { adjustment: 20, branch_id: main.id, reason: 'opening count' });
-  const cust = await api(page, 'POST', '/customers', { first_name: 'Ith', last_name: `Cust ${stamp}`, phone: `86${String(stamp).slice(-8)}`, customer_type: 'cash', force: true });
+  const cust = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Ith', last_name: `Cust ${stamp}`, phone: `86${String(stamp).slice(-8)}`, customer_type: 'cash', force: true });
   const sell = qty => api(page, 'POST', '/transactions', { customer_id: cust.id, items: [{ product_id: p.id, quantity: qty }], branch_id: main.id, employee_id: 1, payment_method: 'cash', amount_tendered: 10000 });
   const sale = await sell(3);
   const voided = await sell(1);
