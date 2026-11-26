@@ -147,6 +147,40 @@ Object.assign(App, {
     return { return_units: back, fleet_units: picked ? picked.new : undefined };
   },
 
+  // ── Booking screens (New Rental, quotes) ────────────────────────────────
+  // Ready-now counts from FleetHub for these SKUs, kept a minute. {} when
+  // FleetHub is off or can't be reached — booking carries on either way.
+  async _fleetReadiness(skus) {
+    this._fleetReadyCache = this._fleetReadyCache || {};
+    const now = Date.now();
+    const want = [...new Set(skus.filter(Boolean))].filter(s => !(this._fleetReadyCache[s] && now - this._fleetReadyCache[s].at < 60000));
+    if (want.length) {
+      try {
+        const r = await this.api('GET', `/rentals/fleet-readiness?skus=${encodeURIComponent(want.join(','))}`);
+        for (const s of want) this._fleetReadyCache[s] = { at: now, value: (r.items || {})[s] || null };
+      } catch (e) { return {}; }
+    }
+    const out = {};
+    for (const s of skus) if (this._fleetReadyCache[s]?.value) out[s] = this._fleetReadyCache[s].value;
+    return out;
+  },
+
+  // "⚠ Ready now: 0 of 1 — 25050005851: Unit is in the shop" (or ✓ all ready).
+  _fleetReadyHtml(r, { short = false } = {}) {
+    if (!r) return '';
+    if (!r.not_ready.length) return `<div class="fleet-ready ok">✓ ${r.ready} of ${r.total} ready to go out (FleetHub)</div>`;
+    const why = r.not_ready.map(u => `${this.escapeAttr(u.unitNumber)}: ${this.escapeAttr(u.reasons.join('; ') || 'not ready')}`);
+    return `<div class="fleet-ready warn" title="${why.join('\n')}">⚠ Ready now: ${r.ready} of ${r.total} — ${r.not_ready.length} in the shop / awaiting pre-rental checklist${short ? '' : `<br><span style="font-weight:400">${why.join('<br>')}</span>`}</div>`;
+  },
+
+  // Fills every [data-fleet-sku] placeholder inside `root` (equipment only).
+  async _fleetReadyFill(root, opts) {
+    const els = [...(root || document).querySelectorAll('[data-fleet-sku]')];
+    if (!els.length) return;
+    const map = await this._fleetReadiness(els.map(e => e.dataset.fleetSku));
+    for (const el of els) el.innerHTML = this._fleetReadyHtml(map[el.dataset.fleetSku], opts);
+  },
+
   // ── Agreement view ──────────────────────────────────────────────────────
   _fleetUnitsRecordHtml(units) {
     if (!units || !units.length) return '';

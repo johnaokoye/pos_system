@@ -883,6 +883,7 @@ Object.assign(App, {
     dd.innerHTML = matches.length ? matches.slice(0, 50).map(p => this._spRentalOptionHtml(idx, p, avail && avail.byId.get(p.id), avail)).join('')
       : `<div style="padding:10px;color:var(--text-muted);font-size:13px">No rental items found</div>`;
     dd.style.display = '';
+    this._fleetReadyFill(dd, { short: true });
   },
 
   // GET /quotations/rental-availability for the form's branch, kept for a
@@ -949,6 +950,7 @@ Object.assign(App, {
         <div style="font-size:11px;color:var(--text-muted)">${details}${details ? ' · ' : ''}${rates}</div>
         ${stockLine ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">${stockLine}</div>` : ''}
         ${elsewhereLine}
+        ${p.rental_classification === 'equipment' && p.sku ? `<div data-fleet-sku="${esc(p.sku)}"></div>` : ''}
         ${bookingLines ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px;padding-left:8px;border-left:2px solid var(--border)">${bookingLines}</div>` : ''}
       </div>`;
   },

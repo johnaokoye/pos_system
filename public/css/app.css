@@ -642,3 +642,6 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .fleet-box { border: 1px solid var(--border); border-left: 3px solid var(--primary); border-radius: 6px; padding: 8px 10px; margin-bottom: 12px; font-size: 13px; }
 .fleet-box select { width: 100%; }
 .fleet-box.fleet-error { border-left-color: var(--danger); color: var(--danger); }
+.fleet-ready { font-size: 11px; font-weight: 600; margin-top: 3px; }
+.fleet-ready.ok { color: var(--success); }
+.fleet-ready.warn { color: var(--warning, #d97706); }

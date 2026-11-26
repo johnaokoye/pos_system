@@ -206,3 +206,29 @@ test('replacing a fleet unit returns the old one and checks out the new one', as
   const full = await api(page, 'GET', `/rentals/agreements/${a.id}`);
   expect(full.fleet_units.map(f => [f.unit_number, f.status, f.item_id])).toEqual([[u(1), 'returned', line], [u(2), 'issued', line]]);
 });
+
+test('booking screens show how many fleet units are ready now, without blocking', async ({ page }) => {
+  const s = `${Date.now()}`;
+  const { branch, customer, sku, u } = await setup(page, s, 1);
+  const r = await api(page, 'GET', `/rentals/fleet-readiness?skus=${sku},NOT-TRACKED-${s}`);
+  expect(r.enabled).toBe(true);
+  expect(Object.keys(r.items)).toEqual([sku]);
+  expect(r.items[sku]).toMatchObject({ total: 4, ready: 3 });
+  expect(r.items[sku].not_ready).toEqual([{ unitNumber: u(4), name: u(4), reasons: ['Pre-rental checklist not completed since last return'] }]);
+
+  // New Rental's item picker and the chosen line both say so.
+  await page.evaluate(() => App.showRentalCheckoutModal());
+  await page.evaluate(id => { const el = document.getElementById('rc-branch'); el.value = String(id); if (el.tagName === 'SELECT') App._refreshRentalCheckoutBranch(); }, branch.id);
+  await page.waitForFunction(() => (App._rentalProducts || []).length > 0);
+  const idx = await page.evaluate(() => document.querySelector('[id^="rl-prod-btn-"]').id.replace('rl-prod-btn-', ''));
+  await page.evaluate(i => App._openRentalItemPicker(i), idx);
+  await page.fill('#rl-picker-search', sku);
+  await expect(page.locator('#rl-picker-list .fleet-ready.warn')).toContainText('Ready now: 3 of 4');
+  await page.locator('#rl-picker-list .nav-item').first().click();
+  await expect(page.locator(`#rl-rate-${idx} .fleet-ready.warn`)).toContainText(u(4));
+  // Not enforced at booking: the hold goes through.
+  const due = await page.evaluate(() => App._storeDay(new Date(Date.now() + 2 * 86400000)));
+  await mock('/__mock/units', { units: [{ unitNumber: u(1), sku, status: 'needs_service' }, { unitNumber: u(2), sku, status: 'needs_service' }, { unitNumber: u(3), sku, status: 'needs_service' }] });
+  const items = [{ product_id: (await page.evaluate(i => document.getElementById(`rl-prod-${i}`).value, idx)), quantity: 1 }];
+  expect(await attempt(page, 'POST', '/rentals/agreements', { customer_id: customer.id, branch_id: branch.id, due_date: due, items })).toBe('accepted');
+});

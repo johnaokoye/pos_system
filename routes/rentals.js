@@ -928,6 +928,17 @@ router.get('/agreements/:id/fleet-units', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Ready-now counts per SKU for the booking screens (New Rental, rental and
+// Special Project quotes). Shown, never enforced — Issue is the gate.
+router.get('/fleet-readiness', requireAuth, async (req, res) => {
+  try {
+    const p = req.employee && req.employee.permissions;
+    if (!req.apiKey && !(canManageRentals(p) || can(p, 'quotations') || can(p, 'special_projects'))) return res.status(403).json({ error: 'Missing permission: rentals' });
+    const skus = String(req.query.skus || '').split(',').map(s => s.trim()).filter(Boolean);
+    res.json({ enabled: fleethub.enabled(), items: await fleethub.readiness(skus) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // FleetHub's units for a rental item's SKU — Replace Item's replacement picker.
 router.get('/fleet-units', requireRentalsManage, async (req, res) => {
   try {

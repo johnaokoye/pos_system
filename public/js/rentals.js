@@ -2764,7 +2764,8 @@ Object.assign(App, {
         const { weekTierDayRate, monthTierDayRate } = this._toolTierDayRates(product.rental_rate);
         parts.push(`${this.fmt(weekTierDayRate)}/day after 7 days`, `${this.fmt(monthTierDayRate)}/day after 28 days`);
       }
-      rateEl.innerHTML = `Rate: ${parts.join(' · ')}`;
+      rateEl.innerHTML = `Rate: ${parts.join(' · ')}${product.rental_classification === 'equipment' && product.sku ? `<div data-fleet-sku="${this.escapeAttr(product.sku)}"></div>` : ''}`;
+      this._fleetReadyFill(rateEl);
     }
     const accessories = await this.api('GET', `/products/${productId}/accessories`);
     if (!document.getElementById(`rl-accessories-${idx}`)) return;
@@ -3101,8 +3102,10 @@ Object.assign(App, {
           <div><strong>${p.name}</strong><div style="font-size:11px;color:var(--text-muted)">${p.sku}</div></div>
           <span class="badge-pill badge-info" style="white-space:nowrap">${avail} available</span>
         </div>
+        ${p.rental_classification === 'equipment' && p.sku ? `<div data-fleet-sku="${this.escapeAttr(p.sku)}"></div>` : ''}
       </div>`;
     }).join('');
+    this._fleetReadyFill(list, { short: true });
   },
 
   _pickRentalItem(idx, productId) {
