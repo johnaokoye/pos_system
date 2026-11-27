@@ -1,4 +1,5 @@
 import { test, expect } from './fixtures.js';
+import { approveConsOrder } from './consignment-order-approval.js';
 
 // The list of supplier-owned items: Consignment Stock filters/search/CSV, and
 // Retail Inventory's Consignment badge and filter.
@@ -34,7 +35,7 @@ test('consignment items listed apart: stock tab filters and CSV, inventory badge
   await api(page, 'POST', `/consignment/agreements/${a.id}/finance`, { revenue_treatment: 'principal', output_gct_treatment: 'Standard' });
   await api(page, 'POST', `/consignment/agreements/${a.id}/approve`, { signature: SIG });
   await login(page, 'admin', '123456');
-  const o = await api(page, 'POST', '/consignment/orders', { agreement_id: a.id, branch_id: main.id, items: [{ product_id: consigned.id, quantity: 3 }] });
+  const o = await approveConsOrder(page, await api(page, 'POST', '/consignment/orders', { agreement_id: a.id, branch_id: main.id, items: [{ product_id: consigned.id, quantity: 3 }] }));
   const g = await api(page, 'POST', `/consignment/orders/${o.id}/grns`, { delivery_note_number: `DN-L${s}`, items: [{ order_item_id: o.items[0].id, quantity: 3 }] });
   await api(page, 'POST', `/consignment/grns/${g.id}/approve`, {});
 

@@ -349,9 +349,10 @@ router.post('/agreements/:id/end', requirePermission('consignment_agreements'), 
 });
 
 // ── Orders ──────────────────────────────────────────────────
-const ORDER_SELECT = `SELECT o.*, (SELECT po.po_number FROM purchase_orders po WHERE po.id = o.source_po_id) AS source_po_number, a.agreement_number, s.name AS supplier_name, s.email AS supplier_email, s.email2 AS supplier_email2, b.name AS branch_name, e.first_name || ' ' || e.last_name AS created_by_name
+const ORDER_SELECT = `SELECT o.*, (SELECT po.po_number FROM purchase_orders po WHERE po.id = o.source_po_id) AS source_po_number, a.agreement_number, s.name AS supplier_name, s.email AS supplier_email, s.email2 AS supplier_email2, b.name AS branch_name, e.first_name || ' ' || e.last_name AS created_by_name,
+  oa.first_name || ' ' || oa.last_name AS approved_by_name, orj.first_name || ' ' || orj.last_name AS rejected_by_name
   FROM consignment_orders o JOIN consignment_agreements a ON a.id = o.agreement_id JOIN suppliers s ON s.id = o.supplier_id
-  JOIN branches b ON b.id = o.branch_id LEFT JOIN employees e ON e.id = o.created_by`;
+  JOIN branches b ON b.id = o.branch_id LEFT JOIN employees e ON e.id = o.created_by LEFT JOIN employees oa ON oa.id = o.approved_by LEFT JOIN employees orj ON orj.id = o.rejected_by`;
 
 async function loadOrder(executor, id) {
   const { rows: [o] } = await executor.execute({ sql: `${ORDER_SELECT} WHERE o.id = ?`, args: [id] });
@@ -441,7 +442,7 @@ router.post('/orders', requirePermission('consignment_agreements'), async (req, 
     }
     const number = await nextNumber(tx, 'consignment_orders', 'order_number', 'CON-', 6);
     const r = await tx.execute({
-      sql: 'INSERT INTO consignment_orders (order_number, agreement_id, supplier_id, branch_id, expected_date, notes, created_by) VALUES (?,?,?,?,?,?,?)',
+      sql: "INSERT INTO consignment_orders (order_number, agreement_id, supplier_id, branch_id, expected_date, notes, created_by, status) VALUES (?,?,?,?,?,?,?,'pending_approval')",
       args: [number, a.id, a.supplier_id, b.id, isDay(req.body.expected_date) ? req.body.expected_date : null, String(req.body.notes || '').trim() || null, req.employee?.id || null],
     });
     const id = Number(r.lastInsertRowid);
@@ -463,10 +464,38 @@ router.post('/orders/:id/cancel', requirePermission('consignment_agreements'), a
     const o = await loadOrder(db, req.params.id);
     if (!o) return res.status(404).json({ error: 'Order not found' });
     if (o.grns.some(g => g.status === 'pending')) return res.status(400).json({ error: 'A GRN on this order is waiting for approval — approve or reject it first' });
-    if (!['open', 'partial'].includes(o.status)) return res.status(400).json({ error: `${o.order_number} is ${o.status}` });
+    if (!['open', 'partial', 'pending_approval'].includes(o.status)) return res.status(400).json({ error: `${o.order_number} is ${o.status}` });
     // Partly received: the rest is cancelled; what came in stays.
     await db.execute({ sql: "UPDATE consignment_orders SET status = ?, cancelled_by = ?, cancelled_at = CURRENT_TIMESTAMP WHERE id = ?", args: [o.status === 'partial' ? 'received' : 'cancelled', req.employee?.id || null, o.id] });
     res.json(await loadOrder(db, o.id));
+  } catch (e) { send(res, e); }
+});
+
+// Approval with signature: a new order (pending_approval) can't be received
+// or emailed to the supplier until someone with consignment_order_approve —
+// not whoever raised it — signs it off (→ open). Rejecting needs a reason.
+router.post('/orders/:id/approve', requirePermission('consignment_order_approve'), async (req, res) => {
+  try {
+    const o = await loadOrder(db, req.params.id);
+    if (!o) return res.status(404).json({ error: 'Order not found' });
+    if (o.status !== 'pending_approval') return res.status(400).json({ error: `${o.order_number} isn't waiting for approval` });
+    if (Number(o.created_by) === Number(req.employee?.id)) return res.status(403).json({ error: 'You raised this order, so someone else has to approve it', code: 'own_order' });
+    let sig;
+    try { sig = await resolveApprovalSignature(db, req.employee?.id, req.body.signature); }
+    catch (e) { return res.status(e.status || 500).json({ error: e.message, code: e.code }); }
+    const r = await db.execute({ sql: "UPDATE consignment_orders SET status = 'open', approved_by = ?, approved_at = CURRENT_TIMESTAMP, approval_signature = ? WHERE id = ? AND status = 'pending_approval'", args: [req.employee?.id || null, sig, o.id] });
+    if (!r.rowsAffected) return res.status(409).json({ error: `${o.order_number} isn't waiting for approval` });
+    res.json(await loadOrder(db, o.id));
+  } catch (e) { send(res, e); }
+});
+
+router.post('/orders/:id/reject', requirePermission('consignment_order_approve'), async (req, res) => {
+  try {
+    const reason = String(req.body.reason || '').trim();
+    if (!reason) return res.status(400).json({ error: 'Give the reason' });
+    const r = await db.execute({ sql: "UPDATE consignment_orders SET status = 'rejected', rejected_by = ?, rejected_at = CURRENT_TIMESTAMP, rejection_reason = ? WHERE id = ? AND status = 'pending_approval'", args: [req.employee?.id || null, reason, req.params.id] });
+    if (!r.rowsAffected) return res.status(400).json({ error: "This order isn't waiting for approval" });
+    res.json(await loadOrder(db, req.params.id));
   } catch (e) { send(res, e); }
 });
 
@@ -519,6 +548,7 @@ router.post('/orders/:id/grns', requirePermission('consignment_receive'), async 
   try {
     const o = await loadOrder(tx, req.params.id);
     if (!o) throw err(404, 'Order not found');
+    if (o.status === 'pending_approval') throw err(400, `${o.order_number} is waiting for approval — it can be received once it's approved`);
     if (!['open', 'partial'].includes(o.status)) throw err(400, `${o.order_number} is ${o.status} — nothing more can be received on it`);
     const note = String(req.body.delivery_note_number || '').trim();
     if (!note) throw err(400, "Enter the supplier's delivery note number");

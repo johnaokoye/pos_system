@@ -17,5 +17,8 @@ const { ensureReady, db } = require(path.join(repo, 'database'));
 (async () => {
   await ensureReady();
   await db.execute("UPDATE employees SET must_change_password = 0 WHERE username = 'admin'");
+  // Starting tracking and recording opening stock are off for every group
+  // until ticked; the demo's Administrator does both.
+  await db.execute("UPDATE security_groups SET permissions = json_set(permissions, '$.consignment_go_live', json('true'), '$.consignment_opening_record', json('true')) WHERE name = 'Administrator'");
   require(path.join(repo, 'server'));
 })().catch(e => { console.error(e); process.exit(1); });

@@ -3,9 +3,9 @@ Object.assign(App, {
   _consCanOpen() { return this.can('consignment') || this.can('consignment_finance') || this.can('payables'); },
   _consFull() { return this.can('consignment') || this.can('consignment_finance'); },
   _consStatusBadge: { draft: 'badge-secondary', submitted: 'badge-warning', approved: 'badge-success', rejected: 'badge-danger', ended: 'badge-secondary',
-    open: 'badge-info', partial: 'badge-warning', received: 'badge-success', cancelled: 'badge-secondary', pending: 'badge-warning' },
+    open: 'badge-info', partial: 'badge-warning', received: 'badge-success', cancelled: 'badge-secondary', pending: 'badge-warning', pending_approval: 'badge-warning' },
   _consStatusLabel: { draft: 'Draft', submitted: 'Awaiting Finance', approved: 'Approved', rejected: 'Rejected', ended: 'Ended',
-    open: 'Open', partial: 'Part received', received: 'Received', cancelled: 'Cancelled', pending: 'Awaiting approval' },
+    open: 'Open', partial: 'Part received', received: 'Received', cancelled: 'Cancelled', pending: 'Awaiting approval', pending_approval: 'Awaiting approval' },
   _consResp: { supplier: 'Supplier', total_tools: 'Total Tools' },
 
   async renderConsignment(tab) {
@@ -364,7 +364,7 @@ Object.assign(App, {
     const items = [...document.querySelectorAll('.co-qty')].map(i => ({ product_id: i.dataset.product, uom_id: document.querySelector(`.co-unit[data-product="${i.dataset.product}"]`)?.value || null, quantity: parseFloat(i.value) || 0 })).filter(i => i.quantity > 0);
     try {
       const o = await this.api('POST', '/consignment/orders', { agreement_id: document.getElementById('co-agr').value, branch_id: document.getElementById('co-branch').value, expected_date: document.getElementById('co-date').value, notes: document.getElementById('co-notes').value, items });
-      this.alert(`${o.order_number} created`, 'success');
+      this.alert(`${o.order_number} created — waiting for approval`, 'success');
       this.renderConsignment('orders');
       this.viewConsOrder(o.id);
     } catch (e) { this.alert(e.message, 'error'); }
@@ -388,7 +388,8 @@ Object.assign(App, {
       <div class="modal" style="max-width:920px">
         <div class="modal-header"><span class="modal-title">Consignment Order ${o.order_number}</span><div style="display:flex;gap:8px;align-items:center">${this._consBadge(o.status)}<button class="modal-close">✕</button></div></div>
         <div class="modal-body" style="font-size:13px">
-          <div style="margin-bottom:10px"><strong>${esc(o.supplier_name)}</strong> · ${o.agreement_number} · to ${esc(o.branch_name)}${o.expected_date ? ` · expected ${this.fmtDate(o.expected_date)}` : ''}</div>
+          <div style="margin-bottom:10px"><strong>${esc(o.supplier_name)}</strong> · ${o.agreement_number} · to ${esc(o.branch_name)}${o.expected_date ? ` · expected ${this.fmtDate(o.expected_date)}` : ''}${o.source_po_number ? ` · from PO ${esc(o.source_po_number)}` : ''}</div>
+          <div id="con-approval" style="margin-bottom:10px;font-size:12px">Raised by ${esc(o.created_by_name || '—')} · ${this.fmtDateTime(o.created_at)}${o.approved_at ? ` · <strong>Approved by</strong> ${esc(o.approved_by_name || '—')} · ${this.fmtDateTime(o.approved_at)}` : ''}${o.status === 'pending_approval' ? ` · <span style="color:#b45309;font-weight:600">Waiting for approval — it can't be received or sent to the supplier until it's approved</span>` : ''}${o.status === 'rejected' ? `<div style="margin-top:6px;padding:8px 10px;border:1px solid #fecaca;background:#fef2f2;border-radius:6px;color:#991b1b"><strong>Rejected</strong> by ${esc(o.rejected_by_name || '—')} · ${this.fmtDateTime(o.rejected_at)}: ${esc(o.rejection_reason || '')}</div>` : ''}</div>
           <table style="width:100%"><thead><tr style="color:var(--text-muted);font-size:12px"><th style="text-align:left">SKU</th><th style="text-align:left">Item</th><th style="text-align:left">Unit</th><th style="text-align:right" title="The supplier's agreed cost in effect today — set on the agreement, not here">Agreed cost</th><th style="text-align:right">Ordered</th><th style="text-align:right">Received</th><th style="text-align:right">Awaiting approval</th><th style="text-align:right">Left</th>${canReceive ? '<th style="text-align:right;width:110px">Receive now</th><th style="text-align:right;width:110px" title="Your price to customers for this unit">Selling price</th>' : ''}</tr></thead>
             <tbody>${o.items.map(i => `<tr style="border-top:1px solid var(--border)"><td style="padding:5px 8px 5px 0;font-family:monospace;white-space:nowrap">${esc(i.sku || '—')}</td><td style="padding:5px 0">${nameCell(i)}</td><td>${esc(i.unit_label || 'Each')}${Number(i.units_per) > 1 ? `<div style="font-size:11px;color:var(--text-muted)">${i.quantity_ordered} ${esc(i.stock_unit)} ordered</div>` : ''}</td>
               <td style="text-align:right">${agreed(i)}</td><td style="text-align:right">${i.ordered_units}</td><td style="text-align:right">${i.received_units}</td><td style="text-align:right">${i.pending_units || 0}</td><td style="text-align:right" class="fw-600">${i.left_units}</td>
@@ -400,7 +401,7 @@ Object.assign(App, {
             <div style="font-size:11px;color:var(--text-muted);margin-top:4px">The stock goes on hand once the GRN is approved.</div>` : ''}
           ${o.grns.length ? `<div style="font-weight:600;margin:12px 0 4px">GRNs</div>${o.grns.map(g => `<div style="border-top:1px solid var(--border);padding:4px 0"><a href="#" onclick="event.preventDefault();App.viewConsGrn(${g.id})">${g.grn_number}</a> · delivery note ${esc(g.delivery_note_number)} · ${this._consBadge(g.status)}</div>`).join('')}` : ''}
         </div>
-        <div class="modal-footer">${['open', 'partial'].includes(o.status) && this.can('consignment_agreements') ? `<button class="btn btn-outline" onclick="App._consCancelOrder(${o.id})">${o.status === 'partial' ? 'Close (cancel the rest)' : 'Cancel Order'}</button>` : ''}<button class="btn btn-secondary" onclick="App._printServerDocument('/api/email/consignment-order-preview/${o.id}', 'consignment-order', 'consignment order')">🖨️ Print</button><a class="btn btn-secondary" id="con-pdf" href="/api/email/consignment-order-pdf/${o.id}" download="${esc(o.order_number)}.pdf" style="text-decoration:none">⬇️ Download PDF</a>${o.status !== 'cancelled' && (this.can('consignment_agreements') || this.can('consignment_receive')) ? `<button class="btn btn-secondary" id="con-email" onclick="App._consEmailDoc('order', ${o.id})">✉️ Email to Supplier</button>` : ''}<button class="btn btn-secondary" onclick="App.closeModal()">Close</button></div>
+        <div class="modal-footer">${o.status === 'pending_approval' && this.can('consignment_order_approve') && Number(o.created_by) !== Number(this.currentUser?.id) ? `<button class="btn btn-danger" id="con-reject" onclick="App._consOrderReject(${o.id})">Reject</button><button class="btn btn-success" id="con-approve" onclick="App._consOrderApprove(${o.id})">Approve Order</button>` : ''}${['open', 'partial', 'pending_approval'].includes(o.status) && this.can('consignment_agreements') ? `<button class="btn btn-outline" onclick="App._consCancelOrder(${o.id})">${o.status === 'partial' ? 'Close (cancel the rest)' : 'Cancel Order'}</button>` : ''}<button class="btn btn-secondary" onclick="App._printServerDocument('/api/email/consignment-order-preview/${o.id}', 'consignment-order', 'consignment order')">🖨️ Print</button><a class="btn btn-secondary" id="con-pdf" href="/api/email/consignment-order-pdf/${o.id}" download="${esc(o.order_number)}.pdf" style="text-decoration:none">⬇️ Download PDF</a>${['open', 'partial', 'received'].includes(o.status) && (this.can('consignment_agreements') || this.can('consignment_receive')) ? `<button class="btn btn-secondary" id="con-email" onclick="App._consEmailDoc('order', ${o.id})">✉️ Email to Supplier</button>` : ''}<button class="btn btn-secondary" onclick="App.closeModal()">Close</button></div>
       </div>`);
   },
   // Email a consignment order or GRN to the supplier (Email and Email 2
@@ -450,6 +451,29 @@ Object.assign(App, {
       this.alert(e.message, 'error');
       if (btn) { btn.disabled = false; btn.textContent = 'Send'; }
     }
+  },
+  _consOrderApprove(id) {
+    this._showApprovalDialog({
+      title: 'Approve Consignment Order',
+      intro: 'Once approved, the order can be sent to the supplier and received. Your signature is recorded and printed on it.',
+      approve: async (signature) => {
+        const o = await this.api('POST', `/consignment/orders/${id}/approve`, { signature });
+        this.alert(`${o.order_number} approved`, 'success');
+        this.renderConsignment('orders');
+        this.viewConsOrder(id);
+      },
+    });
+  },
+  async _consOrderReject(id) {
+    const reason = prompt('Reason for rejecting this consignment order:');
+    if (reason == null) return;
+    if (!reason.trim()) { this.alert('A reason is required', 'error'); return; }
+    try {
+      const o = await this.api('POST', `/consignment/orders/${id}/reject`, { reason: reason.trim() });
+      this.alert(`${o.order_number} rejected`, 'success');
+      this.renderConsignment('orders');
+      this.viewConsOrder(id);
+    } catch (e) { this.alert(e.message, 'error'); }
   },
   async _consReceive(orderId) {
     const items = [...document.querySelectorAll('.cg-qty')].map(i => {

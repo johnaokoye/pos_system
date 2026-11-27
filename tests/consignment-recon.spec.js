@@ -1,4 +1,5 @@
 import { test, expect } from './fixtures.js';
+import { approveConsOrder } from './consignment-order-approval.js';
 import { createClient } from '@libsql/client';
 import os from 'os';
 import path from 'path';
@@ -44,7 +45,7 @@ test('month-end reconciliation: figures, counts, approval and lock, a later retu
   await api(page, 'POST', `/consignment/agreements/${agr.id}/finance`, { revenue_treatment: 'principal', output_gct_treatment: 'Standard' });
   await api(page, 'POST', `/consignment/agreements/${agr.id}/approve`, { signature: SIG });
   await login(page, 'admin', '123456');
-  const o = await api(page, 'POST', '/consignment/orders', { agreement_id: agr.id, branch_id: main.id, items: [{ product_id: item.id, quantity: 10 }] });
+  const o = await approveConsOrder(page, await api(page, 'POST', '/consignment/orders', { agreement_id: agr.id, branch_id: main.id, items: [{ product_id: item.id, quantity: 10 }] }));
   const g = await api(page, 'POST', `/consignment/orders/${o.id}/grns`, { delivery_note_number: `DN${s}`, items: [{ order_item_id: o.items[0].id, quantity: 10 }] });
   await api(page, 'POST', `/consignment/grns/${g.id}/approve`, {});
 

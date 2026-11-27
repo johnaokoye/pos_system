@@ -1,4 +1,5 @@
 import { test, expect } from './fixtures.js';
+import { approveConsOrder } from './consignment-order-approval.js';
 
 // A consignment agreement can settle every 14 days instead of monthly: its
 // periods run 14 days at a time from its start date, and each is reconciled
@@ -37,7 +38,7 @@ test('an agreement settled every 14 days is reconciled in 14-day periods from it
   await api(page, 'POST', `/consignment/agreements/${agr.id}/finance`, { revenue_treatment: 'principal', output_gct_treatment: 'Standard' });
   await api(page, 'POST', `/consignment/agreements/${agr.id}/approve`, { signature: SIG });
   await login(page, 'admin', '123456');
-  const o = await api(page, 'POST', '/consignment/orders', { agreement_id: agr.id, branch_id: main.id, items: [{ product_id: item.id, quantity: 5 }] });
+  const o = await approveConsOrder(page, await api(page, 'POST', '/consignment/orders', { agreement_id: agr.id, branch_id: main.id, items: [{ product_id: item.id, quantity: 5 }] }));
   const g = await api(page, 'POST', `/consignment/orders/${o.id}/grns`, { delivery_note_number: `DN${s}`, items: [{ order_item_id: o.items[0].id, quantity: 5 }] });
   await api(page, 'POST', `/consignment/grns/${g.id}/approve`, {});
   await api(page, 'POST', '/transactions', { items: [{ product_id: item.id, quantity: 2 }], branch_id: main.id, employee_id: 1, payment_method: 'cash', amount_tendered: 5000 });

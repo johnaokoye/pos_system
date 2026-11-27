@@ -1,4 +1,5 @@
 import { test, expect } from './fixtures.js';
+import { approveConsOrder } from './consignment-order-approval.js';
 
 // Consignment Phase 1: an agreement drafted by Purchasing and approved by
 // Finance (with its revenue / GCT treatment), an order received in two
@@ -63,7 +64,7 @@ test('agreement → Finance approval → order → two GRNs → supplier-owned s
   expect((await api(page, 'GET', `/consignment/agreements/${agr.id}`)).items[0].current_cost).toBe(150);
 
   // Order 10; the first delivery brings 6.
-  const order = await api(page, 'POST', '/consignment/orders', { agreement_id: agr.id, branch_id: 1, items: [{ product_id: item.id, quantity: 10 }] });
+  const order = await approveConsOrder(page, await api(page, 'POST', '/consignment/orders', { agreement_id: agr.id, branch_id: 1, items: [{ product_id: item.id, quantity: 10 }] }));
   const line = order.items[0].id;
   expect(await attempt(page, 'POST', `/consignment/orders/${order.id}/grns`, { items: [{ order_item_id: line, quantity: 6 }] })).toContain('delivery note');
   const g1 = await api(page, 'POST', `/consignment/orders/${order.id}/grns`, { delivery_note_number: `DN-${s}-1`, items: [{ order_item_id: line, quantity: 6 }] });

@@ -1,4 +1,5 @@
 import { test, expect } from './fixtures.js';
+import { approveConsOrder } from './consignment-order-approval.js';
 
 // Consignment agreements and orders carry a unit of measure: the agreed cost
 // is entered per the agreement line's unit (e.g. a case of 12) and kept per
@@ -49,9 +50,9 @@ test('agreement cost per case, order in cases or singles, received in the order 
   await login(page, 'admin', '123456');
 
   // Ordered in cases by default (2 cases = 24 singles); singles when chosen.
-  const o = await api(page, 'POST', '/consignment/orders', { agreement_id: agr.id, branch_id: main.id, items: [{ product_id: item.id, quantity: 2 }] });
+  const o = await approveConsOrder(page, await api(page, 'POST', '/consignment/orders', { agreement_id: agr.id, branch_id: main.id, items: [{ product_id: item.id, quantity: 2 }] }));
   expect(o.items[0]).toMatchObject({ purchase_unit: `Case${s}`, units_per: 12, order_qty: 2, quantity_ordered: 24, ordered_units: 2, left_units: 2 });
-  const o2 = await api(page, 'POST', '/consignment/orders', { agreement_id: agr.id, branch_id: main.id, items: [{ product_id: item.id, quantity: 5, uom_id: null }] });
+  const o2 = await approveConsOrder(page, await api(page, 'POST', '/consignment/orders', { agreement_id: agr.id, branch_id: main.id, items: [{ product_id: item.id, quantity: 5, uom_id: null }] }));
   expect(o2.items[0]).toMatchObject({ units_per: 1, quantity_ordered: 5 });
 
   // Received in cases: 1 case = 12 on hand.

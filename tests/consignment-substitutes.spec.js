@@ -1,4 +1,5 @@
 import { test, expect } from './fixtures.js';
+import { approveConsOrder } from './consignment-order-approval.js';
 
 // Substitutes on a consignment delivery (like PO receiving): another item sent
 // in place of part of an order line becomes its own order line; rejecting the
@@ -36,7 +37,34 @@ test('consignment GRN substitutes: own order line, folded back on reject, added 
   await api(page, 'POST', `/consignment/agreements/${a.id}/approve`, { signature: SIG });
   await login(page, 'admin', '123456');
 
-  const order = await api(page, 'POST', '/consignment/orders', { agreement_id: a.id, branch_id: 1, items: [{ product_id: white.id, quantity: 10 }] });
+  // A new order waits for approval: not received, not emailed, not approved by whoever raised it.
+  const raised = await api(page, 'POST', '/consignment/orders', { agreement_id: a.id, branch_id: 1, items: [{ product_id: white.id, quantity: 10 }] });
+  expect(raised.status).toBe('pending_approval');
+  expect(await attempt(page, 'POST', `/consignment/orders/${raised.id}/grns`, { delivery_note_number: 'X', items: [{ order_item_id: raised.items[0].id, unit_quantity: 1 }] })).toMatch(/waiting for approval/);
+  expect(await attempt(page, 'POST', `/email/send-consignment-order/${raised.id}`, { to: 'a@b.co' })).toMatch(/waiting for approval/);
+  expect(await attempt(page, 'POST', `/consignment/orders/${raised.id}/approve`, { signature: SIG })).toMatch(/someone else/);
+  expect(await page.evaluate(async id => (await fetch(`/api/email/consignment-order-preview/${id}`)).text(), raised.id)).toContain('NOT APPROVED');
+  await page.evaluate(() => App.showSection('consignment'));
+  await page.evaluate(id => App.viewConsOrder(id), raised.id);
+  await expect(page.locator('#con-approval')).toContainText('Waiting for approval');
+  await expect(page.locator('#con-approve')).toHaveCount(0); // own order
+  await expect(page.locator('#con-email')).toHaveCount(0);
+  await expect(page.locator('.cg-qty')).toHaveCount(0);
+  await page.evaluate(() => App.closeModal());
+  // Another approver signs it off; the copy then carries their name.
+  const order = await approveConsOrder(page, raised);
+  expect(order).toMatchObject({ status: 'open', approved_by_name: 'Consignment Order Approver' });
+  expect(order.approval_signature).toBeTruthy();
+  // Rejecting needs a reason; a rejected order can't be received.
+  const other = await api(page, 'POST', '/consignment/orders', { agreement_id: a.id, branch_id: 1, items: [{ product_id: cream.id, quantity: 1 }] });
+  await login(page, finance);
+  expect(await attempt(page, 'POST', `/consignment/orders/${other.id}/reject`, {})).toMatch(/reason/);
+  expect((await api(page, 'POST', `/consignment/orders/${other.id}/reject`, { reason: 'Wrong branch' })).status).toBe('rejected');
+  await page.evaluate(() => App.showSection('consignment'));
+  await page.evaluate(id => App.viewConsOrder(id), other.id);
+  await expect(page.locator('#con-approval')).toContainText('Wrong branch');
+  await login(page, 'admin', '123456');
+  expect(await attempt(page, 'POST', `/consignment/orders/${other.id}/grns`, { delivery_note_number: 'X', items: [{ order_item_id: other.items[0].id, unit_quantity: 1 }] })).toMatch(/rejected/);
   const line = order.items[0].id;
   const grn = (items, substitutes, dn) => api(page, 'POST', `/consignment/orders/${order.id}/grns`, { delivery_note_number: dn, items, substitutes });
 

@@ -969,7 +969,7 @@ router.post('/:id/convert-to-consignment', requirePermission('consignment_agreem
     for (const [agreementId, group] of byAgreement) {
       const number = await nextNumber(tx, 'consignment_orders', 'order_number', 'CON-', 6);
       const r = await tx.execute({
-        sql: 'INSERT INTO consignment_orders (order_number, agreement_id, supplier_id, branch_id, expected_date, notes, created_by, source_po_id) VALUES (?,?,?,?,?,?,?,?)',
+        sql: "INSERT INTO consignment_orders (order_number, agreement_id, supplier_id, branch_id, expected_date, notes, created_by, source_po_id, status) VALUES (?,?,?,?,?,?,?,?,'pending_approval')",
         args: [number, agreementId, po.supplier_id, po.branch_id, po.expected_date || null, `Moved from ${po.po_number}: ${reason}`, req.employee?.id || null, po.id],
       });
       const orderId = Number(r.lastInsertRowid);

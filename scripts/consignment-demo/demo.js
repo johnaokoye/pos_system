@@ -84,7 +84,7 @@ async function stockOf(productId) {
     Warehouse: { consignment: true, consignment_receive: true, consignment_grn_approve: true, transfers: true, multi_branch_access: true },
     Cashier: { pos: true, pos_request_transfer: true, customers: true, transactions: true, multi_branch_access: true },
     'Store Manager': { returns_override: true, transactions: true },
-    Finance: { consignment_finance: true, payables_approve: true },
+    Finance: { consignment_finance: true, consignment_order_approve: true, payables_approve: true },
     'Accounts Payable': { payables: true },
   };
   const people = {};
@@ -125,6 +125,7 @@ async function stockOf(productId) {
   // Deliveries: to the Distribution Centre and to the store.
   const receive = async (agr, branch, items, dn) => {
     const o = await pur.api('POST', '/consignment/orders', { agreement_id: agr.id, branch_id: branch.id, items });
+    await fin.api('POST', `/consignment/orders/${o.id}/approve`, { signature: SIG });
     const g = await wh.api('POST', `/consignment/orders/${o.id}/grns`, { delivery_note_number: dn, items: o.items.map(i => ({ order_item_id: i.id, quantity: i.quantity_ordered })) });
     await wh.api('POST', `/consignment/grns/${g.id}/approve`, {});
     return { o, g };
@@ -138,7 +139,7 @@ async function stockOf(productId) {
   check('Received stock is the supplier\'s, not Total Tools\'', lotsAfterGrn.every(l => l.owner === 'consignment' && Number(l.supplier_id) === s1.id), `${lotsAfterGrn.length} receipt(s) at the DC, owner consignment / ${s1.name}`);
 
   // 15 Sep — a store sale with both suppliers' goods.
-  const custB = await cash.api('POST', '/customers', { first_name: 'Brian', last_name: 'Contractor', phone: '8765550101' });
+  const custB = await cash.api('POST', '/customers', { first_name: 'Brian', last_name: 'Contractor', phone: '8765550101', address: '12 Hope Road, Kingston' });
   const saleB = await cash.api('POST', '/transactions', { customer_id: custB.id, items: [{ product_id: bits.id, quantity: 3 }, { product_id: gloves.id, quantity: 4 }], branch_id: main.id, employee_id: cash.me.id, payment_method: 'card' });
   step('2026-09-15', 'Carla (Cashier)', `Sale ${saleB.transaction_number} at Main Store to Brian: 3 bit sets + 4 pairs of gloves`, 'paid by card');
   await shiftStep('2026-09-15');
@@ -147,7 +148,7 @@ async function stockOf(productId) {
     allocB.map(a => `${a.product_id === bits.id ? 'bit sets' : 'gloves'} → ${a.supplier_name || a.supplier_id} @ ${a.unit_cost}`).join('; '));
 
   // 29 Sep — a store sale short at the store: the rest comes from the DC.
-  const custA = await cash.api('POST', '/customers', { first_name: 'Alicia', last_name: 'Builder', phone: '8765550102' });
+  const custA = await cash.api('POST', '/customers', { first_name: 'Alicia', last_name: 'Builder', phone: '8765550102', address: '4 Main Street, Ocho Rios' });
   const saleA = await cash.api('POST', '/transactions', { customer_id: custA.id, items: [{ product_id: drill.id, quantity: 4, transfer_from_branch_id: dc.id, transfer_qty: 2 }], branch_id: main.id, employee_id: cash.me.id, payment_method: 'card' });
   const tr = (await admin.api('GET', '/transfers')).find(x => x.transaction_id === saleA.id);
   step('2026-09-29', 'Carla (Cashier)', `Sale ${saleA.transaction_number} at Main Store to Alicia: 4 drills — 2 from the store, 2 to come from the Distribution Centre (collect later)`, `transfer request ${tr.transfer_number} raised; 2 drills reserved at the DC`);

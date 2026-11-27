@@ -2139,14 +2139,20 @@ async function loadConsignmentOrderDocument(id) {
   return o;
 }
 
-const CONS_ORDER_STATUS = { open: null, partial: 'PART DELIVERED', received: 'COMPLETED', cancelled: 'CANCELLED' };
+const CONS_ORDER_STATUS = { open: null, partial: 'PART DELIVERED', received: 'COMPLETED', cancelled: 'CANCELLED', pending_approval: 'NOT APPROVED - AWAITING APPROVAL', rejected: 'REJECTED - NOT AN ORDER' };
+const CONS_ORDER_WARN = ['cancelled', 'pending_approval', 'rejected'];
 const consToCome = (o, i) => ['open', 'partial'].includes(o.status) ? Math.max(0, round3c(i.left_units + i.pending_units)) : 0;
 const round3c = n => Math.round(n * 1000) / 1000;
 const consLineValue = i => i.agreed_unit_cost == null ? null : Math.round(i.agreed_unit_cost * (Number(i.ordered_units) || 0) * 100) / 100;
 const consLineNote = i => [i.sku, i.substitute_for_name ? `Sent instead of ${i.substitute_for_name}` : '', i.substituted_units > 0 ? `${i.substituted_units} substituted with another item` : ''].filter(Boolean).join(' · ');
 const consOrderTotal = o => o.items.reduce((s, i) => s + (consLineValue(i) || 0), 0);
 
-function buildConsignmentOrderHtml(o, s, { print = false } = {}) {
+function buildConsignmentOrderHtml(o, s, { print = false, origin = '' } = {}) {
+  const absUrl = p => !p ? null : (/^https?:\/\//.test(p) || /^data:/.test(p) ? p : `${origin}${p}`);
+  const sigBox = (label, name, when, img) => `<td style="width:50%;vertical-align:bottom;padding:0 8px">
+      ${img ? `<img src="${esc(absUrl(img))}" alt="Signature" style="max-height:56px;max-width:200px;display:block;margin-bottom:2px">` : '<div style="height:40px"></div>'}
+      <div style="border-top:1px solid #111;padding-top:4px;font-size:12px;color:#444"><strong>${label}:</strong> ${name ? esc(name) : ''}${when ? ` · ${fmtDate(when)}` : ''}</div>
+    </td>`;
   const th = (label, align = 'left') => `<th style="padding:8px;text-align:${align};font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">${label}</th>`;
   const td = (v, align = 'left', extra = '') => `<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:${align};${extra}">${v}</td>`;
   const label = CONS_ORDER_STATUS[o.status];
@@ -2173,7 +2179,7 @@ ${print ? PRINT_PAGE_STYLE : ''}
         <td style="vertical-align:top">
           <div style="font-size:20px;font-weight:700;color:${BRAND.black}">CONSIGNMENT ORDER</div>
           <div style="font-size:13px;color:#888;margin-top:2px">${esc(o.order_number)}</div>
-          ${label ? `<div style="display:inline-block;margin-top:6px;padding:3px 8px;border:2px solid ${o.status === 'cancelled' ? '#dc2626' : '#6b7280'};color:${o.status === 'cancelled' ? '#dc2626' : '#6b7280'};font-size:12px;font-weight:700;letter-spacing:.5px">${label}</div>` : ''}
+          ${label ? `<div style="display:inline-block;margin-top:6px;padding:3px 8px;border:2px solid ${CONS_ORDER_WARN.includes(o.status) ? '#dc2626' : '#6b7280'};color:${CONS_ORDER_WARN.includes(o.status) ? '#dc2626' : '#6b7280'};font-size:12px;font-weight:700;letter-spacing:.5px">${label}</div>` : ''}
         </td>
         <td style="vertical-align:top;text-align:right;font-size:13px;color:#444;line-height:1.6">
           <div><strong>Date:</strong> ${fmtDate(o.created_at)}</div>
@@ -2200,6 +2206,11 @@ ${print ? PRINT_PAGE_STYLE : ''}
         Supplied on consignment under agreement ${esc(o.agreement_number)}: the goods remain the supplier's until sold and are paid for as the agreement sets out — this is not a purchase order and no invoice is due on delivery. Please quote ${esc(o.order_number)} on your delivery note.
       </div>
       ${o.notes ? `<div style="margin-top:14px;font-size:13px;color:#444"><strong>Notes:</strong> ${esc(o.notes)}</div>` : ''}
+      ${o.status === 'rejected' ? `<div style="margin-top:14px;padding:10px 12px;border:1px solid #fecaca;background:#fef2f2;border-radius:6px;font-size:13px;color:#991b1b"><strong>Rejected</strong>${o.rejected_by_name ? ` by ${esc(o.rejected_by_name)}` : ''}${o.rejected_at ? ` on ${fmtDate(o.rejected_at)}` : ''}: ${esc(o.rejection_reason || '')}</div>` : ''}
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:36px"><tr>
+        ${sigBox('Ordered by', o.created_by_name, o.created_at, null)}
+        ${sigBox('Approved by', o.approved_by_name, o.approved_at, o.approval_signature)}
+      </tr></table>
     </td></tr>
   </table>
 </td></tr>
@@ -2223,7 +2234,10 @@ function consignmentOrderPdfModel(o, s) {
         sub: consLineNote(i),
       })) }],
     totals: [{ label: 'TOTAL AT AGREED COST', value: fmt(consOrderTotal(o)), style: 'grand' }],
-    notes: [`Supplied on consignment under agreement ${o.agreement_number}: the goods remain the supplier's until sold and are paid for as the agreement sets out - this is not a purchase order and no invoice is due on delivery. Please quote ${o.order_number} on your delivery note.`, o.notes ? `Notes: ${o.notes}` : ''],
+    notes: [`Supplied on consignment under agreement ${o.agreement_number}: the goods remain the supplier's until sold and are paid for as the agreement sets out - this is not a purchase order and no invoice is due on delivery. Please quote ${o.order_number} on your delivery note.`, o.notes ? `Notes: ${o.notes}` : '',
+      o.status === 'rejected' ? `Rejected${o.rejected_by_name ? ` by ${o.rejected_by_name}` : ''}: ${o.rejection_reason || ''}` : ''],
+    signatures: o.approved_at ? [{ label: 'Approved By', name: o.approved_by_name || '', signedAt: pdfDateTime(o.approved_at), image: o.approval_signature }] : [],
+    signatureAlign: 'right',
   };
 }
 
@@ -2235,7 +2249,7 @@ router.get('/consignment-order-preview/:id', canViewConsignment, async (req, res
     if (!o) return res.status(404).send('<p>Consignment order not found</p>');
     res.setHeader('Content-Type', 'text/html');
     res.setHeader('X-Pos-Document', 'consignment-order');
-    res.send(buildConsignmentOrderHtml(o, await getSettings(), { print: true }));
+    res.send(buildConsignmentOrderHtml(o, await getSettings(), { print: true, origin: `${req.protocol}://${req.get('host')}` }));
   } catch (e) { res.status(500).send(`<p>Error: ${esc(e.message)}</p>`); }
 });
 
@@ -2261,6 +2275,8 @@ router.post('/send-consignment-order/:id', requireAnyPermission('consignment_agr
     const o = await loadConsignmentOrderDocument(req.params.id);
     if (!o) return res.status(404).json({ error: 'Consignment order not found' });
     if (o.status === 'cancelled') return res.status(400).json({ error: 'This consignment order was cancelled' });
+    if (o.status === 'pending_approval') return res.status(400).json({ error: 'This consignment order is waiting for approval — it can be sent to the supplier once approved' });
+    if (o.status === 'rejected') return res.status(400).json({ error: 'This consignment order was rejected' });
     const s = await getSettings();
     try {
       const transporter = createTransporter(s);
@@ -2269,7 +2285,7 @@ router.post('/send-consignment-order/:id', requireAnyPermission('consignment_agr
         to: to.list,
         ...(cc.list.length ? { cc: cc.list } : {}),
         subject: String(req.body.subject || '').trim() || `Consignment Order ${o.order_number} from ${s.store_name || 'Our Store'}`,
-        ...(await documentEmailContent(req.body.as_pdf, s, consignmentOrderPdfModel(o, s), withMessage(buildConsignmentOrderHtml(o, s), req.body.message), { message: req.body.message })),
+        ...(await documentEmailContent(req.body.as_pdf, s, consignmentOrderPdfModel(o, s), inlineProtectedImages(withMessage(buildConsignmentOrderHtml(o, s, { origin: `${req.protocol}://${req.get('host')}` }), req.body.message)), { message: req.body.message })),
       });
       res.json({ success: true, message: `Consignment order sent to ${[...to.list, ...cc.list].join(', ')}` });
     } catch (e) {

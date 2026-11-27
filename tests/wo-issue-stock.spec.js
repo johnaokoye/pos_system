@@ -1,4 +1,5 @@
 import { test, expect } from './fixtures.js';
+import { approveConsOrder } from './consignment-order-approval.js';
 
 // Work orders: Issue from Stock takes a part on the job out of the branch's
 // stock, once per issue. Supplier-owned (consignment) stock is only used
@@ -43,7 +44,7 @@ test('issue parts from stock to a work order — consignment only where the agre
   }
   await login(page, 'admin', '123456');
   for (const [a, item] of [[agreements[0], notAllowed], [agreements[1], allowed]]) {
-    const o = await api(page, 'POST', '/consignment/orders', { agreement_id: a.id, branch_id: main.id, items: [{ product_id: item.id, quantity: 3 }] });
+    const o = await approveConsOrder(page, await api(page, 'POST', '/consignment/orders', { agreement_id: a.id, branch_id: main.id, items: [{ product_id: item.id, quantity: 3 }] }));
     const g = await api(page, 'POST', `/consignment/orders/${o.id}/grns`, { delivery_note_number: `DN${a.id}`, items: [{ order_item_id: o.items[0].id, quantity: 3 }] });
     await api(page, 'POST', `/consignment/grns/${g.id}/approve`, {});
   }

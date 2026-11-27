@@ -3797,6 +3797,15 @@ async function _init() {
     'ALTER TABLE consignment_order_items ADD COLUMN units_per REAL NOT NULL DEFAULT 1',
     'ALTER TABLE consignment_order_items ADD COLUMN order_qty REAL',
     'ALTER TABLE consignment_orders ADD COLUMN source_po_id INTEGER REFERENCES purchase_orders(id)',
+    // Order approval with signature (2026-11-27): a new order waits in
+    // pending_approval until someone with consignment_order_approve (not
+    // whoever raised it) signs it off → open; rejected needs a reason.
+    'ALTER TABLE consignment_orders ADD COLUMN approved_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE consignment_orders ADD COLUMN approved_at DATETIME',
+    'ALTER TABLE consignment_orders ADD COLUMN approval_signature TEXT',
+    'ALTER TABLE consignment_orders ADD COLUMN rejected_by INTEGER REFERENCES employees(id)',
+    'ALTER TABLE consignment_orders ADD COLUMN rejected_at DATETIME',
+    'ALTER TABLE consignment_orders ADD COLUMN rejection_reason TEXT',
     'ALTER TABLE consignment_grn_items ADD COLUMN price_before REAL',
     'ALTER TABLE consignment_grn_items ADD COLUMN price_set REAL',
     'ALTER TABLE consignment_order_items ADD COLUMN substitute_for_item_id INTEGER REFERENCES consignment_order_items(id)',
@@ -4715,6 +4724,8 @@ async function _init() {
       if (!('consignment_agreements' in perms)) { perms.consignment_agreements = can(perms, 'purchasing_create'); changed = true; }
       if (!('consignment_receive' in perms)) { perms.consignment_receive = can(perms, 'purchasing_receive'); changed = true; }
       if (!('consignment_grn_approve' in perms)) { perms.consignment_grn_approve = can(perms, 'purchasing_approve'); changed = true; }
+      // Approving consignment orders (2026-11-27) starts with whoever approves POs.
+      if (!('consignment_order_approve' in perms)) { perms.consignment_order_approve = can(perms, 'purchasing_approve'); changed = true; }
       if (!('consignment_finance' in perms)) { perms.consignment_finance = !!perms.payables_approve; changed = true; }
       // Deleting quotes (2026-11-12) starts with whoever can approve them.
       // Assigning staff accounts / staff purchase tiers and limits

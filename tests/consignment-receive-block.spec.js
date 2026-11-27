@@ -1,4 +1,5 @@
 import { test, expect } from './fixtures.js';
+import { approveConsOrder } from './consignment-order-approval.js';
 
 // Owner's rule: once consignment tracking has started, an item on a
 // supplier's approved consignment agreement can't be received from that
@@ -67,7 +68,8 @@ test('consignment items from their supplier are refused on a PO and a receipt wi
   expect([closed.quantity_ordered, closed.quantity_closed_short]).toEqual([0, 2]);
   expect(closed.closed_short_reason).toContain(moved.orders[0].order_number);
   expect(after.total).toBeCloseTo(160, 2);
-  const order = await api(page, 'GET', `/consignment/orders/${moved.orders[0].id}`);
+  expect((await api(page, 'GET', `/consignment/orders/${moved.orders[0].id}`)).status).toBe('pending_approval');
+  const order = await approveConsOrder(page, moved.orders[0]);
   expect([order.source_po_number, order.branch_id, order.items.map(i => [i.product_id, i.quantity_ordered])]).toEqual([po.po_number, 1, [[consigned.id, 2]]]);
   // ...and it comes in as the supplier's stock.
   const grn = await api(page, 'POST', `/consignment/orders/${order.id}/grns`, { delivery_note_number: `DN-${s}`, items: [{ order_item_id: order.items[0].id, quantity: 2 }] });

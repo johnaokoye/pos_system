@@ -1,4 +1,5 @@
 import { test, expect } from './fixtures.js';
+import { approveConsOrder } from './consignment-order-approval.js';
 
 // Consignment Phase 2: one item code held as Total Tools-owned stock and as
 // stock from two suppliers. Sales take oldest receipt first and keep the
@@ -48,7 +49,7 @@ test('sales, returns, voids, transfers and reservations keep supplier ownership'
   await login(page, 'admin', '123456');
   const [A, B] = agreements.map(a => a.agreement_number);
   for (const [a, qty] of [[agreements[0], 5], [agreements[1], 3]]) {
-    const o = await api(page, 'POST', '/consignment/orders', { agreement_id: a.id, branch_id: main.id, items: [{ product_id: item.id, quantity: qty }] });
+    const o = await approveConsOrder(page, await api(page, 'POST', '/consignment/orders', { agreement_id: a.id, branch_id: main.id, items: [{ product_id: item.id, quantity: qty }] }));
     const g = await api(page, 'POST', `/consignment/orders/${o.id}/grns`, { delivery_note_number: `DN-${a.id}`, items: [{ order_item_id: o.items[0].id, quantity: qty }] });
     await api(page, 'POST', `/consignment/grns/${g.id}/approve`, {});
   }

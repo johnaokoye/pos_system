@@ -1,4 +1,5 @@
 import { test, expect } from './fixtures.js';
+import { approveConsOrder } from './consignment-order-approval.js';
 
 // Consignment Phase 2, the rest: a layaway sets supplier-owned stock aside
 // but only becomes billable once it's paid off (A4); shop use only reaches a
@@ -34,7 +35,7 @@ async function consignedItem(page, s, { qty, allowShopUse = false, cost = 100 })
   await api(page, 'POST', `/consignment/agreements/${a.id}/finance`, { revenue_treatment: 'principal', output_gct_treatment: 'Standard' });
   await api(page, 'POST', `/consignment/agreements/${a.id}/approve`, { signature: SIG });
   await login(page, 'admin', '123456');
-  const o = await api(page, 'POST', '/consignment/orders', { agreement_id: a.id, branch_id: main.id, items: [{ product_id: item.id, quantity: qty }] });
+  const o = await approveConsOrder(page, await api(page, 'POST', '/consignment/orders', { agreement_id: a.id, branch_id: main.id, items: [{ product_id: item.id, quantity: qty }] }));
   const g = await api(page, 'POST', `/consignment/orders/${o.id}/grns`, { delivery_note_number: `DN${s}`, items: [{ order_item_id: o.items[0].id, quantity: qty }] });
   await api(page, 'POST', `/consignment/grns/${g.id}/approve`, {});
   return { item, main, other, agreement: a, approver: other2 };
