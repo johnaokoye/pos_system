@@ -60,3 +60,17 @@ test('A/R filters by home branch or by invoice branch, and home branches can be 
   await expect(page.locator('#ar-acct-head')).toContainText('Owed Here');
   await expect(page.locator('#ar-acct-body')).toContainText(`B ${stamp}`);
 });
+
+test('Print Detail opens the customer aging detail', async ({ page }) => {
+  const stamp = Date.now();
+  const service = await api(page, 'POST', '/products', { sku: `ARD-${stamp}`, name: `AR Detail Service ${stamp}`, is_service: 1, price: 250, tax_rate: 0 });
+  const c = await api(page, 'POST', '/customers', { address: '1 Test Road', first_name: 'Detail', last_name: `Print ${stamp}`,
+    phone: `86${String(stamp).slice(-7)}`, customer_type: 'credit', credit_limit: 100000, credit_terms_days: 30, force: true });
+  const sale = await api(page, 'POST', '/transactions', { customer_id: c.id, items: [{ product_id: service.id, quantity: 1 }], employee_id: 1, payment_method: 'credit', amount_tendered: 0 });
+  const res = await page.request.get(`/api/email/aging-detail-preview/${c.id}`);
+  expect(res.status()).toBe(200);
+  const html = await res.text();
+  expect(html).toContain('CUSTOMER AGING DETAIL');
+  expect(html).toContain(sale.transaction_number);
+  expect(html).toContain('250.00');
+});
