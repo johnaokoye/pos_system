@@ -95,4 +95,25 @@ test('consignment GRN substitutes: own order line, folded back on reject, added 
   await expect(page.locator('#con-pdf')).toHaveAttribute('href', `/api/email/consignment-order-pdf/${order.id}`);
   await page.click('#con-email');
   await expect(page.locator('#coe-subject')).toHaveValue(new RegExp(order.order_number));
+  await page.evaluate(() => App.closeSecondaryModal());
+
+  // ...and the GRN: what came in against their delivery note, no selling prices.
+  const g2 = o.grns.find(g => g.status === 'approved');
+  const gdoc = await page.evaluate(async id => { const r = await fetch(`/api/email/consignment-grn-preview/${id}`); return { tag: r.headers.get('x-pos-document'), html: await r.text() }; }, g2.id);
+  expect(gdoc.tag).toBe('consignment-grn');
+  for (const t of ['GOODS RECEIVED NOTE', g2.grn_number, `DN2-${s}`, order.order_number, `Sent instead of ${white.name}`, 'Approved by']) expect(gdoc.html).toContain(t);
+  expect(gdoc.html).not.toContain('AWAITING APPROVAL');
+  const rejected = await page.evaluate(async id => (await fetch(`/api/email/consignment-grn-preview/${id}`)).text(), g1.id);
+  expect(rejected).toContain('wrong delivery note');
+  const gpdf = await page.evaluate(async id => { const r = await fetch(`/api/email/consignment-grn-pdf/${id}`); return [r.status, r.headers.get('content-type')]; }, g2.id);
+  expect(gpdf).toEqual([200, 'application/pdf']);
+  const g3 = await grn([{ order_item_id: line, unit_quantity: 1 }], [], `DN3-${s}`);
+  expect(await attempt(page, 'POST', `/email/send-consignment-grn/${g3.id}`, { to: 'a@b.co' })).toMatch(/waiting for approval/);
+  await page.evaluate(() => App.closeModal());
+  await page.evaluate(id => App.viewConsGrn(id), g3.id);
+  await expect(page.locator('#cgrn-pdf')).toBeVisible();
+  await expect(page.locator('#cgrn-email')).toHaveCount(0);
+  await page.evaluate(id => App.viewConsGrn(id), g2.id);
+  await page.click('#cgrn-email');
+  await expect(page.locator('#coe-subject')).toHaveValue(new RegExp(`${g2.grn_number}.*DN2-${s}`));
 });

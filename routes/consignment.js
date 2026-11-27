@@ -471,7 +471,7 @@ router.post('/orders/:id/cancel', requirePermission('consignment_agreements'), a
 });
 
 // ── Consignment GRNs ────────────────────────────────────────
-const GRN_SELECT = `SELECT g.*, o.order_number, a.agreement_number, s.name AS supplier_name, b.name AS branch_name,
+const GRN_SELECT = `SELECT g.*, o.order_number, a.agreement_number, s.name AS supplier_name, s.email AS supplier_email, s.email2 AS supplier_email2, b.name AS branch_name,
   re.first_name || ' ' || re.last_name AS received_by_name, ap.first_name || ' ' || ap.last_name AS approved_by_name, rj.first_name || ' ' || rj.last_name AS rejected_by_name
   FROM consignment_grns g JOIN consignment_orders o ON o.id = g.order_id JOIN consignment_agreements a ON a.id = g.agreement_id
   JOIN suppliers s ON s.id = g.supplier_id JOIN branches b ON b.id = g.branch_id
@@ -1163,3 +1163,4 @@ router.get('/postings', canView, async (req, res) => {
 module.exports = router;
 module.exports.costOn = costOn;
 module.exports.loadOrder = loadOrder;
+module.exports.loadGrn = loadGrn;

@@ -2278,6 +2278,147 @@ router.post('/send-consignment-order/:id', requireAnyPermission('consignment_agr
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Consignment GRN (CGRN-) ────────────────────────────────────────────
+// The supplier's copy of what came in against their delivery note: item,
+// unit and quantity received (no selling prices — those are ours). A GRN
+// not yet approved or rejected says so across the top.
+async function loadConsignmentGrnDocument(id) {
+  const { loadGrn } = require('./consignment');
+  const g = await loadGrn(db, id);
+  if (!g) return null;
+  const { rows: [sup] } = await db.execute({ sql: 'SELECT contact_name, phone FROM suppliers WHERE id = ?', args: [g.supplier_id] });
+  g.supplier_contact = sup?.contact_name; g.supplier_phone = sup?.phone;
+  return g;
+}
+const CONS_GRN_STATUS = { pending: 'AWAITING APPROVAL - NOT CONFIRMED', rejected: 'REJECTED' };
+const consGrnNote = i => [i.sku, i.substitute_for_name ? `Sent instead of ${i.substitute_for_name}` : ''].filter(Boolean).join(' · ');
+
+function buildConsignmentGrnHtml(g, s, { print = false } = {}) {
+  const th = (label, align = 'left') => `<th style="padding:8px;text-align:${align};font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">${label}</th>`;
+  const td = (v, align = 'left', extra = '') => `<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:${align};${extra}">${v}</td>`;
+  const label = CONS_GRN_STATUS[g.status];
+  const rows = g.items.map(i => {
+    const note = consGrnNote(i);
+    return `<tr>${td(`${esc(i.product_name)}${note ? `<br><span style="color:#888;font-size:11px">${esc(note)}</span>` : ''}`)}${td(esc(i.unit_label || 'Each'), 'center')}${td(i.unit_quantity ?? i.quantity, 'center', 'font-weight:600')}</tr>`;
+  }).join('');
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Consignment GRN ${esc(g.grn_number)}</title>
+${print ? PRINT_PAGE_STYLE : ''}
+</head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
+<table class="page-wrap" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
+<tr><td align="center">
+  <table class="page" width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+    <tr><td style="${BRAND_HEADER_STYLE}">
+      <div style="color:#fff;font-size:22px;font-weight:700">${esc(s.store_name || 'My Store')}</div>
+      ${s.store_address ? `<div style="color:#ffffff;font-size:12px;margin-top:4px">${esc(s.store_address)}</div>` : ''}
+      ${s.store_phone ? `<div style="color:#ffffff;font-size:12px">${esc(s.store_phone)}</div>` : ''}
+    </td></tr>
+    <tr><td style="padding:20px 24px">
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px"><tr>
+        <td style="vertical-align:top">
+          <div style="font-size:20px;font-weight:700;color:${BRAND.black}">GOODS RECEIVED NOTE</div>
+          <div style="font-size:13px;color:#888;margin-top:2px">${esc(g.grn_number)} · Consignment</div>
+          ${label ? `<div style="display:inline-block;margin-top:6px;padding:3px 8px;border:2px solid #dc2626;color:#dc2626;font-size:12px;font-weight:700;letter-spacing:.5px">${label}</div>` : ''}
+        </td>
+        <td style="vertical-align:top;text-align:right;font-size:13px;color:#444;line-height:1.6">
+          <div><strong>Received:</strong> ${fmtDate(g.received_at)}</div>
+          <div><strong>Your delivery note:</strong> ${esc(g.delivery_note_number)}</div>
+          <div><strong>Consignment order:</strong> ${esc(g.order_number)}</div>
+          <div><strong>Agreement:</strong> ${esc(g.agreement_number)}</div>
+          <div><strong>Branch:</strong> ${esc(g.branch_name)}</div>
+        </td>
+      </tr></table>
+      <div style="background:#f9fafb;border:1px solid #e8e8e8;border-radius:6px;padding:12px;margin-bottom:16px;font-size:13px;line-height:1.5">
+        <strong>Supplier:</strong><br>${esc(g.supplier_name)}${g.supplier_contact ? `<br>${esc(g.supplier_contact)}` : ''}${g.supplier_phone ? `<br>${esc(g.supplier_phone)}` : ''}${g.supplier_email ? `<br>${esc(g.supplier_email)}` : ''}
+      </div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px">
+        <thead><tr style="background:#f9fafb">${th('Item')}${th('Unit', 'center')}${th('Received', 'center')}</tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      ${g.status === 'rejected' ? `<div style="margin-top:14px;padding:10px 12px;border:1px solid #fecaca;background:#fef2f2;border-radius:6px;font-size:13px;color:#991b1b"><strong>Rejected</strong>${g.rejected_by_name ? ` by ${esc(g.rejected_by_name)}` : ''}${g.rejected_at ? ` on ${fmtDate(g.rejected_at)}` : ''}: ${esc(g.rejection_reason || '')}</div>` : ''}
+      <div style="margin-top:14px;padding:10px 12px;border:1px solid #e8e8e8;background:#f9fafb;border-radius:6px;font-size:12px;color:#444;line-height:1.5">
+        Received on consignment under agreement ${esc(g.agreement_number)}: the goods remain the supplier's until sold and are paid for as the agreement sets out.
+      </div>
+      ${g.notes ? `<div style="margin-top:14px;font-size:13px;color:#444"><strong>Notes:</strong> ${esc(g.notes)}</div>` : ''}
+      <div style="margin-top:14px;font-size:13px;color:#444;line-height:1.6">
+        <div><strong>Received by:</strong> ${esc(g.received_by_name || '—')} · ${fmtDateTime(g.received_at)}</div>
+        ${g.approved_at ? `<div><strong>Approved by:</strong> ${esc(g.approved_by_name || '—')} · ${fmtDateTime(g.approved_at)}</div>` : ''}
+      </div>
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body>
+</html>`;
+}
+
+function consignmentGrnPdfModel(g, s) {
+  const label = CONS_GRN_STATUS[g.status];
+  return {
+    store: pdfStore(s),
+    title: label ? `CONSIGNMENT GRN - ${label}` : 'CONSIGNMENT GRN', number: g.grn_number,
+    meta: [['Received', pdfDate(g.received_at)], ['Delivery Note', g.delivery_note_number], ['Order', g.order_number], ['Agreement', g.agreement_number], ['Branch', g.branch_name]],
+    party: { label: 'Supplier', lines: [g.supplier_name, g.supplier_contact, g.supplier_phone, g.supplier_email] },
+    info: [['Received By', [g.received_by_name, pdfDateTime(g.received_at)].filter(Boolean).join(' - ')], ['Approved By', g.approved_at ? [g.approved_by_name, pdfDateTime(g.approved_at)].filter(Boolean).join(' - ') : ''],
+      ['Rejected', g.status === 'rejected' ? `${g.rejected_by_name || ''}: ${g.rejection_reason || ''}` : '']],
+    tables: [{ columns: [{ label: 'Item', width: 4.5 }, { label: 'Unit', width: 1.3, align: 'center' }, { label: 'Received', width: 1.2, align: 'center' }],
+      rows: g.items.map(i => ({ cells: [i.product_name, i.unit_label || 'Each', i.unit_quantity ?? i.quantity], sub: consGrnNote(i) })) }],
+    notes: [`Received on consignment under agreement ${g.agreement_number}: the goods remain the supplier's until sold and are paid for as the agreement sets out.`, g.notes ? `Notes: ${g.notes}` : ''],
+  };
+}
+
+router.get('/consignment-grn-preview/:id', canViewConsignment, async (req, res) => {
+  try {
+    const g = await loadConsignmentGrnDocument(req.params.id);
+    if (!g) return res.status(404).send('<p>GRN not found</p>');
+    res.setHeader('Content-Type', 'text/html');
+    res.setHeader('X-Pos-Document', 'consignment-grn');
+    res.send(buildConsignmentGrnHtml(g, await getSettings(), { print: true }));
+  } catch (e) { res.status(500).send(`<p>Error: ${esc(e.message)}</p>`); }
+});
+
+router.get('/consignment-grn-pdf/:id', canViewConsignment, async (req, res) => {
+  try {
+    const g = await loadConsignmentGrnDocument(req.params.id);
+    if (!g) return res.status(404).json({ error: 'GRN not found' });
+    const pdf = await renderDocumentPdf(consignmentGrnPdfModel(g, await getSettings()));
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${g.grn_number}.pdf"`);
+    res.send(pdf);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// { to, cc, subject, message, as_pdf } — once approved or rejected (a
+// pending GRN isn't confirmed yet).
+router.post('/send-consignment-grn/:id', requireAnyPermission('consignment_receive', 'consignment_grn_approve', 'consignment_agreements'), async (req, res) => {
+  const to = parseRecipients(req.body.to);
+  if (to.error) return res.status(400).json({ error: to.error });
+  if (!to.list.length) return res.status(400).json({ error: 'Recipient email is required' });
+  const cc = parseRecipients(req.body.cc);
+  if (cc.error) return res.status(400).json({ error: `CC: ${cc.error}` });
+  try {
+    const g = await loadConsignmentGrnDocument(req.params.id);
+    if (!g) return res.status(404).json({ error: 'GRN not found' });
+    if (g.status === 'pending') return res.status(400).json({ error: 'This GRN is waiting for approval — approve it before sending it to the supplier' });
+    const s = await getSettings();
+    try {
+      const transporter = createTransporter(s);
+      await transporter.sendMail({
+        from: `"${s.email_from_name || s.store_name || 'POS System'}" <${s.email_smtp_user || s.store_email || ''}>`,
+        to: to.list,
+        ...(cc.list.length ? { cc: cc.list } : {}),
+        subject: String(req.body.subject || '').trim() || `Goods Received Note ${g.grn_number} (your delivery note ${g.delivery_note_number}) from ${s.store_name || 'Our Store'}`,
+        ...(await documentEmailContent(req.body.as_pdf, s, consignmentGrnPdfModel(g, s), withMessage(buildConsignmentGrnHtml(g, s), req.body.message), { message: req.body.message })),
+      });
+      res.json({ success: true, message: `GRN sent to ${[...to.list, ...cc.list].join(', ')}` });
+    } catch (e) {
+      res.status(500).json({ error: `Failed to send email: ${e.message}` });
+    }
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── Authorization to Pump ──────────────────────────────────────────────
 // The supplier-facing copy of an approved supplier-priced (fuel) purchase
 // request: what may be supplied, the maximum quantity, and the approver's
