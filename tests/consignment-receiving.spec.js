@@ -98,7 +98,9 @@ test('agreement → Finance approval → order → two GRNs → supplier-owned s
   expect(report.rows[0]).toMatchObject({ qty_on_hand: 10, agreed_cost: 150, value: 1500 });
 
   // A Total Tools-owned receipt after go-live gets its own dated receipt.
-  await api(page, 'POST', '/direct-receipts', { supplier_id: supplier.id, branch_id: 1, items: [{ product_id: item.id, quantity: 2, unit_cost: 120 }] });
+  // (Bought from another supplier: the consignor's own deliveries of it come through Consignment.)
+  const seller = await api(page, 'POST', '/suppliers', { name: `Outright Seller ${Date.now()}` });
+  await api(page, 'POST', '/direct-receipts', { supplier_id: seller.id, branch_id: 1, items: [{ product_id: item.id, quantity: 2, unit_cost: 120 }] });
   const after = await api(page, 'GET', `/consignment/lots?product_id=${item.id}&branch_id=1`);
   expect(after.at(-1)).toMatchObject({ owner: 'owned', source_type: 'direct_receipt', qty_on_hand: 2 });
 });

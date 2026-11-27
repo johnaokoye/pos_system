@@ -5,7 +5,7 @@ const { db } = require('../database');
 const { resolvePurchaseUnit, lineName, stockUnits } = require('../lib/units');
 const { syncBinQty } = require('../lib/binSync');
 const { syncToBranch } = require('../lib/stockLots');
-const { addOwnedLot } = require('../lib/stockLots');
+const { addOwnedLot, consignmentReceiveError } = require('../lib/stockLots');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -454,6 +454,16 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
     if (missingRate(po)) return res.status(400).json({ error: `This PO is in ${po.currency} with no exchange rate — it's needed to cost the stock and the A/P bill` });
     // Stock cost and A/P are in base currency; the PO may not be
     const rate = poRate(po);
+    // Consignment items come in through Consignment, never a PO (owner's rule).
+    {
+      const lineIds = (items || []).filter(i => (Number(i.quantity_received) || 0) > 0).map(i => Number(i.item_id)).filter(Boolean);
+      const { rows: lineProducts } = lineIds.length
+        ? await db.execute({ sql: `SELECT product_id FROM purchase_order_items WHERE po_id = ? AND id IN (${lineIds.map(() => '?').join(',')})`, args: [po.id, ...lineIds] })
+        : { rows: [] };
+      const subIds = (Array.isArray(req.body.substitutes) ? req.body.substitutes : []).filter(x => (Number(x.quantity) || 0) > 0).map(x => x.product_id);
+      const consErr = await consignmentReceiveError(db, po.supplier_id, [...lineProducts.map(r => r.product_id), ...subIds]);
+      if (consErr) return res.status(400).json({ error: consErr, code: 'consignment_item' });
+    }
 
     const perms = req.employee?.permissions;
     const tx = await db.transaction('write');

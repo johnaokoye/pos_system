@@ -13,7 +13,7 @@ const { nextNumber } = require('../lib/nextNumber');
 const { resolvePurchaseUnit, lineName, parseQty, stockUnits } = require('../lib/units');
 const { syncBinQty } = require('../lib/binSync');
 const { syncToBranch } = require('../lib/stockLots');
-const { addOwnedLot } = require('../lib/stockLots');
+const { addOwnedLot, consignmentReceiveError } = require('../lib/stockLots');
 const { autoBills, createBill, applyPoAdvances, dueDateFor, today, PAID_SQL, round2 } = require('../lib/payables');
 const { localTaxRate, defaultTaxOption, priceLine, poTotals } = require('../lib/poLines');
 
@@ -278,6 +278,7 @@ router.post('/', async (req, res) => {
       lines.push({ p, unit, qty, priced, singles: stockUnits(qty, unit.units_per) });
     }
     const totals = poTotals(lines.map(l => l.priced));
+    { const consErr = await consignmentReceiveError(db, supplier.id, lines.map(l => l.p.id)); if (consErr) return res.status(400).json({ error: consErr, code: 'consignment_item' }); }
 
     const tx = await db.transaction('write');
     let committed = false, receiptId;
