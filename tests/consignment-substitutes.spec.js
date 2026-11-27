@@ -89,8 +89,14 @@ test('consignment GRN substitutes: own order line, folded back on reject, added 
   await page.locator(`.cg-qty[data-line="${line}"]`).fill('4');
   await page.click('button:has-text("+ Substitute")'); // moves one off the line, as on PO receiving
   await expect(page.locator(`.cg-qty[data-line="${line}"]`)).toHaveValue('3');
+  await page.locator('.cg-sub input[type="search"]').fill(`Paint ${s}`);
+  await expect(page.locator(`#cg-subs-${line} [id^="cg-sub-dd-"]`)).toContainText(grey.name);
+  expect((await page.locator(`#cg-subs-${line} [id^="cg-sub-dd-"]`).boundingBox()).width).toBeGreaterThan(350);
+  await page.screenshot({ path: process.env.SUB_SHOT || 'test-results/cons-substitute.png' });
   await page.locator('.cg-sub input[type="search"]').fill(`SG${s}`);
   await expect(page.locator('.cg-sub')).toContainText(grey.name);
+  // The picker has its own full-width row under the line, not squeezed into the Item column.
+  expect((await page.locator('#cg-subs-' + line + ' .cg-sub').boundingBox()).width).toBeGreaterThan(500);
   await page.locator('.cg-sub-qty').fill('2');
   await page.fill('#cg-note', `DN2-${s}`);
   await page.getByRole('button', { name: 'Enter GRN' }).click();
