@@ -81,4 +81,18 @@ test('consignment GRN substitutes: own order line, folded back on reject, added 
   o = await api(page, 'GET', `/consignment/orders/${order.id}`);
   expect(o.items.map(i => [i.product_id, i.quantity_ordered, i.quantity_received])).toEqual([[white.id, 8, 3], [grey.id, 2, 2]]);
   expect(o.status).toBe('partial');
+
+  // The order goes to the supplier: print copy, PDF and email.
+  const doc = await page.evaluate(async id => { const r = await fetch(`/api/email/consignment-order-preview/${id}`); return { tag: r.headers.get('x-pos-document'), html: await r.text() }; }, order.id);
+  expect(doc.tag).toBe('consignment-order');
+  for (const t of ['CONSIGNMENT ORDER', order.order_number, a.agreement_number, `Sent instead of ${white.name}`, 'Still to come', `SW${s}`, 'not a purchase order']) expect(doc.html).toContain(t);
+  expect(doc.html).toContain('1,000.00'); // 10 ordered: 8 white + 2 grey at 100
+  const pdf = await page.evaluate(async id => { const r = await fetch(`/api/email/consignment-order-pdf/${id}`); return [r.status, r.headers.get('content-type'), (await r.arrayBuffer()).byteLength]; }, order.id);
+  expect(pdf[0]).toBe(200); expect(pdf[1]).toBe('application/pdf'); expect(pdf[2]).toBeGreaterThan(1000);
+  expect(await attempt(page, 'POST', `/email/send-consignment-order/${order.id}`, { to: 'not-an-email' })).toMatch(/valid email/);
+  await page.evaluate(() => App.closeModal());
+  await page.evaluate(id => App.viewConsOrder(id), order.id);
+  await expect(page.locator('#con-pdf')).toHaveAttribute('href', `/api/email/consignment-order-pdf/${order.id}`);
+  await page.click('#con-email');
+  await expect(page.locator('#coe-subject')).toHaveValue(new RegExp(order.order_number));
 });

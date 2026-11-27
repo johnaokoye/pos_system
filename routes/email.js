@@ -2123,6 +2123,161 @@ router.post('/send-po/:id', requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Consignment order (CON-) ───────────────────────────────────────────
+// The supplier-facing copy of a consignment order: what to deliver, to
+// which branch, at the agreed cost in effect today. It's not a purchase —
+// the stock stays the supplier's until sold, as the agreement says.
+async function loadConsignmentOrderDocument(id) {
+  const { loadOrder } = require('./consignment');
+  const o = await loadOrder(db, id);
+  if (!o) return null;
+  const { rows: [sup] } = await db.execute({ sql: 'SELECT contact_name, email, email2, phone, address FROM suppliers WHERE id = ?', args: [o.supplier_id] });
+  const { rows: [br] } = await db.execute({ sql: 'SELECT address, city, phone FROM branches WHERE id = ?', args: [o.branch_id] });
+  Object.assign(o, { supplier_contact: sup?.contact_name, supplier_email: sup?.email, supplier_email2: sup?.email2, supplier_phone: sup?.phone, supplier_address: sup?.address,
+    branch_address: [br?.address, br?.city].filter(Boolean).join(', '), branch_phone: br?.phone });
+  o.anyReceived = o.items.some(i => Number(i.quantity_received) > 0);
+  return o;
+}
+
+const CONS_ORDER_STATUS = { open: null, partial: 'PART DELIVERED', received: 'COMPLETED', cancelled: 'CANCELLED' };
+const consToCome = (o, i) => ['open', 'partial'].includes(o.status) ? Math.max(0, round3c(i.left_units + i.pending_units)) : 0;
+const round3c = n => Math.round(n * 1000) / 1000;
+const consLineValue = i => i.agreed_unit_cost == null ? null : Math.round(i.agreed_unit_cost * (Number(i.ordered_units) || 0) * 100) / 100;
+const consLineNote = i => [i.sku, i.substitute_for_name ? `Sent instead of ${i.substitute_for_name}` : '', i.substituted_units > 0 ? `${i.substituted_units} substituted with another item` : ''].filter(Boolean).join(' · ');
+const consOrderTotal = o => o.items.reduce((s, i) => s + (consLineValue(i) || 0), 0);
+
+function buildConsignmentOrderHtml(o, s, { print = false } = {}) {
+  const th = (label, align = 'left') => `<th style="padding:8px;text-align:${align};font-size:12px;color:#666;border-bottom:1px solid #e8e8e8">${label}</th>`;
+  const td = (v, align = 'left', extra = '') => `<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:${align};${extra}">${v}</td>`;
+  const label = CONS_ORDER_STATUS[o.status];
+  const rows = o.items.map(i => {
+    const note = consLineNote(i);
+    return `<tr>${td(`${esc(i.product_name)}${note ? `<br><span style="color:#888;font-size:11px">${esc(note)}</span>` : ''}`)}${td(i.ordered_units, 'center')}${td(esc(i.unit_label || 'Each'), 'center')}${o.anyReceived ? td(i.received_units, 'center') + td(consToCome(o, i), 'center') : ''}${td(i.agreed_unit_cost == null ? '—' : fmt(i.agreed_unit_cost), 'right')}${td(consLineValue(i) == null ? '—' : fmt(consLineValue(i)), 'right', 'font-weight:600')}</tr>`;
+  }).join('');
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Consignment Order ${esc(o.order_number)}</title>
+${print ? PRINT_PAGE_STYLE : ''}
+</head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
+<table class="page-wrap" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0">
+<tr><td align="center">
+  <table class="page" width="560" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+    <tr><td style="${BRAND_HEADER_STYLE}">
+      <div style="color:#fff;font-size:22px;font-weight:700">${esc(s.store_name || 'My Store')}</div>
+      ${s.store_address ? `<div style="color:#ffffff;font-size:12px;margin-top:4px">${esc(s.store_address)}</div>` : ''}
+      ${s.store_phone ? `<div style="color:#ffffff;font-size:12px">${esc(s.store_phone)}</div>` : ''}
+    </td></tr>
+    <tr><td style="padding:20px 24px">
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px"><tr>
+        <td style="vertical-align:top">
+          <div style="font-size:20px;font-weight:700;color:${BRAND.black}">CONSIGNMENT ORDER</div>
+          <div style="font-size:13px;color:#888;margin-top:2px">${esc(o.order_number)}</div>
+          ${label ? `<div style="display:inline-block;margin-top:6px;padding:3px 8px;border:2px solid ${o.status === 'cancelled' ? '#dc2626' : '#6b7280'};color:${o.status === 'cancelled' ? '#dc2626' : '#6b7280'};font-size:12px;font-weight:700;letter-spacing:.5px">${label}</div>` : ''}
+        </td>
+        <td style="vertical-align:top;text-align:right;font-size:13px;color:#444;line-height:1.6">
+          <div><strong>Date:</strong> ${fmtDate(o.created_at)}</div>
+          ${o.expected_date ? `<div><strong>Expected:</strong> ${fmtDate(o.expected_date)}</div>` : ''}
+          <div><strong>Agreement:</strong> ${esc(o.agreement_number)}</div>
+          ${o.source_po_number ? `<div><strong>Replaces PO:</strong> ${esc(o.source_po_number)}</div>` : ''}
+          ${o.created_by_name ? `<div><strong>Ordered by:</strong> ${esc(o.created_by_name)}</div>` : ''}
+        </td>
+      </tr></table>
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;font-size:13px"><tr>
+        <td style="width:50%;vertical-align:top;padding-right:6px"><div style="background:#f9fafb;border:1px solid #e8e8e8;border-radius:6px;padding:12px;line-height:1.5">
+          <strong>Supplier:</strong><br>${esc(o.supplier_name)}${o.supplier_contact ? `<br>${esc(o.supplier_contact)}` : ''}${o.supplier_phone ? `<br>${esc(o.supplier_phone)}` : ''}${o.supplier_email ? `<br>${esc(o.supplier_email)}` : ''}
+        </div></td>
+        <td style="width:50%;vertical-align:top;padding-left:6px"><div style="background:#f9fafb;border:1px solid #e8e8e8;border-radius:6px;padding:12px;line-height:1.5">
+          <strong>Deliver to:</strong><br>${esc(o.branch_name)}${o.branch_address ? `<br>${esc(o.branch_address)}` : ''}${o.branch_phone ? `<br>${esc(o.branch_phone)}` : ''}
+        </div></td>
+      </tr></table>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8e8e8;border-radius:6px;font-size:13px">
+        <thead><tr style="background:#f9fafb">${th('Item')}${th('Qty', 'center')}${th('Unit', 'center')}${o.anyReceived ? th('Delivered', 'center') + th('Still to come', 'center') : ''}${th('Agreed Cost', 'right')}${th('Value', 'right')}</tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div style="text-align:right;margin-top:10px;font-size:16px;font-weight:700;color:${BRAND.black}">Total at agreed cost: ${fmt(consOrderTotal(o))}</div>
+      <div style="margin-top:14px;padding:10px 12px;border:1px solid #e8e8e8;background:#f9fafb;border-radius:6px;font-size:12px;color:#444;line-height:1.5">
+        Supplied on consignment under agreement ${esc(o.agreement_number)}: the goods remain the supplier's until sold and are paid for as the agreement sets out — this is not a purchase order and no invoice is due on delivery. Please quote ${esc(o.order_number)} on your delivery note.
+      </div>
+      ${o.notes ? `<div style="margin-top:14px;font-size:13px;color:#444"><strong>Notes:</strong> ${esc(o.notes)}</div>` : ''}
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body>
+</html>`;
+}
+
+function consignmentOrderPdfModel(o, s) {
+  const label = CONS_ORDER_STATUS[o.status];
+  const extra = o.anyReceived ? [{ label: 'Delivered', width: 1, align: 'center' }, { label: 'To come', width: 1, align: 'center' }] : [];
+  return {
+    store: pdfStore(s),
+    title: label ? `CONSIGNMENT ORDER - ${label}` : 'CONSIGNMENT ORDER', number: o.order_number,
+    meta: [['Date', pdfDate(o.created_at)], ['Expected', o.expected_date ? pdfDate(o.expected_date) : ''], ['Agreement', o.agreement_number], ['Replaces PO', o.source_po_number], ['Ordered By', o.created_by_name]],
+    party: { label: 'Supplier', lines: [o.supplier_name, o.supplier_contact, o.supplier_phone, o.supplier_email] },
+    info: [['Deliver To', [o.branch_name, o.branch_address, o.branch_phone].filter(Boolean).join(', ')]],
+    tables: [{ columns: [{ label: 'Item', width: 3.4 }, { label: 'Qty', width: 0.8, align: 'center' }, { label: 'Unit', width: 1.1, align: 'center' }, ...extra, { label: 'Agreed Cost', width: 1.2, align: 'right' }, { label: 'Value', width: 1.3, align: 'right' }],
+      rows: o.items.map(i => ({
+        cells: [i.product_name, i.ordered_units, i.unit_label || 'Each', ...(o.anyReceived ? [i.received_units, consToCome(o, i)] : []), i.agreed_unit_cost == null ? '-' : fmt(i.agreed_unit_cost), consLineValue(i) == null ? '-' : fmt(consLineValue(i))],
+        sub: consLineNote(i),
+      })) }],
+    totals: [{ label: 'TOTAL AT AGREED COST', value: fmt(consOrderTotal(o)), style: 'grand' }],
+    notes: [`Supplied on consignment under agreement ${o.agreement_number}: the goods remain the supplier's until sold and are paid for as the agreement sets out - this is not a purchase order and no invoice is due on delivery. Please quote ${o.order_number} on your delivery note.`, o.notes ? `Notes: ${o.notes}` : ''],
+  };
+}
+
+const canViewConsignment = requireAnyPermission('consignment', 'consignment_finance');
+
+router.get('/consignment-order-preview/:id', canViewConsignment, async (req, res) => {
+  try {
+    const o = await loadConsignmentOrderDocument(req.params.id);
+    if (!o) return res.status(404).send('<p>Consignment order not found</p>');
+    res.setHeader('Content-Type', 'text/html');
+    res.setHeader('X-Pos-Document', 'consignment-order');
+    res.send(buildConsignmentOrderHtml(o, await getSettings(), { print: true }));
+  } catch (e) { res.status(500).send(`<p>Error: ${esc(e.message)}</p>`); }
+});
+
+router.get('/consignment-order-pdf/:id', canViewConsignment, async (req, res) => {
+  try {
+    const o = await loadConsignmentOrderDocument(req.params.id);
+    if (!o) return res.status(404).json({ error: 'Consignment order not found' });
+    const pdf = await renderDocumentPdf(consignmentOrderPdfModel(o, await getSettings()));
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${o.order_number}.pdf"`);
+    res.send(pdf);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// { to, cc, subject, message, as_pdf } — like send-po.
+router.post('/send-consignment-order/:id', requireAnyPermission('consignment_agreements', 'consignment_receive'), async (req, res) => {
+  const to = parseRecipients(req.body.to);
+  if (to.error) return res.status(400).json({ error: to.error });
+  if (!to.list.length) return res.status(400).json({ error: 'Recipient email is required' });
+  const cc = parseRecipients(req.body.cc);
+  if (cc.error) return res.status(400).json({ error: `CC: ${cc.error}` });
+  try {
+    const o = await loadConsignmentOrderDocument(req.params.id);
+    if (!o) return res.status(404).json({ error: 'Consignment order not found' });
+    if (o.status === 'cancelled') return res.status(400).json({ error: 'This consignment order was cancelled' });
+    const s = await getSettings();
+    try {
+      const transporter = createTransporter(s);
+      await transporter.sendMail({
+        from: `"${s.email_from_name || s.store_name || 'POS System'}" <${s.email_smtp_user || s.store_email || ''}>`,
+        to: to.list,
+        ...(cc.list.length ? { cc: cc.list } : {}),
+        subject: String(req.body.subject || '').trim() || `Consignment Order ${o.order_number} from ${s.store_name || 'Our Store'}`,
+        ...(await documentEmailContent(req.body.as_pdf, s, consignmentOrderPdfModel(o, s), withMessage(buildConsignmentOrderHtml(o, s), req.body.message), { message: req.body.message })),
+      });
+      res.json({ success: true, message: `Consignment order sent to ${[...to.list, ...cc.list].join(', ')}` });
+    } catch (e) {
+      res.status(500).json({ error: `Failed to send email: ${e.message}` });
+    }
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── Authorization to Pump ──────────────────────────────────────────────
 // The supplier-facing copy of an approved supplier-priced (fuel) purchase
 // request: what may be supplied, the maximum quantity, and the approver's

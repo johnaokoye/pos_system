@@ -400,8 +400,51 @@ Object.assign(App, {
             <div style="font-size:11px;color:var(--text-muted);margin-top:4px">The stock goes on hand once the GRN is approved.</div>` : ''}
           ${o.grns.length ? `<div style="font-weight:600;margin:12px 0 4px">GRNs</div>${o.grns.map(g => `<div style="border-top:1px solid var(--border);padding:4px 0"><a href="#" onclick="event.preventDefault();App.viewConsGrn(${g.id})">${g.grn_number}</a> · delivery note ${esc(g.delivery_note_number)} · ${this._consBadge(g.status)}</div>`).join('')}` : ''}
         </div>
-        <div class="modal-footer">${['open', 'partial'].includes(o.status) && this.can('consignment_agreements') ? `<button class="btn btn-outline" onclick="App._consCancelOrder(${o.id})">${o.status === 'partial' ? 'Close (cancel the rest)' : 'Cancel Order'}</button>` : ''}<button class="btn btn-secondary" onclick="App.closeModal()">Close</button></div>
+        <div class="modal-footer">${['open', 'partial'].includes(o.status) && this.can('consignment_agreements') ? `<button class="btn btn-outline" onclick="App._consCancelOrder(${o.id})">${o.status === 'partial' ? 'Close (cancel the rest)' : 'Cancel Order'}</button>` : ''}<button class="btn btn-secondary" onclick="App._printServerDocument('/api/email/consignment-order-preview/${o.id}', 'consignment-order', 'consignment order')">🖨️ Print</button><a class="btn btn-secondary" id="con-pdf" href="/api/email/consignment-order-pdf/${o.id}" download="${esc(o.order_number)}.pdf" style="text-decoration:none">⬇️ Download PDF</a>${o.status !== 'cancelled' && (this.can('consignment_agreements') || this.can('consignment_receive')) ? `<button class="btn btn-secondary" id="con-email" onclick="App._consEmailOrder(${o.id})">✉️ Email to Supplier</button>` : ''}<button class="btn btn-secondary" onclick="App.closeModal()">Close</button></div>
       </div>`);
+  },
+  // Email the consignment order to the supplier (Email and Email 2 filled
+  // in), with CC, subject and a message shown above it — like Email PO.
+  async _consEmailOrder(id) {
+    let o;
+    try { o = await this.api('GET', `/consignment/orders/${id}`); } catch (e) { this.alert(e.message, 'error'); return; }
+    const esc = x => this.escapeAttr(x ?? '');
+    let pdfDefault = false;
+    try { pdfDefault = localStorage.getItem('pos_email_as_pdf') === '1'; } catch (e) {}
+    this.showSecondaryModal(`
+      <div class="modal" style="max-width:560px">
+        <div class="modal-header"><span class="modal-title">Email Consignment Order — ${esc(o.order_number)}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body">
+          <div class="form-group"><label>To *</label><input id="coe-to" value="${esc([o.supplier_email, o.supplier_email2].filter(Boolean).join(', '))}" placeholder="orders@supplier.com">
+            <div style="font-size:11px;color:var(--text-muted);margin-top:3px">Separate several addresses with commas.</div></div>
+          <div class="form-group"><label>CC</label><input id="coe-cc" placeholder="Optional — e.g. our receiving team"></div>
+          <div class="form-group"><label>Subject</label><input id="coe-subject" value="${esc(`Consignment Order ${o.order_number} from ${this.settings?.store_name || 'Our Store'}`)}"></div>
+          <div class="form-group"><label>Message</label><textarea id="coe-message" rows="5" placeholder="Delivery details or instructions — e.g. deliver to ${esc(o.branch_name)} Mon–Fri 8am–3pm; quote ${esc(o.order_number)} on your delivery note."></textarea>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:3px">Shown above the consignment order in the email.</div></div>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px"><input type="checkbox" id="coe-pdf" ${pdfDefault ? 'checked' : ''} style="width:16px;height:16px;margin:0"> Attach as PDF <span style="color:var(--text-muted);font-size:12px">(instead of in the email body)</span></label>
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeSecondaryModal()">Cancel</button><button class="btn btn-primary" id="coe-send" onclick="App._consSendOrderEmail(${o.id})">Send</button></div>
+      </div>`);
+  },
+  async _consSendOrderEmail(id) {
+    const val = k => document.getElementById(k)?.value.trim() || '';
+    const split = v => v.split(/[,;\s]+/).filter(Boolean);
+    const to = split(val('coe-to')), cc = split(val('coe-cc'));
+    if (!to.length) { this.alert('Enter at least one email address', 'error'); return; }
+    const bad = [...to, ...cc].find(a => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(a));
+    if (bad) { this.alert(`"${bad}" isn't a valid email address`, 'error'); return; }
+    const as_pdf = !!document.getElementById('coe-pdf')?.checked;
+    try { localStorage.setItem('pos_email_as_pdf', as_pdf ? '1' : '0'); } catch (e) {}
+    const btn = document.getElementById('coe-send');
+    if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+    try {
+      const r = await this.api('POST', `/email/send-consignment-order/${id}`, { to, cc, subject: val('coe-subject'), message: document.getElementById('coe-message')?.value || '', as_pdf });
+      this.closeSecondaryModal();
+      this.alert(r.message || 'Consignment order sent');
+    } catch (e) {
+      this.alert(e.message, 'error');
+      if (btn) { btn.disabled = false; btn.textContent = 'Send'; }
+    }
   },
   async _consReceive(orderId) {
     const items = [...document.querySelectorAll('.cg-qty')].map(i => {
