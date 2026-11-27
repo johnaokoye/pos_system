@@ -1697,6 +1697,9 @@ Object.assign(App, {
       this.can('payables') ? this.api('GET', `/payables/po/${id}`).catch(() => null) : null,
       this.api('GET', `/payables/payment-requests/for-po/${id}`).catch(() => null),
     ]);
+    // Items still to come that are on the supplier's consignment agreement.
+    const consLines = ['approved', 'partial'].includes(po.status) && !po.reinstated_from_status && this.can('consignment_agreements')
+      ? ((await this.api('GET', `/purchase-orders/${id}/consignment-lines`).catch(() => null))?.lines || []) : [];
     const canReqPay = this.can('purchasing_request_payment') || this.can('payables_requests');
     const canOpenPrq = this.can('payables') || this.can('payables_approve');
     const statusColor = { draft:'badge-warning', sent:'badge-info', approved:'badge-teal', partial:'badge-purple', received:'badge-success', cancelled:'badge-danger' };
@@ -1899,6 +1902,7 @@ Object.assign(App, {
           ${['draft','cancelled'].includes(po.status) && !po.reinstated_from_status && this.can('purchasing_delete') ? `<button class="btn btn-outline" style="color:var(--danger,#dc2626);border-color:var(--danger,#dc2626)" title="Remove this PO permanently" onclick="App.deletePO(${po.id}, '${this.escapeAttr(po.po_number)}')">🗑 Delete PO</button>` : ''}
           ${['received','partial'].includes(po.status) && !po.approved_at && this.can('purchasing_approve') ? `<button class="btn btn-outline" title="Received before approval was required — send it for approval; stock and receipts stay as they are" onclick="App.reinstatePOForApproval(${po.id})">↩ Send Back for Approval</button>` : ''}
           ${(po.status==='approved'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-success" onclick="App.closeModal();App.showReceivePO(${po.id})">Receive Items</button>` : ''}
+          ${consLines.length ? `<button class="btn btn-outline" id="po-to-consignment" title="These items are on the supplier's consignment agreement — receive them as the supplier's stock" onclick="App.showPOToConsignment(${po.id})">📦 Move to Consignment Order (${consLines.length})</button>` : ''}
           ${(po.status==='approved'||po.status==='partial') && canReqPay ? `<button class="btn btn-outline" title="Ask Accounts Payable for an advance or deposit payment on this PO" onclick="App.showPoPaymentRequestForm(${po.id})">💵 Request Payment</button>` : ''}
           ${(po.status==='received'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn" style="background:#f59e0b;color:#fff;border:none" onclick="App.closeModal();App.showProcessDamaged(${po.id})">⚠️ Process Damaged</button>` : ''}
           ${(po.status==='received'||po.status==='partial') && this.can('purchasing_receive') ? `<button class="btn btn-secondary" onclick="App.emailGRN(${po.id},'${(po.supplier_email||'').replace(/'/g,"\\'")}')">✉️ Email GRN</button>` : ''}
@@ -2333,6 +2337,45 @@ Object.assign(App, {
       this.alert(e.message, 'error');
       if (btn) { btn.disabled = false; btn.textContent = 'Send'; }
     }
+  },
+
+  // Move to Consignment Order: what's still to come of the items on the
+  // supplier's consignment agreement goes on a consignment order, and comes
+  // off this PO (closed short; the PO is cancelled if nothing is left).
+  async showPOToConsignment(id) {
+    let data, po;
+    try { [data, po] = await Promise.all([this.api('GET', `/purchase-orders/${id}/consignment-lines`), this.api('GET', `/purchase-orders/${id}`)]); } catch (e) { this.alert(e.message, 'error'); return; }
+    const lines = data.lines || [];
+    if (!lines.length) { this.alert('Nothing still to come on this PO is on a consignment agreement', 'warning'); return; }
+    const esc = v => this.escapeAttr(v == null ? '' : String(v));
+    const moving = new Set(lines.map(l => l.item_id));
+    const leftAfter = (po.items || []).some(i => !moving.has(i.id) && ((Number(i.quantity_ordered) || 0) > 0 || (Number(i.quantity_received) || 0) > 0))
+      || (po.items || []).some(i => moving.has(i.id) && (Number(i.quantity_received) || 0) > 0);
+    this.showModal(`
+      <div class="modal" style="max-width:640px">
+        <div class="modal-header"><span class="modal-title">Move to Consignment Order — ${esc(po.po_number)}</span><button class="modal-close">✕</button></div>
+        <div class="modal-body" style="font-size:13px">
+          <p style="margin-top:0">These items are on ${esc(po.supplier_name || 'the supplier')}'s consignment agreement. What's still to come of each moves to a consignment order at ${esc(po.branch_name || 'this PO\'s branch')}, so it's received as the supplier's stock (no A/P bill). The PO lines are closed short with a note naming the order.</p>
+          <div class="table-wrap"><table style="font-size:13px"><thead><tr><th>Item</th><th>Agreement</th><th style="text-align:right">Still to come</th><th>Unit</th></tr></thead>
+            <tbody>${lines.map(l => `<tr><td>${esc(l.product_name)}<div style="font-size:11px;color:var(--text-muted)">${esc(l.sku)}</div></td><td>${esc(l.agreement_number)}</td><td style="text-align:right">${l.quantity_left}</td><td>${esc(l.unit)}</td></tr>`).join('')}</tbody></table></div>
+          <p style="margin:8px 0;font-weight:600">${leftAfter ? 'The rest of the PO stays as it is.' : 'Nothing else is on this PO, so it will be cancelled.'}</p>
+          <div class="form-group"><label>Reason *</label><input id="po-cons-reason" placeholder="e.g. supplier confirmed these are supplied on consignment"></div>
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button class="btn btn-primary" id="po-cons-confirm" onclick="App._confirmPOToConsignment(${po.id})">Move to Consignment Order</button></div>
+      </div>`);
+    setTimeout(() => document.getElementById('po-cons-reason')?.focus(), 50);
+  },
+
+  async _confirmPOToConsignment(id) {
+    const reason = document.getElementById('po-cons-reason')?.value.trim();
+    if (!reason) { this.alert('Enter the reason', 'warning'); return; }
+    try {
+      const out = await this.api('POST', `/purchase-orders/${id}/convert-to-consignment`, { reason });
+      this.closeModal();
+      this.alert(`Consignment order ${out.orders.map(o => o.order_number).join(', ')} raised${out.status === 'cancelled' ? ' — the PO had nothing else on it and is cancelled' : ''}. Receive the delivery under Purchasing → Consignment.`, 'success');
+      this.viewPO(id);
+    } catch (e) { this.alert(e.message, 'error'); }
   },
 
   async showReceivePO(id) {

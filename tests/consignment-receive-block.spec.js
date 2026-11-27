@@ -53,4 +53,42 @@ test('consignment items from their supplier are refused on a PO and a receipt wi
   // Receipt without a PO: refused from that supplier, fine from another.
   expect(await attempt(page, 'POST', '/direct-receipts', { supplier_id: sup.id, branch_id: 1, items: [{ product_id: consigned.id, quantity: 1, unit_cost: 80 }] })).toMatch(/^consignment_item /);
   expect(await attempt(page, 'POST', '/direct-receipts', { supplier_id: other.id, branch_id: 1, items: [{ product_id: consigned.id, quantity: 1, unit_cost: 80 }] })).toBe('accepted');
+
+  // Move to Consignment Order: the PO line's rest moves to a CON- order at the
+  // PO's branch; the plain item already came in, so the PO stays (received).
+  expect(await attempt(page, 'POST', `/purchase-orders/${po.id}/convert-to-consignment`, {})).toMatch(/Enter why/);
+  const preview = await api(page, 'GET', `/purchase-orders/${po.id}/consignment-lines`);
+  expect(preview.lines.map(l => [l.product_id, l.quantity_left, l.agreement_number])).toEqual([[consigned.id, 2, a.agreement_number]]);
+  const moved = await api(page, 'POST', `/purchase-orders/${po.id}/convert-to-consignment`, { reason: 'Supplier confirmed consignment' });
+  expect(moved.status).toBe('received');
+  expect(moved.orders).toHaveLength(1);
+  const after = await api(page, 'GET', `/purchase-orders/${po.id}`);
+  const closed = after.items.find(i => i.product_id === consigned.id);
+  expect([closed.quantity_ordered, closed.quantity_closed_short]).toEqual([0, 2]);
+  expect(closed.closed_short_reason).toContain(moved.orders[0].order_number);
+  expect(after.total).toBeCloseTo(160, 2);
+  const order = await api(page, 'GET', `/consignment/orders/${moved.orders[0].id}`);
+  expect([order.source_po_number, order.branch_id, order.items.map(i => [i.product_id, i.quantity_ordered])]).toEqual([po.po_number, 1, [[consigned.id, 2]]]);
+  // ...and it comes in as the supplier's stock.
+  const grn = await api(page, 'POST', `/consignment/orders/${order.id}/grns`, { delivery_note_number: `DN-${s}`, items: [{ order_item_id: order.items[0].id, quantity: 2 }] });
+  await api(page, 'POST', `/consignment/grns/${grn.id}/approve`, {});
+  expect((await api(page, 'GET', `/products?search=CS${s}&branch_id=1`)).find(p => p.id === consigned.id)).toMatchObject({ stock_qty: 3, consignment_qty: 2 }); // + the 1 bought from the other supplier
+  expect((await api(page, 'GET', `/purchase-orders/${po.id}/consignment-lines`)).lines).toHaveLength(0);
+
+  // A PO with nothing else on it is cancelled; one with an advance requested is refused.
+  const po2 = await api(page, 'POST', '/purchase-orders', { supplier_id: sup.id, branch_id: 1, items: [{ product_id: consigned.id, quantity: 3, unit_cost: 80 }] });
+  const po3 = await api(page, 'POST', '/purchase-orders', { supplier_id: sup.id, branch_id: 1, items: [{ product_id: consigned.id, quantity: 1, unit_cost: 80 }] });
+  for (const p of [po2, po3]) await api(page, 'PATCH', `/purchase-orders/${p.id}/status`, { status: 'sent' });
+  await login(page, approver);
+  for (const p of [po2, po3]) await api(page, 'PATCH', `/purchase-orders/${p.id}/approve`, { signature: SIG });
+  await login(page, 'admin', '123456');
+  expect((await api(page, 'POST', `/purchase-orders/${po2.id}/convert-to-consignment`, { reason: 'consignment' })).status).toBe('cancelled');
+  expect((await api(page, 'GET', `/purchase-orders/${po2.id}`)).status).toBe('cancelled');
+  await api(page, 'POST', `/payables/payment-requests/from-po/${po3.id}`, { amount: 80, required_date: '2026-12-30' });
+  expect(await attempt(page, 'POST', `/purchase-orders/${po3.id}/convert-to-consignment`, { reason: 'consignment' })).toMatch(/advances/);
+  expect((await api(page, 'GET', `/purchase-orders/${po3.id}`)).items[0].quantity_ordered).toBe(1);
+
+  // The PO view offers it.
+  await page.evaluate(id => App.viewPO(id), po3.id);
+  await expect(page.locator('#po-to-consignment')).toContainText('Move to Consignment Order (1)');
 });

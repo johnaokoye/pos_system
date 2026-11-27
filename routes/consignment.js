@@ -349,7 +349,7 @@ router.post('/agreements/:id/end', requirePermission('consignment_agreements'), 
 });
 
 // ── Orders ──────────────────────────────────────────────────
-const ORDER_SELECT = `SELECT o.*, a.agreement_number, s.name AS supplier_name, b.name AS branch_name, e.first_name || ' ' || e.last_name AS created_by_name
+const ORDER_SELECT = `SELECT o.*, (SELECT po.po_number FROM purchase_orders po WHERE po.id = o.source_po_id) AS source_po_number, a.agreement_number, s.name AS supplier_name, b.name AS branch_name, e.first_name || ' ' || e.last_name AS created_by_name
   FROM consignment_orders o JOIN consignment_agreements a ON a.id = o.agreement_id JOIN suppliers s ON s.id = o.supplier_id
   JOIN branches b ON b.id = o.branch_id LEFT JOIN employees e ON e.id = o.created_by`;
 

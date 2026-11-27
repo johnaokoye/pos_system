@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { storeOffsetModifier } = require('../lib/storeTime');
 const { db } = require('../database');
-const { resolvePurchaseUnit, lineName, stockUnits } = require('../lib/units');
+const { resolvePurchaseUnit, lineName, stockUnits, orderLineUnit } = require('../lib/units');
 const { syncBinQty } = require('../lib/binSync');
 const { syncToBranch } = require('../lib/stockLots');
 const { addOwnedLot, consignmentReceiveError } = require('../lib/stockLots');
@@ -462,7 +462,7 @@ router.patch('/:id/receive', requirePermission('purchasing_receive'), async (req
         : { rows: [] };
       const subIds = (Array.isArray(req.body.substitutes) ? req.body.substitutes : []).filter(x => (Number(x.quantity) || 0) > 0).map(x => x.product_id);
       const consErr = await consignmentReceiveError(db, po.supplier_id, [...lineProducts.map(r => r.product_id), ...subIds]);
-      if (consErr) return res.status(400).json({ error: consErr, code: 'consignment_item' });
+      if (consErr) return res.status(400).json({ error: `${consErr}. Move to Consignment Order on this PO raises the consignment order for what's still to come`, code: 'consignment_item' });
     }
 
     const perms = req.employee?.permissions;
@@ -909,6 +909,106 @@ router.delete('/:id/items/:itemId/close-short', requirePermission('purchasing_re
     }
     res.json({ success: true, status });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Move to Consignment Order ───────────────────────────────
+// A PO raised for a consignment supplier before its items were on consignment
+// (owner, 2026-11-27): what's still to come of each item on the supplier's
+// approved, in-date agreement moves to a consignment order (one per
+// agreement, at the PO's branch, in the PO line's unit) so it's received as
+// the supplier's stock. The PO lines are closed short with a note naming the
+// order; a PO left with nothing (nothing received) is cancelled.
+async function consignmentMoveLines(executor, po) {
+  const day = today();
+  const { rows } = await executor.execute({
+    sql: `SELECT poi.*, ROUND(poi.quantity_ordered - COALESCE(poi.quantity_received, 0), 3) AS quantity_left,
+            (SELECT a.id FROM consignment_agreement_items ai JOIN consignment_agreements a ON a.id = ai.agreement_id
+              WHERE ai.product_id = poi.product_id AND ai.active = 1 AND a.supplier_id = ? AND a.status = 'approved'
+                AND (a.start_date IS NULL OR a.start_date <= ?) AND (a.end_date IS NULL OR a.end_date >= ?) ORDER BY a.id DESC LIMIT 1) AS agreement_id
+          FROM purchase_order_items poi WHERE poi.po_id = ? AND poi.product_id IS NOT NULL AND poi.quantity_ordered - COALESCE(poi.quantity_received, 0) > 0.0005 ORDER BY poi.id`,
+    args: [po.supplier_id, day, day, po.id],
+  });
+  const lines = rows.filter(r => r.agreement_id);
+  if (lines.length) {
+    const ids = [...new Set(lines.map(l => l.agreement_id))];
+    const { rows: ags } = await executor.execute({ sql: `SELECT id, agreement_number FROM consignment_agreements WHERE id IN (${ids.map(() => '?').join(',')})`, args: ids });
+    const num = Object.fromEntries(ags.map(a => [a.id, a.agreement_number]));
+    lines.forEach(l => { l.agreement_number = num[l.agreement_id]; });
+  }
+  return lines;
+}
+
+router.get('/:id/consignment-lines', requirePermission('consignment_agreements'), async (req, res) => {
+  try {
+    const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });
+    if (!po) return res.status(404).json({ error: 'Not found' });
+    const lines = await consignmentMoveLines(db, po);
+    res.json({ lines: lines.map(l => ({ item_id: l.id, product_id: l.product_id, product_name: orderLineUnit(l).name, sku: l.sku, quantity_left: Number(l.quantity_left), unit: orderLineUnit(l).unit, agreement_id: l.agreement_id, agreement_number: l.agreement_number })) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/:id/convert-to-consignment', requirePermission('consignment_agreements'), async (req, res) => {
+  const reason = String(req.body.reason || '').trim().slice(0, 400);
+  if (!reason) return res.status(400).json({ error: "Enter why these items are moving to consignment (e.g. the supplier's agreement covers them)" });
+  const { rows: [po] } = await db.execute({ sql: 'SELECT * FROM purchase_orders WHERE id = ?', args: [req.params.id] });
+  if (!po) return res.status(404).json({ error: 'Not found' });
+  if (!['approved', 'partial'].includes(po.status) || po.reinstated_from_status) {
+    return res.status(400).json({ error: ['draft', 'sent', 'rejected'].includes(po.status)
+      ? `${po.po_number} isn't approved yet — edit it to take the consignment items off and raise a consignment order for them instead`
+      : `${po.po_number} is ${po.status} — only an approved or part-received PO can move items to consignment` });
+  }
+  if (!po.branch_id) return res.status(400).json({ error: `${po.po_number} has no branch — a consignment order needs the branch receiving the stock` });
+  const tx = await db.transaction('write');
+  let committed = false;
+  try {
+    const lines = await consignmentMoveLines(tx, po);
+    if (!lines.length) throw Object.assign(new Error(`Nothing still to come on ${po.po_number} is on an approved consignment agreement with this supplier`), { status: 400 });
+    const byAgreement = new Map();
+    for (const l of lines) (byAgreement.get(l.agreement_id) || byAgreement.set(l.agreement_id, []).get(l.agreement_id)).push(l);
+    const orders = [];
+    for (const [agreementId, group] of byAgreement) {
+      const number = await nextNumber(tx, 'consignment_orders', 'order_number', 'CON-', 6);
+      const r = await tx.execute({
+        sql: 'INSERT INTO consignment_orders (order_number, agreement_id, supplier_id, branch_id, expected_date, notes, created_by, source_po_id) VALUES (?,?,?,?,?,?,?,?)',
+        args: [number, agreementId, po.supplier_id, po.branch_id, po.expected_date || null, `Moved from ${po.po_number}: ${reason}`, req.employee?.id || null, po.id],
+      });
+      const orderId = Number(r.lastInsertRowid);
+      for (const l of group) {
+        const left = Number(l.quantity_left), per = Number(l.units_per) || 1;
+        await tx.execute({ sql: 'INSERT INTO consignment_order_items (order_id, product_id, quantity_ordered, uom_id, purchase_unit, units_per, order_qty) VALUES (?,?,?,?,?,?,?)',
+          args: [orderId, l.product_id, stockUnits(left, per), l.uom_id ?? null, l.purchase_unit || null, per, left] });
+        // Close the rest of the PO line short (as POST /:id/items/:itemId/close-short does).
+        const ordered = Number(l.quantity_ordered) || 0, received = Number(l.quantity_received) || 0;
+        const share = k => received <= 0 ? (Number(l[k]) || 0) : round2((Number(l[k]) || 0) * left / ordered);
+        const cTotal = share('total'), cTax = share('tax_amount'), cDisc = share('vendor_discount');
+        await tx.execute({
+          sql: `UPDATE purchase_order_items SET quantity_ordered = ?, total = ROUND(total - ?, 2), tax_amount = ROUND(tax_amount - ?, 2), vendor_discount = ROUND(vendor_discount - ?, 2),
+                  quantity_closed_short = COALESCE(quantity_closed_short, 0) + ?, closed_short_total = COALESCE(closed_short_total, 0) + ?, closed_short_tax = COALESCE(closed_short_tax, 0) + ?,
+                  closed_short_discount = COALESCE(closed_short_discount, 0) + ?, closed_short_reason = ?, closed_short_by = ?, closed_short_at = CURRENT_TIMESTAMP WHERE id = ?`,
+          args: [received, cTotal, cTax, cDisc, left, cTotal, cTax, cDisc, `Moved to consignment order ${number} (${group[0].agreement_number}): ${reason}`, req.employee?.id || null, l.id],
+        });
+      }
+      orders.push({ id: orderId, order_number: number, agreement_number: group[0].agreement_number, lines: group.length });
+    }
+    await retotalPo(tx, po.id);
+    const { rows: [live] } = await tx.execute({ sql: 'SELECT COUNT(*) AS n FROM purchase_order_items WHERE po_id = ? AND (quantity_ordered > 0 OR COALESCE(quantity_received, 0) > 0)', args: [po.id] });
+    let status;
+    if (!Number(live.n)) {
+      await tx.execute({ sql: "UPDATE purchase_orders SET status = 'cancelled' WHERE id = ?", args: [po.id] });
+      status = 'cancelled';
+    } else status = await refreshPoStatus(tx, po);
+    // Advances paid or asked for on the PO can't be more than what's left on it.
+    const room = await require('./payment-requests').poAdvanceRoom(tx, po.id);
+    if (room && room.paid + room.requested > (status === 'cancelled' ? 0 : room.total_base) + 0.005) {
+      throw Object.assign(new Error(`${po.po_number} has ${round2(room.paid + room.requested).toFixed(2)} paid or requested in advances — more than would be left on it. Ask Accounts Payable to sort the advance first`), { status: 400 });
+    }
+    await tx.commit();
+    committed = true;
+    res.json({ status, orders });
+  } catch (e) {
+    if (!committed) await tx.rollback().catch(() => {});
+    res.status(e.status || 500).json({ error: e.message });
+  }
 });
 
 async function loadReversiblePO(id) {
