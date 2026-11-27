@@ -722,18 +722,35 @@ Object.assign(App, {
   async _consOpeningForm(after) {
     let data;
     try { data = await this.api('GET', '/consignment/opening-candidates'); } catch (e) { this.alert(e.message, 'error'); return; }
-    this._consOpeningCands = data.rows;
+    // One choice per agreement + item, with every location holding it
+    // (the candidates come one per branch).
+    const groups = [];
+    const byKey = {};
+    for (const c of data.rows) {
+      const key = `${c.agreement_id}:${c.product_id}`;
+      if (!byKey[key]) groups.push(byKey[key] = { agreement_id: c.agreement_id, agreement_number: c.agreement_number, supplier_name: c.supplier_name, product_id: c.product_id, product_name: c.product_name, sku: c.sku, total: 0, branches: [] });
+      byKey[key].branches.push({ branch_id: c.branch_id, branch_name: c.branch_name, available: Number(c.available) || 0 });
+      byKey[key].total += Number(c.available) || 0;
+    }
+    this._consOpeningCands = groups;
     this._consOpeningAfter = after;
+    const suppliers = [...new Set(groups.map(g => g.supplier_name))].sort();
     this.showModal(`
-      <div class="modal" style="max-width:760px">
+      <div class="modal" style="max-width:820px">
         <div class="modal-header"><span class="modal-title">${after ? 'Record Supplier-Owned Stock Found On Hand' : 'Start Consignment Tracking'}</span><button class="modal-close">✕</button></div>
         <div class="modal-body" style="font-size:13px">
           ${after
-            ? '<p style="margin-top:0">For units that were recorded as Total Tools\' stock when tracking started but really belong to a supplier — add a line per agreement, item and branch. They move to the supplier\'s ownership, dated when tracking started, and the reason is kept. The stock figures don\'t change.</p>'
+            ? '<p style="margin-top:0">For units that were recorded as Total Tools\' stock when tracking started but really belong to a supplier — add a line per agreement and item; every location holding it is listed, filled in with all it has (change any you need to). They move to the supplier\'s ownership, dated when tracking started, and the reason is kept. The stock figures don\'t change.</p>'
             : '<p style="margin-top:0">Everything on hand is recorded as of now. First list any stock on hand that already belongs to a supplier under an approved agreement — it becomes that supplier\'s. All the rest becomes one Total Tools-owned receipt dated today, so it sells before consignment stock received later. This is done once and can\'t be undone.</p>'}
           <div style="font-weight:600;margin:10px 0 6px">Supplier-owned stock on hand</div>
-          ${data.rows.length ? `<div id="cons-open-lines" style="display:grid;gap:6px"></div>
-            <button class="btn btn-sm btn-outline" style="margin-top:6px" onclick="App._consOpeningAddLine()">+ Add line</button>`
+          ${groups.length ? `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+              <label style="margin:0">Supplier</label>
+              <select id="cons-open-supplier" style="min-width:200px" onchange="App._consOpeningFilter()"><option value="">All suppliers</option>${suppliers.map(n => `<option value="${this.escapeAttr(n)}">${this.escapeAttr(n)}</option>`).join('')}</select>
+              <button class="btn btn-sm btn-outline" id="cons-open-add-all" onclick="App._consOpeningAddAll()" disabled>+ Add all this supplier's items</button>
+            </div>
+            <div id="cons-open-lines" style="display:grid;gap:8px"></div>
+            <button class="btn btn-sm btn-outline" style="margin-top:6px" onclick="App._consOpeningAddLine()">+ Add line</button>
+            <div id="cons-open-total" style="margin-top:8px;font-weight:600"></div>`
             : `<p style="color:var(--text-muted)">No stock on hand is on an approved agreement, so there's nothing to list${after ? '' : ' — everything will be Total Tools-owned'}. An agreement has to be approved before its stock can be recorded here.</p>`}
           ${after ? '<div class="form-group" style="margin-top:10px"><label>Reason *</label><input id="cons-open-note" placeholder="e.g. delivery note CPT-DN-4101 shows these were left on consignment"></div>'
             : `<div class="form-group" style="margin-top:12px"><label>Type START to confirm</label><input id="cons-open-confirm" autocomplete="off" style="max-width:160px"></div>`}
@@ -741,34 +758,89 @@ Object.assign(App, {
         <div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
           <button class="btn btn-primary" onclick="App._consOpeningSave()">${after ? 'Record' : 'Start Tracking'}</button></div>
       </div>`);
-    if (data.rows.length) this._consOpeningAddLine();
+    if (groups.length) this._consOpeningAddLine();
   },
 
-  _consOpeningAddLine() {
+  _consOpeningOptions(selected = '') {
+    const sup = document.getElementById('cons-open-supplier')?.value || '';
+    const where = this._consOpeningAfter ? "Total Tools'" : 'on hand';
+    return `<option value="">— Agreement · item —</option>${this._consOpeningCands.map((g, i) => (!sup || g.supplier_name === sup || String(i) === String(selected))
+      ? `<option value="${i}"${String(i) === String(selected) ? ' selected' : ''}>${this.escapeAttr(g.supplier_name)} ${g.agreement_number} · ${this.escapeAttr(g.sku || '')} ${this.escapeAttr(g.product_name)} — ${g.total} ${where} at ${g.branches.length} location${g.branches.length === 1 ? '' : 's'}</option>` : '').join('')}`;
+  },
+
+  // Supplier box: narrows every line's picker and enables "Add all".
+  _consOpeningFilter() {
+    document.querySelectorAll('.cons-open-pick').forEach(sel => { sel.innerHTML = this._consOpeningOptions(sel.value); });
+    const btn = document.getElementById('cons-open-add-all');
+    if (btn) btn.disabled = !document.getElementById('cons-open-supplier')?.value;
+  },
+
+  _consOpeningAddLine(index = '') {
     const box = document.getElementById('cons-open-lines');
-    if (!box) return;
+    if (!box) return null;
     const row = document.createElement('div');
     row.className = 'cons-open-line';
-    row.style.cssText = 'display:flex;gap:6px;align-items:center;flex-wrap:wrap';
-    row.innerHTML = `<select class="cons-open-pick" style="flex:1;min-width:260px"><option value="">— Agreement · item · branch —</option>${this._consOpeningCands.map((c, i) =>
-      `<option value="${i}">${this.escapeAttr(c.supplier_name)} ${c.agreement_number} · ${this.escapeAttr(c.product_name)} · ${this.escapeAttr(c.branch_name)} (${Number(c.available)} ${this._consOpeningAfter ? "Total Tools'" : 'on hand'})</option>`).join('')}</select>
-      <input class="cons-open-qty" type="number" min="0" step="any" placeholder="Qty" style="width:90px">
-      <button class="btn btn-sm btn-outline" title="Remove" onclick="this.parentElement.remove()">✕</button>`;
+    row.style.cssText = 'border:1px solid var(--border);border-radius:8px;padding:8px';
+    row.innerHTML = `<div style="display:flex;gap:6px;align-items:center">
+        <select class="cons-open-pick" style="flex:1;min-width:260px" onchange="App._consOpeningPicked(this)">${this._consOpeningOptions(index)}</select>
+        <button class="btn btn-sm btn-outline" title="Remove" onclick="this.closest('.cons-open-line').remove();App._consOpeningTotal()">✕</button>
+      </div>
+      <div class="cons-open-branches" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:6px;margin-top:6px"></div>`;
     box.appendChild(row);
+    if (index !== '') this._consOpeningPicked(row.querySelector('.cons-open-pick'));
+    return row;
+  },
+
+  // Every location holding the chosen item, filled in with all it has.
+  _consOpeningPicked(sel) {
+    const row = sel.closest('.cons-open-line');
+    const g = this._consOpeningCands[sel.value];
+    const box = row.querySelector('.cons-open-branches');
+    box.innerHTML = g ? g.branches.map(b => `<label style="display:flex;align-items:center;gap:6px;margin:0;font-weight:400">
+        <span style="flex:1">${this.escapeAttr(b.branch_name)} <span style="color:var(--text-muted)">(${b.available})</span></span>
+        <input class="cons-open-qty" data-branch="${b.branch_id}" type="number" min="0" max="${b.available}" step="any" value="${b.available}" style="width:80px" oninput="App._consOpeningTotal()">
+      </label>`).join('') : '';
+    this._consOpeningTotal();
+  },
+
+  _consOpeningAddAll() {
+    const sup = document.getElementById('cons-open-supplier')?.value;
+    if (!sup) return;
+    const chosen = new Set([...document.querySelectorAll('.cons-open-pick')].map(s => s.value).filter(Boolean));
+    document.querySelectorAll('.cons-open-line').forEach(r => { if (!r.querySelector('.cons-open-pick').value) r.remove(); });
+    this._consOpeningCands.forEach((g, i) => { if (g.supplier_name === sup && !chosen.has(String(i))) this._consOpeningAddLine(String(i)); });
+  },
+
+  _consOpeningLines() {
+    const lines = [];
+    document.querySelectorAll('.cons-open-line').forEach(r => {
+      const g = this._consOpeningCands[r.querySelector('.cons-open-pick').value];
+      if (!g) return;
+      r.querySelectorAll('.cons-open-qty').forEach(inp => {
+        const qty = Number(inp.value) || 0;
+        if (qty > 0) lines.push({ agreement_id: g.agreement_id, product_id: g.product_id, branch_id: Number(inp.dataset.branch), qty });
+      });
+    });
+    return lines;
+  },
+
+  _consOpeningTotal() {
+    const el = document.getElementById('cons-open-total');
+    if (!el) return;
+    const lines = this._consOpeningLines();
+    const units = lines.reduce((s, l) => s + l.qty, 0);
+    el.textContent = lines.length ? `${units} unit${units === 1 ? '' : 's'} at ${lines.length} item location${lines.length === 1 ? '' : 's'}` : '';
   },
 
   async _consOpeningSave() {
-    const lines = [...document.querySelectorAll('.cons-open-line')].map(r => {
-      const c = this._consOpeningCands[r.querySelector('.cons-open-pick').value];
-      const qty = Number(r.querySelector('.cons-open-qty').value) || 0;
-      return c && qty ? { agreement_id: c.agreement_id, product_id: c.product_id, branch_id: c.branch_id, qty } : null;
-    }).filter(Boolean);
+    const lines = this._consOpeningLines();
     try {
       if (this._consOpeningAfter) {
-        if (!lines.length) { this.alert('Choose the agreement, item and branch and enter the quantity', 'warning'); return; }
+        if (!lines.length) { this.alert('Choose the agreement and item and enter the quantities', 'warning'); return; }
         const out = await this.api('POST', '/consignment/opening-stock', { lines, note: document.getElementById('cons-open-note').value });
         this.closeModal();
-        this.alert(`${out.recorded.length} line${out.recorded.length === 1 ? '' : 's'} recorded as the supplier's stock`, 'success');
+        const units = out.recorded.reduce((s, r) => s + (Number(r.qty) || 0), 0) || lines.reduce((s, l) => s + l.qty, 0);
+        this.alert(`${units} unit${units === 1 ? '' : 's'} recorded as the supplier's stock (${out.recorded.length} item location${out.recorded.length === 1 ? '' : 's'})`, 'success');
       } else {
         const out = await this.api('POST', '/consignment/go-live', { confirm: document.getElementById('cons-open-confirm').value.trim(), opening: lines });
         this.closeModal();

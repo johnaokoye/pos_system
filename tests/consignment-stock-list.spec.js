@@ -82,22 +82,30 @@ test('consignment items listed apart: stock tab filters and CSV, inventory badge
   expect(await page.evaluate(b => App.api('POST', '/consignment/opening-stock', b).then(() => 'accepted', e => e.message),
     { lines: [line(owned, 1), line(consigned, 5)], note: 'x' })).toMatch(/^Line 2:/);
   expect((await api(page, 'GET', `/products?search=${s}&consignment=1`)).map(p => p.id)).toEqual([consigned.id]); // line 1 rolled back
+  // The form: one line per item with every location holding it, filled in
+  // with all it has; Supplier + "Add all" puts each of its items on a line.
+  await api(page, 'PATCH', `/products/${owned.id}/stock`, { adjustment: 3, reason: 'owned', branch_id: other.id });
   await page.evaluate(() => App.renderConsignment('stock'));
   await page.click('button:has-text("+ Record supplier-owned stock")');
-  const pick = async (i, p, qty) => {
-    const row = page.locator('.cons-open-line').nth(i);
-    const value = await row.locator('.cons-open-pick option').filter({ hasText: `${p.name} · ${main.name}` }).getAttribute('value');
-    await row.locator('.cons-open-pick').selectOption(value);
-    await row.locator('.cons-open-qty').fill(String(qty));
-  };
-  await pick(0, owned, 2);
-  await page.click('.modal button:has-text("+ Add line")');
-  await pick(1, consigned, 1);
+  await page.locator('#cons-open-supplier').selectOption(`Listing Supplier ${s}`);
+  await page.click('#cons-open-add-all');
+  await expect(page.locator('.cons-open-line')).toHaveCount(2);
+  const lineFor = p => page.locator('.cons-open-line').filter({ has: page.locator('.cons-open-pick option:checked', { hasText: p.name }) });
+  const qty = (p, b) => lineFor(p).locator(`.cons-open-qty[data-branch="${b.id}"]`);
+  await expect(qty(owned, main)).toHaveValue('4');
+  await expect(qty(owned, other)).toHaveValue('3');
+  await expect(qty(consigned, main)).toHaveValue('1');
+  await expect(lineFor(consigned).locator('.cons-open-qty')).toHaveCount(1);
+  await expect(page.locator('#cons-open-total')).toHaveText('8 units at 3 item locations');
+  await qty(owned, main).fill('2');
+  await expect(page.locator('#cons-open-total')).toHaveText('6 units at 3 item locations');
   await page.fill('#cons-open-note', 'Delivery notes show both were left on consignment');
   await page.click('.modal-footer button:has-text("Record")');
-  await expect(page.locator('.alert-success', { hasText: '2 lines recorded' }).last()).toBeVisible();
+  await expect(page.locator('.alert-success', { hasText: '6 units recorded' }).last()).toBeVisible();
   const after = await api(page, 'GET', `/products?search=${s}&branch_id=${main.id}`);
   expect(after.map(p => [p.id, p.consignment_qty, p.stock_qty]).sort()).toEqual([[consigned.id, 4, 4], [owned.id, 2, 4]].sort());
+  expect((await api(page, 'GET', `/products?search=${s}&branch_id=${other.id}`)).find(p => p.id === owned.id).consignment_qty).toBe(3);
   const log = (await api(page, 'GET', '/consignment/opening-stock')).filter(o => o.agreement_id === a.id);
-  expect(log.map(o => [o.product_id, o.qty, o.note]).sort()).toEqual([[consigned.id, 1, 'Delivery notes show both were left on consignment'], [owned.id, 2, 'Delivery notes show both were left on consignment']].sort());
+  const note = 'Delivery notes show both were left on consignment';
+  expect(log.map(o => [o.product_id, o.branch_id, o.qty, o.note]).sort()).toEqual([[consigned.id, main.id, 1, note], [owned.id, main.id, 2, note], [owned.id, other.id, 3, note]].sort());
 });
