@@ -1170,6 +1170,86 @@ router.get('/supplier-item-sales', requirePermission('reports'), async (req, res
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Purchase orders by department and branch (Purchasing Reports). A PO's
+// department is the one on the purchase request it was converted from (POs
+// raised directly have none); its branch is the PO's. Base currency (a
+// foreign PO at its own rate).
+//   basis=ordered (default): POs ordered in the store-day range — approved
+//     on those days (or created, for one received before approval was
+//     required); cancelled/draft/rejected left out. Shows each PO's value,
+//     what's been received against it so far and what's still to come.
+//   basis=received: goods received in the range — each PO receipt (not
+//     reversed) by its received date, valued at the PO line's cost incl. GCT.
+// Filters: branch_id, department (name, or 'none'), supplier_id.
+const PO_DEPT_SQL = `(SELECT NULLIF(TRIM(pr.department), '') FROM purchase_requests pr WHERE pr.converted_to_po_id = po.id ORDER BY pr.id LIMIT 1)`;
+const PO_RATE_SQL = `(CASE WHEN po.currency IS NOT NULL AND po.currency <> '' THEN COALESCE(po.exchange_rate, 0) ELSE 1 END)`;
+router.get('/po-by-department', requirePermission('reports'), async (req, res) => {
+  try {
+    const s = /^\d{4}-\d{2}-\d{2}$/.test(req.query.start || '') ? req.query.start : storeDay(Date.now() - 30 * 86400000);
+    const e = /^\d{4}-\d{2}-\d{2}$/.test(req.query.end || '') ? req.query.end : storeToday();
+    const basis = req.query.basis === 'received' ? 'received' : 'ordered';
+    const { branch_id, department, supplier_id } = req.query;
+    const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
+    let rows;
+    if (basis === 'ordered') {
+      ({ rows } = await db.execute({ sql: `SELECT * FROM (
+          SELECT po.id AS po_id, po.po_number, po.status, ${sd('COALESCE(po.approved_at, po.created_at)')} AS day, po.branch_id, b.name AS branch_name,
+            po.supplier_id, s.name AS supplier_name, ${PO_DEPT_SQL} AS department, po.currency,
+            po.subtotal * ${PO_RATE_SQL} AS subtotal, po.tax_amount * ${PO_RATE_SQL} AS tax, po.total * ${PO_RATE_SQL} AS total,
+            ${PO_RATE_SQL} * (SELECT COALESCE(SUM(CASE WHEN i.quantity_ordered > 0 THEN COALESCE(i.quantity_received, 0) * (i.total + COALESCE(i.tax_amount, 0)) / i.quantity_ordered ELSE 0 END), 0)
+              FROM purchase_order_items i WHERE i.po_id = po.id) AS received
+          FROM purchase_orders po LEFT JOIN branches b ON b.id = po.branch_id LEFT JOIN suppliers s ON s.id = po.supplier_id
+          WHERE (po.status IN ('approved', 'partial', 'received') OR po.reinstated_from_status IS NOT NULL)
+        ) x WHERE day BETWEEN ? AND ? ORDER BY day, po_number`, args: [s, e] }));
+      rows = rows.map(r => ({ ...r, outstanding: r.status === 'received' && !r.received ? 0 : Math.max(0, r2(r.total - r.received)) }));
+    } else {
+      ({ rows } = await db.execute({ sql: `SELECT * FROM (
+          SELECT r.id AS receipt_id, r.receipt_number, po.id AS po_id, po.po_number, po.status, COALESCE(r.received_date, ${sd('r.received_at')}) AS day,
+            COALESCE(r.branch_id, po.branch_id) AS branch_id, b.name AS branch_name, po.supplier_id, s.name AS supplier_name, ${PO_DEPT_SQL} AS department, po.currency,
+            r.vendor_invoice_number,
+            ${PO_RATE_SQL} * (SELECT COALESCE(SUM(CASE WHEN i.quantity_ordered > 0 THEN ri.quantity * i.total / i.quantity_ordered ELSE ri.quantity * i.unit_cost END), 0)
+              FROM po_receipt_items ri JOIN purchase_order_items i ON i.id = ri.po_item_id WHERE ri.receipt_id = r.id) AS subtotal,
+            ${PO_RATE_SQL} * (SELECT COALESCE(SUM(CASE WHEN i.quantity_ordered > 0 THEN ri.quantity * COALESCE(i.tax_amount, 0) / i.quantity_ordered ELSE 0 END), 0)
+              FROM po_receipt_items ri JOIN purchase_order_items i ON i.id = ri.po_item_id WHERE ri.receipt_id = r.id) AS tax
+          FROM po_receipts r JOIN purchase_orders po ON po.id = r.po_id
+          LEFT JOIN branches b ON b.id = COALESCE(r.branch_id, po.branch_id) LEFT JOIN suppliers s ON s.id = po.supplier_id
+          WHERE r.status = 'received'
+        ) x WHERE day BETWEEN ? AND ? ORDER BY day, receipt_number`, args: [s, e] }));
+      rows = rows.map(r => ({ ...r, total: r2(r.subtotal + r.tax) }));
+    }
+    rows = rows.filter(r => (!branch_id || String(r.branch_id) === String(branch_id))
+      && (!department || (department === 'none' ? !r.department : String(r.department || '').toLowerCase() === String(department).toLowerCase()))
+      && (!supplier_id || String(r.supplier_id) === String(supplier_id)))
+      .map(r => ({ ...r, subtotal: r2(r.subtotal), tax: r2(r.tax), total: r2(r.total), ...(basis === 'ordered' ? { received: r2(r.received) } : {}) }));
+
+    const keys = basis === 'ordered' ? ['subtotal', 'tax', 'total', 'received', 'outstanding'] : ['subtotal', 'tax', 'total'];
+    const group = keyOf => {
+      const m = new Map();
+      for (const r of rows) {
+        const k = keyOf(r);
+        const g = m.get(k.key) || { ...k.fields, count: 0, pos: new Set(), ...Object.fromEntries(keys.map(x => [x, 0])) };
+        g.count++; g.pos.add(r.po_id);
+        for (const x of keys) g[x] += Number(r[x]) || 0;
+        m.set(k.key, g);
+      }
+      return [...m.values()].map(g => ({ ...g, pos: g.pos.size, ...Object.fromEntries(keys.map(x => [x, r2(g[x])])) })).sort((a, b) => b.total - a.total);
+    };
+    const dept = r => ({ key: r.department || '', fields: { department: r.department || null } });
+    const branch = r => ({ key: String(r.branch_id ?? ''), fields: { branch_id: r.branch_id, branch_name: r.branch_name || 'No branch' } });
+    const [summary] = group(() => ({ key: 'all', fields: {} }));
+    const { rows: deps } = await db.execute('SELECT name FROM pr_departments ORDER BY name COLLATE NOCASE');
+    res.json({
+      basis, start: s, end: e,
+      summary: summary || { count: 0, pos: 0, ...Object.fromEntries(keys.map(x => [x, 0])) },
+      by_department: group(dept),
+      by_branch: group(branch),
+      matrix: group(r => ({ key: `${r.department || ''}|${r.branch_id ?? ''}`, fields: { ...dept(r).fields, ...branch(r).fields } })),
+      rows,
+      departments: deps.map(d => d.name),
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Items sold — per-item units and sales over a period, net of returns, for
 // the Inventory Reports screen. Same sale/return line basis as
 // /supplier-item-sales (stock units; returns counted on the day processed;

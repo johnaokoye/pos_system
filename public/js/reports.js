@@ -68,7 +68,8 @@ Object.assign(App, {
   renderReportsPurchasing() {
     document.getElementById('content').innerHTML = `
       <div class="section-header"><h2>Purchasing Reports</h2></div>
-      ${this._reportButtonCard('Supplier Item Sales', "What each supplier's items sold — units, sales net of returns, cost and margin — by day, week, month, quarter or year, with a per-item breakdown for one supplier.", 'App.showSupplierItemSalesReport()')}`;
+      ${this._reportButtonCard('Supplier Item Sales', "What each supplier's items sold — units, sales net of returns, cost and margin — by day, week, month, quarter or year, with a per-item breakdown for one supplier.", 'App.showSupplierItemSalesReport()')}
+      ${this._reportButtonCard('Purchase Orders by Department', 'What each department and branch ordered — or received — over a period: PO value, GCT, received so far and still to come, with every PO or receipt listed.', 'App.showPoDepartmentReport()')}`;
   },
 
   renderReportsInventory() {
@@ -712,6 +713,99 @@ Object.assign(App, {
         </table></div>
       </div>` : ''}` : ''}
       <p style="font-size:11px;color:var(--text-muted);margin-top:10px">An item counts toward the supplier set on the product, or if none, the supplier of the latest PO it was on. Returns are counted on the day they were processed. Cost uses each item's current cost.</p>`;
+  },
+
+  // ─── Purchase Orders by Department (GET /reports/po-by-department) ──────
+  // Ordered = POs ordered in the range (received so far / still to come);
+  // Received = PO receipts in the range. Department = the PO's purchase request's.
+  async showPoDepartmentReport() {
+    const branches = await this.api('GET', '/branches').catch(() => []) || [];
+    const filters = `
+      ${this._reportDateRangeFilters('pod-start', 'pod-end')}
+      <select id="pod-basis" style="width:190px" title="Ordered: POs ordered in the range. Received: goods received in the range.">
+        <option value="ordered">Ordered in the range</option><option value="received">Received in the range</option>
+      </select>
+      <select id="pod-branch" style="width:160px"><option value="">All Branches</option>${this._reportBranchOptions(branches)}</select>
+      <select id="pod-dept" style="width:170px"><option value="">All Departments</option><option value="none">No department</option></select>`;
+    this._showReportModal('Purchase Orders by Department', filters, 'loadPoDepartmentReport');
+    document.querySelector('#rpt-modal-content')?.closest('.modal')?.style.setProperty('max-width', '1150px');
+  },
+
+  _podFilter(id, value) {
+    const sel = document.getElementById(id);
+    if (!sel) return;
+    if (![...sel.options].some(o => o.value === value)) sel.add(new Option(value, value));
+    sel.value = value;
+    this.loadPoDepartmentReport();
+  },
+
+  async loadPoDepartmentReport() {
+    const startEl = document.getElementById('pod-start');
+    if (!startEl) return;
+    const basis = document.getElementById('pod-basis').value;
+    const deptSel = document.getElementById('pod-dept');
+    const params = new URLSearchParams({ start: startEl.value, end: document.getElementById('pod-end').value, basis });
+    const branchId = document.getElementById('pod-branch').value, dept = deptSel.value;
+    if (branchId) params.set('branch_id', branchId);
+    if (dept) params.set('department', dept);
+    const content = document.getElementById('rpt-modal-content');
+    content.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
+    let d;
+    try { d = await this.api('GET', `/reports/po-by-department?${params}`); }
+    catch (e) { content.innerHTML = `<div class="empty-state"><p>${this.escapeAttr(e.message)}</p></div>`; return; }
+    if (!document.getElementById('rpt-modal-content')) return;
+    const esc = v => this.escapeAttr(v ?? '');
+    const names = [...new Set([...d.departments, ...d.by_department.map(r => r.department).filter(Boolean)])].sort((a, b) => a.localeCompare(b));
+    deptSel.innerHTML = `<option value="">All Departments</option><option value="none">No department</option>${names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('')}`;
+    if (dept && ![...deptSel.options].some(o => o.value === dept)) deptSel.add(new Option(dept, dept));
+    deptSel.value = dept;
+
+    const ordered = d.basis === 'ordered';
+    const deptName = n => n ? esc(n) : '<span style="color:var(--text-muted)">No department</span>';
+    const deptKey = n => n || 'none';
+    const money = n => this.fmt(n || 0);
+    const sum = d.summary;
+    const head = `<th style="text-align:right">${ordered ? 'POs' : 'Receipts'}</th>${ordered ? '' : '<th style="text-align:right">POs</th>'}<th style="text-align:right">Before GCT</th><th style="text-align:right">GCT</th><th style="text-align:right">Total</th>${ordered ? '<th style="text-align:right">Received so far</th><th style="text-align:right">Still to come</th>' : ''}`;
+    const cells = r => `<td style="text-align:right">${r.count}</td>${ordered ? '' : `<td style="text-align:right">${r.pos}</td>`}<td style="text-align:right">${money(r.subtotal)}</td><td style="text-align:right">${money(r.tax)}</td><td style="text-align:right" class="fw-600">${money(r.total)}</td>${ordered ? `<td style="text-align:right">${money(r.received)}</td><td style="text-align:right;${r.outstanding > 0 ? 'color:var(--warning)' : ''}">${money(r.outstanding)}</td>` : ''}`;
+    const branchesIn = d.by_branch.map(b => b).sort((a, b) => String(a.branch_name).localeCompare(String(b.branch_name)));
+    const cell = (dep, br) => d.matrix.find(m => (m.department || '') === (dep || '') && String(m.branch_id ?? '') === String(br ?? ''));
+    const scope = [branchId ? document.getElementById('pod-branch').selectedOptions[0]?.text : '', dept ? (dept === 'none' ? 'No department' : dept) : ''].filter(Boolean).join(' · ');
+
+    content.innerHTML = `
+      <div class="stats-grid" style="grid-template-columns:repeat(${ordered ? 4 : 3},1fr);margin-bottom:18px">
+        <div class="stat-card"><div class="stat-label">${ordered ? 'POs Ordered' : 'Receipts'}</div><div class="stat-value">${sum.count}</div><div class="stat-sub">${ordered ? `${this.fmtDate(d.start)} – ${this.fmtDate(d.end)}` : `on ${sum.pos} PO${sum.pos === 1 ? '' : 's'}`}${scope ? ` · ${esc(scope)}` : ''}</div></div>
+        <div class="stat-card blue"><div class="stat-label">${ordered ? 'Ordered' : 'Received'} (incl. GCT)</div><div class="stat-value" style="font-size:20px">${money(sum.total)}</div><div class="stat-sub">${money(sum.subtotal)} + ${money(sum.tax)} GCT</div></div>
+        ${ordered ? `<div class="stat-card green"><div class="stat-label">Received so far</div><div class="stat-value" style="font-size:20px">${money(sum.received)}</div></div>
+        <div class="stat-card orange"><div class="stat-label">Still to come</div><div class="stat-value" style="font-size:20px">${money(sum.outstanding)}</div></div>` : `<div class="stat-card green"><div class="stat-label">Departments</div><div class="stat-value">${d.by_department.length}</div><div class="stat-sub">${d.by_branch.length} branch${d.by_branch.length === 1 ? '' : 'es'}</div></div>`}
+      </div>
+      ${!d.rows.length ? `<div class="empty-state"><p>No purchase orders ${ordered ? 'ordered' : 'received'} in this range${scope ? ' for this filter' : ''}.</p></div>` : `
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">By Department</span><span style="font-size:12px;color:var(--text-muted)">Click a department to filter</span></div>
+        <div class="table-wrap"><table id="pod-by-dept"><thead><tr><th>Department</th>${head}</tr></thead>
+          <tbody>${d.by_department.map(r => `<tr style="cursor:pointer" onclick="App._podFilter('pod-dept', '${esc(deptKey(r.department))}')"><td class="fw-600">${deptName(r.department)}</td>${cells(r)}</tr>`).join('')}</tbody></table></div>
+      </div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">By Branch</span><span style="font-size:12px;color:var(--text-muted)">Click a branch to filter</span></div>
+        <div class="table-wrap"><table id="pod-by-branch"><thead><tr><th>Branch</th>${head}</tr></thead>
+          <tbody>${d.by_branch.map(r => `<tr style="cursor:pointer" onclick="App._podFilter('pod-branch', '${esc(r.branch_id ?? '')}')"><td class="fw-600">${esc(r.branch_name)}</td>${cells(r)}</tr>`).join('')}</tbody></table></div>
+      </div>
+      ${d.by_department.length > 1 && branchesIn.length > 1 ? `
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header"><span class="card-title">Department × Branch — ${ordered ? 'ordered' : 'received'} (incl. GCT)</span></div>
+        <div class="table-wrap" style="overflow-x:auto"><table><thead><tr><th>Department</th>${branchesIn.map(b => `<th style="text-align:right;white-space:nowrap">${esc(b.branch_name)}</th>`).join('')}<th style="text-align:right">Total</th></tr></thead>
+          <tbody>${d.by_department.map(r => `<tr><td class="fw-600">${deptName(r.department)}</td>${branchesIn.map(b => { const c = cell(r.department, b.branch_id); return `<td style="text-align:right${c ? '' : ';color:var(--text-muted)'}">${c ? money(c.total) : '—'}</td>`; }).join('')}<td style="text-align:right" class="fw-600">${money(r.total)}</td></tr>`).join('')}</tbody></table></div>
+      </div>` : ''}
+      <div class="card">
+        <div class="card-header"><span class="card-title">${ordered ? 'Purchase Orders' : 'Receipts'} (${d.rows.length})</span></div>
+        <div class="table-wrap"><table id="pod-rows"><thead><tr><th>${ordered ? 'Ordered' : 'Received'}</th>${ordered ? '' : '<th>Receipt</th>'}<th>PO #</th><th>Supplier</th><th>Branch</th><th>Department</th>${ordered ? '<th>Status</th>' : '<th>Invoice #</th>'}<th style="text-align:right">Before GCT</th><th style="text-align:right">GCT</th><th style="text-align:right">Total</th>${ordered ? '<th style="text-align:right">Received so far</th><th style="text-align:right">Still to come</th>' : ''}</tr></thead>
+          <tbody>${d.rows.map(r => `<tr><td style="white-space:nowrap">${this.fmtDate(r.day)}</td>${ordered ? '' : `<td style="font-family:monospace;font-size:12px">${esc(r.receipt_number)}</td>`}
+            <td class="fw-600">${esc(r.po_number)}${r.currency ? ` <span style="font-size:11px;color:var(--text-muted)">${esc(r.currency)}</span>` : ''}</td>
+            <td>${esc(r.supplier_name || '—')}</td><td>${esc(r.branch_name || '—')}</td><td>${deptName(r.department)}</td>
+            ${ordered ? `<td>${esc(r.status)}</td>` : `<td>${esc(r.vendor_invoice_number || '—')}</td>`}
+            <td style="text-align:right">${money(r.subtotal)}</td><td style="text-align:right">${money(r.tax)}</td><td style="text-align:right" class="fw-600">${money(r.total)}</td>
+            ${ordered ? `<td style="text-align:right">${money(r.received)}</td><td style="text-align:right">${money(r.outstanding)}</td>` : ''}</tr>`).join('')}</tbody></table></div>
+      </div>`}
+      <p style="font-size:11px;color:var(--text-muted);margin-top:10px">A PO's department is the one on the purchase request it was converted from; POs raised directly show as No department. ${ordered ? 'Ordered = approved on that day (cancelled, draft and rejected POs left out); received so far counts everything received against it to date.' : 'Received = each PO receipt by its received date (reversed receipts left out), valued at the PO line cost including GCT.'} Foreign-currency POs are shown in ${esc(this.settings?.currency || 'base currency')} at the PO's rate.</p>`;
   },
 
   // ─── Cash Drawer Variance Trend ─────────────────────────────────────────
