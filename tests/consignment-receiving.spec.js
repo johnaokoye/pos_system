@@ -77,11 +77,18 @@ test('agreement → Finance approval → order → two GRNs → supplier-owned s
 
   // The second delivery, through the screen, then approved.
   await page.evaluate(() => App.showSection('consignment'));
+  // Agreed cost in effect today shown (not the 2099 one); selling price set with the GRN.
+  expect((await api(page, 'GET', `/consignment/orders/${order.id}`)).items[0]).toMatchObject({ agreed_cost: 150, agreed_unit_cost: 150, sell_price: 250, can_set_price: true });
   await page.evaluate(id => App.viewConsOrder(id), order.id);
+  await expect(page.locator('.modal table')).toContainText('$150.00');
+  await expect(page.locator('.cg-price')).toHaveValue('250');
+  await page.locator('.cg-price').fill('265');
   await page.locator('.cg-qty').fill('4');
   await page.fill('#cg-note', `DN-${s}-2`);
   await page.getByRole('button', { name: 'Enter GRN' }).click();
   await expect(page.locator('.modal-title')).toContainText('Consignment GRN CGRN-');
+  await expect(page.locator('.modal table')).toContainText('$265.00');
+  expect((await api(page, 'GET', `/products/${item.id}`)).price).toBe(265);
   await page.getByRole('button', { name: 'Approve GRN' }).click();
   await expect(page.locator('.modal')).toContainText('Approved');
   expect(await branchStock(page, 1, item.id)).toBe(13);

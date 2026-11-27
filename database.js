@@ -3797,6 +3797,8 @@ async function _init() {
     'ALTER TABLE consignment_order_items ADD COLUMN units_per REAL NOT NULL DEFAULT 1',
     'ALTER TABLE consignment_order_items ADD COLUMN order_qty REAL',
     'ALTER TABLE consignment_orders ADD COLUMN source_po_id INTEGER REFERENCES purchase_orders(id)',
+    'ALTER TABLE consignment_grn_items ADD COLUMN price_before REAL',
+    'ALTER TABLE consignment_grn_items ADD COLUMN price_set REAL',
     'ALTER TABLE direct_receipts ADD COLUMN po_id INTEGER REFERENCES purchase_orders(id)',
     'ALTER TABLE direct_receipts ADD COLUMN po_linked_by INTEGER REFERENCES employees(id)',
     'ALTER TABLE direct_receipts ADD COLUMN po_linked_at DATETIME',

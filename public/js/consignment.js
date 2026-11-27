@@ -375,15 +375,22 @@ Object.assign(App, {
     try { o = await this.api('GET', `/consignment/orders/${id}`); } catch (e) { this.alert(e.message, 'error'); return; }
     const esc = x => this.escapeAttr(x ?? '');
     const canReceive = this.can('consignment_receive') && ['open', 'partial'].includes(o.status);
+    const canPrice = canReceive && this.can('inventory_edit');
+    const agreed = i => i.agreed_unit_cost == null ? '<span style="color:var(--text-muted)" title="No agreed cost in effect today">—</span>'
+      : `<span title="Agreed cost per ${esc(i.unit_label || 'Each')} from ${this.fmtDate(i.agreed_cost_from)} (set on the agreement)">${this.fmt(i.agreed_unit_cost)}</span>`;
+    const priceCell = i => !canReceive ? '' : `<td style="text-align:right">${canPrice && i.can_set_price
+      ? `<input class="cg-price" data-line="${i.id}" data-was="${i.sell_price ?? ''}" type="number" min="0" step="0.01" style="width:95px;text-align:right" value="${i.sell_price ?? ''}" placeholder="—" ${i.quantity_left > 0 ? '' : 'disabled'}>`
+      : (i.sell_price != null ? this.fmt(i.sell_price) : '—')}</td>`;
     this.showModal(`
-      <div class="modal" style="max-width:720px">
+      <div class="modal" style="max-width:920px">
         <div class="modal-header"><span class="modal-title">Consignment Order ${o.order_number}</span><div style="display:flex;gap:8px;align-items:center">${this._consBadge(o.status)}<button class="modal-close">✕</button></div></div>
         <div class="modal-body" style="font-size:13px">
           <div style="margin-bottom:10px"><strong>${esc(o.supplier_name)}</strong> · ${o.agreement_number} · to ${esc(o.branch_name)}${o.expected_date ? ` · expected ${this.fmtDate(o.expected_date)}` : ''}</div>
-          <table style="width:100%"><thead><tr style="color:var(--text-muted);font-size:12px"><th style="text-align:left">Item</th><th style="text-align:left">Unit</th><th style="text-align:right">Ordered</th><th style="text-align:right">Received</th><th style="text-align:right">Awaiting approval</th><th style="text-align:right">Left</th>${canReceive ? '<th style="text-align:right;width:110px">Receive now</th>' : ''}</tr></thead>
+          <table style="width:100%"><thead><tr style="color:var(--text-muted);font-size:12px"><th style="text-align:left">Item</th><th style="text-align:left">Unit</th><th style="text-align:right" title="The supplier's agreed cost in effect today — set on the agreement, not here">Agreed cost</th><th style="text-align:right">Ordered</th><th style="text-align:right">Received</th><th style="text-align:right">Awaiting approval</th><th style="text-align:right">Left</th>${canReceive ? '<th style="text-align:right;width:110px">Receive now</th><th style="text-align:right;width:110px" title="Your price to customers for this unit">Selling price</th>' : ''}</tr></thead>
             <tbody>${o.items.map(i => `<tr style="border-top:1px solid var(--border)"><td style="padding:5px 0">${esc(i.product_name)}</td><td>${esc(i.unit_label || 'Each')}${Number(i.units_per) > 1 ? `<div style="font-size:11px;color:var(--text-muted)">${i.quantity_ordered} ${esc(i.stock_unit)} ordered</div>` : ''}</td>
-              <td style="text-align:right">${i.ordered_units}</td><td style="text-align:right">${i.received_units}</td><td style="text-align:right">${i.pending_units || 0}</td><td style="text-align:right" class="fw-600">${i.left_units}</td>
-              ${canReceive ? `<td style="text-align:right"><input class="cg-qty" data-line="${i.id}" type="number" min="0" max="${i.left_units}" step="${Number(i.units_per) > 1 ? 'any' : '1'}" style="width:90px;text-align:right" placeholder="0" ${i.quantity_left > 0 ? '' : 'disabled'}></td>` : ''}</tr>`).join('')}</tbody></table>
+              <td style="text-align:right">${agreed(i)}</td><td style="text-align:right">${i.ordered_units}</td><td style="text-align:right">${i.received_units}</td><td style="text-align:right">${i.pending_units || 0}</td><td style="text-align:right" class="fw-600">${i.left_units}</td>
+              ${canReceive ? `<td style="text-align:right"><input class="cg-qty" data-line="${i.id}" type="number" min="0" max="${i.left_units}" step="${Number(i.units_per) > 1 ? 'any' : '1'}" style="width:90px;text-align:right" placeholder="0" ${i.quantity_left > 0 ? '' : 'disabled'}></td>` : ''}${priceCell(i)}</tr>`).join('')}</tbody></table>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:4px">Agreed cost is the supplier's price on ${o.agreement_number}, in effect today — what's owed is worked out at that cost when items sell; change it on the agreement.${canReceive ? ` Selling price is your shelf price${canPrice ? ' — a change on a line you receive is saved with the GRN' : ' (changing it needs Edit Inventory)'}.` : ''}</div>
           ${o.items.some(i => Number(i.units_per) > 1) ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px">Quantities are in each line's unit; stock goes on hand in the item's stock unit.</div>` : ''}
           ${canReceive ? `<div class="input-row" style="margin-top:10px"><div class="form-group"><label>Supplier delivery note # *</label><input id="cg-note"></div><div class="form-group"><label>Notes</label><input id="cg-notes"></div></div>
             <button class="btn btn-primary btn-sm" onclick="App._consReceive(${o.id})">Enter GRN</button>
@@ -394,7 +401,11 @@ Object.assign(App, {
       </div>`);
   },
   async _consReceive(orderId) {
-    const items = [...document.querySelectorAll('.cg-qty')].map(i => ({ order_item_id: i.dataset.line, unit_quantity: parseFloat(i.value) || 0 })).filter(i => i.unit_quantity > 0);
+    const items = [...document.querySelectorAll('.cg-qty')].map(i => {
+      const price = document.querySelector(`.cg-price[data-line="${i.dataset.line}"]`);
+      const changed = price && price.value !== '' && price.value !== price.dataset.was;
+      return { order_item_id: i.dataset.line, unit_quantity: parseFloat(i.value) || 0, ...(changed ? { selling_price: parseFloat(price.value) } : {}) };
+    }).filter(i => i.unit_quantity > 0);
     try {
       const g = await this.api('POST', `/consignment/orders/${orderId}/grns`, { delivery_note_number: document.getElementById('cg-note').value, notes: document.getElementById('cg-notes').value, items });
       this.alert(`${g.grn_number} entered — waiting for approval`, 'success');
@@ -429,8 +440,8 @@ Object.assign(App, {
           <div class="two-col" style="margin-bottom:10px"><div><strong>Supplier:</strong> ${esc(g.supplier_name)}<br><strong>Agreement:</strong> ${g.agreement_number}<br><strong>Order:</strong> ${g.order_number}</div>
             <div><strong>Delivery note:</strong> ${esc(g.delivery_note_number)}<br><strong>Branch:</strong> ${esc(g.branch_name)}<br><strong>Received by:</strong> ${esc(g.received_by_name || '—')} · ${this.fmtDateTime(g.received_at)}
               ${g.approved_at ? `<br><strong>Approved by:</strong> ${esc(g.approved_by_name)} · ${this.fmtDateTime(g.approved_at)}` : ''}${g.rejected_at ? `<br><strong>Rejected by:</strong> ${esc(g.rejected_by_name)}: ${esc(g.rejection_reason)}` : ''}</div></div>
-          <table style="width:100%"><thead><tr style="color:var(--text-muted);font-size:12px"><th style="text-align:left">Item</th><th style="text-align:left">Unit</th><th style="text-align:right">Quantity</th><th style="text-align:right">Stock units</th></tr></thead>
-            <tbody>${g.items.map(i => `<tr style="border-top:1px solid var(--border)"><td style="padding:5px 0">${esc(i.product_name)}</td><td>${esc(i.unit_label || 'Each')}</td><td style="text-align:right" class="fw-600">${i.unit_quantity ?? i.quantity}</td><td style="text-align:right">${i.quantity} ${esc(i.stock_unit || '')}</td></tr>`).join('')}</tbody></table>
+          <table style="width:100%"><thead><tr style="color:var(--text-muted);font-size:12px"><th style="text-align:left">Item</th><th style="text-align:left">Unit</th><th style="text-align:right">Quantity</th><th style="text-align:right">Stock units</th>${g.items.some(i => i.price_set != null) ? '<th style="text-align:right">Selling price set</th>' : ''}</tr></thead>
+            <tbody>${g.items.map(i => `<tr style="border-top:1px solid var(--border)"><td style="padding:5px 0">${esc(i.product_name)}</td><td>${esc(i.unit_label || 'Each')}</td><td style="text-align:right" class="fw-600">${i.unit_quantity ?? i.quantity}</td><td style="text-align:right">${i.quantity} ${esc(i.stock_unit || '')}</td>${g.items.some(x => x.price_set != null) ? `<td style="text-align:right">${i.price_set != null ? `${i.price_before != null ? `<span style="color:var(--text-muted);text-decoration:line-through">${this.fmt(i.price_before)}</span> ` : ''}${this.fmt(i.price_set)}` : ''}</td>` : ''}</tr>`).join('')}</tbody></table>
           ${g.notes ? `<div style="margin-top:8px">${esc(g.notes)}</div>` : ''}
           ${canApprove ? '<div style="font-size:12px;color:var(--text-muted);margin-top:8px">Approving puts this stock on hand at the branch, owned by the supplier, and saleable at the POS.</div>' : ''}
         </div>

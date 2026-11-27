@@ -358,11 +358,29 @@ async function loadOrder(executor, id) {
   if (!o) return null;
   const { rows: items } = await executor.execute({
     sql: `SELECT oi.*, p.name AS product_name, p.sku, ${BASE_UNIT_SQL} AS base_unit_name,
+            (oi.uom_id IS NULL OR oi.uom_id = p.base_unit_id) AS base_line, p.price AS product_price,
+            (SELECT pu.price FROM product_units pu WHERE pu.product_id = p.id AND pu.unit_id = oi.uom_id) AS unit_price_alt,
+            EXISTS (SELECT 1 FROM product_units pu WHERE pu.product_id = p.id AND pu.unit_id = oi.uom_id) AS has_unit_row,
             (SELECT COALESCE(SUM(gi.quantity), 0) FROM consignment_grn_items gi JOIN consignment_grns g ON g.id = gi.grn_id WHERE gi.order_item_id = oi.id AND g.status = 'pending') AS quantity_pending
           FROM consignment_order_items oi JOIN products p ON p.id = oi.product_id WHERE oi.order_id = ? ORDER BY oi.id`,
     args: [o.id],
   });
   // Quantities are in stock units; the *_units figures are in the line's unit.
+  // The agreed cost in effect today (per stock unit, and per the line's
+  // unit) — shown when receiving, never entered there (A8) — and the line
+  // unit's current selling price (null = none set; can_set_price false =
+  // the unit isn't one the item is sold in).
+  const day = storeToday();
+  for (const i of items) {
+    const c = await costOn(executor, o.agreement_id, i.product_id, day);
+    i.agreed_cost = c ? c.cost : null;
+    i.agreed_cost_from = c ? c.effective_from : null;
+    i.agreed_unit_cost = c ? Math.round(c.cost * (Number(i.units_per) || 1) * 10000) / 10000 : null;
+    const base = !!Number(i.base_line);
+    i.can_set_price = base || !!Number(i.has_unit_row);
+    i.sell_price = base ? (i.product_price == null ? null : Number(i.product_price)) : (i.unit_price_alt == null ? null : Number(i.unit_price_alt));
+    delete i.base_line; delete i.product_price; delete i.unit_price_alt; delete i.has_unit_row;
+  }
   o.items = items.map(i => {
     const per = Number(i.units_per) || 1, left = round3(i.quantity_ordered - i.quantity_received - i.quantity_pending);
     return { ...i, quantity_left: left, unit_label: unitLabelOf(i.purchase_unit, per, i.base_unit_name), stock_unit: i.base_unit_name || 'Each',
@@ -500,7 +518,7 @@ router.post('/orders/:id/grns', requirePermission('consignment_receive'), async 
     const lines = (Array.isArray(req.body.items) ? req.body.items : []).map(i => {
       const it = o.items.find(x => Number(x.id) === Number(i.order_item_id));
       const quantity = i.unit_quantity != null && i.unit_quantity !== '' && it ? stockUnits(i.unit_quantity, it.units_per) : round3(i.quantity);
-      return { order_item_id: Number(i.order_item_id), quantity };
+      return { order_item_id: Number(i.order_item_id), quantity, selling_price: i.selling_price };
     }).filter(i => i.quantity > 0);
     if (!lines.length) throw err(400, 'Enter the quantity received for at least one item');
     for (const l of lines) {
@@ -508,6 +526,19 @@ router.post('/orders/:id/grns', requirePermission('consignment_receive'), async 
       if (!it) throw err(400, "A line isn't on this order");
       if (l.quantity - it.quantity_left > 0.0005) throw err(400, `Only ${it.quantity_left} of ${it.product_name} is left to receive on ${o.order_number}`);
       l.product_id = it.product_id;
+      // A new selling price for the line's unit (the shelf price — not the
+      // supplier's cost, which is the agreement's): set now, Edit Inventory only.
+      if (l.selling_price !== undefined && l.selling_price !== null && l.selling_price !== '') {
+        const price = Math.round(Number(l.selling_price) * 100) / 100;
+        if (!(price >= 0)) throw err(400, `Enter a valid selling price for ${it.product_name}`);
+        if (!it.can_set_price) throw err(400, `${it.product_name} isn't sold by the ${it.unit_label || 'unit'} — set its price on the item`);
+        if (it.sell_price == null || Math.abs(price - it.sell_price) >= 0.005) {
+          if (!can(req.employee?.permissions, 'inventory_edit')) throw err(403, 'Changing selling prices needs Edit Inventory permission');
+          l.price_before = it.sell_price;
+          l.price_set = price;
+          l.uom_id = it.uom_id;
+        }
+      }
     }
     const number = await nextNumber(tx, 'consignment_grns', 'grn_number', 'CGRN-', 6);
     const r = await tx.execute({
@@ -515,7 +546,14 @@ router.post('/orders/:id/grns', requirePermission('consignment_receive'), async 
       args: [number, o.id, o.agreement_id, o.supplier_id, o.branch_id, note, String(req.body.notes || '').trim() || null, req.employee?.id || null],
     });
     const id = Number(r.lastInsertRowid);
-    for (const l of lines) await tx.execute({ sql: 'INSERT INTO consignment_grn_items (grn_id, order_item_id, product_id, quantity) VALUES (?,?,?,?)', args: [id, l.order_item_id, l.product_id, l.quantity] });
+    for (const l of lines) {
+      await tx.execute({ sql: 'INSERT INTO consignment_grn_items (grn_id, order_item_id, product_id, quantity, price_before, price_set) VALUES (?,?,?,?,?,?)', args: [id, l.order_item_id, l.product_id, l.quantity, l.price_set != null ? l.price_before : null, l.price_set ?? null] });
+      if (l.price_set != null) {
+        const { rows: [p] } = await tx.execute({ sql: 'SELECT base_unit_id FROM products WHERE id = ?', args: [l.product_id] });
+        if (l.uom_id == null || (p && l.uom_id === p.base_unit_id)) await tx.execute({ sql: 'UPDATE products SET price = ? WHERE id = ?', args: [l.price_set, l.product_id] });
+        else await tx.execute({ sql: 'UPDATE product_units SET price = ? WHERE product_id = ? AND unit_id = ?', args: [l.price_set, l.product_id, l.uom_id] });
+      }
+    }
     await tx.commit();
     committed = true;
     res.status(201).json(await loadGrn(db, id));
