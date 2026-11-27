@@ -361,8 +361,11 @@ async function loadOrder(executor, id) {
             (oi.uom_id IS NULL OR oi.uom_id = p.base_unit_id) AS base_line, p.price AS product_price,
             (SELECT pu.price FROM product_units pu WHERE pu.product_id = p.id AND pu.unit_id = oi.uom_id) AS unit_price_alt,
             EXISTS (SELECT 1 FROM product_units pu WHERE pu.product_id = p.id AND pu.unit_id = oi.uom_id) AS has_unit_row,
-            (SELECT COALESCE(SUM(gi.quantity), 0) FROM consignment_grn_items gi JOIN consignment_grns g ON g.id = gi.grn_id WHERE gi.order_item_id = oi.id AND g.status = 'pending') AS quantity_pending
-          FROM consignment_order_items oi JOIN products p ON p.id = oi.product_id WHERE oi.order_id = ? ORDER BY oi.id`,
+            (SELECT COALESCE(SUM(gi.quantity), 0) FROM consignment_grn_items gi JOIN consignment_grns g ON g.id = gi.grn_id WHERE gi.order_item_id = oi.id AND g.status = 'pending') AS quantity_pending,
+            (SELECT op.name FROM consignment_order_items o2 JOIN products op ON op.id = o2.product_id WHERE o2.id = oi.substitute_for_item_id) AS substitute_for_name,
+            (SELECT g.grn_number FROM consignment_grns g WHERE g.id = oi.substitute_grn_id) AS substitute_grn_number
+          FROM consignment_order_items oi JOIN products p ON p.id = oi.product_id
+          WHERE oi.order_id = ? AND NOT (oi.substitute_for_item_id IS NOT NULL AND oi.quantity_ordered <= 0) ORDER BY oi.id`,
     args: [o.id],
   });
   // Quantities are in stock units; the *_units figures are in the line's unit.
@@ -384,6 +387,7 @@ async function loadOrder(executor, id) {
   o.items = items.map(i => {
     const per = Number(i.units_per) || 1, left = round3(i.quantity_ordered - i.quantity_received - i.quantity_pending);
     return { ...i, quantity_left: left, unit_label: unitLabelOf(i.purchase_unit, per, i.base_unit_name), stock_unit: i.base_unit_name || 'Each',
+      substituted_units: round3((Number(i.quantity_substituted) || 0) / per),
       ordered_units: i.order_qty ?? round3(i.quantity_ordered / per), received_units: round3(i.quantity_received / per), pending_units: round3(i.quantity_pending / per), left_units: round3(left / per) };
   });
   const { rows: grns } = await executor.execute({ sql: 'SELECT id, grn_number, delivery_note_number, status, received_at, approved_at FROM consignment_grns WHERE order_id = ? ORDER BY id', args: [o.id] });
@@ -476,8 +480,12 @@ const GRN_SELECT = `SELECT g.*, o.order_number, a.agreement_number, s.name AS su
 async function loadGrn(executor, id) {
   const { rows: [g] } = await executor.execute({ sql: `${GRN_SELECT} WHERE g.id = ?`, args: [id] });
   if (!g) return null;
-  const { rows: items } = await executor.execute({ sql: `SELECT gi.*, p.name AS product_name, p.sku, oi.purchase_unit, oi.units_per, ${BASE_UNIT_SQL} AS base_unit_name
-      FROM consignment_grn_items gi JOIN products p ON p.id = gi.product_id LEFT JOIN consignment_order_items oi ON oi.id = gi.order_item_id WHERE gi.grn_id = ? ORDER BY gi.id`, args: [g.id] });
+  const { rows: items } = await executor.execute({ sql: `SELECT gi.*, p.name AS product_name, p.sku, oi.purchase_unit, oi.units_per, ${BASE_UNIT_SQL} AS base_unit_name,
+        o2.product_id AS substitute_for_product_id, sp.name AS substitute_for_name, sp.sku AS substitute_for_sku,
+        CASE WHEN o2.id IS NULL THEN 0 ELSE NOT EXISTS (SELECT 1 FROM consignment_agreement_items ai WHERE ai.agreement_id = (SELECT g2.agreement_id FROM consignment_grns g2 WHERE g2.id = gi.grn_id) AND ai.product_id = gi.product_id) END AS new_to_agreement,
+        (SELECT ai.added_from_grn_id FROM consignment_agreement_items ai WHERE ai.agreement_id = (SELECT g2.agreement_id FROM consignment_grns g2 WHERE g2.id = gi.grn_id) AND ai.product_id = gi.product_id) = gi.grn_id AS added_to_agreement
+      FROM consignment_grn_items gi JOIN products p ON p.id = gi.product_id LEFT JOIN consignment_order_items oi ON oi.id = gi.order_item_id
+      LEFT JOIN consignment_order_items o2 ON o2.id = oi.substitute_for_item_id LEFT JOIN products sp ON sp.id = o2.product_id WHERE gi.grn_id = ? ORDER BY gi.id`, args: [g.id] });
   g.items = items.map(i => ({ ...i, unit_label: unitLabelOf(i.purchase_unit, i.units_per, i.base_unit_name), stock_unit: i.base_unit_name || 'Each', unit_quantity: round3(i.quantity / (Number(i.units_per) || 1)) }));
   return g;
 }
@@ -520,7 +528,31 @@ router.post('/orders/:id/grns', requirePermission('consignment_receive'), async 
       const quantity = i.unit_quantity != null && i.unit_quantity !== '' && it ? stockUnits(i.unit_quantity, it.units_per) : round3(i.quantity);
       return { order_item_id: Number(i.order_item_id), quantity, selling_price: i.selling_price };
     }).filter(i => i.quantity > 0);
-    if (!lines.length) throw err(400, 'Enter the quantity received for at least one item');
+    // Substitutes (like PO receiving): another item the supplier sent in place
+    // of part of an order line — { order_item_id, product_id, unit_quantity }
+    // in the original line's unit. Each becomes its own order line, taking
+    // that quantity off the original; an item not on the agreement is added to
+    // it when the GRN is approved, at the original's agreed cost.
+    const subs = [];
+    for (const sb of (Array.isArray(req.body.substitutes) ? req.body.substitutes : [])) {
+      const uq = Number(sb.unit_quantity);
+      if (!(uq > 0)) continue;
+      const orig = o.items.find(x => Number(x.id) === Number(sb.order_item_id));
+      if (!orig) throw err(400, "A substitute's line isn't on this order");
+      const { rows: [p] } = await tx.execute({ sql: `SELECT p.id, p.name, p.active, p.is_service, p.is_rental,
+          (SELECT COUNT(*) FROM product_variations v WHERE v.product_id = p.id AND v.active = 1) AS has_variations FROM products p WHERE p.id = ?`, args: [sb.product_id || 0] });
+      if (!p) throw err(400, `Pick the item sent instead of ${orig.product_name}`);
+      if (Number(p.id) === Number(orig.product_id)) throw err(400, `${p.name} is the item ordered — enter it as received, not as a substitute`);
+      if (p.active === 0 || p.is_service || p.is_rental || Number(p.has_variations) > 0) throw err(400, `${p.name} isn't a stocked retail item, so it can't be received as a substitute`);
+      const { rows: [onAg] } = await tx.execute({ sql: 'SELECT active FROM consignment_agreement_items WHERE agreement_id = ? AND product_id = ?', args: [o.agreement_id, p.id] });
+      if (onAg && !Number(onAg.active)) throw err(400, `${p.name} was taken off ${o.agreement_number} — it can't come in on it as a substitute`);
+      subs.push({ orig, product: p, unit_quantity: round3(uq), quantity: stockUnits(uq, orig.units_per) });
+    }
+    if (!lines.length && !subs.length) throw err(400, 'Enter the quantity received for at least one item');
+    for (const it of o.items) {
+      const here = lines.filter(l => l.order_item_id === Number(it.id)).reduce((t, l) => t + l.quantity, 0) + subs.filter(x => x.orig === it).reduce((t, x) => t + x.quantity, 0);
+      if (here - it.quantity_left > 0.0005) throw err(400, `Only ${it.left_units} ${it.unit_label || ''} of ${it.product_name} is left to receive on ${o.order_number} (received + substitutes)`.replace(/ {2}/g, ' '));
+    }
     for (const l of lines) {
       const it = o.items.find(i => Number(i.id) === l.order_item_id);
       if (!it) throw err(400, "A line isn't on this order");
@@ -546,6 +578,14 @@ router.post('/orders/:id/grns', requirePermission('consignment_receive'), async 
       args: [number, o.id, o.agreement_id, o.supplier_id, o.branch_id, note, String(req.body.notes || '').trim() || null, req.employee?.id || null],
     });
     const id = Number(r.lastInsertRowid);
+    for (const sb of subs) {
+      const per = Number(sb.orig.units_per) || 1;
+      const ins = await tx.execute({ sql: `INSERT INTO consignment_order_items (order_id, product_id, quantity_ordered, uom_id, purchase_unit, units_per, order_qty, substitute_for_item_id, substitute_grn_id)
+          VALUES (?,?,?,?,?,?,?,?,?)`, args: [o.id, sb.product.id, sb.quantity, sb.orig.uom_id ?? null, sb.orig.purchase_unit || null, per, sb.unit_quantity, sb.orig.id, id] });
+      await tx.execute({ sql: `UPDATE consignment_order_items SET quantity_ordered = ROUND(quantity_ordered - ?, 3), order_qty = CASE WHEN order_qty IS NULL THEN NULL ELSE ROUND(order_qty - ?, 3) END,
+          quantity_substituted = ROUND(COALESCE(quantity_substituted, 0) + ?, 3) WHERE id = ?`, args: [sb.quantity, sb.unit_quantity, sb.quantity, sb.orig.id] });
+      lines.push({ order_item_id: Number(ins.lastInsertRowid), product_id: sb.product.id, quantity: sb.quantity });
+    }
     for (const l of lines) {
       await tx.execute({ sql: 'INSERT INTO consignment_grn_items (grn_id, order_item_id, product_id, quantity, price_before, price_set) VALUES (?,?,?,?,?,?)', args: [id, l.order_item_id, l.product_id, l.quantity, l.price_set != null ? l.price_before : null, l.price_set ?? null] });
       if (l.price_set != null) {
@@ -590,6 +630,15 @@ router.post('/grns/:id/approve', requirePermission('consignment_grn_approve'), a
       await syncBinQty(tx, l.product_id, g.branch_id, qty);
       await tx.execute({ sql: 'INSERT INTO stock_movements (product_id, branch_id, quantity_change, type, reference, reason) VALUES (?,?,?,?,?,?)',
         args: [l.product_id, g.branch_id, qty, 'consignment_received', g.grn_number, `Consignment from ${g.supplier_name} (${g.agreement_number}), delivery note ${g.delivery_note_number}`] });
+      // A substitute not on the agreement joins it now, at the original item's agreed cost.
+      if (l.substitute_for_product_id && Number(l.new_to_agreement)) {
+        const oc = await costOn(tx, g.agreement_id, l.substitute_for_product_id, today);
+        if (!oc) throw err(400, `${l.substitute_for_name} has no agreed cost in effect today, so ${l.product_name} (sent instead) can't be added to ${g.agreement_number} — add the cost on the agreement first`);
+        const { rows: [oa] } = await tx.execute({ sql: 'SELECT uom_id, purchase_unit, units_per FROM consignment_agreement_items WHERE agreement_id = ? AND product_id = ?', args: [g.agreement_id, l.substitute_for_product_id] });
+        const ai = await tx.execute({ sql: `INSERT INTO consignment_agreement_items (agreement_id, product_id, active, uom_id, purchase_unit, units_per, added_from_grn_id, added_by, added_at)
+            VALUES (?,?,1,?,?,?,?,?,CURRENT_TIMESTAMP)`, args: [g.agreement_id, l.product_id, oa?.uom_id ?? null, oa?.purchase_unit || null, Number(oa?.units_per) || 1, g.id, req.employee?.id || null] });
+        await tx.execute({ sql: 'INSERT INTO consignment_agreement_costs (agreement_item_id, cost, effective_from, created_by) VALUES (?,?,?,?)', args: [Number(ai.lastInsertRowid), oc.cost, today, req.employee?.id || null] });
+      }
       const c = await costOn(tx, g.agreement_id, l.product_id, today);
       await addLot(tx, { product_id: l.product_id, branch_id: g.branch_id, owner: 'consignment', supplier_id: g.supplier_id, agreement_id: g.agreement_id,
         source_type: 'consignment_grn', source_id: g.id, source_number: g.grn_number, qty, unit_cost: c ? c.cost : null, employee_id: req.employee?.id || null });
@@ -611,8 +660,19 @@ router.post('/grns/:id/reject', requirePermission('consignment_grn_approve'), as
   try {
     const reason = String(req.body.reason || '').trim();
     if (!reason) return res.status(400).json({ error: 'Give the reason' });
-    const r = await db.execute({ sql: "UPDATE consignment_grns SET status = 'rejected', rejected_by = ?, rejected_at = CURRENT_TIMESTAMP, rejection_reason = ? WHERE id = ? AND status = 'pending'", args: [req.employee?.id || null, reason, req.params.id] });
-    if (!r.rowsAffected) return res.status(400).json({ error: "This GRN isn't waiting for approval" });
+    const tx = await db.transaction('write');
+    try {
+      const r = await tx.execute({ sql: "UPDATE consignment_grns SET status = 'rejected', rejected_by = ?, rejected_at = CURRENT_TIMESTAMP, rejection_reason = ? WHERE id = ? AND status = 'pending'", args: [req.employee?.id || null, reason, req.params.id] });
+      if (!r.rowsAffected) { await tx.rollback(); return res.status(400).json({ error: "This GRN isn't waiting for approval" }); }
+      // Substitutes on it go back onto the lines they came off.
+      const { rows: subs } = await tx.execute({ sql: 'SELECT * FROM consignment_order_items WHERE substitute_grn_id = ? AND quantity_ordered > 0', args: [req.params.id] });
+      for (const sb of subs) {
+        await tx.execute({ sql: `UPDATE consignment_order_items SET quantity_ordered = ROUND(quantity_ordered + ?, 3), order_qty = CASE WHEN order_qty IS NULL THEN NULL ELSE ROUND(order_qty + ?, 3) END,
+            quantity_substituted = MAX(0, ROUND(COALESCE(quantity_substituted, 0) - ?, 3)) WHERE id = ?`, args: [sb.quantity_ordered, Number(sb.order_qty) || 0, sb.quantity_ordered, sb.substitute_for_item_id] });
+        await tx.execute({ sql: 'UPDATE consignment_order_items SET quantity_ordered = 0, order_qty = 0 WHERE id = ?', args: [sb.id] });
+      }
+      await tx.commit();
+    } catch (e) { await tx.rollback().catch(() => {}); throw e; }
     res.json(await loadGrn(db, req.params.id));
   } catch (e) { send(res, e); }
 });

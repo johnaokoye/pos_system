@@ -375,6 +375,9 @@ Object.assign(App, {
     try { o = await this.api('GET', `/consignment/orders/${id}`); } catch (e) { this.alert(e.message, 'error'); return; }
     const esc = x => this.escapeAttr(x ?? '');
     const canReceive = this.can('consignment_receive') && ['open', 'partial'].includes(o.status);
+    this._cgOrder = o;
+    this._cgSubs = [];
+    const nameCell = i => `${esc(i.product_name)}${i.substitute_for_name ? `<div style="font-size:11px;color:#b45309">↳ sent instead of ${esc(i.substitute_for_name)}${i.substitute_grn_number ? ` (${esc(i.substitute_grn_number)})` : ''}</div>` : ''}${i.substituted_units > 0 ? `<div style="font-size:11px;color:var(--text-muted)">${i.substituted_units} substituted</div>` : ''}${canReceive && i.quantity_left > 0 ? `<div id="cg-subs-${i.id}"></div><button class="btn btn-sm btn-outline" style="margin-top:4px;font-size:11px;padding:2px 8px" title="The supplier sent a different item (another colour, size…) in place of some of these" onclick="App._cgAddSub(${i.id})">+ Substitute</button>` : ''}`;
     const canPrice = canReceive && this.can('inventory_edit');
     const agreed = i => i.agreed_unit_cost == null ? '<span style="color:var(--text-muted)" title="No agreed cost in effect today">—</span>'
       : `<span title="Agreed cost per ${esc(i.unit_label || 'Each')} from ${this.fmtDate(i.agreed_cost_from)} (set on the agreement)">${this.fmt(i.agreed_unit_cost)}</span>`;
@@ -387,7 +390,7 @@ Object.assign(App, {
         <div class="modal-body" style="font-size:13px">
           <div style="margin-bottom:10px"><strong>${esc(o.supplier_name)}</strong> · ${o.agreement_number} · to ${esc(o.branch_name)}${o.expected_date ? ` · expected ${this.fmtDate(o.expected_date)}` : ''}</div>
           <table style="width:100%"><thead><tr style="color:var(--text-muted);font-size:12px"><th style="text-align:left">SKU</th><th style="text-align:left">Item</th><th style="text-align:left">Unit</th><th style="text-align:right" title="The supplier's agreed cost in effect today — set on the agreement, not here">Agreed cost</th><th style="text-align:right">Ordered</th><th style="text-align:right">Received</th><th style="text-align:right">Awaiting approval</th><th style="text-align:right">Left</th>${canReceive ? '<th style="text-align:right;width:110px">Receive now</th><th style="text-align:right;width:110px" title="Your price to customers for this unit">Selling price</th>' : ''}</tr></thead>
-            <tbody>${o.items.map(i => `<tr style="border-top:1px solid var(--border)"><td style="padding:5px 8px 5px 0;font-family:monospace;white-space:nowrap">${esc(i.sku || '—')}</td><td style="padding:5px 0">${esc(i.product_name)}</td><td>${esc(i.unit_label || 'Each')}${Number(i.units_per) > 1 ? `<div style="font-size:11px;color:var(--text-muted)">${i.quantity_ordered} ${esc(i.stock_unit)} ordered</div>` : ''}</td>
+            <tbody>${o.items.map(i => `<tr style="border-top:1px solid var(--border)"><td style="padding:5px 8px 5px 0;font-family:monospace;white-space:nowrap">${esc(i.sku || '—')}</td><td style="padding:5px 0">${nameCell(i)}</td><td>${esc(i.unit_label || 'Each')}${Number(i.units_per) > 1 ? `<div style="font-size:11px;color:var(--text-muted)">${i.quantity_ordered} ${esc(i.stock_unit)} ordered</div>` : ''}</td>
               <td style="text-align:right">${agreed(i)}</td><td style="text-align:right">${i.ordered_units}</td><td style="text-align:right">${i.received_units}</td><td style="text-align:right">${i.pending_units || 0}</td><td style="text-align:right" class="fw-600">${i.left_units}</td>
               ${canReceive ? `<td style="text-align:right"><input class="cg-qty" data-line="${i.id}" type="number" min="0" max="${i.left_units}" step="${Number(i.units_per) > 1 ? 'any' : '1'}" style="width:90px;text-align:right" placeholder="0" ${i.quantity_left > 0 ? '' : 'disabled'}></td>` : ''}${priceCell(i)}</tr>`).join('')}</tbody></table>
           <div style="font-size:11px;color:var(--text-muted);margin-top:4px">Agreed cost is the supplier's price on ${o.agreement_number}, in effect today — what's owed is worked out at that cost when items sell; change it on the agreement.${canReceive ? ` Selling price is your shelf price${canPrice ? ' — a change on a line you receive is saved with the GRN' : ' (changing it needs Edit Inventory)'}.` : ''}</div>
@@ -406,12 +409,93 @@ Object.assign(App, {
       const changed = price && price.value !== '' && price.value !== price.dataset.was;
       return { order_item_id: i.dataset.line, unit_quantity: parseFloat(i.value) || 0, ...(changed ? { selling_price: parseFloat(price.value) } : {}) };
     }).filter(i => i.unit_quantity > 0);
+    const pendingSub = (this._cgSubs || []).find(x => x.qty > 0 && !x.product);
+    if (pendingSub) { this.alert('Pick the item sent instead on each substitute line, or remove it', 'warning'); return; }
+    const substitutes = (this._cgSubs || []).filter(x => x.product && x.qty > 0).map(x => ({ order_item_id: x.lineId, product_id: x.product.id, unit_quantity: x.qty }));
     try {
-      const g = await this.api('POST', `/consignment/orders/${orderId}/grns`, { delivery_note_number: document.getElementById('cg-note').value, notes: document.getElementById('cg-notes').value, items });
+      const g = await this.api('POST', `/consignment/orders/${orderId}/grns`, { delivery_note_number: document.getElementById('cg-note').value, notes: document.getElementById('cg-notes').value, items, substitutes });
       this.alert(`${g.grn_number} entered — waiting for approval`, 'success');
       this.viewConsGrn(g.id);
     } catch (e) { this.alert(e.message, 'error'); }
   },
+  // ── Substitutes when receiving (like PO receiving) ──
+  // Another item sent in place of some of an order line, in that line's unit.
+  // The server makes it its own order line; one not on the agreement joins it
+  // at the original's agreed cost when the GRN is approved.
+  async _cgAddSub(lineId) {
+    const line = (this._cgOrder?.items || []).find(x => x.id === lineId);
+    if (!line) return;
+    if (!this._cgProducts) {
+      try { this._cgProducts = (await this.api('GET', '/products?is_rental=0')).filter(p => p.active !== 0 && !p.is_service && !p.is_rental && !(p.has_variations > 0) && !['service', 'non-inventory'].includes(p.product_type)); }
+      catch (e) { return this.alert(e.message, 'error'); }
+    }
+    const qtyEl = document.querySelector(`.cg-qty[data-line="${lineId}"]`);
+    if (qtyEl && Number(qtyEl.value) >= 1) qtyEl.value = Math.round((Number(qtyEl.value) - 1) * 1000) / 1000;
+    const key = (this._cgSubSeq = (this._cgSubSeq || 0) + 1);
+    this._cgSubs.push({ key, lineId, product: null, qty: 1 });
+    this._cgRenderSubs(lineId);
+    const input = document.getElementById(`cg-sub-q-${key}`);
+    if (input) {
+      input.value = String(line.product_name || '').split(/\s+/)[0] || '';
+      input.focus();
+      this._cgSubSearch(key, input.value);
+    }
+  },
+
+  _cgRenderSubs(lineId) {
+    const box = document.getElementById(`cg-subs-${lineId}`);
+    if (!box) return;
+    const esc = v => this.escapeAttr(v ?? '');
+    box.innerHTML = this._cgSubs.filter(x => x.lineId === lineId).map(x => `
+      <div class="cg-sub" style="display:flex;align-items:center;gap:6px;margin-top:6px;padding:6px 8px;border:1px dashed #f59e0b;border-radius:6px;background:#fffbeb;position:relative">
+        <span style="font-size:12px;color:#b45309;white-space:nowrap">↳ Instead:</span>
+        ${x.product
+          ? `<span style="flex:1;font-size:13px"><strong>${esc(x.product.name)}</strong>${x.product.sku ? ` <span style="color:var(--text-muted);font-size:11px;font-family:monospace">${esc(x.product.sku)}</span>` : ''}</span>`
+          : `<span style="flex:1;position:relative"><input id="cg-sub-q-${x.key}" type="search" autocomplete="off" placeholder="Item sent instead — name, SKU or barcode" style="width:100%" oninput="App._cgSubSearch(${x.key}, this.value)">
+              <div id="cg-sub-dd-${x.key}" style="display:none;position:absolute;z-index:30;left:0;right:0;max-height:220px;overflow:auto;background:var(--card-bg,#fff);border:1px solid var(--border);border-radius:6px;box-shadow:0 4px 14px rgba(0,0,0,.15)"></div></span>`}
+        <input class="cg-sub-qty" type="number" min="0" step="any" value="${x.qty}" title="Quantity sent instead (in this line's unit)" style="width:70px;text-align:right" oninput="App._cgSubQty(${x.key}, this.value)">
+        <button class="btn btn-sm btn-outline" title="Remove" onclick="App._cgSubRemove(${x.key})">✕</button>
+      </div>`).join('');
+  },
+
+  _cgSubSearch(key, query) {
+    const dd = document.getElementById(`cg-sub-dd-${key}`);
+    const sub = this._cgSubs.find(x => x.key === key);
+    if (!dd || !sub) return;
+    const q = String(query || '').trim().toLowerCase();
+    if (!q) { dd.style.display = 'none'; return; }
+    const orig = (this._cgOrder?.items || []).find(x => x.id === sub.lineId);
+    const exact = (this._cgProducts || []).find(p => p.id !== orig?.product_id && [p.sku, p.barcode].some(v => v && String(v).toLowerCase() === q));
+    if (exact) return this._cgSubPick(key, exact.id);
+    const matches = (this._cgProducts || []).filter(p => p.id !== orig?.product_id && `${p.name} ${p.sku || ''} ${p.barcode || ''}`.toLowerCase().includes(q)).slice(0, 30);
+    dd.innerHTML = matches.length ? matches.map(p => `
+      <div class="nav-item" style="padding:7px 10px;cursor:pointer;color:var(--text)" onclick="App._cgSubPick(${key}, ${p.id})">
+        <strong>${this.escapeAttr(p.name)}</strong>
+        <div style="font-size:11px;color:var(--text-muted)">${p.sku ? this.escapeAttr(p.sku) + ' · ' : ''}on hand ${p.stock_qty ?? 0}</div>
+      </div>`).join('') : '<div style="padding:10px;color:var(--text-muted);font-size:13px">No stocked item matches — add it in Inventory first</div>';
+    dd.style.display = '';
+  },
+
+  _cgSubPick(key, productId) {
+    const sub = this._cgSubs.find(x => x.key === key);
+    const p = (this._cgProducts || []).find(x => x.id === productId);
+    if (!sub || !p) return;
+    sub.product = p;
+    this._cgRenderSubs(sub.lineId);
+  },
+
+  _cgSubQty(key, value) {
+    const sub = this._cgSubs.find(x => x.key === key);
+    if (sub) sub.qty = Number(value) || 0;
+  },
+
+  _cgSubRemove(key) {
+    const sub = this._cgSubs.find(x => x.key === key);
+    if (!sub) return;
+    this._cgSubs = this._cgSubs.filter(x => x.key !== key);
+    this._cgRenderSubs(sub.lineId);
+  },
+
   async _consCancelOrder(id) {
     if (!confirm('Cancel what is left on this order?')) return;
     try { await this.api('POST', `/consignment/orders/${id}/cancel`, {}); this.renderConsignment('orders'); this.viewConsOrder(id); } catch (e) { this.alert(e.message, 'error'); }
@@ -441,7 +525,7 @@ Object.assign(App, {
             <div><strong>Delivery note:</strong> ${esc(g.delivery_note_number)}<br><strong>Branch:</strong> ${esc(g.branch_name)}<br><strong>Received by:</strong> ${esc(g.received_by_name || '—')} · ${this.fmtDateTime(g.received_at)}
               ${g.approved_at ? `<br><strong>Approved by:</strong> ${esc(g.approved_by_name)} · ${this.fmtDateTime(g.approved_at)}` : ''}${g.rejected_at ? `<br><strong>Rejected by:</strong> ${esc(g.rejected_by_name)}: ${esc(g.rejection_reason)}` : ''}</div></div>
           <table style="width:100%"><thead><tr style="color:var(--text-muted);font-size:12px"><th style="text-align:left">SKU</th><th style="text-align:left">Item</th><th style="text-align:left">Unit</th><th style="text-align:right">Quantity</th><th style="text-align:right">Stock units</th>${g.items.some(i => i.price_set != null) ? '<th style="text-align:right">Selling price set</th>' : ''}</tr></thead>
-            <tbody>${g.items.map(i => `<tr style="border-top:1px solid var(--border)"><td style="padding:5px 8px 5px 0;font-family:monospace;white-space:nowrap">${esc(i.sku || '—')}</td><td style="padding:5px 0">${esc(i.product_name)}</td><td>${esc(i.unit_label || 'Each')}</td><td style="text-align:right" class="fw-600">${i.unit_quantity ?? i.quantity}</td><td style="text-align:right">${i.quantity} ${esc(i.stock_unit || '')}</td>${g.items.some(x => x.price_set != null) ? `<td style="text-align:right">${i.price_set != null ? `${i.price_before != null ? `<span style="color:var(--text-muted);text-decoration:line-through">${this.fmt(i.price_before)}</span> ` : ''}${this.fmt(i.price_set)}` : ''}</td>` : ''}</tr>`).join('')}</tbody></table>
+            <tbody>${g.items.map(i => `<tr style="border-top:1px solid var(--border)"><td style="padding:5px 8px 5px 0;font-family:monospace;white-space:nowrap">${esc(i.sku || '—')}</td><td style="padding:5px 0">${esc(i.product_name)}${i.substitute_for_name ? `<div style="font-size:11px;color:#b45309">↳ sent instead of ${esc(i.substitute_for_name)}</div>` : ''}${Number(i.new_to_agreement) && g.status === 'pending' ? `<div style="font-size:11px;color:#b45309;font-weight:600">Not on ${g.agreement_number} — approving adds it at ${esc(i.substitute_for_name)}'s agreed cost</div>` : ''}${Number(i.added_to_agreement) ? `<div style="font-size:11px;color:var(--text-muted)">Added to ${g.agreement_number} by this GRN</div>` : ''}</td><td>${esc(i.unit_label || 'Each')}</td><td style="text-align:right" class="fw-600">${i.unit_quantity ?? i.quantity}</td><td style="text-align:right">${i.quantity} ${esc(i.stock_unit || '')}</td>${g.items.some(x => x.price_set != null) ? `<td style="text-align:right">${i.price_set != null ? `${i.price_before != null ? `<span style="color:var(--text-muted);text-decoration:line-through">${this.fmt(i.price_before)}</span> ` : ''}${this.fmt(i.price_set)}` : ''}</td>` : ''}</tr>`).join('')}</tbody></table>
           ${g.notes ? `<div style="margin-top:8px">${esc(g.notes)}</div>` : ''}
           ${canApprove ? '<div style="font-size:12px;color:var(--text-muted);margin-top:8px">Approving puts this stock on hand at the branch, owned by the supplier, and saleable at the POS.</div>' : ''}
         </div>
