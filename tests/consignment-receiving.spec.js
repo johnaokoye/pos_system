@@ -81,6 +81,7 @@ test('agreement → Finance approval → order → two GRNs → supplier-owned s
   expect((await api(page, 'GET', `/consignment/orders/${order.id}`)).items[0]).toMatchObject({ agreed_cost: 150, agreed_unit_cost: 150, sell_price: 250, can_set_price: true });
   await page.evaluate(id => App.viewConsOrder(id), order.id);
   await expect(page.locator('.modal table')).toContainText('$150.00');
+  await expect(page.locator('.modal table')).toContainText(`CD${s}`);
   await expect(page.locator('.cg-price')).toHaveValue('250');
   await page.locator('.cg-price').fill('265');
   await page.locator('.cg-qty').fill('4');
