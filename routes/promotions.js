@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../database');
 const { requirePermission } = require('../lib/permissions');
-const { promoTimingStatus, computeEligibleAmount, promoAppliesToProduct, computeBundleDiscount } = require('../lib/promotions');
+const { promoTimingStatus, computeEligibleAmount, promoAppliesToProduct, computeBundleDiscount, eligibleProductIds } = require('../lib/promotions');
 
 // List all promotions with code count
 router.get('/', requirePermission('promotions'), async (req, res) => {
@@ -419,7 +419,7 @@ router.post('/auto-apply', requirePermission('pos'), async (req, res) => {
       if (promo.min_purchase > 0 && subtotal < promo.min_purchase) continue;
       if (promo.type === 'bundle') {
         const { discount, sets } = computeBundleDiscount(promo, bundleItems[promo.id] || [], cart_items);
-        if (discount > 0) results.push({ ...promo, discount_amount: discount, bundle_sets: sets });
+        if (discount > 0) results.push({ ...promo, discount_amount: discount, bundle_sets: sets, eligible_product_ids: eligibleProductIds(promo, cart_items, { bundleItems: bundleItems[promo.id] || [] }) });
         continue;
       }
       const eligibleAmount = computeEligibleAmount(promo, cart_items, subtotal, { items: itemsByPromo[promo.id] || [], brands: brandsByPromo[promo.id] || [], brandByProduct });
@@ -427,7 +427,7 @@ router.post('/auto-apply', requirePermission('pos'), async (req, res) => {
       const discount = promo.type === 'percentage'
         ? parseFloat((eligibleAmount * promo.value / 100).toFixed(2))
         : parseFloat(Math.min(promo.value, eligibleAmount).toFixed(2));
-      results.push({ ...promo, discount_amount: discount });
+      results.push({ ...promo, discount_amount: discount, eligible_product_ids: eligibleProductIds(promo, cart_items, { items: itemsByPromo[promo.id] || [], brands: brandsByPromo[promo.id] || [], brandByProduct }) });
     }
 
     results.sort((a, b) => b.discount_amount - a.discount_amount);
@@ -472,11 +472,11 @@ router.post('/validate-code', requirePermission('pos'), async (req, res) => {
       const bundleItems = await bundleItemsByPromo([{ type: 'bundle', id: pc.promotion_id }]);
       const { discount } = computeBundleDiscount(pc, bundleItems[pc.promotion_id] || [], cart_items || []);
       if (!discount) return res.status(400).json({ error: 'The cart doesn\'t contain a complete bundle for this promotion' });
-      return res.json({ code_id: pc.id, code: pc.code, promotion_id: pc.promotion_id, promo_name: pc.promo_name, type: pc.type, value: pc.value, discount_amount: discount });
+      return res.json({ code_id: pc.id, code: pc.code, promotion_id: pc.promotion_id, promo_name: pc.promo_name, type: pc.type, value: pc.value, discount_amount: discount, eligible_product_ids: eligibleProductIds(pc, cart_items || [], { bundleItems: bundleItems[pc.promotion_id] || [] }) });
     }
 
     // Calculate eligible amount
-    let eligibleAmount = subtotal;
+    let eligibleAmount = subtotal, eligibleIds = null;
     if (cart_items && cart_items.length) {
       const [{ rows: items }, { rows: brands }] = await Promise.all([
         db.execute({ sql: `SELECT * FROM promotion_items WHERE promotion_id = ?`, args: [pc.promotion_id] }),
@@ -490,6 +490,7 @@ router.post('/validate-code', requirePermission('pos'), async (req, res) => {
         for (const pr of prodRows) brandByProduct[pr.id] = pr.brand;
       }
       eligibleAmount = computeEligibleAmount(pc, cart_items, subtotal, { items, brands, brandByProduct });
+      eligibleIds = eligibleProductIds(pc, cart_items, { items, brands, brandByProduct });
       if (eligibleAmount === 0 && (['specific', 'categories', 'items', 'brands'].includes(pc.applies_to) || brands.some(b => b.excluded))) {
         return res.status(400).json({ error: 'No items in cart qualify for this promotion' });
       }
@@ -509,6 +510,7 @@ router.post('/validate-code', requirePermission('pos'), async (req, res) => {
       type: pc.type,
       value: pc.value,
       discount_amount: discount,
+      eligible_product_ids: eligibleIds,
     });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

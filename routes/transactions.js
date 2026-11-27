@@ -32,7 +32,7 @@ const { blockedMessage, creditLimitError, quoteCreditHold } = require('../lib/cr
 const { resolveUnit, lineName, parseQty, stockUnits } = require('../lib/units');
 const { isSerialNumberProduct, serialNumberLabel, serialNumberOf, serialClashError } = require('../lib/serialNumber');
 const { checkDiscountEligibility } = require('./promotions');
-const { allocateTicketDiscount, returnedDiscountShare } = require('../lib/ticketDiscount');
+const { allocateTicketDiscount, returnedDiscountShare, promoLineFlags } = require('../lib/ticketDiscount');
 const { staffAccountFor, staffSettings, staffSaleError } = require('../lib/staffPurchases');
 const { UNAPPLIED_SQL, paymentReceipt } = require('../lib/customerPayments');
 const { recordReturnCreditNote, useStoreCredit } = require('../lib/returnCreditNotes');
@@ -150,7 +150,8 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
     const linePct = items.map((item, i) => lineFixed[i] ? (lineGross[i] > 0 ? parseFloat((lineFixed[i] / lineGross[i] * 100).toFixed(4)) : 0) : Math.min(100, Math.max(0, parseFloat(item.discount_percent) || 0)));
     const lineDisc = lineGross.map((g, i) => lineFixed[i] ? parseFloat(lineFixed[i].toFixed(2)) : parseFloat((g * linePct[i] / 100).toFixed(2)));
     const lineTotals = lineGross.map((g, i) => parseFloat((g - lineDisc[i]).toFixed(2)));
-    const { discount: disc, shares: ticketShares } = allocateTicketDiscount(lineTotals, discount_amount);
+    // A promotion's discount goes on the lines it covers only (promo_line).
+    const { discount: disc, shares: ticketShares } = allocateTicketDiscount(lineTotals, discount_amount, sourceReturnId ? null : promoLineFlags(items));
     const shares = sourceReturnId ? ticketShares.map(() => 0) : ticketShares;
     // A tax-exempt ticket (the POS Tax Exempt button, or an exempt customer)
     // is held without tax and comes back exempt on recall.
@@ -189,8 +190,8 @@ router.post('/hold', requirePermission('pos_hold'), async (req, res) => {
           transfer = await saleTransfers.transferLine(txn, { item, product: prod, variation: item.variation_id || null, unit: { sell_unit: sellUnit, units_per: unitsPer }, stockUnits: stockUnits(item.quantity, unitsPer), branchId: branch_id, serialNumber: serial });
         }
         await txn.execute({
-          sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,serial_number,sell_unit,units_per,uom_id,is_comment,is_delivery,discount_percent,discount_override_by,discount_fixed,is_q_item,transfer_from_branch_id,transfer_qty) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          args: [txId, item.product_id || null, serial ? serialNumberLabel(serial) : item.product_name, item.sku || '', item.is_comment && !item.product_id ? 1 : item.quantity, parseFloat(item.unit_price) || 0, lineDisc[i], lineTax, lineTotal, item.variation_id || null, item.variation_name || null, serial || null, sellUnit, unitsPer, uomId, item.is_comment && !item.product_id ? 1 : 0, item.is_delivery && !item.product_id ? 1 : 0, linePct[i], linePct[i] > 0 ? (item.discount_override_employee_id || null) : null, lineFixed[i] && linePct[i] > 0 ? lineFixed[i] : null, item.is_q_item && !item.product_id ? 1 : 0, transfer?.from ?? null, transfer?.qty ?? null]
+          sql: `INSERT INTO transaction_items (transaction_id,product_id,product_name,sku,quantity,unit_price,discount_amount,tax_amount,total,variation_id,variation_name,serial_number,sell_unit,units_per,uom_id,is_comment,is_delivery,discount_percent,discount_override_by,discount_fixed,is_q_item,transfer_from_branch_id,transfer_qty,ticket_discount) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          args: [txId, item.product_id || null, serial ? serialNumberLabel(serial) : item.product_name, item.sku || '', item.is_comment && !item.product_id ? 1 : item.quantity, parseFloat(item.unit_price) || 0, lineDisc[i], lineTax, lineTotal, item.variation_id || null, item.variation_name || null, serial || null, sellUnit, unitsPer, uomId, item.is_comment && !item.product_id ? 1 : 0, item.is_delivery && !item.product_id ? 1 : 0, linePct[i], linePct[i] > 0 ? (item.discount_override_employee_id || null) : null, lineFixed[i] && linePct[i] > 0 ? lineFixed[i] : null, item.is_q_item && !item.product_id ? 1 : 0, transfer?.from ?? null, transfer?.qty ?? null, shares[i]]
         });
       }
       await txn.commit();
@@ -864,7 +865,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         const lineTax = isTaxExempt ? 0 : parseFloat((unit_price * product.tax_rate / 100).toFixed(2));
         subtotal += unit_price;
         tax_amount += lineTax;
-        processedItems.push({ product, variation: null, serialNumber, quantity: 1, unit_price, lineTotal: unit_price, lineTax, taxRate: product.tax_rate || 0, discount: 0, discountPercent: 0, discountOverrideBy: null });
+        processedItems.push({ product, variation: null, serialNumber, quantity: 1, unit_price, lineTotal: unit_price, lineTax, taxRate: product.tax_rate || 0, discount: 0, discountPercent: 0, discountOverrideBy: null, promoLine: item.promo_line });
         continue;
       }
       // Unit of measure (lib/units.js): the unit's price, and quantity × its
@@ -926,7 +927,7 @@ router.post('/', requirePermission('pos'), async (req, res) => {
         if (!req.apiKey && !can(req.employee?.permissions, 'pos_request_transfer')) return res.status(403).json({ error: 'Missing permission: pos_request_transfer (get items from another branch)' });
         transfer = await saleTransfers.transferLine(db, { item, product, variation, unit, stockUnits: stockUnits(item.quantity, unit?.units_per || 1), branchId: branch_id, spRental: !!spRentalLine });
       }
-      processedItems.push({ product, variation, unit, quantity: item.quantity, unit_price, lineTotal, lineTax, taxRate: product.tax_rate || 0, discount: discountAmount, discountPercent, discountOverrideBy, discountFixed: discountPercent > 0 ? discountFixed : null, spRental: !!spRentalLine, transfer });
+      processedItems.push({ product, variation, unit, quantity: item.quantity, unit_price, lineTotal, lineTax, taxRate: product.tax_rate || 0, discount: discountAmount, discountPercent, discountOverrideBy, discountFixed: discountPercent > 0 ? discountFixed : null, spRental: !!spRentalLine, transfer, promoLine: item.promo_line });
     }
 
     if (!processedItems.some(p => !p.isComment)) return res.status(400).json({ error: 'No items in transaction' });
@@ -948,7 +949,9 @@ router.post('/', requirePermission('pos'), async (req, res) => {
     const salePromoCode = staffDiscount ? null : (promotion_code || null);
     const salePromoName = staffDiscount ? (disc > 0 ? 'Staff Discount' : null) : (promotion_name || null);
     if (discountPreTax) {
-      const split = allocateTicketDiscount(processedItems.map(p => p.lineTotal), disc);
+      // A promotion's discount is spread over the lines it covers only
+      // (items[].promo_line from the till) — not a staff discount.
+      const split = allocateTicketDiscount(processedItems.map(p => p.lineTotal), disc, promoLineFlags(processedItems.map(p => ({ promo_line: p.promoLine })), { staff: staffDiscount }));
       disc = split.discount;
       tax_amount = 0;
       processedItems.forEach((p, i) => {

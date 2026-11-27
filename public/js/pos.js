@@ -2005,9 +2005,12 @@ Object.assign(App, {
   // split lib/ticketDiscount.js makes at checkout, so the cart shows what
   // the server will charge. Returns the discount (capped at the lines'
   // total) and each line's share, last line taking the rounding remainder.
-  _allocateTicketDiscount(amounts, discount) {
+  // `eligible` (one flag per line, _promoLineFlags) keeps a promotion's
+  // discount on the lines it covers.
+  _allocateTicketDiscount(amounts, discount, eligible = null) {
     const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
-    const nets = amounts.map(a => Math.max(0, Number(a) || 0));
+    let nets = amounts.map(a => Math.max(0, Number(a) || 0));
+    if (Array.isArray(eligible) && nets.some((a, i) => a > 0 && eligible[i])) nets = nets.map((a, i) => (eligible[i] ? a : 0));
     const base = r2(nets.reduce((s, a) => s + a, 0));
     const disc = r2(Math.min(Math.max(0, Number(discount) || 0), base));
     const shares = nets.map(() => 0);
@@ -2028,12 +2031,27 @@ Object.assign(App, {
   // come off before tax — each line is taxed on its net less its share. A
   // return credit on an exchange is money already paid, tax included, so it
   // stays after tax like Available Credit and Cash Back.
+  // Which cart lines the ticket's promotion (promo code or automatic) covers
+  // — its discount is spread over those only, so an item outside it keeps
+  // its full price and can take its own line discount. null = every line
+  // (an unscoped promotion, a manual Ticket Discount, a discount card, a
+  // quote's or exchange's discount). Sent as items[].promo_line so checkout
+  // and holds split it the same way (lib/ticketDiscount.js).
+  _promoLineFlags() {
+    if (this._returnCredit || this.appliedDiscountCard) return null;
+    const promo = this.appliedPromoCode || (this._manualTicketDiscount ? null : this.autoAppliedPromo);
+    if (!promo || !Array.isArray(promo.eligible_product_ids) || !(this.cartDiscount > 0)) return null;
+    const ids = new Set(promo.eligible_product_ids.map(Number));
+    return this.cart.map(i => !!i.product_id && ids.has(Number(i.product_id))
+      && !(promo.type === 'bundle' && this._cartLineDiscountPct(i) > 0));
+  },
+
   getCartTotals() {
     const nets = this.cart.map(i => this._cartLineNet(i));
     const subtotal = nets.reduce((s, n) => s + n, 0);
     const isTaxExempt = this.isCartTaxExempt();
     const discountPreTax = !this._returnCredit;
-    const split = discountPreTax ? this._allocateTicketDiscount(nets, this.cartDiscount || 0) : { discount: this.cartDiscount || 0, shares: nets.map(() => 0) };
+    const split = discountPreTax ? this._allocateTicketDiscount(nets, this.cartDiscount || 0, this._promoLineFlags()) : { discount: this.cartDiscount || 0, shares: nets.map(() => 0) };
     const lineTaxes = this.cart.map((i, idx) => isTaxExempt ? 0 : parseFloat(((nets[idx] - split.shares[idx]) * (i.tax_rate || 0) / 100).toFixed(2)));
     const tax = lineTaxes.reduce((s, t) => s + t, 0);
     const discount = split.discount;
@@ -2327,6 +2345,7 @@ Object.assign(App, {
     }
 
     const isTaxExempt = this.isCartTaxExempt();
+    const promoFlags = this._promoLineFlags();
 
     this._paymentInFlight = true;
     const busy = this._showPaymentBusy();
@@ -2344,7 +2363,7 @@ Object.assign(App, {
         // directly for that case only; a real product_id line still has its
         // price/tax authoritatively re-derived server-side, never trusted
         // from the client.
-        items: this.cart.map(i => ({ product_id: i.product_id, variation_id: i.variation_id||null, serial_number: i.serial_number||null, uom_id: i.uom_id ?? null, sell_unit: i.sell_unit || null, quantity: i.quantity, discount_percent: i.discountPercent||0, discount_fixed: i.discountFixed||0, discount_override_employee_id: i.discountOverrideEmployeeId||null, ...(i.transfer_from_branch_id ? { transfer_from_branch_id: i.transfer_from_branch_id, transfer_qty: i.transfer_qty } : {}), ...(i.product_id ? {} : { product_name: i.name, unit_price: i.price, tax_rate: i.tax_rate||0, is_comment: i.is_comment ? 1 : 0, is_delivery: i.is_delivery ? 1 : 0, is_q_item: i.is_q_item ? 1 : 0 }) })),
+        items: this.cart.map((i, idx) => ({ ...(promoFlags ? { promo_line: promoFlags[idx] } : {}), product_id: i.product_id, variation_id: i.variation_id||null, serial_number: i.serial_number||null, uom_id: i.uom_id ?? null, sell_unit: i.sell_unit || null, quantity: i.quantity, discount_percent: i.discountPercent||0, discount_fixed: i.discountFixed||0, discount_override_employee_id: i.discountOverrideEmployeeId||null, ...(i.transfer_from_branch_id ? { transfer_from_branch_id: i.transfer_from_branch_id, transfer_qty: i.transfer_qty } : {}), ...(i.product_id ? {} : { product_name: i.name, unit_price: i.price, tax_rate: i.tax_rate||0, is_comment: i.is_comment ? 1 : 0, is_delivery: i.is_delivery ? 1 : 0, is_q_item: i.is_q_item ? 1 : 0 }) })),
         discount_amount: discount,
         discount_override_employee_id: this._manualTicketDiscount ? (this._ticketDiscountOverride?.id || null) : null,
         promotion_code: this.appliedDiscountCard ? (this.appliedDiscountCard.card_number || null) : (this.appliedPromoCode?.code || null),
@@ -2431,7 +2450,8 @@ Object.assign(App, {
   async holdOrder() {
     if (!this.cart.length) { this.alert('Cart is empty', 'warning'); return; }
     try {
-      const cartItems = this.cart.map(i => {
+      const holdPromoFlags = this._promoLineFlags();
+      const cartItems = this.cart.map((i, idx) => {
         const product = this.allProducts?.find(p => p.id === i.product_id);
         return {
           product_id: i.product_id,
@@ -2451,6 +2471,7 @@ Object.assign(App, {
           discount_percent: i.discountPercent || 0,
           discount_fixed: i.discountFixed || 0,
           discount_override_employee_id: i.discountOverrideEmployeeId || null,
+          ...(holdPromoFlags ? { promo_line: holdPromoFlags[idx] } : {}),
           // Get from here: held with the line; the request is raised when it's paid.
           ...(i.transfer_from_branch_id ? { transfer_from_branch_id: i.transfer_from_branch_id, transfer_qty: i.transfer_qty } : {}),
         };
@@ -2622,7 +2643,9 @@ Object.assign(App, {
       await this.api('PATCH', `/transactions/${id}/hold/recall`);
       // Each line's share of the held ticket discount — its tax was charged
       // on its total less that share (discount before tax).
-      const heldShares = held.source_return_id ? held.items.map(() => 0) : this._allocateTicketDiscount(held.items.map(i => i.total), held.discount_amount).shares;
+      // Holds keep each line's share (ticket_discount); older ones are spread by total.
+      const spreadShares = this._allocateTicketDiscount(held.items.map(i => i.total), held.discount_amount).shares;
+      const heldShares = held.source_return_id ? held.items.map(() => 0) : held.items.map((i, idx) => i.ticket_discount != null ? Number(i.ticket_discount) : spreadShares[idx]);
       // A hold made by converting a quote carries the quoted prices — kept
       // while the quote is valid, today's prices once it has expired.
       const fromQuote = !!held.source_quote_id;
