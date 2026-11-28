@@ -11,6 +11,7 @@ Object.assign(App, {
       search: val('inv-search') || val('noninv-search') || fallback.search || '',
       category: val('inv-cat-filter'),
       brand: val('inv-brand-filter'),
+      supplier: val('inv-supplier-filter'),
       branchId: val('inv-branch-filter') || (fallback.branchId ? String(fallback.branchId) : ''),
       owner: val('inv-owner-filter'),
     };
@@ -29,8 +30,8 @@ Object.assign(App, {
 
     if (tab === 'non-inventory') return this.renderNonInventoryTab(tabsHtml, filters);
 
-    const hasFilters = !!(filters && (filters.search || filters.category || filters.brand || filters.branchId || filters.owner));
-    const [products, categories, brands, movements, branches] = await Promise.all([
+    const hasFilters = !!(filters && (filters.search || filters.category || filters.brand || filters.supplier || filters.branchId || filters.owner));
+    const [products, categories, brands, movements, branches, suppliers] = await Promise.all([
       // Re-rendering onto saved filters: refilter() below fetches the
       // filtered list, so don't pull the whole catalogue first.
       hasFilters ? [] : this.api('GET', '/products?is_service=0&is_rental=0&is_non_inventory=0'),
@@ -41,6 +42,7 @@ Object.assign(App, {
       // to (this.currentUser.branches) — this is a browse/oversight filter, not
       // an operational "which branch am I working from" picker like POS's.
       this.api('GET', '/branches'),
+      this.api('GET', '/suppliers').catch(() => []),
     ]);
     if (this.section !== 'inventory') return;
 
@@ -57,6 +59,7 @@ Object.assign(App, {
         </div>
         <select id="inv-cat-filter" style="width:auto;min-width:140px"><option value="">All Categories</option>${categories.map(c => `<option value="${c.id}">${c.name}</option>`).join('')}</select>
         <select id="inv-brand-filter" style="width:auto;min-width:140px"><option value="">All Brands</option>${brands.map(b => `<option value="${(b.name||'').replace(/"/g,'&quot;')}">${b.name}</option>`).join('')}</select>
+        <select id="inv-supplier-filter" style="width:auto;min-width:150px" title="The supplier set on the item's form"><option value="">All Suppliers</option><option value="none">No supplier</option>${suppliers.map(s => `<option value="${s.id}">${this.escapeAttr(s.name)}</option>`).join('')}</select>
         <select id="inv-branch-filter" style="width:auto;min-width:130px">
           <option value="">All Branches</option>
           ${branches.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
@@ -115,6 +118,8 @@ Object.assign(App, {
       if (q) url += `search=${encodeURIComponent(q)}&`;
       if (cat) url += `category=${cat}&`;
       if (brand) url += `brand=${encodeURIComponent(brand)}&`;
+      const supplier = document.getElementById('inv-supplier-filter').value;
+      if (supplier) url += `supplier_id=${encodeURIComponent(supplier)}&`;
       if (branchId) url += `branch_id=${branchId}&`;
       const owner = document.getElementById('inv-owner-filter').value;
       if (owner) url += `consignment=${owner}&`;
@@ -132,6 +137,7 @@ Object.assign(App, {
     searchEl.addEventListener('keydown', e => { if (e.key === 'Enter') { clearTimeout(searchTimer); refilter(); } });
     document.getElementById('inv-cat-filter').addEventListener('change', refilter);
     document.getElementById('inv-brand-filter').addEventListener('change', refilter);
+    document.getElementById('inv-supplier-filter').addEventListener('change', refilter);
     document.getElementById('inv-branch-filter').addEventListener('change', () => { refilter(); refilterHistory(); });
     document.getElementById('inv-owner-filter').addEventListener('change', refilter);
 
@@ -139,6 +145,7 @@ Object.assign(App, {
       document.getElementById('inv-search').value = filters.search || '';
       document.getElementById('inv-cat-filter').value = filters.category || '';
       document.getElementById('inv-brand-filter').value = filters.brand || '';
+      document.getElementById('inv-supplier-filter').value = filters.supplier || '';
       document.getElementById('inv-branch-filter').value = filters.branchId || '';
       document.getElementById('inv-owner-filter').value = filters.owner || '';
       await refilter();
@@ -453,6 +460,10 @@ Object.assign(App, {
     let url = '/api/products/export?is_service=0&is_rental=0&is_non_inventory=0&';
     if (q) url += `search=${encodeURIComponent(q)}&`;
     if (cat) url += `category=${encodeURIComponent(cat)}&`;
+    const brand = (document.getElementById('inv-brand-filter') || {}).value || '';
+    if (brand) url += `brand=${encodeURIComponent(brand)}&`;
+    const supplier = (document.getElementById('inv-supplier-filter') || {}).value || '';
+    if (supplier) url += `supplier_id=${encodeURIComponent(supplier)}&`;
     if (branchId) url += `branch_id=${encodeURIComponent(branchId)}&`;
     const owner = (document.getElementById('inv-owner-filter') || {}).value || '';
     if (owner) url += `consignment=${encodeURIComponent(owner)}&`;

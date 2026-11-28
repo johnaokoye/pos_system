@@ -287,7 +287,9 @@ router.get('/', requireAuth, async (req, res) => {
     }
     if (category) { sql += ` AND p.category_id = ?`; params.push(category); }
     if (brand) { sql += ` AND p.brand = ?`; params.push(brand); }
-    if (supplier_id) { sql += ` AND p.supplier_id = ?`; params.push(supplier_id); }
+    // supplier_id=none → items with no supplier on the product form.
+    if (supplier_id === 'none') sql += ` AND p.supplier_id IS NULL`;
+    else if (supplier_id) { sql += ` AND p.supplier_id = ?`; params.push(supplier_id); }
     if (active !== undefined) { sql += ` AND p.active = ?`; params.push(active); }
     if (is_service !== undefined) { sql += ` AND p.is_service = ?`; params.push(is_service); }
     if (is_rental !== undefined) { sql += ` AND p.is_rental = ?`; params.push(is_rental); }
@@ -360,7 +362,7 @@ router.get('/movements', requirePermission('inventory'), async (req, res) => {
 // GET export filtered products as CSV
 router.get('/export', requirePermission('inventory_export'), async (req, res) => {
   try {
-    const { search, category, active, low_stock, branch_id, supplier_id, is_rental, is_service, is_non_inventory, consignment } = req.query;
+    const { search, category, brand, active, low_stock, branch_id, supplier_id, is_rental, is_service, is_non_inventory, consignment } = req.query;
     const params = [];
     let sql;
 
@@ -390,7 +392,10 @@ router.get('/export', requirePermission('inventory_export'), async (req, res) =>
       params.push(`%${search}%`, `%${search}%`, `%${search}%`);
     }
     if (category) { sql += ` AND p.category_id = ?`; params.push(category); }
-    if (supplier_id) { sql += ` AND p.supplier_id = ?`; params.push(supplier_id); }
+    if (brand) { sql += ` AND p.brand = ?`; params.push(brand); }
+    // supplier_id=none → items with no supplier on the product form.
+    if (supplier_id === 'none') sql += ` AND p.supplier_id IS NULL`;
+    else if (supplier_id) { sql += ` AND p.supplier_id = ?`; params.push(supplier_id); }
     if (active !== undefined) { sql += ` AND p.active = ?`; params.push(active); }
     if (is_rental !== undefined) { sql += ` AND p.is_rental = ?`; params.push(is_rental); }
     if (is_service !== undefined) { sql += ` AND p.is_service = ?`; params.push(is_service); }
